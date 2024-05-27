@@ -1,0 +1,17 @@
+name: test
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - fftw
+  - h5py
+  - hdf5plugin
+  - jax
+  - llvm-openmp
+  - numpy
+  - pandas
+  - pybind11
+  - pytables
+  - python>=3.10
+  - scipy
+  - tqdm

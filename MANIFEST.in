@@ -1,0 +1,9 @@
+graft tests
+graft cbclib_v2/config
+graft cbclib_v2/src
+graft cbclib_v2/include
+exclude cbclib_v2/include/Makefile
+include pytest.ini
+include LICENSE
+global-exclude *.py[cod]
+global-exclude *.so
