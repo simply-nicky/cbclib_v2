@@ -22,12 +22,15 @@ NDRealArray = npt.NDArray[np.floating[Any]]
 NDComplexArray = npt.NDArray[Union[np.floating[Any], np.complexfloating[Any, Any]]]
 
 Array = Union[JaxArray, NDArray]
+BoolArray = Union[JaxBoolArray, NDBoolArray]
+IntArray = Union[JaxIntArray, NDIntArray]
+RealArray = Union[JaxRealArray, NDRealArray]
 
 Indices = Union[int, slice, NDIntArray, Sequence[int]]
 
 IntSequence = Union[int, np.integer[Any], Sequence[int], NDIntArray]
 ROIType = Union[List[int], Tuple[int, int, int, int], NDIntArray]
-RealSequence = Union[float, np.floating[Any], Sequence[float], NDRealArray, JaxRealArray]
+RealSequence = Union[float, np.floating[Any], Sequence[float], NDRealArray]
 CPPIntSequence = Union[Sequence[int], NDIntArray]
 
 NDRealArrayLike = Union[NDRealArray, List[float], Tuple[float, ...]]

@@ -402,13 +402,6 @@ class FileAccess(metaclass=MetaFileAccess):
                     # to False. Format 1.2 restored the 1.0 semantics.
                     np.logical_not(self.validity_flag, out=self.validity_flag)
 
-                    warn(
-                        'Train validation is not fully supported for data '
-                        'format version 1.1. If you have issues accessing '
-                        'these files, please contact da-support@xfel.eu.',
-                        stacklevel=2
-                    )
-
         if self._file is not None:
             # Store the stat of the file as it was when we read the metadata.
             # This is used by the run files map.
@@ -850,7 +843,7 @@ class DataCollection:
         )
 
     @property
-    def all_sources(self):
+    def all_sources(self) -> FrozenSet:
         return self.control_sources | self.instrument_sources
 
     def _check_source_conflicts(self):
@@ -908,7 +901,7 @@ class DataCollection:
 
     def _find_data(self, source, train_id) -> Tuple[Optional[FileAccess], Optional[int]]:
         for f in self._sources_data[source].files:
-            ixs = (f.train_ids == train_id).nonzero()[0]
+            ixs = np.nonzero(f.train_ids == train_id)[0]
             if self.inc_suspect_trains and ixs.size > 0:
                 return f, ixs[0]
 
@@ -938,7 +931,7 @@ class DataCollection:
         return self._get_source_data(source).keys()
 
     def select(self, seln_or_source_glob, key_glob: str='*', require_all: bool=False,
-               require_any: bool=False, *, warn_drop_trains_frac: float=1.) -> 'DataCollection':
+               require_any: bool=False) -> 'DataCollection':
         """Select a subset of sources and keys from this data.
 
         There are four possible ways to select data:
@@ -1016,12 +1009,13 @@ class DataCollection:
                 train_ids = np.empty(0, dtype=np.uint64)
 
             for source, srcdata in sources_data.items():
-                n_trains_prev = len(train_ids)
                 for group in srcdata.index_groups:
                     source_tids = np.empty(0, dtype=np.uint64)
 
                     for f in self._sources_data[source].files:
-                        valid = True if self.inc_suspect_trains else np.asarray(f.validity_flag)
+                        valid = self.inc_suspect_trains
+                        if not valid:
+                            valid = np.asarray(f.validity_flag)
                         # Add the trains with data in each file.
                         _, counts = f.get_index(source, group)
                         source_tids = np.union1d(
@@ -1036,16 +1030,9 @@ class DataCollection:
                     else:  # require_any
                         train_ids = np.union1d(train_ids, source_tids)
 
-                n_drop = n_trains_prev - len(train_ids)
-                if n_trains_prev and (n_drop / n_trains_prev) >= warn_drop_trains_frac:
-                    warn(f"{n_drop}/{n_trains_prev} ({n_drop / n_trains_prev :.0%})"
-                         f" trains dropped when filtering by {source}")
-
             train_ids = list(train_ids)  # Convert back to a list.
-            sources_data = {
-                src: srcdata._only_tids(train_ids)
-                for src, srcdata in sources_data.items()
-            }
+            sources_data = {src: srcdata._only_tids(train_ids)
+                            for src, srcdata in sources_data.items()}
 
         else:
             train_ids = self.train_ids

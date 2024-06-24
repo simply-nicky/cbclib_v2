@@ -1,21 +1,21 @@
-import pytest
 from typing import Any, Callable, Tuple
+import pytest
 import jax.numpy as jnp
 from jax import config
 from jax.test_util import check_grads
 import cbclib_v2 as cbc
-from cbclib_v2.annotations import JaxArray, JaxIntArray
+from cbclib_v2.annotations import Array, IntArray
 
 config.update("jax_enable_x64", True)
 
 class Parameters():
-    a_vec           = [-0.00093604,-0.00893389,-0.00049815]
-    b_vec           = [ 0.00688718,-0.00039195,-0.00573877]
-    c_vec           = [ 0.01180108,-0.00199115, 0.01430421]
-    foc_pos         = [ 0.14292289, 0.16409828,-0.39722229]
+    a_vec           = [-0.00093604, -0.00893389, -0.00049815]
+    b_vec           = [ 0.00688718, -0.00039195, -0.00573877]
+    c_vec           = [ 0.01180108, -0.00199115,  0.01430421]
+    foc_pos         = [ 0.14292289,  0.16409828, -0.39722229]
     roi             = (1100, 3260, 1040, 3108)
-    pupil_roi       = [2211.13555081,2360.12483269,1952.07580504,2093.26351828]
-    rot_axis        = [ 1.57123908,-1.56927065]
+    pupil_roi       = [2211.13555081, 2360.12483269, 1952.07580504, 2093.26351828]
+    rot_axis        = [ 1.57123908, -1.56927065]
     rotations       = [[[ 9.9619448e-01,  3.2783555e-05, -8.7157689e-02],
                         [-4.4395445e-05,  1.0000000e+00, -1.3129010e-04],
                         [ 8.7157689e-02,  1.3465989e-04,  9.9619448e-01]],
@@ -50,7 +50,7 @@ class TestCBDModel():
     RTOL: float = 1e-3
     ATOL: float = 1e-5
     EPS: float = 1e-11
-    Criterion = Callable[[cbc.jax.Basis, cbc.jax.ScanSamples, cbc.jax.ScanSetup], JaxArray]
+    Criterion = Callable[[cbc.jax.Basis, cbc.jax.ScanSamples, cbc.jax.ScanSetup], Array]
 
     @pytest.fixture(params=[1.0])
     def width(self, request: pytest.FixtureRequest) -> float:
@@ -65,21 +65,22 @@ class TestCBDModel():
         return cbc.jax.CBDModel(Parameters.basis(), Parameters.samples(), Parameters.setup(), crop)
 
     @pytest.fixture
-    def hkl(self, model: cbc.jax.CBDModel) -> JaxIntArray:
+    def hkl(self, model: cbc.jax.CBDModel) -> IntArray:
         return model.basis.generate_hkl(0.3)
 
     @pytest.fixture
-    def indices(self, model: cbc.jax.CBDModel, hkl: JaxIntArray) -> Tuple[JaxIntArray, JaxIntArray]:
+    def indices(self, model: cbc.jax.CBDModel, hkl: IntArray) -> Tuple[IntArray, IntArray]:
         return model.filter_hkl(hkl)
 
     @pytest.fixture
-    def criterion(self, hkl: JaxIntArray, indices: Tuple[JaxIntArray, JaxIntArray],
+    def criterion(self, hkl: IntArray, indices: Tuple[IntArray, IntArray],
                   crop: cbc.Crop, width: float) -> Criterion:
         hidxs, bidxs = indices
 
         def wrapper(basis: cbc.jax.Basis, samples: cbc.jax.ScanSamples, setup: cbc.jax.ScanSetup):
-            model = cbc.jax.CBDModel(basis, samples, setup, crop, 1)
-            streaks = model.generate_streaks(hkl, hidxs, bidxs)
+            model = cbc.jax.CBDModel(basis, samples, setup, crop)
+            is_good, streaks = model.generate_streaks(hkl, hidxs, bidxs)
+            streaks = streaks.mask_streaks(is_good)
             return jnp.mean(jnp.concatenate(streaks.to_lines(width)))
 
         return wrapper

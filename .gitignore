@@ -1,7 +1,13 @@
 # Diffraction pattern results and temporary development files
-/figures/
-/results/
-/notebooks/
+figures/
+results/
+notebooks/
+
+# JAX profiling results
+trace/
+
+# C++ debugging
+cbclib_v2/src/debug
 
 #jupyter checkpoints
 .ipynb_checkpoints/

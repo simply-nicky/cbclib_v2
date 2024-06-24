@@ -1,8 +1,12 @@
-from typing import Optional
-from ..annotations import NDRealArray, NDIntArray, Shape, Table
+from typing import Optional, Tuple
+from ..annotations import IntArray, NDRealArray, NDIntArray, Shape, Table
+
+def fill_indices(xsize: int, isize: int, idxs: Optional[IntArray]=None) -> IntArray:
+    ...
 
 def draw_line(out: NDRealArray, lines: NDRealArray, idxs: Optional[NDIntArray]=None,
-              max_val: float=1.0, kernel: str='biweight', num_threads: int=1) -> NDRealArray:
+              max_val: float=1.0, kernel: str='biweight', num_threads: int=1
+              ) -> Tuple[NDRealArray, NDIntArray]:
     """Draw thick lines on top of a n-dimensional array `out` with variable thickness and the
     antialiasing applied on a single frame.
 
@@ -37,7 +41,7 @@ def draw_line(out: NDRealArray, lines: NDRealArray, idxs: Optional[NDIntArray]=N
     """
     ...
 
-def draw_line_vjp(cotangents: NDRealArray, lines: NDRealArray,
+def draw_line_vjp(cotangents: NDRealArray, out_idxs: NDIntArray, lines: NDRealArray,
                   idxs: Optional[NDIntArray]=None, max_val: float=1.0,
                   kernel: str='biweight', num_threads: int=1) -> NDRealArray:
     ...

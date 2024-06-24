@@ -42,12 +42,18 @@ template <typename RandomIt, typename Compare>
 double median_1d(RandomIt first, RandomIt last, Compare comp)
 {
     auto n = std::distance(first, last);
-    if (n & 1) return *wirthselect(first, last, n / 2, comp);
+    if (n & 1)
+    {
+        auto nth = std::next(first, n / 2);
+        std::nth_element(first, nth, last, comp);
+        return *nth;
+    }
     else
     {
-        double lo = *wirthselect(first, last, n / 2 - 1, comp);
-        double hi = *wirthselect(first, last, n / 2, comp);
-        return (lo + hi) / 2;
+        auto low = std::next(first, n / 2 - 1), high = std::next(first, n / 2);
+        std::nth_element(first, low, last, comp);
+        std::nth_element(high, high, last, comp);
+        return (*low + *high) / 2;
     }
 }
 
@@ -105,62 +111,66 @@ T extend_point(const Container & coord, const array<T> & arr, extend mode, const
 }
 
 template <typename T>
-struct footprint
+class ImageFilter
 {
-    size_t ndim;
-    size_t npts;
-    std::vector<std::vector<long>> offsets;
-    std::vector<std::vector<long>> coords;
-    std::vector<T> data;
+public:
+    ImageFilter(std::vector<std::vector<long>> offsets) : offsets(std::move(offsets)) {}
 
-    footprint(size_t ndim, size_t npts, std::vector<std::vector<long>> offsets, std::vector<std::vector<long>> coords)
-        : ndim(ndim), npts(npts), offsets(std::move(offsets)), coords(std::move(coords)) {}
-
-    footprint(const array<bool> & fmask) : ndim(fmask.ndim)
+    ImageFilter(const array<bool> & footprint)
     {
-        auto fiter = fmask.begin();
-        for (size_t i = 0; fiter != fmask.end(); ++fiter, ++i)
+        for (auto riter = rect_iterator(footprint.shape); !riter.is_end(); ++riter)
         {
-            if (*fiter)
+            if (footprint[riter.index])
             {
-                std::vector<long> coord;
-                fmask.unravel_index(std::back_inserter(coord), i);
                 auto & offset = offsets.emplace_back();
-                std::transform(coord.begin(), coord.end(), fmask.shape.begin(), std::back_inserter(offset),
+                std::transform(riter.coord.begin(), riter.coord.end(), footprint.shape.begin(), std::back_inserter(offset),
                                [](long crd, size_t dim){return crd - dim / 2;});
             }
         }
 
-        npts = offsets.size();
-        coords = std::vector<std::vector<long>>(npts, std::vector<long>(ndim));
-        if (npts == 0) throw std::runtime_error("zero number of points in a footprint.");
+        if (!offsets.size())
+            throw std::runtime_error("zero number of points in a ImageFilter");
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_convertible_v<typename Container::value_type, long>>>
-    footprint & update(const Container & coord, const array<T> & arr, extend mode, const T & cval)
+    void update(const Container & coord, const array<T> & image, extend mode, const T & cval)
     {
         data.clear();
+        std::vector<long> current;
 
-        for (size_t i = 0; i < npts; i++)
+        for (const auto & offset : offsets)
         {
+            current.clear();
             bool extend = false;
 
-            for (size_t n = 0; n < ndim; n++)
+            for (size_t n = 0; n < offset.size(); n++)
             {
-                coords[i][n] = coord[n] + offsets[i][n];
-                extend |= (coords[i][n] >= static_cast<long>(arr.shape[n])) || (coords[i][n] < 0);
+                current.push_back(coord[n] + offset[n]);
+                extend |= (current.back() >= static_cast<long>(image.shape[n])) || (current.back() < 0);
             }
 
             if (extend)
             {
-                auto val = extend_point(coords[i], arr, mode, cval);
+                auto val = extend_point(current, image, mode, cval);
                 data.push_back(val);
             }
-            else data.push_back(arr.at(coords[i]));
+            else data.push_back(image.at(current));
         }
-
-        return *this;
     }
+
+    T nth_element(size_t rank)
+    {
+        if (rank >= data.size()) return T();
+        auto nth = std::next(data.begin(), rank);
+        std::nth_element(data.begin(), nth, data.end());
+        return *nth;
+    }
+
+    auto size() const {return offsets.size();}
+
+private:
+    std::vector<std::vector<long>> offsets;
+    std::vector<T> data;
 };
 
 }

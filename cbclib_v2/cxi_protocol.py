@@ -371,7 +371,7 @@ class FileStore():
         raise NotImplementedError
 
     def is_empty(self) -> bool:
-        raise NotImplementedError
+        return self.size == 0
 
     def update(self):
         raise NotImplementedError
@@ -544,9 +544,6 @@ class CXIStore(FileStore):
 
             raise ValueError(f'Invalid kind: {kind:s}')
 
-    def is_empty(self) -> bool:
-        return len(self.indices) == 0
-
     def update(self):
         """Read the files for the data attributes contained in the protocol."""
         self.indices = {}
@@ -712,9 +709,6 @@ class ExtraStore(FileStore):
 
     def read_frame_shape(self) -> Shape:
         return self.protocol.read_frame_shape()
-
-    def is_empty(self) -> bool:
-        return self.size == 0
 
     def update(self):
         self.indices = self.protocol.read_indices(self.runs)

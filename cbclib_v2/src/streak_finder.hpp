@@ -66,7 +66,7 @@ struct Peaks : public PointsList
     {
         std::vector<std::pair<point_type, std::nullptr_t>> items;
         std::transform(points.begin(), points.end(), std::back_inserter(items), [](point_type pt){return std::make_pair(pt, nullptr);});
-        tree = tree_type(std::move(items));
+        tree = tree_type(items.begin(), items.end(), 2);
     }
 
     template <typename T>
@@ -101,7 +101,7 @@ struct Peaks : public PointsList
 
         std::vector<std::pair<point_type, std::nullptr_t>> items;
         std::transform(points.begin(), points.end(), std::back_inserter(items), [](point_type pt){return std::make_pair(pt, nullptr);});
-        tree = tree_type(std::move(items));
+        tree = tree_type(items.begin(), items.end(), 2);
     }
 
     template <typename T>
