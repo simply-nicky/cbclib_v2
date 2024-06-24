@@ -4,7 +4,6 @@ from multiprocessing import cpu_count
 from typing import List, Union
 import numpy as np
 from .data_container import DataContainer
-from .cbc_setup import Streaks
 from .annotations import Indices, NDBoolArray, NDRealArray, Shape
 from .src import (detect_peaks, detect_streaks, filter_peaks, StreakFinder,
                   StreakFinderResultDouble, StreakFinderResultFloat, Structure, Peaks)
@@ -71,7 +70,7 @@ class PatternsStreakFinder(DataContainer):
                             num_threads=self.num_threads)
 
     def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0) -> Streaks:
+                       lookahead: int=0, nfa: int=0) -> List[NDRealArray]:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -89,9 +88,5 @@ class PatternsStreakFinder(DataContainer):
             A list of detected streaks.
         """
         result = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
-                                 lookahead, nfa, num_threads=self.num_threads)
-        x0, y0, x1, y1 = np.concatenate([list(pattern.streaks.values()) for pattern in result]).T
-        idxs = np.concatenate([np.full((len(pattern.streaks),), idx)
-                               for idx, pattern in enumerate(result)])
-
-        return Streaks(x0, y0, x1, y1, idxs)
+                                lookahead, nfa, num_threads=self.num_threads)
+        return [np.array(list(pattern.streaks.values())) for pattern in result]

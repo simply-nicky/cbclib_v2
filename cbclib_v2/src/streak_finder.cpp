@@ -183,7 +183,7 @@ auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<b
     return result;
 }
 
-template<typename T>
+template <typename T>
 void declare_streak_finder_result(py::module & m, const std::string & typestr)
 {
     py::class_<StreakFinderResult<T>>(m, (std::string("StreakFinderResult") + typestr).c_str())
@@ -246,11 +246,11 @@ PYBIND11_MODULE(streak_finder, m)
 
     py::class_<Peaks>(m, "Peaks")
         .def(py::init([](std::vector<integer_type> xvec, std::vector<integer_type> yvec)
-        {
-            Peaks::container_type points;
-            for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace_back(x, y);
-            return Peaks(std::move(points));
-        }), py::arg("x"), py::arg("y"))
+            {
+                Peaks::container_type points;
+                for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace_back(x, y);
+                return Peaks(std::move(points));
+            }), py::arg("x"), py::arg("y"))
         .def("filter",
             [](Peaks & peaks, py::array_t<float> data, py::array_t<bool> mask, Structure s, float vmin, size_t npts)
             {
@@ -324,7 +324,8 @@ PYBIND11_MODULE(streak_finder, m)
         .def_property("size", [](const Peaks & peaks){return peaks.points.size();}, nullptr, py::keep_alive<0, 1>())
         .def_property("x", [](const Peaks & peaks){return peaks.x();}, nullptr, py::keep_alive<0, 1>())
         .def_property("y", [](const Peaks & peaks){return peaks.y();}, nullptr, py::keep_alive<0, 1>())
-        .def("__repr__", &Peaks::info);
+        .def("__repr__", &Peaks::info)
+        .def("print_tree", [](Peaks & peaks){peaks.tree.print(std::cout);});
 
     declare_streak_finder_result<double>(m, "Double");
     declare_streak_finder_result<float>(m, "Float");
@@ -332,17 +333,17 @@ PYBIND11_MODULE(streak_finder, m)
     py::class_<StreakFinder>(m, "StreakFinder")
         .def(py::init<Structure, unsigned, unsigned, unsigned>(), py::arg("structure"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0)
         .def("detect_streaks", [](StreakFinder & finder, py::array_t<double> data, py::array_t<bool> mask, Peaks peaks, double xtol, double vmin)
-        {
-            array<double> darr (data.request());
-            array<bool> marr (mask.request());
-            return finder.detect_streaks(StreakFinderResult(darr, marr), darr, peaks, xtol, vmin);
-        }, py::arg("data"), py::arg("mask"), py::arg("peaks"), py::arg("xtol"), py::arg("vmin"))
+            {
+                array<double> darr (data.request());
+                array<bool> marr (mask.request());
+                return finder.detect_streaks(StreakFinderResult(darr, marr), darr, peaks, xtol, vmin);
+            }, py::arg("data"), py::arg("mask"), py::arg("peaks"), py::arg("xtol"), py::arg("vmin"))
         .def("detect_streaks", [](StreakFinder & finder, py::array_t<float> data, py::array_t<bool> mask, Peaks peaks, float xtol, float vmin)
-        {
-            array<float> darr (data.request());
-            array<bool> marr (mask.request());
-            return finder.detect_streaks(StreakFinderResult(darr, marr), darr, peaks, xtol, vmin);
-        }, py::arg("data"), py::arg("mask"), py::arg("peaks"), py::arg("xtol"), py::arg("vmin"))
+            {
+                array<float> darr (data.request());
+                array<bool> marr (mask.request());
+                return finder.detect_streaks(StreakFinderResult(darr, marr), darr, peaks, xtol, vmin);
+            }, py::arg("data"), py::arg("mask"), py::arg("peaks"), py::arg("xtol"), py::arg("vmin"))
         .def_readwrite("lookahead", &StreakFinder::lookahead)
         .def_readwrite("nfa", &StreakFinder::nfa)
         .def_readwrite("structure", &StreakFinder::structure);

@@ -4,7 +4,7 @@ from setuptools import setup, find_namespace_packages
 from pybind11.setup_helpers import Pybind11Extension
 import numpy
 
-__version__ = '0.8.0'
+__version__ = '0.8.1'
 
 extension_args = {'extra_compile_args': ['-fopenmp', '-std=c++20'],
                   'extra_link_args': ['-lgomp'],
@@ -19,10 +19,6 @@ extensions = [Pybind11Extension("cbclib_v2.src.fft_functions",
                                 define_macros = [('VERSION_INFO', __version__)],
                                 libraries = ['fftw3', 'fftw3f', 'fftw3l', 'fftw3_omp',
                                              'fftw3f_omp', 'fftw3l_omp'],
-                                **extension_args),
-              Pybind11Extension("cbclib_v2.src.geometry",
-                                sources=["cbclib_v2/src/geometry.cpp"],
-                                define_macros = [('VERSION_INFO', __version__)],
                                 **extension_args),
               Pybind11Extension("cbclib_v2.src.kd_tree",
                                 sources=["cbclib_v2/src/kd_tree.cpp"],

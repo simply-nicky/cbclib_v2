@@ -2,106 +2,106 @@
 
 namespace cbclib {
 
-template<typename F, size_t ndim>
-void test_tree(size_t npts, F range)
+template <typename T, typename I>
+KDTree<array<T>, I> build_tree(py::array_t<T> database)
 {
-    std::random_device rnd_device;
-    std::mt19937 mersenne_engine {rnd_device()};
-    std::uniform_real_distribution<F> dist {0.0, 100.0};
-    std::uniform_int_distribution<int> dist_int {0, 100};
+    auto dbuf = database.request();
+    size_t ndim = dbuf.shape[dbuf.ndim - 1];
+    size_t dsize = dbuf.size / ndim;
 
-    auto gen = [&dist, &mersenne_engine](){return dist(mersenne_engine);};
-    auto gen_int = [&dist_int, &mersenne_engine](){return dist_int(mersenne_engine);};
-    auto gen_array = [&gen, &gen_int]()
+    array<T> darr {dbuf};
+
+    std::vector<std::pair<array<T>, I>> items;
+    for (size_t i = 0; i < dsize; i++)
     {
-        std::array<F, ndim> arr;
-        std::generate(arr.begin(), arr.end(), gen);
-        return std::make_pair(arr, gen_int());
-    };
-
-    std::vector<std::pair<std::array<F, ndim>, int>> items;
-    std::generate_n(std::back_inserter(items), npts, gen_array);
-
-    std::cout << "Points generated:\n";
-    for (auto item : items)
-    {
-        std::cout << "{";
-        std::copy(item.first.begin(), item.first.end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "} ";
+        items.emplace_back(array<T>(ndim, darr.data() + i * ndim), i);
     }
-    std::cout << std::endl;
+    return {items.begin(), items.end(), ndim};
+}
 
-    auto tree = KDTree<std::array<F, ndim>, int>(std::move(items));
+template <typename T, typename I>
+void declare_kd_tree(py::module & m, const std::string & typestr)
+{
+    py::class_<KDTree<array<T>, I>>(m, (std::string("KDTree") + typestr).c_str())
+        .def(py::init([](py::array_t<T> database)
+            {
+                return build_tree<T, I>(database);
+            }), py::arg("database"))
+        .def_property("high", [](const KDTree<array<T>, I> & tree)
+            {
+                return tree.rectangle().high;
+            }, nullptr)
+        .def_property("low", [](const KDTree<array<T>, I> & tree)
+            {
+                return tree.rectangle().low;
+            }, nullptr)
+        .def_readonly("ndim", &KDTree<array<T>, I>::ndim)
+        .def_property("size", [](const KDTree<array<T>, I> & tree)
+            {
+                return std::distance(tree.begin(), tree.end());
+            }, nullptr)
+        .def("find_nearest", [](const KDTree<array<T>, I> & tree, py::array_t<T> query, size_t k, unsigned threads)
+            {
+                array<T> qarr {query.request()};
+                size_t ndim = qarr.shape[qarr.ndim - 1];
+                size_t qsize = qarr.size / ndim;
+                if (ndim != tree.ndim)
+                    throw std::invalid_argument("query has invalid number of dimensions (" + std::to_string(ndim) + ")");
 
-    std::cout << "Points in the tree:\n";
-    for (auto node : tree)
-    {
-        std::cout << "{";
-        std::copy(node.point().begin(), node.point().end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "} ";
-    }
-    std::cout << std::endl;
+                std::vector<size_t> shape {qarr.shape.begin(), std::prev(qarr.shape.end())};
+                shape.push_back(k);
+                py::array_t<I> result {shape};
+                array<I> rarr {result.request()};
+                py::array_t<double> dist {shape};
+                array<double> darr {dist.request()};
 
-    std::array<F, ndim> point;
-    std::generate(point.begin(), point.end(), gen);
-    std::cout << "Inserting {";
-    std::copy(point.begin(), point.end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-    std::cout << "}\n";
+                py::gil_scoped_release release;
 
-    auto inserted = tree.insert(std::make_pair(point, gen_int()));
-    if (inserted != tree.end())
-    {
-        std::cout << "{";
-        std::copy(inserted->point().begin(), inserted->point().end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "} inserted\n";
-    }
-    inserted = tree.insert(std::make_pair(point, gen_int()));
-    std::cout << ((inserted == tree.end()) ? "inserted == end() " : "inserted != end() ") << "after inserting twice\n";
+                #pragma omp parallel for num_threads(threads) schedule(dynamic,20)
+                for (size_t i = 0; i < qsize; i++)
+                {
+                    auto stack = tree.find_k_nearest(array<T>(ndim, qarr.data() + i * ndim), k);
+                    size_t j = 0;
+                    for (auto [iter, dist]: stack)
+                    {
+                        rarr[k * i + j] = iter->data(); darr[k * i + j] = std::sqrt(dist);
+                        j++;
+                    }
+                }
 
-    std::cout << "Tree:\n";
-    tree.print();
+                py::gil_scoped_acquire acquire;
 
-    auto found = tree.find(point);
-    if (found != tree.end())
-    {
-        std::cout << "{";
-        std::copy(found->point().begin(), found->point().end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "} found\n";
+                return std::make_tuple(dist, result);
+            }, py::arg("query"), py::arg("k")=1, py::arg("num_threads")=1)
+        .def("find_range", [](const KDTree<array<T>, I> & tree, py::array_t<T> query, T range, unsigned threads)
+            {
+                array<T> qarr {query.request()};
+                size_t ndim = qarr.shape[qarr.ndim - 1];
+                size_t qsize = qarr.size / ndim;
+                if (ndim != tree.ndim)
+                    throw std::invalid_argument("query has invalid number of dimensions (" + std::to_string(ndim) + ")");
 
-        auto removed = tree.erase(found);
-        std::cout << "erase returned {";
-        std::copy(removed->point().begin(), removed->point().end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "}\n";
-    }
+                std::vector<std::vector<I>> result;
 
-    std::cout << "Tree:\n";
-    tree.print();
+                auto get_index = [](const std::pair<typename KDTree<array<T>, I>::const_iterator, T> & item)
+                {
+                    return item.first->data();
+                };
 
-    point.fill(50.0);
-    auto stack = tree.find_range(point, range);
+                py::gil_scoped_release release;
 
-    std::cout << "Found points in vicinity:\n";
-    for (auto query : stack)
-    {
-        std::cout << "(";
-        std::copy(query.first->point().begin(), query.first->point().end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "), dist = " << query.second << std::endl;
-    }
+                #pragma omp parallel for num_threads(threads)
+                for (size_t i = 0; i < qsize; i++)
+                {
+                    auto stack = tree.find_range(array<T>(ndim, qarr.data() + i * ndim), range * range);
+                    auto & neighbours = result.emplace_back();
+                    std::transform(stack.begin(), stack.end(), std::back_inserter(neighbours), get_index);
+                }
 
-    tree.clear();
+                py::gil_scoped_acquire acquire;
 
-    KDTree<std::array<F, ndim>, int> new_tree;
-    new_tree.insert(std::make_pair(point, 0));
-
-    std::cout << "New tree:\n";
-    for (auto node : new_tree)
-    {
-        std::cout << "{";
-        std::copy(node.point().begin(), node.point().end(), std::experimental::make_ostream_joiner(std::cout, ", "));
-        std::cout << "} ";
-    }
-
-    tree = new_tree;
+                return result;
+            }, py::arg("query"), py::arg("range"), py::arg("num_threads")=1);
 }
 
 }
@@ -121,7 +121,14 @@ PYBIND11_MODULE(kd_tree, m)
         return;
     }
 
-    m.def("test_tree", &test_tree<double, 2>, py::arg("npts"), py::arg("range"));
+    declare_kd_tree<float, long>(m, "Float");
+    declare_kd_tree<double, long>(m, "Double");
+    declare_kd_tree<long, long>(m, "Int");
+
+    m.def("build_tree", &build_tree<float, long>, py::arg("database"));
+    m.def("build_tree", &build_tree<double, long>, py::arg("database"));
+    m.def("build_tree", &build_tree<long, long>, py::arg("database"));
+
 
 #ifdef VERSION_INFO
     m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

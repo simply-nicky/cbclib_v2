@@ -147,7 +147,7 @@ public:
         return offset_along_dim(strides, index, dim) / strides[dim];
     }
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
+    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
     bool is_inbound(CoordIter first, CoordIter last) const
     {
         bool flag = true;
@@ -380,6 +380,8 @@ public:
     array(shape_handler handler, T * ptr) : shape_handler(std::move(handler)), ptr(ptr) {}
 
     array(ShapeContainer shape, T * ptr) : shape_handler(std::move(shape)), ptr(ptr) {}
+    
+    array(size_t count, T * ptr) : shape_handler({count}) , ptr(ptr) {}
 
     array(const py::buffer_info & buf) : array(buf.shape, static_cast<T *>(buf.ptr)) {}
 
@@ -420,6 +422,7 @@ public:
 
         return array<T>(std::move(new_shape), std::move(new_strides), ptr + ravel_index(coord.begin(), coord.end()));
     }
+
 
     /* Line slice iterators:
         Take a slice of an array 'array' as follows:
@@ -578,52 +581,15 @@ public:
 };
 
 /*----------------------------------------------------------------------------*/
-/*------------------------------- Wirth select -------------------------------*/
+/*------------------------------ Median element ------------------------------*/
 /*----------------------------------------------------------------------------*/
-
-/*---------------------------------------------------------------------------
-    Function :  kth_smallest()
-    In       :  array of elements, n elements in the array, rank k
-    Out      :  one element
-    Job      :  find the kth smallest element in the array
-    Notice   :  Buffer must be of size n
-
-    Reference:
-        Author: Wirth, Niklaus
-        Title: Algorithms + data structures = programs
-        Publisher: Englewood Cliffs: Prentice-Hall, 1976 Physical description: 366 p.
-        Series: Prentice-Hall Series in Automatic Computation
----------------------------------------------------------------------------*/
 template <class RandomIt, class Compare>
-RandomIt wirthselect(RandomIt first, RandomIt last, typename std::iterator_traits<RandomIt>::difference_type k, Compare comp)
-{
-    auto l = first;
-    auto m = std::prev(last);
-    auto key = std::next(first, k);
-    while (l < m)
-    {
-        auto value = *key;
-        auto i = l;
-        auto j = m;
-
-        do
-        {
-            while (comp(*i, value)) ++i;
-            while (comp(value, *j)) --j;
-            if (i <= j) iter_swap(i++, j--);
-        } while (i <= j);
-        if (j < key) l = i;
-        if (key < i) m = j;
-    }
-
-    return key;
-}
-
-template <class RandomIt, class Compare>
-RandomIt wirthmedian(RandomIt first, RandomIt last, Compare comp)
+RandomIt median_element(RandomIt first, RandomIt last, Compare comp)
 {
     auto n = std::distance(first, last);
-    return wirthselect(first, last, (n & 1) ? n / 2 : n / 2 - 1, comp);
+    auto kth = std::next(first, (n & 1) ? n / 2 : n / 2 - 1);
+    std::nth_element(first, kth, last, comp);
+    return kth;
 }
 
 /*----------------------------------------------------------------------------*/

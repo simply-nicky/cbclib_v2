@@ -87,8 +87,8 @@ point_t get_ubound(const std::vector<size_t> & shape)
                    static_cast<I>((shape[shape.size() - 2]) ? shape[shape.size() - 2] - 1 : 0)};
 }
 
-template <typename Data, typename T, typename Out, class Func>
-void draw_bresenham(Data & data, const point_t & ubound, const Line<T> & line, T width, Out max_val, kernel_t<T> krn, Func draw_pixel)
+template <typename Out, typename T, typename I, class Func>
+void draw_bresenham(const point_t & ubound, I frame, I index, const Line<T> & line, T width, Out max_val, kernel_t<T> krn, Func && draw_pixel)
 {
     width = std::clamp(width, T(), std::numeric_limits<T>::max());
 
@@ -97,31 +97,32 @@ void draw_bresenham(Data & data, const point_t & ubound, const Line<T> & line, T
         return line_value(liter, eiter, width, max_val, krn);
     };
 
-    auto draw = [&data, &get_val, &draw_pixel](BresenhamIterator<T, true> liter, BresenhamIterator<T, true> eiter)
+    auto draw = [&get_val, &draw_pixel, frame, index](BresenhamIterator<T, true> liter, BresenhamIterator<T, true> eiter)
     {
-        draw_pixel(data, liter.point, get_val(liter, eiter));
+        std::forward<Func>(draw_pixel)(liter.point, frame, index, get_val(liter, eiter));
     };
 
     draw_bresenham_func(ubound, line, width, draw);
 }
 
-template <typename Data, typename T, class Func>
-auto draw_bresenham_vjp(Data & ct, const point_t & ubound, const Line<T> & line, T width, T max_val, grad_t<T> grad, Func get_pixel)
+template <typename Out, typename T, typename I, class Func>
+auto draw_bresenham_vjp(const point_t & ubound, I frame, I index, const Line<T> & line, T width, Out max_val, grad_t<T> grad, Func && get_pixel)
 {
     width = std::clamp(width, T(), std::numeric_limits<T>::max());
     std::array<T, 5> ct_line {};
 
-    auto propagate = [&ct_line, &line, &grad, width, max_val](T ct_pt, BresenhamIterator<T, true> liter, BresenhamIterator<T, true> eiter)
+    auto propagate = [&ct_line, &line, &grad, width, max_val](Out ct_pt, BresenhamIterator<T, true> liter, BresenhamIterator<T, true> eiter)
     {
         line_value_vjp(ct_line, line, ct_pt, liter, eiter, width, max_val, grad);
     };
 
-    auto get_contangent = [&ct, &propagate, &get_pixel](BresenhamIterator<T, true> liter, BresenhamIterator<T, true> eiter)
+    auto get_cotangent = [&propagate, &get_pixel, frame, index](BresenhamIterator<T, true> liter, BresenhamIterator<T, true> eiter)
     {
-        propagate(get_pixel(ct, liter.point), liter, eiter);
+        auto [ct_pt, flag] = std::forward<Func>(get_pixel)(liter.point, frame, index);
+        if (flag) propagate(ct_pt, liter, eiter);
     };
 
-    draw_bresenham_func(ubound, line, width, get_contangent);
+    draw_bresenham_func(ubound, line, width, get_cotangent);
 
     return to_tuple(ct_line);
 }
@@ -140,8 +141,8 @@ std::map<I, std::vector<I>> sort_indices(array<I> idxs)
 }
 
 template <typename Out, typename T, typename I>
-py::array_t<Out> draw_line(py::array_t<Out> out, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, Out max_val,
-                           std::string kernel, unsigned threads)
+py::array_t<Out> draw_line_sum(py::array_t<Out> out, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, Out max_val,
+                               std::string kernel, unsigned threads)
 {
     assert(PyArray_API);
 
@@ -157,29 +158,36 @@ py::array_t<Out> draw_line(py::array_t<Out> out, py::array_t<T> lines, std::opti
 
     if (!idxs) fill_indices("idxs", n_shape[0], lsize, idxs);
     else check_indices("idxs", n_shape[0], lsize, idxs);
-    auto sorted_idxs = sort_indices(array<I>(idxs.value().request()));
-
-    auto draw_pixel = [](array<Out> & image, const point_t & pt, Out val){detail::draw_pixel(image, pt, val);};
-    std::array<size_t, 2> axes = {oarr.ndim - 2, oarr.ndim - 1};
+    auto iarr = array<I>(idxs.value().request());
 
     thread_exception e;
 
     py::gil_scoped_release release;
 
-    #pragma omp parallel for num_threads(threads)
-    for (size_t i = 0; i < sorted_idxs.size(); i++)
+    #pragma omp parallel num_threads(threads)
     {
-        e.run([&]
+        detail::ImageBuffer<std::pair<I, T>> buffer (n_shape);
+        auto draw_pixel = [&buffer](const point_t & pt, I frame, I index, T val)
         {
-            auto iter = std::next(sorted_idxs.begin(), i);
-            auto frame = oarr.slice(iter->first, axes);
+            detail::draw_pixel(buffer, pt, frame, val);
+        };
+        auto write = [&buffer, &oarr](const std::pair<I, T> & value)
+        {
+            oarr[value.first] += value.second;
+        };
 
-            for (auto lindex : iter->second)
+        #pragma omp for nowait
+        for (size_t i = 0; i < lsize; i++)
+        {
+            e.run([&]()
             {
-                auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * lindex));
-                draw_bresenham(frame, ubound, line, larr[5 * lindex + 4], max_val, krn, draw_pixel);
-            }
-        });
+                auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * i));
+                draw_bresenham(ubound, iarr[i], static_cast<I>(i + 1), line, larr[5 * i + 4], max_val, krn, draw_pixel);
+            });
+        }
+
+        #pragma omp critical
+        std::for_each(buffer.begin(), buffer.end(), write);
     }
 
     py::gil_scoped_acquire acquire;
@@ -189,17 +197,17 @@ py::array_t<Out> draw_line(py::array_t<Out> out, py::array_t<T> lines, std::opti
     return out;
 }
 
-template <typename T, typename I>
-py::array_t<T> draw_line_vjp(py::array_t<T> cotangents, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, T max_val,
-                             std::string kernel, unsigned threads)
+template <typename Out, typename T, typename I>
+auto draw_line_max(py::array_t<Out> out, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, Out max_val,
+                   std::string kernel, unsigned threads)
 {
     assert(PyArray_API);
 
-    auto krn = kernels<T>::get_grad(kernel);
-    auto ctarr = array<T>(cotangents.request());
+    auto krn = kernels<T>::get_kernel(kernel);
+    auto oarr = array<Out>(out.request());
 
-    auto n_shape = normalise_shape(ctarr.shape);
-    auto ubound = get_ubound(ctarr.shape);
+    auto n_shape = normalise_shape(oarr.shape);
+    auto ubound = get_ubound(oarr.shape);
 
     auto larr = array<T>(lines.request());
     check_dimensions("lines", larr.ndim - 1, larr.shape, 5);
@@ -207,34 +215,102 @@ py::array_t<T> draw_line_vjp(py::array_t<T> cotangents, py::array_t<T> lines, st
 
     if (!idxs) fill_indices("idxs", n_shape[0], lsize, idxs);
     else check_indices("idxs", n_shape[0], lsize, idxs);
-    auto sorted_idxs = sort_indices(array<I>(idxs.value().request()));
+    auto iarr = array<I>(idxs.value().request());
+
+    auto out_idxs = py::array_t<I>(oarr.shape);
+    auto oiarr = array<I>(out_idxs.request());
+
+    fill_array(out_idxs, I());
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        detail::ImageBuffer<std::tuple<I, I, T>> buffer (n_shape);
+        auto draw_pixel = [&buffer](const point_t & pt, I frame, I index, T val)
+        {
+            detail::draw_pixel(buffer, pt, frame, index, val);
+        };
+        auto write = [&buffer, &oarr, &oiarr](const std::tuple<I, I, T> & value)
+        {
+            if (std::get<2>(value) > oarr[std::get<0>(value)])
+            {
+                oarr[std::get<0>(value)] = std::get<2>(value);
+                oiarr[std::get<0>(value)] = std::get<1>(value);
+            }
+        };
+
+        #pragma omp for nowait
+        for (size_t i = 0; i < lsize; i++)
+        {
+            e.run([&]()
+            {
+                auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * i));
+                draw_bresenham(ubound, iarr[i], static_cast<I>(i + 1), line, larr[5 * i + 4], max_val, krn, draw_pixel);
+            });
+        }
+
+        #pragma omp critical
+        std::for_each(buffer.begin(), buffer.end(), write);
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    return std::make_tuple(out, out_idxs);
+}
+
+template <typename Out, typename T, typename I>
+py::array_t<T> draw_line_max_vjp(py::array_t<Out> cotangents, py::array_t<I> out_idxs, py::array_t<T> lines, std::optional<py::array_t<I>> idxs,
+                                 Out max_val, std::string kernel, unsigned threads)
+{
+    assert(PyArray_API);
+
+    auto krn = kernels<T>::get_grad(kernel);
+    auto ctarr = array<Out>(cotangents.request());
+    auto oiarr = array<I>(out_idxs.request());
+
+    auto n_shape = normalise_shape(ctarr.shape);
+    auto ubound = get_ubound(ctarr.shape);
+
+    ctarr = ctarr.reshape(n_shape);
+    oiarr = oiarr.reshape(n_shape);
+
+    auto larr = array<T>(lines.request());
+    check_dimensions("lines", larr.ndim - 1, larr.shape, 5);
+    auto lsize = larr.size / larr.shape[larr.ndim - 1];
+
+    if (!idxs) fill_indices("idxs", n_shape[0], lsize, idxs);
+    else check_indices("idxs", n_shape[0], lsize, idxs);
+    auto iarr = array<I>(idxs.value().request());
 
     std::vector<py::ssize_t> out_shape (larr.shape.begin(), std::prev(larr.shape.end(), 1));
     out_shape.push_back(5);
     auto ct_l = py::array_t<T>(out_shape);
     auto ct_larr = array<T>(ct_l.request());
 
-    auto get_pixel = [](array<T> & image, const point_t & pt){return detail::get_pixel(image, pt);};
-    std::array<size_t, 2> axes = {ctarr.ndim - 2, ctarr.ndim - 1};
+    auto get_pixel = [&ctarr, &oiarr](const point_t & pt, I frame, I index)
+    {
+        using integer_type = typename point_t::value_type;
+        std::array<integer_type, 3> coord {static_cast<integer_type>(frame), pt.y(), pt.x()};
+        if (ctarr.is_inbound(coord)) return std::make_pair(ctarr.at(coord), oiarr.at(coord) == index);
+        return std::make_pair(Out(), false);
+    };
 
     thread_exception e;
 
     py::gil_scoped_release release;
 
     #pragma omp parallel for num_threads(threads)
-    for (size_t i = 0; i < sorted_idxs.size(); i++)
+    for (size_t i = 0; i < lsize; i++)
     {
-        e.run([&]
+        e.run([&]()
         {
-            auto iter = std::next(sorted_idxs.begin(), i);
-            auto frame = ctarr.slice(iter->first, axes);
-
-            for (auto lindex : iter->second)
-            {
-                auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * lindex));
-                to_tie<5>(ct_larr, 5 * lindex) = draw_bresenham_vjp(frame, ubound, line, larr[5 * lindex + 4],
-                                                                    max_val, krn, get_pixel);
-            }
+            auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * i));
+            to_tie<5>(ct_larr, 5 * i) = draw_bresenham_vjp(ubound, iarr[i], static_cast<I>(i + 1), line, larr[5 * i + 4], max_val, krn, get_pixel);
         });
     }
 
@@ -262,7 +338,7 @@ auto draw_line_table(py::array_t<T> lines, std::vector<size_t> shape, std::optio
 
     if (!idxs) fill_indices("idxs", n_shape[0], lsize, idxs);
     else check_indices("idxs", n_shape[0], lsize, idxs);
-    auto sorted_idxs = sort_indices(array<I>(idxs.value().request()));
+    auto iarr = array<I>(idxs.value().request());
 
     table_t<T> result;
 
@@ -274,25 +350,18 @@ auto draw_line_table(py::array_t<T> lines, std::vector<size_t> shape, std::optio
     {
         table_t<T> buffer;
         detail::shape_handler handler (n_shape);
+        auto draw_pixel = [&buffer, &handler](const point_t & pt, I frame, I index, T val)
+        {
+            if (val) buffer.emplace(std::make_pair(index, handler.ravel_index(frame, pt.y(), pt.x())), val);
+        };
 
         #pragma omp for nowait
-        for (size_t i = 0; i < sorted_idxs.size(); i++)
+        for (size_t i = 0; i < lsize; i++)
         {
-            e.run([&]
+            e.run([&]()
             {
-                auto iter = std::next(sorted_idxs.begin(), i);
-                auto fnum = iter->first;
-
-                for (auto lindex : iter->second)
-                {
-                    auto draw_pixel = [fnum, lindex, &handler](table_t<T> & table, const point_t & pt, T val)
-                    {
-                        detail::draw_pixel(table, std::make_pair(lindex, handler.ravel_index(fnum, pt.y(), pt.x())), val);
-                    };
-
-                    auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * lindex));
-                    draw_bresenham(buffer, ubound, line, larr[5 * lindex + 4], max_val, krn, draw_pixel);
-                }
+                auto line = std::make_from_tuple<Line<T>>(to_tuple<4>(larr, 5 * i));
+                draw_bresenham(ubound, iarr[i], static_cast<I>(i + 1), line, larr[5 * i + 4], max_val, krn, draw_pixel);
             });
         }
 
@@ -324,22 +393,37 @@ PYBIND11_MODULE(image_proc, m)
         return;
     }
 
-    m.def("draw_line", &draw_line<float, float, size_t>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
-    m.def("draw_line", &draw_line<double, double, size_t>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
-    m.def("draw_line", &draw_line<float, float, long>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
-    m.def("draw_line", &draw_line<double, double, long>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("fill_indices",
+        [](size_t xsize, size_t isize, std::optional<py::array_t<size_t>> idxs)
+        {
+            if (!idxs) fill_indices("idxs", xsize, isize, idxs);
+            else check_indices("idxs", xsize, isize, idxs);
+            return idxs.value();
+        }, py::arg("xsize"), py::arg("isize"), py::arg("idxs") = nullptr);
+    m.def("fill_indices",
+        [](size_t xsize, size_t isize, std::optional<py::array_t<long>> idxs)
+        {
+            if (!idxs) fill_indices("idxs", xsize, isize, idxs);
+            else check_indices("idxs", xsize, isize, idxs);
+            return idxs.value();
+        }, py::arg("xsize"), py::arg("isize"), py::arg("idxs") = nullptr);
 
-    m.def("draw_line_vjp", &draw_line_vjp<float, size_t>, py::arg("cotangents"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
-    m.def("draw_line_vjp", &draw_line_vjp<double, size_t>, py::arg("cotangents"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
-    m.def("draw_line_vjp", &draw_line_vjp<float, long>, py::arg("cotangents"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
-    m.def("draw_line_vjp", &draw_line_vjp<double, long>, py::arg("cotangents"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line", &draw_line_max<float, float, size_t>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line", &draw_line_max<double, double, size_t>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line", &draw_line_max<float, float, long>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line", &draw_line_max<double, double, long>, py::arg("out"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+
+    m.def("draw_line_vjp", &draw_line_max_vjp<float, float, size_t>, py::arg("cotangents"), py::arg("out_idxs"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line_vjp", &draw_line_max_vjp<double, double, size_t>, py::arg("cotangents"), py::arg("out_idxs"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line_vjp", &draw_line_max_vjp<float, float, long>, py::arg("cotangents"), py::arg("out_idxs"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
+    m.def("draw_line_vjp", &draw_line_max_vjp<double, double, long>, py::arg("cotangents"), py::arg("out_idxs"), py::arg("lines"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "biweight", py::arg("num_threads") = 1);
 
     m.def("draw_line_mask",
         [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, uint32_t max_val, std::string kernel, unsigned threads)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_mask",
@@ -347,7 +431,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_mask",
@@ -355,7 +439,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_mask",
@@ -363,7 +447,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
 
@@ -372,7 +456,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<double> out {shape};
             fill_array(out, double());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_image",
@@ -380,7 +464,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<float> out {shape};
             fill_array(out, float());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_image",
@@ -388,7 +472,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<double> out {shape};
             fill_array(out, double());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_image",
@@ -396,7 +480,7 @@ PYBIND11_MODULE(image_proc, m)
         {
             py::array_t<float> out {shape};
             fill_array(out, float());
-            return draw_line(out, lines, idxs, max_val, kernel, threads);
+            return draw_line_sum(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
 

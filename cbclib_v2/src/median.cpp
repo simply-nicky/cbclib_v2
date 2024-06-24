@@ -68,13 +68,18 @@ py::array_t<double> median(py::array_t<T, py::array::c_style | py::array::forcec
     return out;
 }
 
-template <typename T, typename U>
-py::array_t<T> filter_preprocessor(py::array_t<T, py::array::c_style | py::array::forcecast> & inp, std::optional<U> size,
-                                   std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> & fprint,
-                                   std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> & mask)
+extend get_mode(std::string mode)
 {
-    check_optional("mask", inp.shape(), inp.shape() + inp.ndim(), mask, true);
+    auto it = modes.find(mode);
+    if (it == modes.end())
+        throw std::invalid_argument("invalid mode argument: " + mode);
+    return it->second;
+}
 
+template <typename T, typename U>
+array<bool> get_footprint(py::array_t<T, py::array::c_style | py::array::forcecast> & inp, std::optional<U> size,
+                          std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> & fprint)
+{
     if (!size && !fprint)
         throw std::invalid_argument("size or fprint must be provided");
 
@@ -89,7 +94,59 @@ py::array_t<T> filter_preprocessor(py::array_t<T, py::array::c_style | py::array
         throw std::invalid_argument("fprint must have the same number of dimensions (" + std::to_string(fbuf.ndim) +
                                     ") as the input (" + std::to_string(ibuf.ndim) + ")");
 
-    return py::array_t<T>(ibuf.shape);
+    return {fbuf};
+}
+
+template <typename T>
+py::array_t<T> filter_image(array<T> inp, size_t rank, array<bool> footprint, extend mode, const T & cval, unsigned threads)
+{
+    py::array_t<T> out {inp.shape};
+    if (!out.size()) return out;
+
+    auto oarr = array<T>(out.request());
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        ImageFilter<T> filter (footprint);
+        std::vector<long> coord (inp.ndim);
+
+        #pragma omp for schedule(guided)
+        for (size_t i = 0; i < inp.size; i++)
+        {
+            e.run([&]
+            {
+                inp.unravel_index(coord.begin(), i);
+                filter.update(coord, inp, mode, cval);
+
+                oarr[i] = filter.nth_element(rank);
+            });
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    return out;
+}
+
+template <typename T, typename U>
+py::array_t<T> rank_filter(py::array_t<T, py::array::c_style | py::array::forcecast> inp, size_t rank, std::optional<U> size,
+                           std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> fprint,
+                           std::string mode, const T & cval, unsigned threads)
+{
+    assert(PyArray_API);
+
+    auto m = get_mode(mode);
+
+    auto farr = get_footprint(inp, size, fprint);
+    auto iarr = array<T>(inp.request());
+
+    return filter_image(iarr, rank, farr, m, cval, threads);
 }
 
 template <typename T, typename U>
@@ -100,51 +157,12 @@ py::array_t<T> median_filter(py::array_t<T, py::array::c_style | py::array::forc
 {
     assert(PyArray_API);
 
-    auto it = modes.find(mode);
-    if (it == modes.end())
-        throw std::invalid_argument("invalid mode argument: " + mode);
-    auto m = it->second;
-
-    auto out = filter_preprocessor(inp, size, fprint, mask);
-
-    if (!out.size()) return out;
-
-    auto oarr = array<T>(out.request());
+    auto m = get_mode(mode);
+    auto farr = get_footprint(inp, size, fprint);
+    size_t rank = std::reduce(farr.begin(), farr.end(), size_t(), std::plus()) / 2;
     auto iarr = array<T>(inp.request());
-    auto marr = array<bool>(mask.value().request());
-    auto farr = array<bool>(fprint.value().request());
 
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        footprint<T> fpt (farr);
-        std::vector<long> coord (iarr.ndim, 0);
-
-        #pragma omp for schedule(guided)
-        for (size_t i = 0; i < iarr.size; i++)
-        {
-            e.run([&]
-            {
-                if (marr[i])
-                {
-                    iarr.unravel_index(coord.begin(), i);
-                    fpt.update(coord, iarr, m, cval);
-
-                    if (fpt.data.size()) oarr[i] = *wirthmedian(fpt.data.begin(), fpt.data.end(), std::less<T>());
-                }
-                else oarr[i] = T();
-            });
-        }
-    }
-
-    py::gil_scoped_acquire acquire;
-
-    e.rethrow();
-
-    return out;
+    return filter_image(iarr, rank, farr, m, cval, threads);
 }
 
 template <typename T, typename U>
@@ -155,51 +173,12 @@ py::array_t<T> maximum_filter(py::array_t<T, py::array::c_style | py::array::for
 {
     assert(PyArray_API);
 
-    auto it = modes.find(mode);
-    if (it == modes.end())
-        throw std::invalid_argument("invalid mode argument: " + mode);
-    auto m = it->second;
-
-    auto out = filter_preprocessor(inp, size, fprint, mask);
-
-    if (!out.size()) return out;
-
-    auto oarr = array<T>(out.request());
+    auto m = get_mode(mode);
+    auto farr = get_footprint(inp, size, fprint);
+    size_t rank = std::reduce(farr.begin(), farr.end(), size_t(), std::plus());
     auto iarr = array<T>(inp.request());
-    auto marr = array<bool>(mask.value().request());
-    auto farr = array<bool>(fprint.value().request());
 
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        footprint<T> fpt (farr);
-        std::vector<long> coord (iarr.ndim, 0);
-
-        #pragma omp for schedule(guided)
-        for (size_t i = 0; i < iarr.size; i++)
-        {
-            e.run([&]
-            {
-                if (marr[i])
-                {
-                    iarr.unravel_index(coord.begin(), i);
-                    fpt.update(coord, iarr, m, cval);
-
-                    if (fpt.data.size()) oarr[i] = *wirthselect(fpt.data.begin(), fpt.data.end(), fpt.data.size() - 1, std::less<T>());
-                }
-                else oarr[i] = T();
-            });
-        }
-    }
-
-    py::gil_scoped_acquire acquire;
-
-    e.rethrow();
-
-    return out;
+    return filter_image(iarr, rank, farr, m, cval, threads);
 }
 
 template <typename T, typename U>
@@ -265,7 +244,7 @@ auto robust_mean(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
                 std::iota(idxs.begin(), idxs.end(), 0);
                 for (auto idx : idxs) if (miter[idx]) buffer.push_back(iiter[idx]);
 
-                if (buffer.size()) mean = *wirthmedian(buffer.begin(), buffer.end(), std::less<T>());
+                if (buffer.size()) mean = *median_element(buffer.begin(), buffer.end(), std::less<T>());
                 else mean = D();
 
 

@@ -35,21 +35,18 @@ def median(inp: Union[NDRealArray, NDIntArray], mask: Optional[NDBoolArray]=None
 
 @overload
 def median_filter(inp: NDRealArray, size: Optional[IntSequence]=None,
-                  footprint: Optional[NDBoolArray]=None,
-                  mask: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
+                  footprint: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
                   num_threads: int=1) -> NDRealArray:
     ...
 
 @overload
 def median_filter(inp: NDIntArray, size: Optional[IntSequence]=None,
-                  footprint: Optional[NDBoolArray]=None,
-                  mask: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
+                  footprint: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
                   num_threads: int=1) -> NDIntArray:
     ...
 
 def median_filter(inp: Union[NDRealArray, NDIntArray], size: Optional[IntSequence]=None,
-                  footprint: Optional[NDBoolArray]=None,
-                  mask: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
+                  footprint: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
                   num_threads: int=1) -> Union[NDRealArray, NDIntArray]:
     """Calculate a multidimensional median filter.
 
@@ -65,8 +62,6 @@ def median_filter(inp: Union[NDRealArray, NDIntArray], size: Optional[IntSequenc
             dimensions of the input array, so that, if the input array is shape (10, 10, 10), and
             size is 2, then the actual size used is (2, 2, 2). When footprint is given, size is
             ignored.
-        mask : Output mask. Median is calculated only where `mask` is True, output array set to 0
-            otherwise. Median is calculated over the whole input array by default.
         mode : The mode parameter determines how the input array is extended when the
             filter overlaps a border. Default value is 'reflect'. The valid values and their
             behavior is as follows:
@@ -99,21 +94,18 @@ def median_filter(inp: Union[NDRealArray, NDIntArray], size: Optional[IntSequenc
 
 @overload
 def maximum_filter(inp: NDRealArray, size: Optional[IntSequence]=None,
-                   footprint: Optional[NDBoolArray]=None,
-                   mask: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
+                   footprint: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
                    num_threads: int=1) -> NDRealArray:
     ...
 
 @overload
 def maximum_filter(inp: NDIntArray, size: Optional[IntSequence]=None,
-                   footprint: Optional[NDBoolArray]=None,
-                   mask: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
+                   footprint: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
                    num_threads: int=1) -> NDIntArray:
     ...
 
 def maximum_filter(inp: Union[NDRealArray, NDIntArray], size: Optional[IntSequence]=None,
-                   footprint: Optional[NDBoolArray]=None,
-                   mask: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
+                   footprint: Optional[NDBoolArray]=None, mode: Mode='reflect', cval: float=0.0,
                    num_threads: int=1) -> Union[NDRealArray, NDIntArray]:
     """Calculate a multidimensional maximum filter.
 
@@ -129,8 +121,6 @@ def maximum_filter(inp: Union[NDRealArray, NDIntArray], size: Optional[IntSequen
             dimensions of the input array, so that, if the input array is shape (10, 10, 10), and
             size is 2, then the actual size used is (2, 2, 2). When footprint is given, size is
             ignored.
-        mask : Output mask. Median is calculated only where `mask` is True, output array set to 0
-            otherwise. Median is calculated over the whole input array by default.
         mode : The mode parameter determines how the input array is extended when the
             filter overlaps a border. Default value is 'reflect'. The valid values and their
             behavior is as follows:

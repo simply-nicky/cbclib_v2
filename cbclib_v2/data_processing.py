@@ -12,17 +12,17 @@ Examples:
 """
 from __future__ import annotations
 from multiprocessing import cpu_count
-from typing import Dict, List, Optional, TypeVar, Union, cast
+from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
-from .cbc_setup import Basis, ScanSamples, ScanSetup, Streaks, CBDModel
+from .jax import Basis, ScanSamples, ScanSetup, Streaks, CBDModel
 from .cxi_protocol import CrystProtocol, FileStore, Kinds
 from .data_container import StringFormatter, DataContainer, Transform, ReferenceType
 from .streak_finder import PatternsStreakFinder
-from .annotations import (Indices, IntSequence, NDArray, NDArrayLike, NDBoolArray, NDIntArray,
-                          NDRealArray, ROIType, Shape)
+from .annotations import (Indices, IntArray, IntSequence, NDArrayLike, NDBoolArray,
+                          NDIntArray, NDRealArray, ROIType, Shape)
 from .src import binterpolate, kr_grid, label, median, robust_mean, robust_lsq, Regions, Structure
 
 def read_hdf(input_file: FileStore, attributes: Union[str, List[str]],
@@ -53,7 +53,7 @@ def read_hdf(input_file: FileStore, attributes: Union[str, List[str]],
         idxs = np.arange(input_file.size)
     idxs = np.atleast_1d(idxs)
 
-    data_dict: Dict[str, NDArray] = {'frames': idxs}
+    data_dict: Dict[str, Any] = {'frames': idxs}
 
     for attr in StringFormatter.str_to_list(attributes):
         if attr not in input_file.attributes():
@@ -148,11 +148,11 @@ class CrystDataBase(CrystProtocol, DataContainer):
     frames      : NDIntArray
 
     data        : Optional[NDRealArray]
+    snr         : Optional[NDRealArray]
     whitefield  : Optional[NDRealArray]
 
     mask        : Optional[NDBoolArray] = field(default=None)
     std         : Optional[NDRealArray] = field(default=None)
-    snr         : Optional[NDRealArray] = field(default=None)
     scales      : Optional[NDRealArray] = field(default=None)
     num_threads : int = field(default=cpu_count())
 
@@ -205,10 +205,13 @@ Cryst = TypeVar("Cryst", bound="CrystDataPartBase")
 class CrystDataPartBase(CrystDataBase):
     data        : NDRealArray
     mask        : NDBoolArray = field(default_factory=lambda: np.array([], dtype=bool))
+    scales      : NDRealArray = field(default_factory=lambda: np.array([]))
 
     def __post_init__(self):
         if self.mask.shape != self.shape[1:]:
             self.mask = np.ones(self.shape[1:], dtype=bool)
+        if self.scales.shape != (self.frames.size,):
+            self.scales = np.ones(self.frames.size)
 
     def mask_region(self: Cryst, roi: ROIType) -> Cryst:
         """Return a new :class:`CrystData` object with the updated mask. The region
@@ -322,9 +325,9 @@ class CrystDataPartBase(CrystDataBase):
         new_mask[roi[0]:roi[1], roi[2]:roi[3]] &= mask
         return self.replace(mask=new_mask)
 
-    def update_whitefield(self, method: str='median', frames: Optional[Indices]=None,
+    def update_whitefield(self: Cryst, method: str='median', frames: Optional[Indices]=None,
                           r0: float=0.0, r1: float=0.5, n_iter: int=12,
-                          lm: float=9.0) -> CrystDataFull:
+                          lm: float=9.0) -> Cryst:
         """Return a new :class:`CrystData` object with new whitefield.
 
         Args:
@@ -370,80 +373,14 @@ class CrystDataPartBase(CrystDataBase):
         else:
             raise ValueError('Invalid method argument')
 
-        return CrystDataFull(**dict(self.to_dict(), whitefield=whitefield, std=std))
+        return self.replace(whitefield=whitefield, std=std)
 
-@dataclass
-class CrystData(CrystDataBase):
-    data        : Optional[NDRealArray] = field(default=None)
-    whitefield  : Optional[NDRealArray] = field(default=None)
-
-@dataclass
-class CrystDataPart(CrystDataPartBase):
-    data        : NDRealArray
-    whitefield  : Optional[NDRealArray] = field(default=None)
-
-@dataclass
-class CrystDataFull(CrystDataPartBase):
-    whitefield  : NDRealArray
-    scales      : NDRealArray = field(default_factory=lambda: np.array([]))
-
-    def __post_init__(self):
-        if self.scales.shape != (self.frames.size,):
-            self.scales = np.ones(self.frames.size)
-
-    def streak_detector(self, structure: Structure) -> StreakDetector:
-        """Return a new :class:`cbclib.StreakDetector` object that detects lines in SNR frames.
-
-        Raises:
-            ValueError : If there is no ``whitefield`` inside the container.
-            ValueError : If there is no ``snr`` inside the container.
-
-        Returns:
-            A CBC pattern detector based on :class:`cbclib.bin.LSD` Line Segment Detection [LSD]_
-            algorithm.
-        """
-        if self.snr is None:
-            raise ValueError('No snr in the container')
-
-        parent = cast(ReferenceType[CrystDataFull], ref(self))
-        return StreakDetector(data=self.snr, mask=self.mask, parent=parent, frames=self.frames,
-                              structure=structure, num_threads=self.num_threads)
-
-    def region_detector(self, structure: Structure):
-        if self.snr is None:
-            raise ValueError('No snr in the container')
-
-        parent = cast(ReferenceType[CrystDataFull], ref(self))
-        return RegionDetector(data=self.snr, mask=self.mask, parent=parent, frames=self.frames,
-                              structure=structure, num_threads=self.num_threads)
-
-    def model_detector(self, basis: Basis, samples: ScanSamples, setup: ScanSetup) -> ModelDetector:
-        """Return a new :class:`cbclib.ModelDetector` object that finds the diffracted streaks
-        in SNR frames based on the solution of sample and indexing refinement.
-
-        Args:
-            basis : Indexing solution.
-            samples : Sample refinement solution.
-            setup : Experimental setup.
-
-        Raises:
-            ValueError : If there is no ``whitefield`` inside the container.
-            ValueError : If there is no ``snr`` inside the container.
-
-        Returns:
-            A CBC pattern detector based on :class:`cbclib.CBDModel` CBD pattern prediction model.
-        """
-        if self.snr is None:
-            raise ValueError('No snr in the container')
-
-        parent = cast(ReferenceType[CrystDataFull], ref(self))
-        return ModelDetector(data=self.snr, parent=parent, frames=self.frames,
-                             model=CBDModel(basis, samples, setup, num_threads=self.num_threads))
-
-    def update_std(self, method="robust-scale", frames: Optional[Indices]=None,
-                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0) -> CrystDataFull:
+    def update_std(self: Cryst, method="robust-scale", frames: Optional[Indices]=None,
+                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0) -> Cryst:
         if frames is None:
             frames = np.arange(self.shape[0])
+        if self.whitefield is None:
+            raise ValueError("No whitefield in the container")
 
         if method == "robust-scale":
             _, std = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0, r1=r1,
@@ -466,15 +403,17 @@ class CrystDataFull(CrystDataPartBase):
         Returns:
             New :class:`CrystData` object with the updated ``cor_data``.
         """
+        if self.whitefield is None:
+            raise ValueError("No whitefield in the container")
         if self.std is None:
-            raise ValueError("No snr in the container")
+            raise ValueError("No std in the container")
 
         whitefields = self.scales[:, None, None] * self.whitefield
         snr = np.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
-        return self.replace(snr=snr)
+        return CrystDataFull(**dict(self.to_dict(), snr=snr))
 
-    def scale_whitefield(self, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
-                         n_iter: int=12, lm: float=9.0) -> CrystDataFull:
+    def scale_whitefield(self: Cryst, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
+                         n_iter: int=12, lm: float=9.0) -> Cryst:
         """Return a new :class:`CrystData` object with a new set of whitefields. A set of
         backgrounds is generated by robustly fitting a design matrix `W` to the measured
         patterns.
@@ -504,7 +443,9 @@ class CrystDataFull(CrystDataPartBase):
             An array of scale factors for each frame in the container.
         """
         if self.std is None:
-            raise ValueError("No snr in the container")
+            raise ValueError("No std in the container")
+        if self.whitefield is None:
+            raise ValueError("No whitefield in the container")
 
         mask = self.mask & (self.std > 0.0)
         y: NDRealArray = np.where(mask, self.data / self.std, 0.0)[:, mask]
@@ -522,13 +463,69 @@ class CrystDataFull(CrystDataPartBase):
 
         raise ValueError(f"Invalid method argument: {method}")
 
+@dataclass
+class CrystData(CrystDataBase):
+    data        : Optional[NDRealArray] = field(default=None)
+    snr         : Optional[NDRealArray] = field(default=None)
+    whitefield  : Optional[NDRealArray] = field(default=None)
+
+@dataclass
+class CrystDataPart(CrystDataPartBase):
+    data        : NDRealArray
+    snr         : Optional[NDRealArray] = field(default=None)
+    whitefield  : Optional[NDRealArray] = field(default=None)
+
+@dataclass
+class CrystDataFull(CrystDataPartBase):
+    snr         : NDRealArray
+    whitefield  : NDRealArray
+
+    def streak_detector(self, structure: Structure) -> StreakDetector:
+        """Return a new :class:`cbclib.StreakDetector` object that detects lines in SNR frames.
+
+        Raises:
+            ValueError : If there is no ``whitefield`` inside the container.
+            ValueError : If there is no ``snr`` inside the container.
+
+        Returns:
+            A CBC pattern detector based on :class:`cbclib.bin.LSD` Line Segment Detection [LSD]_
+            algorithm.
+        """
+        parent = cast(ReferenceType[CrystDataFull], ref(self))
+        return StreakDetector(data=self.snr, mask=self.mask, parent=parent, frames=self.frames,
+                              structure=structure, scale=1.0, num_threads=self.num_threads)
+
+    def region_detector(self, structure: Structure):
+        parent = cast(ReferenceType[CrystDataFull], ref(self))
+        return RegionDetector(data=self.snr, mask=self.mask, parent=parent, frames=self.frames,
+                              structure=structure, scale=1.0, num_threads=self.num_threads)
+
+    def model_detector(self, basis: Basis, samples: ScanSamples, setup: ScanSetup) -> ModelDetector:
+        """Return a new :class:`cbclib.ModelDetector` object that finds the diffracted streaks
+        in SNR frames based on the solution of sample and indexing refinement.
+
+        Args:
+            basis : Indexing solution.
+            samples : Sample refinement solution.
+            setup : Experimental setup.
+
+        Raises:
+            ValueError : If there is no ``whitefield`` inside the container.
+            ValueError : If there is no ``snr`` inside the container.
+
+        Returns:
+            A CBC pattern detector based on :class:`cbclib.CBDModel` CBD pattern prediction model.
+        """
+        parent = cast(ReferenceType[CrystDataFull], ref(self))
+        return ModelDetector(data=self.snr, parent=parent, frames=self.frames,
+                             model=CBDModel(basis, samples, setup))
+
 DetBase = TypeVar("DetBase", bound="DetectorBase")
 
 @dataclass
 class DetectorBase(DataContainer):
     frames          : NDIntArray
     data            : NDRealArray
-    num_threads     : int
     parent          : ReferenceType[CrystDataFull]
 
     @property
@@ -544,7 +541,7 @@ class DetectorBase(DataContainer):
     def export_coordinates(self, frames: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
         table = {'bgd': self.parent().scales[frames] * self.parent().whitefield[y, x],
                  'frames': self.frames[frames], 'I_raw': self.parent().data[frames, y, x],
-                 'snr': self.data[frames, y, x], 'x': x, 'y': y}
+                 'snr': self.parent().snr[frames, y, x], 'x': x, 'y': y}
         return pd.DataFrame(table)
 
 MDet = TypeVar("MDet", bound="MaskedDetector")
@@ -552,25 +549,33 @@ MDet = TypeVar("MDet", bound="MaskedDetector")
 @dataclass
 class MaskedDetector(DetectorBase):
     mask            : NDBoolArray
+    num_threads     : int
+    scale           : float
 
-    def downscale(self: MDet, ratio: float, sigma: float) -> MDet:
+    def downscale(self: MDet, scale: float, sigma: float) -> MDet:
         x, y = np.arange(0, self.shape[-1]), np.arange(0, self.shape[-2])
         pts = np.stack(np.meshgrid(x, y), axis=-1)
 
-        x_scaled = ratio * np.arange(0, self.shape[-1] / ratio)
-        y_scaled = ratio * np.arange(0, self.shape[-2] / ratio)
+        x_scaled = scale * np.arange(0, self.shape[-1] / scale)
+        y_scaled = scale * np.arange(0, self.shape[-2] / scale)
         pts_scaled = np.stack(np.meshgrid(x_scaled, y_scaled), axis=-1)
 
         data_scaled = kr_grid(self.data, pts, (x_scaled, y_scaled), sigma=sigma,
                               num_threads=self.num_threads)[0]
         mask_scaled = binterpolate(np.asarray(self.mask, dtype=float), (x, y), pts_scaled)
-        return self.replace(data=data_scaled, mask=np.asarray(mask_scaled, dtype=bool))
+        return self.replace(data=data_scaled, mask=np.asarray(mask_scaled, dtype=bool),
+                            scale=scale)
+
+    def export_coordinates(self, frames: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
+        x = np.asarray(np.round(self.scale * x), dtype=int)
+        y = np.asarray(np.round(self.scale * y), dtype=int)
+        return super().export_coordinates(frames, y, x)
 
     def get_frames(self: MDet, idxs: Indices) -> MDet:
         return self.replace(data=self.data[idxs], mask=self.mask[idxs], frames=self.frames[idxs])
 
 class StreakDetectorBase(DetectorBase):
-    def export_table(self, streaks: Streaks, width: float,
+    def export_table(self, streaks: List[NDRealArray], width: float,
                      kernel: str='rectangular') -> pd.DataFrame:
         """Export normalised pattern into a :class:`pandas.DataFrame` table.
 
@@ -603,15 +608,35 @@ class StreakDetectorBase(DetectorBase):
         """
         if self.parent() is None:
             raise ValueError('Invalid parent: the parent data container was deleted')
+        if len(streaks) != self.shape[0]:
+            raise ValueError(f'Number of streaks ({len(streaks)}) must be equal to the '\
+                             f'number of frames ({self.shape[0]}) in the container')
 
-        table = streaks.pattern_dataframe(width, shape=self.shape, kernel=kernel)
+        x0, y0, x1, y1 = np.concatenate(streaks).T
+        idxs = np.concatenate([np.full((len(pattern),), idx)
+                               for idx, pattern in enumerate(streaks)])
+
+        table = Streaks(x0, y0, x1, y1, idxs).pattern_dataframe(width, shape=self.shape,
+                                                                kernel=kernel)
         table2 = self.export_coordinates(table['frames'].to_numpy(),
                                          table['y'].to_numpy(), table['x'].to_numpy())
-        return table.merge(table2, how='left', on=['frames', 'y', 'x'])
+        columns = set(table.columns) - {'frames', 'y', 'x'}
+        return table2.assign(**{key: table[key] for key in columns})
 
 @dataclass
 class StreakDetector(StreakDetectorBase, MaskedDetector, PatternsStreakFinder):
-    pass
+    def filter_streaks(self, streaks: List[NDRealArray], center: NDRealArray, min_dist: float
+                       ) -> List[NDRealArray]:
+        new_streaks = []
+        for lines in streaks:
+            line_centers = np.mean(lines.reshape(-1, 2, 2), axis=1)
+            norm = np.stack([lines[:, 3] - lines[:, 1], lines[:, 0] - lines[:, 2]], axis=-1)
+            dist = line_centers - center
+            prod = np.sum(norm * dist, axis=-1)[..., None]
+            proj = dist - prod * norm / np.sum(norm**2, axis=-1)[..., None]
+            mask = np.sqrt(np.sum(proj**2, axis=-1)) < min_dist
+            new_streaks.append(lines[mask])
+        return new_streaks
 
 @dataclass
 class RegionDetector(MaskedDetector):
@@ -667,7 +692,8 @@ class ModelDetector(StreakDetectorBase, DetectorBase):
         np.add.at(cnts, df['hkl_id'], np.ones(df.shape[0], dtype=int))
         return np.where(cnts, snr / cnts, 0.0)
 
-    def detect(self, hkl: NDIntArray, hkl_index: bool=False) -> Streaks:
+    def detect(self, hkl: IntArray, hidxs: IntArray, bidxs: IntArray, hkl_index: bool=False
+               ) -> Streaks:
         """Perform the streak detection based on prediction. Generate a predicted pattern and
         filter out all the streaks, which pertain to the set of reciprocal lattice points ``hkl``.
 
@@ -679,4 +705,5 @@ class ModelDetector(StreakDetectorBase, DetectorBase):
         Returns:
             New :class:`cbclib.ModelDetector` streak detector with updated ``streaks``.
         """
-        return self.model.generate_streaks(hkl, hkl_index=hkl_index)
+        is_good, streaks = self.model.generate_streaks(hkl, hidxs, bidxs, hkl_index=hkl_index)
+        return streaks.mask_streaks(is_good)
