@@ -26,7 +26,7 @@ import numpy as np
 from tqdm.auto import tqdm
 from .xfel_data import open_run, stack_detector_data, DataCollection
 from .xfel_geom import JUNGFRAUGeometry
-from .data_container import DataContainer, Parser, INIParser, JSONParser, StringFormatter
+from .data_container import DataContainer, Parser, INIParser, JSONParser, StringFormatting
 from .annotations import Indices, IntTuple, NDArray, NDIntArray, Shape
 
 EXP_ROOT_DIR = '/gpfs/exfel/exp'
@@ -45,8 +45,8 @@ class Kinds(Enum):
 class CrystProtocol():
     kinds       : ClassVar[Dict[str, Kinds]] = {'data': Kinds.STACK, 'good_frames': Kinds.SEQUENCE,
                                                 'mask': Kinds.FRAME, 'frames': Kinds.SEQUENCE,
-                                                'whitefield': Kinds.FRAME, 'std': Kinds.FRAME,
-                                                'scales': Kinds.SEQUENCE}
+                                                'whitefield': Kinds.FRAME, 'snr': Kinds.STACK,
+                                                'std': Kinds.FRAME, 'scales': Kinds.SEQUENCE}
 
     @classmethod
     def get_kind(cls, attr: str) -> Kinds:
@@ -409,8 +409,8 @@ class CXIStore(FileStore):
     def __post_init__(self):
         if self.mode not in ['r', 'r+', 'w', 'w-', 'x', 'a']:
             raise ValueError(f'Wrong file mode: {self.mode}')
-        if len(self.files) != len(StringFormatter.str_to_list(self.names)):
-            self.files = {fname: None for fname in StringFormatter.str_to_list(self.names)}
+        if len(self.files) != len(StringFormatting.str_to_list(self.names)):
+            self.files = {fname: None for fname in StringFormatting.str_to_list(self.names)}
 
     @property
     def size(self) -> int:
@@ -541,8 +541,6 @@ class CXIStore(FileStore):
 
             if kind in (Kinds.FRAME, Kinds.SCALAR):
                 return writer.save_data(attr=attr, data=data)
-
-            raise ValueError(f'Invalid kind: {kind:s}')
 
     def update(self):
         """Read the files for the data attributes contained in the protocol."""

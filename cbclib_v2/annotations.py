@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Literal, NamedTuple, Sequence, Set, Tuple, Union
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, NamedTuple, Sequence, Set,
+                    Tuple, Type, Union)
 import numpy as np
 import numpy.typing as npt
 from jax import Array as JaxArray
@@ -26,18 +27,18 @@ BoolArray = Union[JaxBoolArray, NDBoolArray]
 IntArray = Union[JaxIntArray, NDIntArray]
 RealArray = Union[JaxRealArray, NDRealArray]
 
-Indices = Union[int, slice, NDIntArray, Sequence[int]]
+KeyArray = JaxArray
 
-IntSequence = Union[int, np.integer[Any], Sequence[int], NDIntArray]
-ROIType = Union[List[int], Tuple[int, int, int, int], NDIntArray]
-RealSequence = Union[float, np.floating[Any], Sequence[float], NDRealArray]
-CPPIntSequence = Union[Sequence[int], NDIntArray]
+Indices = Union[int, slice, IntArray, Sequence[int]]
 
-NDRealArrayLike = Union[NDRealArray, List[float], Tuple[float, ...]]
-JaxRealArrayLike = Union[JaxArray, List[float], Tuple[float, ...]]
+IntSequence = Union[int, np.integer[Any], Sequence[int], IntArray]
+ROI = Union[List[int], Tuple[int, int, int, int], IntArray]
+RealSequence = Union[float, np.floating[Any], Sequence[float], RealArray]
+CPPIntSequence = Union[Sequence[int], IntArray]
 
 PyTree = Any
 Table = Dict[Tuple[int, int], float]
+ExpandedType = Union[Type, Tuple[Type, List]]
 
 Norm = Literal['backward', 'forward', 'ortho']
 Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
@@ -47,28 +48,28 @@ Streak = Tuple[Set[Tuple[int, int, float]], Dict[float, List[float]],
                Dict[float, List[int]], Line]
 
 class Pattern(NamedTuple):
-    index   : NDIntArray
-    frames  : NDIntArray
-    y       : NDIntArray
-    x       : NDIntArray
+    index   : IntArray
+    frames  : IntArray
+    y       : IntArray
+    x       : IntArray
 
 class PatternWithHKL(NamedTuple):
-    index   : NDIntArray
-    frames  : NDIntArray
-    y       : NDIntArray
-    x       : NDIntArray
-    rp      : NDRealArray
-    h       : NDIntArray
-    k       : NDIntArray
-    l       : NDIntArray
+    index   : IntArray
+    frames  : IntArray
+    y       : IntArray
+    x       : IntArray
+    rp      : RealArray
+    h       : IntArray
+    k       : IntArray
+    l       : IntArray
 
 class PatternWithHKLID(NamedTuple):
-    index   : NDIntArray
-    frames  : NDIntArray
-    y       : NDIntArray
-    x       : NDIntArray
-    rp      : NDRealArray
-    h       : NDIntArray
-    k       : NDIntArray
-    l       : NDIntArray
-    hkl_id  : NDIntArray
+    index   : IntArray
+    frames  : IntArray
+    y       : IntArray
+    x       : IntArray
+    rp      : RealArray
+    h       : IntArray
+    k       : IntArray
+    l       : IntArray
+    hkl_id  : IntArray

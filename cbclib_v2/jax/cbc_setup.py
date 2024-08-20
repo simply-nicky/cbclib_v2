@@ -1,628 +1,21 @@
-from __future__ import annotations
-
-from typing import Any, ClassVar, Iterable, Optional, Tuple, Union, get_type_hints
+from functools import partial
+from typing import (Any, Callable, ClassVar, Dict, Optional, Tuple, Type, TypeVar, Union, cast,
+                    get_type_hints, overload)
+from dataclasses import asdict, is_dataclass, fields
 import pandas as pd
 import numpy as np
-from numpy.linalg import eigh
 import jax.numpy as jnp
+from jax import jit, random, tree_util
 from .dataclasses import jax_dataclass, field
-from .primitives import (det_to_k, euler_angles, euler_matrix, k_to_det, k_to_smp, source_lines,
-                         tilt_angles, tilt_matrix)
+from .geometry import (det_to_k, euler_angles, euler_matrix, k_to_det, k_to_smp, source_lines,
+                       tilt_angles, tilt_matrix)
+from .primitives import line_distances
 from ..src import draw_line_image, draw_line_mask, draw_line_table
-from ..data_container import DataContainer, Parser, INIParser, JSONParser, Transform, Crop
-from ..annotations import (Indices, Array, BoolArray, IntArray, RealArray, Pattern, PatternWithHKL,
-                           PatternWithHKLID, Shape)
-
-@jax_dataclass
-class Basis(DataContainer):
-    """An indexing solution, defined by a set of three unit cell vectors.
-
-    Args:
-        a_vec : First basis vector.
-        b_vec : Second basis vector.
-        c_vec : Third basis vector.
-    """
-    a_vec : RealArray
-    b_vec : RealArray
-    c_vec : RealArray
-
-    def __post_init__(self):
-        self.mat = jnp.stack((self.a_vec, self.b_vec, self.c_vec))
-
-    @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser({'basis': ('a_vec', 'b_vec', 'c_vec')},
-                             types=get_type_hints(cls))
-        if ext == 'json':
-            return JSONParser({'basis': ('a_vec', 'b_vec', 'c_vec')})
-
-        raise ValueError(f"Invalid format: {ext}")
-
-    @classmethod
-    def read(cls, file: str, ext: str='ini') -> Basis:
-        return cls(**cls.parser(ext).read(file))
-
-    @classmethod
-    def import_matrix(cls, mat: RealArray) -> Basis:
-        """Return a new :class:`Basis` object, initialised by a stacked matrix of three basis
-        vectors.
-
-        Args:
-            mat : A matrix of three stacked basis vectors.
-
-        Returns:
-            A new :class:`Basis` object.
-        """
-        if mat.size != 9:
-            raise ValueError("Wrong matrix size: " + str(mat.size))
-        mat = mat.reshape(-1, 3)
-        return cls(a_vec=mat[0], b_vec=mat[1], c_vec=mat[2])
-
-    @classmethod
-    def import_spherical(cls, mat: RealArray) -> Basis:
-        """Return a new :class:`Basis` object, initialised by a stacked matrix of three basis
-        vectors written in spherical coordinate system.
-
-        Args:
-            mat : A matrix of three stacked basis vectors in spherical coordinate system.
-
-        Returns:
-            A new :class:`Basis` object.
-        """
-        return cls.import_matrix(jnp.stack((mat[:, 0] * jnp.sin(mat[:, 1]) * jnp.cos(mat[:, 2]),
-                                            mat[:, 0] * jnp.sin(mat[:, 1]) * jnp.sin(mat[:, 2]),
-                                            mat[:, 0] * jnp.cos(mat[:, 1])), axis=1))
-
-    def generate_hkl(self, q_abs: float) -> IntArray:
-        """Return a set of reflections lying inside of a sphere of radius ``q_abs`` in the
-        reciprocal space.
-
-        Args:
-            q_abs : The radius of a sphere in the reciprocal space.
-
-        Returns:
-            An array of Miller indices, that lie inside of the sphere.
-        """
-        lat_size = jnp.asarray(jnp.rint(q_abs / self.to_spherical()[:, 0]), dtype=int)
-        h_idxs = jnp.arange(-lat_size[0], lat_size[0] + 1)
-        k_idxs = jnp.arange(-lat_size[1], lat_size[1] + 1)
-        l_idxs = jnp.arange(-lat_size[2], lat_size[2] + 1)
-        h_grid, k_grid, l_grid = jnp.meshgrid(h_idxs, k_idxs, l_idxs)
-        hkl = jnp.stack((jnp.ravel(h_grid), jnp.ravel(k_grid), jnp.ravel(l_grid)), axis=1)
-        hkl = jnp.compress(jnp.any(hkl, axis=1), hkl, axis=0)
-
-        rec_vec = jnp.dot(hkl, self.mat)
-        rec_abs = jnp.sqrt(jnp.sum(rec_vec**2, axis=-1))
-        return hkl[rec_abs < q_abs]
-
-    def lattice_constants(self) -> RealArray:
-        r"""Return lattice constants :math:`a, b, c, \alpha, \beta, \gamma`. The unit cell
-        length are unitless.
-
-        Returns:
-            An array of lattice constants.
-        """
-        lengths = self.to_spherical()[:, 0]
-        alpha = jnp.arccos(jnp.sum(self.mat[1] * self.mat[2]) / (lengths[1] * lengths[2]))
-        beta = jnp.arccos(jnp.sum(self.mat[0] * self.mat[2]) / (lengths[0] * lengths[2]))
-        gamma = jnp.arccos(jnp.sum(self.mat[0] * self.mat[1]) / (lengths[0] * lengths[1]))
-        return jnp.concatenate((lengths, [alpha, beta, gamma]))
-
-    def reciprocate(self) -> Basis:
-        """Calculate the basis of the reciprocal lattice.
-
-        Returns:
-            The basis of the reciprocal lattice.
-        """
-        a_rec = jnp.cross(self.b_vec, self.c_vec) / jnp.dot(jnp.cross(self.b_vec, self.c_vec),
-                                                            self.a_vec)
-        b_rec = jnp.cross(self.c_vec, self.a_vec) / jnp.dot(jnp.cross(self.c_vec, self.a_vec),
-                                                            self.b_vec)
-        c_rec = jnp.cross(self.a_vec, self.b_vec) / jnp.dot(jnp.cross(self.a_vec, self.b_vec),
-                                                            self.c_vec)
-        return Basis.import_matrix(jnp.stack((a_rec, b_rec, c_rec)))
-
-    def to_spherical(self) -> RealArray:
-        """Return a stack of unit cell vectors in spherical coordinate system.
-
-        Returns:
-            A matrix of three stacked unit cell vectors in spherical coordinate system.
-        """
-        lengths = jnp.sqrt(jnp.sum(self.mat**2, axis=1))
-        return jnp.stack((lengths, jnp.cos(self.mat[:, 2] / lengths),
-                          jnp.arctan2(self.mat[:, 1], self.mat[:, 0])), axis=1)
-
-@jax_dataclass
-class ScanSetup(DataContainer):
-    """Convergent beam crystallography experimental setup. Contains the parameters of the scattering
-    geometry and experimental setup.
-
-    Args:
-        foc_pos : Focus position relative to the detector [m].
-        pupil_roi : Region of interest of the aperture function in the detector plane. Comprised
-            of four elements ``[y_min, y_max, x_min, x_max]``.
-        rot_axis : Axis of rotation.
-        smp_dist : Focus-to-sample distance [m].
-        wavelength : X-ray beam wavelength [m].
-        x_pixel_size : Detector pixel size along the x axis [m].
-        y_pixel_size : Detector pixel size along the y axis [m].
-    """
-    foc_pos         : RealArray
-    pupil_roi       : RealArray
-    rot_axis        : RealArray
-    smp_dist        : float
-    wavelength      : float = field(static=True)
-    x_pixel_size    : float = field(static=True)
-    y_pixel_size    : float = field(static=True)
-
-    @property
-    def kin_min(self) -> RealArray:
-        return self.detector_to_kin(x=self.pupil_roi[2], y=self.pupil_roi[0]).ravel()
-
-    @property
-    def kin_max(self) -> RealArray:
-        return self.detector_to_kin(x=self.pupil_roi[3], y=self.pupil_roi[1]).ravel()
-
-    @property
-    def kin_center(self) -> RealArray:
-        return self.detector_to_kin(x=jnp.mean(self.pupil_roi[2:]),
-                                    y=jnp.mean(self.pupil_roi[:2])).ravel()
-
-    @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser({'exp_geom': ('foc_pos', 'pupil_roi', 'rot_axis', 'smp_dist',
-                                           'wavelength', 'x_pixel_size', 'y_pixel_size')},
-                             types=get_type_hints(cls))
-        if ext == 'json':
-            return JSONParser({'exp_geom': ('foc_pos', 'pupil_roi', 'rot_axis', 'smp_dist',
-                                            'wavelength', 'x_pixel_size', 'y_pixel_size')})
-
-        raise ValueError(f"Invalid format: {ext}")
-
-    @classmethod
-    def read(cls, file: str, ext: str='ini') -> ScanSetup:
-        return cls(**cls.parser(ext).read(file))
-
-    def detector_to_kout(self, x: RealArray, y: RealArray, pos: RealArray,
-                         idxs: IntArray) -> RealArray:
-        """Project detector coordinates ``(x, y)`` to the output wave-vectors space originating
-        from the point ``pos``.
-
-        Args:
-            x : A set of x coordinates.
-            y : A set of y coordinates.
-            pos : Source point of the output wave-vectors.
-            idxs : Source point indices.
-
-        Returns:
-            An array of output wave-vectors.
-        """
-        return det_to_k(x * self.x_pixel_size, y * self.y_pixel_size, pos, idxs=idxs)
-
-    def kout_to_detector(self, kout: RealArray, pos: RealArray,
-                         idxs: IntArray) -> Tuple[RealArray, RealArray]:
-        """Project output wave-vectors originating from the point ``pos`` to the detector plane.
-
-        Args:
-            kout : Output wave-vectors.
-            pos : Source point of the output wave-vectors.
-            idxs : Source point indices.
-
-        Returns:
-            A tuple of x and y detector coordinates.
-        """
-        det_x, det_y = k_to_det(kout, pos, idxs)
-        return det_x / self.x_pixel_size, det_y / self.y_pixel_size
-
-    def detector_to_kin(self, x: RealArray, y: RealArray) -> RealArray:
-        """Project detector coordinates ``(x, y)`` to the incident wave-vectors space.
-
-        Args:
-            x : A set of x coordinates.
-            y : A set of y coordinates.
-
-        Returns:
-            An array of incident wave-vectors.
-        """
-        return det_to_k(x * self.x_pixel_size, y * self.y_pixel_size,
-                        self.foc_pos, jnp.zeros(x.shape, dtype=int))
-
-    def kin_to_detector(self, kin: RealArray) -> Tuple[RealArray, RealArray]:
-        """Project incident wave-vectors to the detector plane.
-
-        Args:
-            kin : Incident wave-vectors.
-
-        Returns:
-            A tuple of x and y detector coordinates.
-        """
-        det_x, det_y = k_to_det(kin, self.foc_pos, jnp.zeros(kin.shape[:-1], dtype=int))
-        return det_x / self.x_pixel_size, det_y / self.y_pixel_size
-
-    def kin_to_sample(self, kin: RealArray, z: RealArray, idxs: IntArray
-                      ) -> RealArray:
-        """Project incident wave-vectors to the sample planes located at the z coordinates
-        ``smp_z``.
-
-        Args:
-            kin : Incident wave-vectors.
-            smp_z : z coordinates of the sample [m].
-            idxs : Sample indices.
-
-        Returns:
-            An array of points pertaining to the sample planes.
-        """
-        return k_to_smp(kin, z, self.foc_pos, idxs)
-
-    def sample_z(self) -> RealArray:
-        return jnp.array([self.foc_pos[2] + self.smp_dist,])
-
-    def tilt_rotation(self, theta: float) -> Rotation:
-        """Return a tilt rotation by the angle ``theta`` arount the axis of rotation.
-
-        Args:
-            theta : Angle of rotation.
-
-        Returns:
-            A new :class:`cbclib.Rotation` object.
-        """
-        return Rotation.import_tilt(jnp.array([theta, self.rot_axis[0], self.rot_axis[1]]))
-
-    def tilt_samples(self, frames: IntArray, thetas: RealArray) -> ScanSamples:
-        """Return a list of sample position and orientations of a tilt series.
-
-        Args:
-            frames : Set of frame indices.
-            thetas : Set of sample tilts.
-
-        Returns:
-            A container of sample objects :class:`ScanSamples`.
-        """
-        angles = jnp.empty((thetas.size, 3))
-        angles[:, 0] = thetas
-        angles[:, 1:] = self.rot_axis
-        rmats = tilt_matrix(angles).reshape(-1, 3, 3)
-        return ScanSamples(frames, rmats, jnp.full(frames.size, self.foc_pos[2] + self.smp_dist))
-
-@jax_dataclass
-class Rotation(DataContainer):
-    """A rotation matrix implementation. Provides auxiliary methods to work with Euler
-    and tilt angles.
-
-    Args:
-        matrix : Rotation matrix.
-    """
-    matrix : RealArray = field(default=jnp.eye(3, 3))
-
-    def __post_init__(self):
-        self.matrix = self.matrix.reshape((3, 3))
-
-    @classmethod
-    def import_euler(cls, angles: RealArray) -> Rotation:
-        r"""Calculate a rotation matrix from Euler angles with Bunge convention [EUL]_.
-
-        Args:
-            angles : Euler angles :math:`\phi_1, \Phi, \phi_2`.
-
-        Returns:
-            A new rotation matrix :class:`Rotation`.
-        """
-        return cls(euler_matrix(angles))
-
-    @classmethod
-    def import_tilt(cls, angles: RealArray) -> Rotation:
-        r"""Calculate a rotation matrix for a set of three angles set of three angles
-        :math:`\theta, \alpha, \beta`, a rotation angle :math:`\theta`, an angle between the
-        axis of rotation and OZ axis :math:`\alpha`, and a polar angle of the axis of rotation
-        :math:`\beta`.
-
-        Args:
-            angles : A set of angles :math:`\theta, \alpha, \beta`.
-
-        Returns:
-            A new rotation matrix :class:`Rotation`.
-        """
-        return cls(tilt_matrix(angles))
-
-    def __call__(self, inp: Array) -> Array:
-        """Apply the rotation to a set of vectors ``inp``.
-
-        Args:
-            inp : A set of 3D vectors.
-
-        Returns:
-            A set of rotated 3D vectors.
-        """
-        return jnp.dot(inp, self.matrix.T)
-
-    def __mul__(self, obj: Any) -> Rotation:
-        """Calculate a product of two rotations.
-
-        Args:
-            obj : A rotation matrix.
-
-        Returns:
-            A new rotation matrix that is a product of two rotations.
-        """
-        if isinstance(obj, Rotation):
-            return Rotation(self.matrix.dot(obj.matrix))
-        return NotImplemented
-
-    def reciprocate(self) -> Rotation:
-        """Invert the rotation matrix.
-
-        Returns:
-            An inverse rotation matrix.
-        """
-        return Rotation(self.matrix.T)
-
-    def to_euler(self) -> RealArray:
-        r"""Calculate Euler angles with Bunge convention [EUL]_.
-
-        Returns:
-            A set of Euler angles with Bunge convention :math:`\phi_1, \Phi, \phi_2`.
-        """
-        return euler_angles(self.matrix)
-
-    def to_tilt(self) -> RealArray:
-        r"""Calculate an axis of rotation and a rotation angle for a rotation matrix.
-
-        Returns:
-            A set of three angles :math:`\theta, \alpha, \beta`, a rotation angle :math:`\theta`,
-            an angle between the axis of rotation and OZ axis :math:`\alpha`, and a polar angle
-            of the axis of rotation :math:`\beta`.
-        """
-        if jnp.allclose(self.matrix, self.matrix.T):
-            eigw, eigv = jnp.stack(eigh(self.matrix))
-            axis = eigv[jnp.isclose(eigw, 1.0)]
-            theta = jnp.arccos(0.5 * (jnp.trace(self.matrix) - 1.0))
-            return jnp.array([theta, jnp.arccos(axis[0, 2]), jnp.arctan2(axis[0, 1], axis[0, 0])])
-        return tilt_angles(self.matrix)
-
-@jax_dataclass
-class Sample(DataContainer):
-    """A convergent beam sample implementation. Stores position and orientation of the sample.
-
-    Args:
-        rotation : rotation matrix, that defines the orientation of the sample.
-        position : Sample's position [m].
-    """
-    rotation : Rotation
-    z : Array
-    mat_columns : ClassVar[Tuple[str, ...]] = ('Rxx', 'Rxy', 'Rxz',
-                                               'Ryx', 'Ryy', 'Ryz',
-                                               'Rzx', 'Rzy', 'Rzz')
-    z_column : ClassVar[str] = 'z'
-
-    @classmethod
-    def import_dataframe(cls, data: pd.Series) -> Sample:
-        """Initialize a new :class:`Sample` object with a :class:`pandas.Series` array. The array
-        must contain the following columns:
-
-        * `Rxx`, `Rxy`, `Rxz`, `Ryx`, `Ryy`, `Ryz`, `Rzx`, `Rzy`, `Rzz` : Rotational matrix.
-        * `z` : z coordinate [m].
-
-        Args:
-            data : A :class:`pandas.Series` array.
-
-        Returns:
-            A new :class:`Sample` object.
-        """
-        return cls(rotation=Rotation(jnp.asarray(data[list(cls.mat_columns)].to_numpy())),
-                   z=data[cls.z_column])
-
-    def kin_to_sample(self, setup: ScanSetup, kin: RealArray) -> RealArray:
-        """Project incident wave-vectors ``kin`` to the sample plane.
-
-        Args:
-            setup : Experimental setup.
-            kin : Incident wave-vectors.
-
-        Returns:
-            An array of points belonging to the sample plane.
-        """
-        idxs = jnp.zeros(kin.shape[:-1], dtype=int)
-        return setup.kin_to_sample(kin, self.z, idxs)
-
-    def rotate_basis(self, basis: Basis) -> Basis:
-        """Rotate a :class:`cbclib.Basis` by the ``rotation`` attribute.
-
-        Args:
-            basis : Indexing solution basis vectors.
-
-        Returns:
-            A new rotated :class:`cbclib.Basis` object.
-        """
-        return Basis.import_matrix(self.rotation(basis.mat))
-
-    def detector_to_kout(self, x: RealArray, y: RealArray, setup: ScanSetup,
-                         rec_vec: Optional[IntArray]=None) -> RealArray:
-        """Project detector coordinates ``(x, y)`` to the output wave-vectors space originating
-        from the sample's position.
-
-        Args:
-            x : A set of x coordinates.
-            y : A set of y coordinates.
-            setup : Experimental setup.
-            rec_vec : A set of scattering vectors corresponding to the detector points.
-
-        Returns:
-            An array of output wave-vectors.
-        """
-        idxs = jnp.zeros(x.shape, dtype=int)
-        kout = setup.detector_to_kout(x, y, self.kin_to_sample(setup, setup.kin_center), idxs)
-        if rec_vec is not None:
-            smp_pos = self.kin_to_sample(setup, kout - rec_vec)
-            idxs = jnp.reshape(jnp.arange(x.size, dtype=int), x.shape)
-            kout = setup.detector_to_kout(x, y, smp_pos, idxs)
-        return kout
-
-    def kout_to_detector(self, kout: RealArray, setup: ScanSetup,
-                         rec_vec: Optional[IntArray]=None) -> Tuple[RealArray, RealArray]:
-        """Project output wave-vectors originating from the sample's position to the detector
-        plane.
-
-        Args:
-            kout : Output wave-vectors.
-            setup : Experimental setup.
-            rec_vec : A set of scattering vectors corresponding to the output wave-vectors.
-
-        Returns:
-            A tuple of x and y detector coordinates.
-        """
-        idxs = jnp.zeros(kout.shape[:-1], dtype=int)
-        x, y = setup.kout_to_detector(kout, self.kin_to_sample(setup, setup.kin_center), idxs)
-        if rec_vec is not None:
-            smp_pos = self.kin_to_sample(setup, kout - rec_vec)
-            idxs = jnp.reshape(jnp.arange(np.prod(kout.shape[:-1]), dtype=int), kout.shape[:-1])
-            x, y = setup.kout_to_detector(kout, smp_pos, idxs)
-        return x, y
-
-    def to_dataframe(self) -> pd.Series:
-        """Export the sample object to a :class:`pandas.Series` array.
-
-        Returns:
-            A :class:`pandas.Series` array with the following columns:
-
-            * `Rxx`, `Rxy`, `Rxz`, `Ryx`, `Ryy`, `Ryz`, `Rzx`, `Rzy`, `Rzz` : Rotational
-              matrix.
-            * `z` : z coordinate [m].
-        """
-        return pd.Series(jnp.append(self.rotation.matrix.ravel(), self.z),
-                         index=self.mat_columns + (self.z_column,))
-
-@jax_dataclass
-class ScanSamples():
-    """A collection of sample :class:`cbclib.Sample` objects. Provides an interface to import
-    from and exprort to a :class:`pandas.DataFrame` table and a set of dictionary methods.
-    """
-    frames : IntArray = field(static=True)
-    rmats : RealArray
-    zs : RealArray
-
-    def __getitem__(self, idxs: Indices) -> Union[Sample, ScanSamples]:
-        if jnp.size(self.zs[idxs]) == 1:
-            return Sample(Rotation(jnp.squeeze(self.rmats[idxs])), jnp.squeeze(self.zs[idxs]))
-        return ScanSamples(self.frames[idxs], self.rmats[idxs], self.zs[idxs])
-
-    @classmethod
-    def import_dataframe(cls, df: pd.DataFrame) -> ScanSamples:
-        """Initialize a new :class:`ScanSamples` container with a :class:`pandas.DataFrame`
-        table. The table must contain the following columns:
-
-        * `Rxx`, `Rxy`, `Rxz`, `Ryx`, `Ryy`, `Ryz`, `Rzx`, `Rzy`, `Rzz` : Rotational matrix.
-        * `z` : z coordinate [m].
-
-        Args:
-            data : A :class:`pandas.DataFrame` table.
-
-        Returns:
-            A new :class:`ScanSamples` container.
-        """
-        frames = df.index
-        samples = [Sample.import_dataframe(series) for _, series in df.iterrows()]
-        return cls(jnp.asarray(frames), jnp.stack([sample.rotation.matrix for sample in samples]),
-                   jnp.array([sample.z for sample in samples]))
-
-    @property
-    def size(self) -> int:
-        return jnp.size(self.frames)
-
-    def samples(self) -> Iterable[Sample]:
-        for rmat, z in zip(self.rmats, self.zs):
-            yield Sample(Rotation(rmat), z)
-
-    def kin_to_sample(self, setup: ScanSetup, kin: RealArray, idxs: IntArray) -> RealArray:
-        """Project incident wave-vectors to the sample planes.
-
-        Args:
-            setup : Experimental setup.
-            kin : An array of incident wave-vectors.
-            idxs : Sample indices.
-
-        Returns:
-            Array of sample coordinates.
-        """
-        return setup.kin_to_sample(kin, self.zs, idxs)
-
-    def detector_to_kout(self, x: RealArray, y: RealArray, setup: ScanSetup,
-                         idxs: IntArray, rec_vec: Optional[RealArray]=None) -> RealArray:
-        """Project detector coordinates ``(x, y)`` to the output wave-vectors space originating
-        from the samples' locations.
-
-        Args:
-            x : A set of x coordinates.
-            y : A set of y coordinates.
-            setup : Experimental setup.
-            idxs : Sample indices.
-            rec_vec : A set of scattering vectors corresponding to the detector points.
-
-        Returns:
-            An array of output wave-vectors.
-        """
-        kin = jnp.broadcast_to(setup.kin_center, self.zs.shape + (3,))
-        smp_pos = self.kin_to_sample(setup, kin, jnp.reshape(jnp.arange(self.size), self.zs.shape))
-        kout = setup.detector_to_kout(x, y, smp_pos, idxs)
-        if rec_vec is not None:
-            smp_pos = self.kin_to_sample(setup, kout - rec_vec, idxs)
-            idxs = jnp.reshape(jnp.arange(x.size, dtype=int), idxs.shape)
-            kout = setup.detector_to_kout(x, y, smp_pos, idxs)
-        return kout
-
-    def kout_to_detector(self, kout: RealArray, setup: ScanSetup,
-                         idxs: IntArray, rec_vec: Optional[RealArray]=None
-                         ) -> Tuple[RealArray, RealArray]:
-        """Project output wave-vectors originating from the samples' locations to the detector
-        plane.
-
-        Args:
-            kout : Output wave-vectors.
-            setup : Experimental setup.
-            idxs : Sample indices.
-            rec_vec : A set of scattering vectors corresponding to the output wave-vectors.
-
-        Returns:
-            A tuple of x and y detector coordinates.
-        """
-        kin = jnp.broadcast_to(setup.kin_center, self.zs.shape + (3,))
-        smp_pos = self.kin_to_sample(setup, kin, jnp.reshape(jnp.arange(self.size), self.zs.shape))
-        x, y = setup.kout_to_detector(kout, smp_pos, idxs)
-        if rec_vec is not None:
-            smp_pos = self.kin_to_sample(setup, kout - rec_vec, idxs)
-            idxs = jnp.reshape(jnp.arange(np.prod(kout.shape[:-1]), dtype=int), kout.shape[:-1])
-            x, y = setup.kout_to_detector(kout, smp_pos, idxs)
-        return x, y
-
-    def rotate(self, vecs: RealArray, idxs: IntArray) -> RealArray:
-        """Rotate an array of vectors into the samples' system of coordinates.
-
-        Args:
-            vecs : An array of vectors.
-            idxs : Sample indices.
-            reciprocate : Apply the inverse sample rotations if True.
-
-        Returns:
-            An array of rotated vectors.
-        """
-        return jnp.sum(self.rmats[idxs] * vecs[..., None], axis=-2)
-
-    def reciprocate(self) -> ScanSamples:
-        return ScanSamples(self.frames, jnp.swapaxes(self.rmats, 1, 2), self.zs)
-
-    def to_dataframe(self) -> pd.DataFrame:
-        """Export the sample object to a :class:`pandas.DataFrame` table.
-
-        Returns:
-            A :class:`pandas.DataFrame` table with the following columns:
-
-            * `Rxx`, `Rxy`, `Rxz`, `Ryx`, `Ryy`, `Ryz`, `Rzx`, `Rzy`, `Rzz` : Rotational
-              matrix.
-            * `z` : z coordinate [m].
-        """
-        return pd.DataFrame((sample.to_dataframe() for sample in self.samples()),
-                            index=np.array(self.frames))
+from ..data_container import DataclassInstance, DataContainer, Parser, INIParser, JSONParser
+from ..annotations import (BoolArray, Indices, IntArray, KeyArray, RealArray, Pattern,
+                           PatternWithHKL, PatternWithHKLID, Shape)
+
+State = DataclassInstance
 
 @jax_dataclass
 class Streaks(DataContainer):
@@ -646,6 +39,7 @@ class Streaks(DataContainer):
     y1          : RealArray
     idxs        : IntArray = field(default_factory=lambda: jnp.array([], dtype=int))
     length      : RealArray = field(default_factory=lambda: jnp.array([]))
+    mask        : BoolArray = field(default_factory=lambda: jnp.array([], dtype=bool))
     h           : Optional[IntArray] = field(default=None)
     k           : Optional[IntArray] = field(default=None)
     l           : Optional[IntArray] = field(default=None)
@@ -656,6 +50,8 @@ class Streaks(DataContainer):
             self.idxs = jnp.zeros(self.x0.shape, dtype=int)
         if self.length.shape != self.x0.shape:
             self.length = jnp.sqrt((self.x1 - self.x0)**2 + (self.y1 - self.y0)**2)
+        if self.mask.shape != self.x0.shape:
+            self.mask = jnp.ones(self.x0.shape, dtype=bool)
 
     @property
     def hkl(self) -> Optional[IntArray]:
@@ -666,7 +62,7 @@ class Streaks(DataContainer):
     def __len__(self) -> int:
         return self.length.shape[0]
 
-    def mask_streaks(self, idxs: Union[Indices, BoolArray]) -> Streaks:
+    def mask_streaks(self, idxs: Union[Indices, BoolArray]) -> 'Streaks':
         """Return a new streaks container with a set of streaks discarded.
 
         Args:
@@ -676,6 +72,9 @@ class Streaks(DataContainer):
             A new :class:`cbclib.Streaks` container.
         """
         return Streaks(**{attr: self[attr][idxs] for attr in self.contents()})
+
+    def offset(self, x: float, y: float) -> 'Streaks':
+        return self.replace(x0=self.x0 - x, x1=self.x1 - x, y0=self.y0 - y, y1=self.y1 - y)
 
     def pattern_dict(self, width: float, shape: Shape, kernel: str='rectangular',
                      num_threads: int=1) -> Union[Pattern, PatternWithHKL, PatternWithHKLID]:
@@ -707,8 +106,7 @@ class Streaks(DataContainer):
             h, k, l = self.hkl[ids].T
 
             if self.hkl_id is not None:
-                return PatternWithHKLID(ids, frames, y, x, vals, h, k, l,
-                                        np.asarray(self.hkl_id)[ids])
+                return PatternWithHKLID(ids, frames, y, x, vals, h, k, l, self.hkl_id[ids])
             return PatternWithHKL(ids, frames, y, x, vals, h, k, l)
         return Pattern(ids, frames, y, x)
 
@@ -790,7 +188,7 @@ class Streaks(DataContainer):
         """
         return pd.DataFrame({attr: self[attr] for attr in self.contents()})
 
-    def to_lines(self, width: float) -> RealArray:
+    def to_lines(self, width: Union[float, RealArray, None]=None) -> RealArray:
         """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
 
         * `[x0, y0]`, `[x1, y1]` : The coordinates of the line's ends.
@@ -799,99 +197,482 @@ class Streaks(DataContainer):
         Returns:
             An array of line parameters.
         """
-        widths = width * jnp.ones(len(self))
-        return jnp.stack((self.x0, self.y0, self.x1, self.y1, widths), axis=1)
+        if width is None:
+            lines = jnp.stack((self.x0, self.y0, self.x1, self.y1), axis=1)
+        else:
+            widths = jnp.broadcast_to(width, self.x0.shape)
+            lines = jnp.stack((self.x0, self.y0, self.x1, self.y1, widths), axis=1)
+        return jnp.where(self.mask[..., None], lines, 0)
+
+    def trim(self) -> 'Streaks':
+        return self.mask_streaks(self.mask)
 
 @jax_dataclass
-class CBDModel(DataContainer):
-    """Prediction model for Convergent Beam Diffraction (CBD) pattern. The method uses the
-    geometrical schematic of CBD diffraction in the reciprocal space [CBM]_ to predict a CBD
-    pattern for the given crystalline sample.
-
-    Args:
-        basis : Unit cell basis vectors.
-        sample : Sample position and orientation.
-        setup : Experimental setup.
-        transform : Any of the image transform objects.
-        shape : Shape of the detector pixel grid.
-
-    References:
-        .. [CBM] Ho, Joseph X et al. “Convergent-beam method in macromolecular crystallography”,
-                 Acta crystallographica Section D, Biological crystallography vol. 58, Pt. 12
-                 (2002): 2087-95, https://doi.org/10.1107/s0907444902017511.
-    """
-    basis       : Basis
-    samples     : ScanSamples
-    setup       : ScanSetup
-    transform   : Optional[Transform] = None
+class MillerIndices():
+    hkl     : IntArray
+    hidxs   : IntArray
+    bidxs   : IntArray
 
     @property
-    def shape(self) -> Optional[Shape]:
-        if isinstance(self.transform, Crop):
-            return (self.samples.size, self.transform.roi[1] - self.transform.roi[0],
-                    self.transform.roi[3] - self.transform.roi[2])
-        return None
+    def h(self) -> IntArray:
+        return self.hkl[self.hidxs][..., 0]
 
-    def __getitem__(self, idxs: Indices) -> CBDModel:
-        return self.replace(samples=self.samples[idxs])
+    @property
+    def k(self) -> IntArray:
+        return self.hkl[self.hidxs][..., 1]
 
-    def bases(self) -> RealArray:
-        vidxs = jnp.broadcast_to(jnp.arange(self.samples.size), (3, self.samples.size))
-        midxs = jnp.broadcast_to(jnp.arange(self.samples.size)[:, None], (self.samples.size, 3))
-        return jnp.sum(self.samples.rmats[midxs] * self.basis.mat[vidxs][..., None, :], axis=-1)
+    @property
+    def l(self) -> IntArray:
+        return self.hkl[self.hidxs][..., 2]
 
-    def rec_vectors(self, hkl: IntArray, hidxs: IntArray, bidxs: IntArray) -> RealArray:
-        return jnp.sum(self.bases()[bidxs] * hkl[hidxs][..., None], axis=-2)
+@jax_dataclass
+class XtalCell():
+    angles  : RealArray
+    lengths : RealArray
 
-    def filter_hkl(self, hkl: IntArray) -> Tuple[IntArray, IntArray]:
-        """Return a set of reciprocal lattice points that lie in the region of reciprocal space
-        involved in diffraction.
+    def __post_init__(self):
+        if self.lengths.shape != self.angles.shape:
+            raise ValueError("angles and lengths have incompatible shapes: "\
+                             f"{self.angles.shape} and {self.lengths.shape}")
+
+    @property
+    def shape(self) -> Shape:
+        return self.angles.shape
+
+    @property
+    def alpha(self) -> RealArray:
+        return self.angles[..., 0]
+
+    @property
+    def beta(self) -> RealArray:
+        return self.angles[..., 1]
+
+    @property
+    def gamma(self) -> RealArray:
+        return self.angles[..., 2]
+
+    def to_basis(self) -> 'XtalState':
+        cos = jnp.cos(self.angles)
+        sin = jnp.sin(self.gamma)
+        v_ratio = jnp.sqrt(jnp.ones(self.shape[:-1]) - jnp.sum(cos**2, axis=-1) + \
+                           2 * jnp.prod(cos, axis=-1))
+        a_vec = jnp.broadcast_to(jnp.array([1, 0, 0]), self.shape)
+        b_vec = jnp.stack((cos[..., 2], sin, jnp.zeros(self.shape[:-1])), axis=-1)
+        c_vec = jnp.stack((cos[..., 1], (cos[..., 0] - cos[..., 1] * cos[..., 2]) / sin,
+                           v_ratio / sin))
+        return XtalState(self.lengths[..., None] * jnp.stack((a_vec, b_vec, c_vec), axis=-2))
+
+@jax_dataclass
+class XtalState():
+    basis : RealArray
+
+    @property
+    def a(self) -> RealArray:
+        return self.basis[..., 0, :]
+
+    @property
+    def b(self) -> RealArray:
+        return self.basis[..., 1, :]
+
+    @property
+    def c(self) -> RealArray:
+        return self.basis[..., 2, :]
+
+    @property
+    def num(self) -> int:
+        return self.basis.size // 9
+
+    @classmethod
+    def parser(cls, ext: str='ini') -> Parser:
+        types = {'a_vec': RealArray, 'b_vec': RealArray, 'c_vec': RealArray}
+        if ext == 'ini':
+            return INIParser({'basis': ('a_vec', 'b_vec', 'c_vec')},
+                             types=cast(Dict[str, Type], types))
+        if ext == 'json':
+            return JSONParser({'basis': ('a_vec', 'b_vec', 'c_vec')})
+
+        raise ValueError(f"Invalid format: {ext}")
+
+    @classmethod
+    def read(cls, file: str, ext: str='ini') -> 'XtalState':
+        return cls(jnp.stack(list(cls.parser(ext).read(file).values())))
+
+    @classmethod
+    def import_spherical(cls, basis: RealArray) -> 'XtalState':
+        """Return a new :class:`XtalState` object, initialised by a stacked matrix of three basis
+        vectors written in spherical coordinate system.
 
         Args:
-            hkl : Set of input Miller indices.
+            mat : A matrix of three stacked basis vectors in spherical coordinate system.
 
         Returns:
-            A set of Miller indices.
+            A new :class:`XtalState` object.
         """
-        shape = (self.samples.size, hkl.shape[0])
-        hidxs = jnp.broadcast_to(jnp.arange(hkl.shape[0]), shape)
-        bidxs = jnp.broadcast_to(jnp.arange(self.samples.size)[:, None], shape)
+        return cls(jnp.stack((basis[..., 0] * jnp.sin(basis[..., 1]) * jnp.cos(basis[..., 2]),
+                              basis[..., 0] * jnp.sin(basis[..., 1]) * jnp.sin(basis[..., 2]),
+                              basis[..., 0] * jnp.cos(basis[..., 1])), axis=-1))
 
-        rec_vec = self.rec_vectors(hkl, hidxs, bidxs)
+    def lattice_constants(self) -> XtalCell:
+        """Return a stack of unit cell vectors in spherical coordinate system.
+
+        Returns:
+            A matrix of three stacked unit cell vectors in spherical coordinate system.
+        """
+        lengths = jnp.sqrt(jnp.sum(self.basis**2, axis=-1))
+        angles = jnp.stack([jnp.sum(self.b * self.c) / (lengths[..., 1] * lengths[..., 2]),
+                            jnp.sum(self.c * self.a) / (lengths[..., 2] * lengths[..., 0]),
+                            jnp.sum(self.a * self.b) / (lengths[..., 0] * lengths[..., 1])],
+                           axis=-1)
+        return XtalCell(angles=jnp.arccos(angles), lengths=lengths)
+
+    def reciprocate(self) -> 'XtalState':
+        """Calculate the basis of the reciprocal lattice.
+
+        Returns:
+            The basis of the reciprocal lattice.
+        """
+        a_rec = jnp.cross(self.b, self.c) / jnp.dot(jnp.cross(self.b, self.c), self.a)
+        b_rec = jnp.cross(self.c, self.a) / jnp.dot(jnp.cross(self.c, self.a), self.b)
+        c_rec = jnp.cross(self.a, self.b) / jnp.dot(jnp.cross(self.a, self.b), self.c)
+        return XtalState(jnp.stack((a_rec, b_rec, c_rec)))
+
+    def to_spherical(self) -> RealArray:
+        """Return a stack of unit cell vectors in spherical coordinate system.
+
+        Returns:
+            A matrix of three stacked unit cell vectors in spherical coordinate system.
+        """
+        lengths = jnp.sqrt(jnp.sum(self.basis**2, axis=-1))
+        return jnp.stack((lengths, jnp.arccos(self.basis[..., 2] / lengths),
+                          jnp.arctan2(self.basis[..., 1], self.basis[..., 0])), axis=-1)
+
+class Xtal():
+    def init_hkl(self, q_abs: Union[float, RealArray], state: XtalState) -> IntArray:
+        constants = state.lattice_constants()
+        lat_size = jnp.asarray(jnp.rint(q_abs / constants.lengths), dtype=int)
+        lat_size = jnp.max(jnp.reshape(lat_size, (-1, 3)), axis=0)
+        h_idxs = jnp.arange(-lat_size[0], lat_size[0] + 1)
+        k_idxs = jnp.arange(-lat_size[1], lat_size[1] + 1)
+        l_idxs = jnp.arange(-lat_size[2], lat_size[2] + 1)
+        h_grid, k_grid, l_grid = jnp.meshgrid(h_idxs, k_idxs, l_idxs)
+        hkl = jnp.stack((jnp.ravel(h_grid), jnp.ravel(k_grid), jnp.ravel(l_grid)), axis=1)
+        hkl = jnp.compress(jnp.any(hkl, axis=1), hkl, axis=0)
+
+        rec_vec = jnp.dot(hkl, state.basis)
+        rec_abs = jnp.sqrt(jnp.sum(rec_vec**2, axis=-1))
+        rec_abs = jnp.reshape(rec_abs, (hkl.shape[0], -1))
+        return hkl[jnp.any(rec_abs < 0.3, axis=-1)]
+
+    def init_miller(self, theta: Union[float, RealArray], hkl: IntArray, state: XtalState
+                    ) -> MillerIndices:
+        shape = (state.num, hkl.size // 3)
+        hidxs = jnp.broadcast_to(jnp.arange(shape[1]), shape)
+        bidxs = jnp.broadcast_to(jnp.arange(shape[0])[:, None], shape)
+        miller = MillerIndices(hkl, hidxs, bidxs)
+
+        rec_vec = self.rec_vectors(miller, state)
         rec_abs = jnp.sqrt((rec_vec**2).sum(axis=-1))
         rec_th = jnp.arccos(-rec_vec[..., 2] / rec_abs)
         src_th = rec_th - jnp.arccos(0.5 * rec_abs)
-        idxs = jnp.where((jnp.abs(jnp.sin(src_th)) < jnp.arccos(self.setup.kin_max[2])))
-        return hidxs[idxs], bidxs[idxs]
+        idxs = jnp.where((jnp.abs(src_th) < theta))
+        return MillerIndices(miller.hkl, miller.hidxs[idxs], miller.bidxs[idxs])
 
-    def generate_streaks(self, hkl: IntArray, hidxs: IntArray, bidxs: IntArray,
-                         hkl_index: bool=False) -> Tuple[BoolArray, Streaks]:
-        """Generate a CBD pattern. Return a set of streaks in :class:`cbclib.Streaks` container.
+    def rec_vectors(self, miller: MillerIndices, state: XtalState) -> RealArray:
+        return jnp.sum(state.basis[miller.bidxs] * miller.hkl[miller.hidxs][..., None], axis=-2)
+
+    def init_streaks(self, x: RealArray, y: RealArray, mask: BoolArray, hkl_index: bool,
+                     miller: MillerIndices) -> Streaks:
+        result = {'idxs': miller.bidxs, 'x0': x[:, 0], 'y0': y[:, 0], 'x1': x[:, 1], 'y1': y[:, 1],
+                  'h': miller.h, 'k': miller.k, 'l': miller.l, 'mask': mask}
+        if hkl_index:
+            result['hkl_id'] = miller.hidxs
+        return Streaks(**result)
+
+@jax_dataclass
+class LensState():
+    foc_pos         : RealArray
+    pupil_roi       : RealArray
+
+    @classmethod
+    def parser(cls, ext: str='ini') -> Parser:
+        if ext == 'ini':
+            return INIParser({'exp_geom': ('foc_pos', 'pupil_roi')},
+                             types=get_type_hints(cls))
+        if ext == 'json':
+            return JSONParser({'exp_geom': ('foc_pos', 'pupil_roi')})
+
+        raise ValueError(f"Invalid format: {ext}")
+
+    @classmethod
+    def read(cls, file: str, ext: str='ini') -> 'LensState':
+        return cls(**cls.parser(ext).read(file))
+
+class Lens():
+    def kin_center(self, state: LensState) -> RealArray:
+        x, y = jnp.mean(state.pupil_roi[2:]), jnp.mean(state.pupil_roi[:2])
+        return det_to_k(x, y, state.foc_pos, jnp.zeros(x.shape, dtype=int))
+
+    def kin_max(self, state: LensState) -> RealArray:
+        x, y = state.pupil_roi[3], state.pupil_roi[1]
+        return det_to_k(x, y, state.foc_pos, jnp.zeros(x.shape, dtype=int))
+
+    def kin_min(self, state: LensState) -> RealArray:
+        x, y = state.pupil_roi[2], state.pupil_roi[0]
+        return det_to_k(x, y, state.foc_pos, jnp.zeros(x.shape, dtype=int))
+
+    def kin_to_sample(self, kin: RealArray, z: RealArray, idxs: IntArray, state: LensState
+                      ) -> RealArray:
+        """Project incident wave-vectors to the sample planes.
 
         Args:
-            hkl : Set of Miller indices.
-            width : Width of diffraction streaks in pixels.
-            hkl_index : Save ``hkl`` indices in the streaks container if True.
+            setup : Experimental setup.
+            kin : An array of incident wave-vectors.
+            idxs : Sample indices.
 
         Returns:
-            A set of streaks, that constitute the predicted CBD pattern.
+            Array of sample coordinates.
         """
-        rec_vec = self.rec_vectors(hkl, hidxs, bidxs)
-        kin = source_lines(rec_vec, kmin=self.setup.kin_min[:2], kmax=self.setup.kin_max[:2])
+        return k_to_smp(kin, z, state.foc_pos, idxs)
+
+Params = Union[RealArray, float]
+S = TypeVar('S', bound=State)
+
+def init_from_bounds(state: S, bounds: Dict[str, Any], default: Callable[[Params], Params]
+                     ) -> Callable[[KeyArray,], S]:
+    def flatten_state(state: S) -> Dict:
+        return asdict(state)
+
+    @overload
+    def unflatten_state(state: S, params: Dict) -> S:
+        ...
+
+    @overload
+    def unflatten_state(state: Params, params: Params) -> Params:
+        ...
+
+    def unflatten_state(state: Union[S, Params], params: Union[Dict, Params]) -> Union[S, Params]:
+        if is_dataclass(state):
+            attributes = {}
+            for fld in fields(state):
+                if not isinstance(params, dict) or fld.name not in params:
+                    raise ValueError(f"No attribute '{fld.name}' in params: {params:s}")
+                attributes[fld.name] = unflatten_state(getattr(state, fld.name), params[fld.name])
+            return type(state)(**attributes)
+        else:
+            if isinstance(params, dict):
+                raise ValueError(f"Invalid params: {params}")
+            return params
+
+    def generate_bounds(rng: KeyArray, params: Union[Dict, Params],
+                        bounds: Union[Dict, Params, None], default: Callable[[Params], Params]
+                        ) -> Union[Dict, Params]:
+        if isinstance(params, dict):
+            result = {}
+            for key, val in params.items():
+                if isinstance(bounds, dict) and key in bounds:
+                    result[key] = generate_bounds(rng, val, bounds[key], default)
+                else:
+                    result[key] = generate_bounds(rng, val, None, default)
+            return result
+        else:
+            if bounds is None or isinstance(bounds, dict):
+                bound = default(params)
+            else:
+                bound = bounds
+            return bound * random.uniform(random.split(rng, num=1), jnp.shape(params),
+                                          minval=-1, maxval=1)
+
+    def init(rng) -> S:
+        params = flatten_state(state)
+        bound_params = generate_bounds(rng, params, bounds, default)
+        return unflatten_state(state, tree_util.tree_map(jnp.add, params, bound_params))
+
+    return init
+
+@partial(jit, static_argnums=1)
+def rand_rotation_matrix(rng: KeyArray, shape: Shape=()) -> RealArray:
+    values = random.uniform(rng, shape=shape + (3,))
+    theta = 2.0 * jnp.pi * values[..., 0]
+    phi = 2.0 * jnp.pi * values[..., 1]
+    r = jnp.sqrt(values[..., 2])
+    V = jnp.stack((jnp.cos(phi) * r, jnp.sin(phi) * r, jnp.sqrt(1.0 - values[..., 2])), axis=-1)
+    st = jnp.sin(theta)
+    ct = jnp.cos(theta)
+    R = jnp.stack((jnp.stack((ct, st, jnp.zeros(shape)), axis=-1),
+                   jnp.stack((-st, ct, jnp.zeros(shape)), axis=-1),
+                   jnp.broadcast_to(jnp.array([0, 0, 1]), shape + (3,))), axis=-2)
+    V = 2 * V[..., None, :] * V[..., None] - jnp.broadcast_to(jnp.eye(3), shape + (3, 3))
+    return jnp.sum(V[..., None] * R[..., None, :, :], axis=-2)
+
+@jax_dataclass
+class RotationState():
+    matrix : RealArray
+    mat_columns : ClassVar[Tuple[str, ...]] = ('Rxx', 'Rxy', 'Rxz',
+                                               'Ryx', 'Ryy', 'Ryz',
+                                               'Rzx', 'Rzy', 'Rzz')
+
+    @classmethod
+    def import_dataframe(cls, data: pd.Series) -> 'RotationState':
+        """Initialize a new :class:`Sample` object with a :class:`pandas.Series` array. The array
+        must contain the following columns:
+
+        * `Rxx`, `Rxy`, `Rxz`, `Ryx`, `Ryy`, `Ryz`, `Rzx`, `Rzy`, `Rzz` : Rotational matrix.
+        * `z` : z coordinate [m].
+
+        Args:
+            data : A :class:`pandas.Series` array.
+
+        Returns:
+            A new :class:`Sample` object.
+        """
+        matrix = jnp.asarray(data[list(cls.mat_columns)].to_numpy())
+        return cls(jnp.reshape(matrix, (3, 3)))
+
+    def rotate(self, vecs: RealArray) -> RealArray:
+        return jnp.sum(self.matrix[..., None, :, :] * vecs[..., None], axis=-2)
+
+    def to_euler(self) -> 'EulerState':
+        r"""Calculate Euler angles with Bunge convention [EUL]_.
+
+        Returns:
+            A set of Euler angles with Bunge convention :math:`\phi_1, \Phi, \phi_2`.
+        """
+        return EulerState(euler_angles(self.matrix))
+
+    def to_tilt(self) -> RealArray:
+        r"""Calculate an axis of rotation and a rotation angle for a rotation matrix.
+
+        Returns:
+            A set of three angles :math:`\theta, \alpha, \beta`, a rotation angle :math:`\theta`,
+            an angle between the axis of rotation and OZ axis :math:`\alpha`, and a polar angle
+            of the axis of rotation :math:`\beta`.
+        """
+        if jnp.allclose(self.matrix, self.matrix.T):
+            eigw, eigv = jnp.stack(jnp.linalg.eigh(self.matrix))
+            axis = eigv[jnp.isclose(eigw, 1.0)]
+            theta = jnp.arccos(0.5 * (jnp.trace(self.matrix) - 1.0))
+            return jnp.array([theta, jnp.arccos(axis[0, 2]), jnp.arctan2(axis[0, 1], axis[0, 0])])
+        return tilt_angles(self.matrix)
+
+class Transform():
+    def apply(self, xtal: XtalState, state: State) -> XtalState:
+        raise NotImplementedError
+
+class Rotation(Transform):
+    def apply(self, xtal: XtalState, state: RotationState) -> XtalState:
+        return XtalState(jnp.sum(state.matrix[..., None, :, :] * xtal.basis[..., None], axis=-2))
+
+@jax_dataclass
+class EulerState():
+    angles : RealArray
+
+    def to_rotation(self) -> RotationState:
+        return RotationState(euler_matrix(self.angles))
+
+class Euler(Transform):
+    rotation : Rotation = Rotation()
+
+    def apply(self, xtal: XtalState, state: EulerState) -> XtalState:
+        return self.rotation.apply(xtal, state.to_rotation())
+
+@jax_dataclass
+class TiltState():
+    angles : RealArray
+
+    def to_rotation(self) -> RotationState:
+        return RotationState(tilt_matrix(self.angles))
+
+class Tilt():
+    rotation : Rotation = Rotation()
+
+    def apply(self, xtal: XtalState, state: TiltState) -> XtalState:
+        return self.rotation.apply(xtal, state.to_rotation())
+
+@jax_dataclass
+class TiltAxisState:
+    angles : RealArray
+    axis : RealArray
+
+    def to_tilt(self) -> TiltState:
+        r = jnp.sqrt(jnp.sum(self.axis**2, axis=-1))
+        theta = jnp.broadcast_to(jnp.arccos(self.axis[..., 2] / r), self.angles.shape)
+        phi = jnp.broadcast_to(jnp.arctan2(self.axis[..., 1], self.axis[..., 0]), self.angles.shape)
+        return TiltState(jnp.stack((self.angles, theta, phi), axis=-1))
+
+class TiltAxis():
+    tilt : Tilt = Tilt()
+
+    def apply(self, xtal: XtalState, state: TiltAxisState) -> XtalState:
+        return self.tilt.apply(xtal, state.to_tilt())
+
+@jax_dataclass
+class ChainTransform():
+    transforms : Tuple[Transform, ...]
+
+    def apply(self, xtal: XtalState, state: Tuple[State, ...]) -> XtalState:
+        for s, transform in zip(state, self.transforms):
+            xtal = transform.apply(xtal, s)
+        return xtal
+
+@jax_dataclass
+class InternalState():
+    xtal    : XtalState
+    lens    : LensState
+    z       : RealArray
+
+class CBDModel():
+    lens    : Lens = Lens()
+    xtal    : Xtal = Xtal()
+
+    def init(self, rng: KeyArray) -> State:
+        raise NotImplementedError
+
+    def to_internal(self, state: State) -> InternalState:
+        raise NotImplementedError
+
+    def kin_to_sample(self, kin: RealArray, idxs: IntArray, state: InternalState
+                      ) -> RealArray:
+        """Project incident wave-vectors to the sample planes.
+
+        Args:
+            setup : Experimental setup.
+            kin : An array of incident wave-vectors.
+            idxs : Sample indices.
+
+        Returns:
+            Array of sample coordinates.
+        """
+        return self.lens.kin_to_sample(kin, state.z, idxs, state.lens)
+
+    def kout_to_detector(self, kout: RealArray, idxs: IntArray, rec_vec: RealArray,
+                         state: InternalState) -> RealArray:
+        smp_pos = self.kin_to_sample(kout - rec_vec, idxs, state)
+        return k_to_det(kout, smp_pos, idxs)
+
+    def init_miller(self, q_abs: float, state: InternalState) -> MillerIndices:
+        hkl = self.xtal.init_hkl(q_abs, state.xtal)
+        kz = jnp.asarray([self.lens.kin_min(state.lens)[..., 2],
+                          self.lens.kin_max(state.lens)[..., 2]])
+        return self.xtal.init_miller(jnp.arccos(jnp.min(kz)), hkl, state.xtal)
+
+    def init_patterns(self, miller: MillerIndices, roi: Tuple[int, int, int, int], width: float,
+                      pixel_size: Tuple[float, float], state: InternalState) -> RealArray:
+        streaks = self.init_streaks(miller, False, pixel_size, state).offset(roi[2], roi[0])
+        return line_distances(jnp.zeros((state.xtal.num, roi[1] - roi[0], roi[3] - roi[2])),
+                              streaks.to_lines(width), streaks.idxs)
+
+    def init_streaks(self, miller: MillerIndices, hkl_index: bool, pixel_size: Tuple[float, float],
+                     state: InternalState) -> Streaks:
+        rec_vec = self.xtal.rec_vectors(miller, state.xtal)
+        kin = source_lines(rec_vec, kmin=self.lens.kin_min(state.lens),
+                           kmax=self.lens.kin_max(state.lens))
         is_good = jnp.sum(kin, axis=(-2, -1)) > 0
 
-        x, y = self.samples.kout_to_detector(kin + rec_vec[..., None, :], setup=self.setup,
-                                             idxs=bidxs[..., None], rec_vec=rec_vec[..., None, :])
-        if self.transform:
-            x, y = self.transform.forward_points(x, y)
+        rec_vec = jnp.where(is_good[..., None], rec_vec, 0.0)
+        pos = self.kout_to_detector(kin + rec_vec[..., None, :], miller.bidxs[..., None],
+                                    rec_vec[..., None, :], state)
+        pos = pos / jnp.array(pixel_size)
+        return self.xtal.init_streaks(pos[..., 0], pos[..., 1], is_good, hkl_index, miller)
 
-        if self.shape:
-            is_good &= (0 < y).any(axis=1) & (y < self.shape[-2]).any(axis=1) & \
-                       (0 < x).any(axis=1) & (x < self.shape[-1]).any(axis=1)
-
-        result = {'idxs': bidxs, 'x0': x[:, 0], 'y0': y[:, 0], 'x1': x[:, 1], 'y1': y[:, 1],
-                  'h': hkl[hidxs][:, 0], 'k': hkl[hidxs][:, 1], 'l': hkl[hidxs][:, 2]}
-        if hkl_index:
-            result['hkl_id'] = hidxs
-
-        return is_good, Streaks(**result)
+    def sample_position(self, state: InternalState) -> RealArray:
+        return self.kin_to_sample(self.lens.kin_center(state.lens), jnp.zeros(1), state)

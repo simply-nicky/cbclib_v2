@@ -541,6 +541,14 @@ void draw_bresenham_func(const point_t & ubound, const Line<T> & line, T width, 
     while (!lpix.is_end(bnd1));
 }
 
+template <typename I>
+point_t get_ubound(const std::vector<I> & shape)
+{
+    using integer_type = typename point_t::value_type;
+    return point_t{static_cast<integer_type>((shape[shape.size() - 1]) ? shape[shape.size() - 1] - 1 : 0),
+                   static_cast<integer_type>((shape[shape.size() - 2]) ? shape[shape.size() - 2] - 1 : 0)};
+}
+
 }
 
 #endif

@@ -4,7 +4,7 @@ from setuptools import setup, find_namespace_packages
 from pybind11.setup_helpers import Pybind11Extension
 import numpy
 
-__version__ = '0.8.1'
+__version__ = '0.8.2'
 
 extension_args = {'extra_compile_args': ['-fopenmp', '-std=c++20'],
                   'extra_link_args': ['-lgomp'],
@@ -43,7 +43,11 @@ extensions = [Pybind11Extension("cbclib_v2.src.fft_functions",
               Pybind11Extension("cbclib_v2.src.streak_finder",
                                 sources=["cbclib_v2/src/streak_finder.cpp"],
                                 define_macros = [('VERSION_INFO', __version__)],
-                                **extension_args)]
+                                **extension_args),
+              Pybind11Extension("cbclib_v2.src.cpu_ops",
+                                sources=["cbclib_v2/src/cpu_ops.cc"],
+                                define_macros = [('VERSION_INFO', __version__)],
+                                **extension_args),]
 
 with open('README.md', 'r') as readme:
     long_description = readme.read()

@@ -31,6 +31,14 @@ def field(*, static: bool=False, init: bool=..., repr: bool=...,
           metadata: Optional[Mapping[str, Any]]=...) -> Any:
     ...
 
+def add_static_to_metadata(func: Callable):
+    def wrapper(*args, static: bool=False, metadata: Optional[Mapping[str, Any]]=None, **kwargs):
+        metadata_dict: Dict[str, Any] = {} if metadata is None else dict(metadata)
+        metadata_dict['pytree_node'] = not static
+        return func(*args, metadata=metadata_dict, **kwargs)
+
+    return wrapper
+
 def field(*, static: bool=False, default: Any=MISSING, default_factory: Any=MISSING,
           init: bool=True, repr: bool=True, hash: Optional[bool]=None,
           compare: bool=True, metadata: Optional[Mapping[str, Any]]=None) -> Any:
@@ -39,13 +47,9 @@ def field(*, static: bool=False, default: Any=MISSING, default_factory: Any=MISS
     The static flag indicates whether a field is a pytree or static.  Pytree fields are
     differentiated and traced.  Static fields are hashed and compared.
     """
-    metadata_dict: Dict[str, Any] = {} if metadata is None else dict(metadata)
-    metadata_dict['pytree_node'] = not static
-    if default is MISSING:
-        return dataclasses.field(default_factory=default_factory, init=init, repr=repr,
-                                 hash=hash, compare=compare, metadata=metadata_dict)
-    return dataclasses.field(default=default, init=init, repr=repr, hash=hash,
-                             compare=compare, metadata=metadata_dict)
+    wrapper = add_static_to_metadata(dataclasses.field)
+    return wrapper(static=static, default=default, default_factory=default_factory,
+                   init=init, repr=repr, hash=hash, compare=compare, metadata=metadata)
 
 @runtime_checkable
 class JaxDataclassInstance(DataclassInstance, Protocol):
@@ -133,7 +137,8 @@ def jax_dataclass(cls: Optional[Type[Any]]=None, /, *, init: bool=True, repr: bo
     non_none_cls = cls
 
     # Apply dataclass function to cls.
-    data_clz = dataclasses.dataclass(init=init, repr=repr, eq=eq, order=order)(cls)
+    data_clz : Type[JaxDataclassInstance] = dataclasses.dataclass(init=init, repr=repr,
+                                                                  eq=eq, order=order)(cls)
 
     # Partition fields into static, and dynamic; and assign these to the class.
     static_fields: List[str] = []

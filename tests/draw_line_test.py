@@ -5,8 +5,8 @@ from jax import config
 import pytest
 from jax.test_util import check_grads
 from cbclib_v2.src import draw_line_image, draw_line_table
-from cbclib_v2.jax import draw_line
-from cbclib_v2.annotations import NDIntArray, NDRealArray, Shape, Table
+from cbclib_v2.jax import line_distances
+from cbclib_v2.annotations import IntArray, RealArray, Shape, Table
 
 config.update("jax_enable_x64", True)
 
@@ -14,7 +14,7 @@ class TestDrawLine():
     ATOL: float = 1e-8
     RTOL: float = 1e-3
 
-    def check_close(self, a: NDRealArray, b: NDRealArray, rtol: Optional[float]=None,
+    def check_close(self, a: RealArray, b: RealArray, rtol: Optional[float]=None,
                     atol: Optional[float]=None):
         if rtol is None:
             rtol = self.RTOL
@@ -49,12 +49,12 @@ class TestDrawLine():
         return request.param
 
     @pytest.fixture
-    def idxs(self, rng: np.random.Generator, n_lines: int, shape: Shape) -> NDIntArray:
+    def idxs(self, rng: np.random.Generator, n_lines: int, shape: Shape) -> IntArray:
         return rng.integers(0, np.prod(shape[:-2]) - 1, size=n_lines)
 
     @pytest.fixture
     def lines(self, rng: np.random.Generator, n_lines: int, shape: Shape,
-              length: float, width: float) -> NDRealArray:
+              length: float, width: float) -> RealArray:
         lengths = length * rng.random((n_lines,))
         thetas = 2 * np.pi * rng.random((n_lines,))
         x0, y0 = np.array([[shape[-1]], [shape[-2]]]) * rng.random((2, n_lines))
@@ -65,12 +65,12 @@ class TestDrawLine():
                          width * np.ones(n_lines)), axis=1)
 
     @pytest.fixture
-    def image(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape, max_val: float,
-              kernel: str) -> NDRealArray:
+    def image(self, lines: RealArray, idxs: IntArray, shape: Shape, max_val: float,
+              kernel: str) -> RealArray:
         return draw_line_image(lines, shape, idxs, max_val=max_val, kernel=kernel)
 
     @pytest.fixture
-    def table(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape, max_val: float,
+    def table(self, lines: RealArray, idxs: IntArray, shape: Shape, max_val: float,
               kernel: str) -> Table:
         return draw_line_table(lines, shape, idxs, max_val=max_val, kernel=kernel)
 
@@ -81,21 +81,21 @@ class TestDrawLine():
         assert len(table) == 0
 
     @pytest.mark.xfail(raises=ValueError)
-    def test_image_wrong_size_lines(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape):
+    def test_image_wrong_size_lines(self, lines: RealArray, idxs: IntArray, shape: Shape):
         image = draw_line_image(lines[::2], shape, idxs)
 
     @pytest.mark.xfail(raises=ValueError)
-    def test_table_wrong_size_lines(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape):
+    def test_table_wrong_size_lines(self, lines: RealArray, idxs: IntArray, shape: Shape):
         table = draw_line_image(lines[::2], shape, idxs)
 
-    def test_zero_width(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape, kernel: str):
+    def test_zero_width(self, lines: RealArray, idxs: IntArray, shape: Shape, kernel: str):
         zero_lines = np.concatenate((lines[..., :4], np.zeros(lines.shape[:-1] + (1,))), axis=-1)
         image = draw_line_image(zero_lines, shape, idxs, kernel=kernel)
         table = draw_line_table(zero_lines, shape, idxs, kernel=kernel)
         assert np.sum(image) == 0
         assert len(table) == 0
 
-    def test_negative_width(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape, kernel: str):
+    def test_negative_width(self, lines: RealArray, idxs: IntArray, shape: Shape, kernel: str):
         neg_lines = np.concatenate((lines[..., :4], np.full(lines.shape[:-1] + (1,), -1)), axis=-1)
         image = draw_line_image(neg_lines, shape, idxs, kernel=kernel)
         table = draw_line_table(neg_lines, shape, idxs, kernel=kernel)
@@ -103,13 +103,13 @@ class TestDrawLine():
         assert len(table) == 0
 
     @pytest.mark.slow
-    def test_max_val(self, image: NDRealArray, table: Table, n_lines: int, max_val: float):
+    def test_max_val(self, image: RealArray, table: Table, n_lines: int, max_val: float):
         assert np.min(image) == 0
         assert np.all(np.max(image, axis=(-2, -1)) <= n_lines * max_val)
         assert np.min(list(table.values())) >= 0
         assert np.all(np.array(list(table.values())) <= max_val)
 
-    def kernel_dict(self) -> Dict[str, Callable[[NDRealArray, NDRealArray], NDRealArray]]:
+    def kernel_dict(self) -> Dict[str, Callable[[RealArray, RealArray], RealArray]]:
         def biweight(x, sigma):
             return 0.9375 * np.clip(1 - (x / sigma)**2, 0, np.infty)**2
         def gaussian(x, sigma):
@@ -126,7 +126,7 @@ class TestDrawLine():
                 'rectangular': rectangular, 'triangular': triangular}
 
     @pytest.fixture
-    def image_numpy(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape,
+    def image_numpy(self, lines: RealArray, idxs: IntArray, shape: Shape,
                     max_val: float, kernel: str) -> np.ndarray:
         kernel_func = self.kernel_dict()[kernel]
         x, y = np.meshgrid(np.arange(shape[-1]), np.arange(shape[-2]))
@@ -146,22 +146,17 @@ class TestDrawLine():
             frames.append(np.sum(frame, axis=-1))
         return np.stack(frames).reshape(shape)
 
-    def test_draw_line_image(self, image: NDRealArray, image_numpy: NDRealArray):
+    def test_draw_line_image(self, image: RealArray, image_numpy: RealArray):
         self.check_close(image, image_numpy)
 
-    def test_draw_line_table(self, table: Table, image_numpy: NDRealArray):
+    def test_draw_line_table(self, table: Table, image_numpy: RealArray):
         image = np.zeros(image_numpy.shape)
         for (_, idx), val in table.items():
             image[np.unravel_index(idx, image_numpy.shape)] += val
         self.check_close(image, image_numpy)
 
-    def test_draw_line_gradient(self, lines: NDRealArray, idxs: NDIntArray, shape: Shape,
-                                max_val: float, kernel: str):
-        if kernel == 'rectangular':
-            pytest.xfail("rectangular kernel has no valid gradient")
-
+    def test_draw_line_gradient(self, lines: RealArray, idxs: IntArray, shape: Shape):
         def wrapper(lines):
-            return draw_line(jnp.zeros(shape), jnp.asarray(lines), jnp.asarray(idxs),
-                             max_val=max_val, kernel=kernel)
+            return line_distances(jnp.zeros(shape), jnp.asarray(lines), jnp.asarray(idxs))
 
         check_grads(wrapper, (lines,), order=1, modes='rev')

@@ -4,17 +4,21 @@ import jax.numpy as jnp
 from jax import config
 from jax.test_util import check_grads
 import cbclib_v2 as cbc
-from cbclib_v2.annotations import Array, IntArray
+from cbclib_v2.jax import jax_dataclass
+from cbclib_v2.annotations import KeyArray, RealArray
 
 config.update("jax_enable_x64", True)
 
 class Parameters():
+    ChainState = Tuple[cbc.jax.RotationState, ...]
+
     a_vec           = [-0.00093604, -0.00893389, -0.00049815]
     b_vec           = [ 0.00688718, -0.00039195, -0.00573877]
     c_vec           = [ 0.01180108, -0.00199115,  0.01430421]
     foc_pos         = [ 0.14292289,  0.16409828, -0.39722229]
+    frames          = (10, 20, 30)
     roi             = (1100, 3260, 1040, 3108)
-    pupil_roi       = [2211.13555081, 2360.12483269, 1952.07580504, 2093.26351828]
+    pupil_roi       = [0.16583517, 0.17700936, 0.14640569, 0.15699476]
     rot_axis        = [ 1.57123908, -1.56927065]
     rotations       = [[[ 9.9619448e-01,  3.2783555e-05, -8.7157689e-02],
                         [-4.4395445e-05,  1.0000000e+00, -1.3129010e-04],
@@ -32,74 +36,91 @@ class Parameters():
     y_pixel_size    = 7.5e-05
 
     @classmethod
-    def basis(cls) -> cbc.jax.Basis:
-        return cbc.jax.Basis(jnp.asarray(cls.a_vec), jnp.asarray(cls.b_vec), jnp.asarray(cls.c_vec))
+    def xtal(cls) -> cbc.jax.XtalState:
+        return cbc.jax.XtalState(jnp.stack([jnp.asarray(cls.a_vec),
+                                            jnp.asarray(cls.b_vec),
+                                            jnp.asarray(cls.c_vec)]))
 
     @classmethod
-    def setup(cls) -> cbc.jax.ScanSetup:
-        return cbc.jax.ScanSetup(jnp.asarray(cls.foc_pos), jnp.asarray(cls.pupil_roi),
-                                 jnp.asarray(cls.rot_axis), cls.smp_dist,
-                                 cls.wavelength, cls.x_pixel_size, cls.y_pixel_size)
+    def lens(cls) -> cbc.jax.LensState:
+        return cbc.jax.LensState(jnp.asarray(cls.foc_pos), jnp.asarray(cls.pupil_roi))
 
     @classmethod
-    def samples(cls) -> cbc.jax.ScanSamples:
-        return cbc.jax.ScanSamples(jnp.arange(len(cls.rotations)), jnp.array(cls.rotations),
-                                   jnp.full(len(cls.rotations), cls.dist))
+    def pixel_size(cls) -> Tuple[float, float]:
+        return (cls.x_pixel_size, cls.y_pixel_size)
+
+    @classmethod
+    def tilt(cls) -> cbc.jax.TiltAxisState:
+        theta, phi = cls.rot_axis
+        axis = jnp.array([jnp.sin(theta) * jnp.cos(phi),
+                          jnp.sin(theta) * jnp.sin(phi), jnp.cos(theta)])
+        return cbc.jax.TiltAxisState(angles=-jnp.pi / 360 * jnp.array(cls.frames), axis=axis)
+
+    @classmethod
+    def transforms(cls) -> ChainState:
+        return tuple(cbc.jax.RotationState(jnp.asarray(mat)) for mat in cls.rotations)
+
+    @classmethod
+    def z(cls) -> RealArray:
+        return jnp.array(cls.smp_dist + cls.foc_pos[2])
+
+@jax_dataclass
+class TestState:
+    transform       : cbc.jax.TiltAxisState
+    xtal            : cbc.jax.XtalState
+    lens            : cbc.jax.LensState
+    z               : RealArray
+
+@jax_dataclass
+class TestModel(cbc.jax.CBDModel):
+    init_state  : Callable[[KeyArray,], TestState]
+    transform   : cbc.jax.TiltAxis = cbc.jax.TiltAxis()
+
+    def init(self, rng) -> TestState:
+        return self.init_state(rng)
+
+    def to_internal(self, state: TestState) -> cbc.jax.InternalState:
+        xtal = self.transform.apply(state.xtal, state.transform)
+        z = state.z * jnp.ones(xtal.num)
+        return cbc.jax.InternalState(xtal, state.lens, z)
 
 class TestCBDModel():
-    RTOL: float = 1e-3
-    ATOL: float = 1e-5
+    REL_TOL: float = 0.05
+    Q_ABS: float = 0.25
     EPS: float = 1e-11
-    Criterion = Callable[[cbc.jax.Basis, cbc.jax.ScanSamples, cbc.jax.ScanSetup], Array]
 
     @pytest.fixture(params=[1.0])
     def width(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
     @pytest.fixture
-    def crop(self) -> cbc.Crop:
-        return cbc.Crop(Parameters.roi)
+    def model(self) -> TestModel:
+        state = TestState(Parameters.tilt(), Parameters.xtal(), Parameters.lens(), Parameters.z())
+        bounds = {'transform': {'angles': jnp.full(3, 1.0 / 180 * jnp.pi), 'axis': jnp.full(3, 0.05)}}
+        init = cbc.jax.init_from_bounds(state, bounds=bounds, default=lambda val: self.REL_TOL * val)
+        return TestModel(init)
 
     @pytest.fixture
-    def model(self, crop: cbc.Crop) -> cbc.jax.CBDModel:
-        return cbc.jax.CBDModel(Parameters.basis(), Parameters.samples(), Parameters.setup(), crop)
+    def miller(self, model: TestModel, jax_rng: KeyArray) -> cbc.jax.MillerIndices:
+        return model.init_miller(self.Q_ABS, model.to_internal(model.init(jax_rng)))
 
     @pytest.fixture
-    def hkl(self, model: cbc.jax.CBDModel) -> IntArray:
-        return model.basis.generate_hkl(0.3)
+    def criterion(self, model: TestModel, miller: cbc.jax.MillerIndices, width: float
+                  ) -> Callable[[TestState,], RealArray]:
 
-    @pytest.fixture
-    def indices(self, model: cbc.jax.CBDModel, hkl: IntArray) -> Tuple[IntArray, IntArray]:
-        return model.filter_hkl(hkl)
-
-    @pytest.fixture
-    def criterion(self, hkl: IntArray, indices: Tuple[IntArray, IntArray],
-                  crop: cbc.Crop, width: float) -> Criterion:
-        hidxs, bidxs = indices
-
-        def wrapper(basis: cbc.jax.Basis, samples: cbc.jax.ScanSamples, setup: cbc.jax.ScanSetup):
-            model = cbc.jax.CBDModel(basis, samples, setup, crop)
-            is_good, streaks = model.generate_streaks(hkl, hidxs, bidxs)
-            streaks = streaks.mask_streaks(is_good)
-            return jnp.mean(jnp.concatenate(streaks.to_lines(width)))
+        def wrapper(state: TestState) -> RealArray:
+            int_state = model.to_internal(state)
+            streaks = model.init_streaks(miller, False, Parameters.pixel_size(), int_state)
+            return jnp.mean(streaks.length)
 
         return wrapper
 
     def check_gradient(self, f: Callable, args: Tuple[Any, ...]):
         def wrapper(*args):
             return f(*args)
-        check_grads(wrapper, args, order=1, modes='rev',
-                    eps=self.EPS, rtol=self.RTOL, atol=self.ATOL)
+        check_grads(wrapper, args, order=1, modes='rev', eps=self.EPS)
 
     @pytest.mark.slow
-    def test_model_gradients(self, criterion: Criterion, model: cbc.jax.CBDModel):
-        self.check_gradient(criterion, (model.basis, model.samples, model.setup))
-
-        self.check_gradient(lambda basis: criterion(basis, model.samples, model.setup),
-                            (model.basis,))
-
-        self.check_gradient(lambda samples: criterion(model.basis, samples, model.setup),
-                            (model.samples,))
-
-        self.check_gradient(lambda setup: criterion(model.basis, model.samples, setup),
-                            (model.setup,))
+    def test_model_gradients(self, criterion: Callable[[TestState,], RealArray], model: TestModel,
+                             jax_rng: KeyArray):
+        self.check_gradient(criterion, (model.init(jax_rng),))

@@ -10,11 +10,11 @@ import json
 import os
 import re
 from typing import (Any, Callable, ClassVar, Dict, Generic, ItemsView, Iterator, List,
-                    Optional, Protocol, Tuple, Type, Union, ValuesView, TypeVar, get_args,
-                    get_origin, overload, runtime_checkable)
+                    Optional, Protocol, Tuple, Type, Union, ValuesView, TypeVar,
+                    get_args, get_origin, overload, runtime_checkable)
 import numpy as np
 import jax.numpy as jnp
-from .annotations import Array, NDArray, JaxArray, NDIntArray
+from .annotations import Array, ExpandedType, NDArray, JaxArray, NDIntArray
 
 T = TypeVar('T')
 Self = TypeVar('Self')
@@ -105,86 +105,149 @@ class DataContainer(DataclassInstance):
         """
         return {attr: self.get(attr) for attr in self.contents()}
 
-class StringFormatter:
+class BaseFormatter:
+    aliases : ClassVar[Tuple[Type, ...]]
+
     @classmethod
-    def format_list(cls, string: str, dtype: Type=str) -> List:
+    def is_instance(cls, t: ExpandedType) -> bool:
+        if isinstance(t, tuple):
+            return any(t[0] is alias for alias in cls.aliases)
+
+        return any(t is alias for alias in cls.aliases)    
+
+class SimpleFormatter(BaseFormatter):
+    @classmethod
+    def format_string(cls, string: str) -> Any:
+        return cls.aliases[0](string)
+
+class Formatter(BaseFormatter):
+    @classmethod
+    def format_string(cls, string: str, dtype: Type) -> Any:
+        raise NotImplementedError
+
+class FloatFormatter(SimpleFormatter):
+    aliases = (float, np.floating)
+
+class IntFormatter(SimpleFormatter):
+    aliases = (int, np.integer)
+
+class BoolFormatter(SimpleFormatter):
+    aliases = (bool,)
+
+class StringFormatter(SimpleFormatter):
+    aliases = (str,)
+
+class ListFormatter(Formatter):
+    aliases = (list,)
+
+    @classmethod
+    def format_string(cls, string: str, dtype: Type) -> List:
         is_list = re.search(r'^\[([\s\S]*)\]$', string)
         if is_list:
             return [dtype(p.strip('\'\"'))
                     for p in re.split(r'\s*,\s*', is_list.group(1)) if p]
         raise ValueError(f"Invalid string: '{string}'")
 
+class TupleFormatter(Formatter):
+    aliases = (tuple,)
+
     @classmethod
-    def format_tuple(cls, string: str, dtype: Type=str) -> Tuple:
+    def format_string(cls, string: str, dtype: Type) -> Tuple:
         is_tuple = re.search(r'^\(([\s\S]*)\)$', string)
         if is_tuple:
             return tuple(dtype(p.strip('\'\"'))
                          for p in re.split(r'\s*,\s*', is_tuple.group(1)) if p)
         raise ValueError(f"Invalid string: '{string}'")
 
+class NDArrayFormatter(Formatter):
+    aliases = (np.ndarray,)
+
     @classmethod
-    def format_array(cls, string: str, dtype: Type=float) -> NDArray:
+    def format_string(cls, string: str, dtype: Type) -> NDArray:
         is_list = re.search(r'^\[([\s\S]*)\]$', string)
         if is_list:
             return np.fromstring(is_list.group(1), dtype=dtype, sep=',')
         raise ValueError(f"Invalid string: '{string}'")
 
+class JaxArrayFormatter(Formatter):
+    aliases = (JaxArray,)
+
     @classmethod
-    def format_jax_array(cls, string: str, dtype: Type=float) -> JaxArray:
+    def format_string(cls, string: str, dtype: Type) -> JaxArray:
         is_list = re.search(r'^\[([\s\S]*)\]$', string)
         if is_list:
             return jnp.fromstring(is_list.group(1), dtype=dtype, sep=',')
         raise ValueError(f"Invalid string: '{string}'")
 
+class StringFormatting:
+    FormatterDict = Dict[str, Union[Type[SimpleFormatter], Type[Formatter]]]
+    formatters : FormatterDict = {'ndarray': NDArrayFormatter,
+                                  'list': ListFormatter,
+                                  'tuple': TupleFormatter,
+                                  'Array': JaxArrayFormatter,
+                                  'float': FloatFormatter,
+                                  'int': IntFormatter,
+                                  'bool': BoolFormatter,
+                                  'str': StringFormatter}
     @classmethod
-    def format_bool(cls, string: str) -> bool:
-        return string in ('yes', 'True', 'true', 'T')
-
-    @classmethod
-    def get_dtype(cls, type: Type) -> str:
-        if len(get_args(type)):
-            return get_args(type)[0].__name__
-        return str()
-
-    @classmethod
-    def get_array_dtype(cls, type: Type) -> Optional[str]:
-        generic_types = {'float': np.floating, 'int': np.integer,
-                        'complex': np.complexfloating}
-        if get_origin(type) is np.ndarray and len(get_args(type)) == 2:
-            dtype = get_args(get_args(type)[1])[0]
-            if len(get_args(dtype)):
-                dtype = get_origin(dtype)
-
-            for name, generic in generic_types.items():
-                if dtype is generic or np.issubdtype(dtype, generic):
-                    return name
-
-        return str()
-
-    @classmethod
-    def get_formatter(cls, type: Type):
-        formatters = {'list': cls.format_list, 'tuple': cls.format_tuple,
-                      'ndarray': cls.format_array, 'Array': cls.format_jax_array,
-                      'float': float, 'int': int, 'bool': cls.format_bool,
-                      'complex': complex}
-        arg_getters = {'list': cls.get_dtype,
-                       'tuple': cls.get_dtype,
-                       'ndarray': cls.get_array_dtype,
-                       'Array': lambda type: 'float'}
-
-        origin = get_origin(type)
-
+    def expand_types(cls, t: Type) -> ExpandedType:
+        origin = get_origin(t)
         if origin is None:
-            return formatters.get(type.__name__, str)
-        if origin is ClassVar:
-            return formatters.get(get_args(type)[0].__name__, str)
-        if origin is dict:
-            return cls.get_formatter(get_args(type)[1])
+            return t
+        return (origin, [cls.expand_types(arg) for arg in get_args(t)])
 
-        string = arg_getters[origin.__name__](type)
-        origin_formatter = formatters.get(origin.__name__, str)
-        arg_formatter = formatters.get(string, str)
-        return lambda string: origin_formatter(string, arg_formatter)
+    @classmethod
+    def list_types(cls, expanded_type: ExpandedType) -> List[ExpandedType]:
+        def add_type(t: ExpandedType, types: List):
+            if not isinstance(t, tuple):
+                types.append(t)
+            else:
+                origin, args = t
+                types.append((origin, args))
+                if len(args) > 1:
+                    for arg in args:
+                        add_type(arg, types)
+
+        types = []
+        add_type(expanded_type, types)
+        return types
+
+    @classmethod
+    def flatten_list(cls, nested_list: List) -> List:
+        if not bool(nested_list):
+            return nested_list
+
+        if isinstance(nested_list[0], (list, tuple)):
+            return cls.flatten_list(*nested_list[:1]) + list(cls.flatten_list(nested_list[1:]))
+
+        return list(nested_list[:1]) + cls.flatten_list(nested_list[1:])
+
+    @classmethod
+    def get_dtype(cls, types: List) -> Type:
+        formatters = [formatter for formatter in cls.formatters.values()
+                      if issubclass(formatter, SimpleFormatter)]
+        for formatter in formatters:
+            for t in types:
+                if formatter.is_instance(t):
+                    return formatter.aliases[0]
+        return float
+
+    @classmethod
+    def get_formatter(cls, t: Type) -> Callable[[str,], Any]:
+        types = cls.list_types(cls.expand_types(t))
+        for formatter in cls.formatters.values():
+            for extended_type in types:
+                if formatter.is_instance(extended_type):
+                    if issubclass(formatter, SimpleFormatter):
+                        return formatter.format_string
+
+                    if isinstance(extended_type, tuple):
+                        dtype = cls.get_dtype(cls.flatten_list(extended_type[1]))
+                    else:
+                        dtype = float
+
+                    return lambda string: formatter.format_string(string, dtype)
+        return str
 
     @classmethod
     def format_dict(cls, dct: Dict[str, Any], types: Dict[str, Type]) -> Dict[str, Any]:
@@ -233,12 +296,9 @@ class StringFormatter:
         Returns:
             List of strings.
         """
-        if isinstance(strings, (str, list)):
-            if isinstance(strings, str):
-                return [strings,]
-            return strings
-
-        raise ValueError('strings must be a string or a list of strings')
+        if isinstance(strings, str):
+            return [strings,]
+        return list(str(string) for string in strings)
 
 class Parser():
     fields : Dict[str, Union[str, List[str], Dict[str, str]]]
@@ -304,10 +364,10 @@ class INIParser(Parser, DataContainer):
         return {section: dict(ini_parser.items(section)) for section in ini_parser.sections()}
 
     def read(self, file: str) -> Dict[str, Any]:
-        return StringFormatter.format_dict(super().read(file), self.types)
+        return StringFormatting.format_dict(super().read(file), self.types)
 
     def to_dict(self, obj: Any) -> Dict[str, str]:
-        return StringFormatter.to_string(super().to_dict(obj))
+        return StringFormatting.to_string(super().to_dict(obj))
 
     def write(self, file: str, obj: Any):
         """Save all the attributes stored in the container to an INI file ``file``.

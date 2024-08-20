@@ -179,39 +179,6 @@ void fill_array(py::array_t<T, ExtraFlags> & arr, T fill_value)
     PyArray_CopyInto(reinterpret_cast<PyArrayObject *>(arr.ptr()), reinterpret_cast<PyArrayObject *>(fill.ptr()));
 }
 
-template <typename I, int ExtraFlags>
-void fill_indices(std::string name, size_t xsize, size_t isize, std::optional<py::array_t<I, ExtraFlags>> & idxs)
-{
-    if (xsize == 1)
-    {
-        idxs = py::array_t<I, ExtraFlags>(isize);
-        fill_array(idxs.value(), I());
-    }
-    else if (xsize == isize)
-    {
-        idxs = py::array_t<I, ExtraFlags>(isize);
-        auto ptr = static_cast<I *>(idxs.value().request().ptr);
-        for (size_t i = 0; i < isize; i++) ptr[i] = i;
-    }
-    else throw std::invalid_argument(name + " is not defined");
-}
-
-template <typename I, int ExtraFlags>
-void check_indices(std::string name, size_t xsize, size_t isize, std::optional<py::array_t<I, ExtraFlags>> & idxs)
-{
-    if (idxs && idxs.value().size())
-    {
-        if (static_cast<size_t>(idxs.value().size()) != isize)
-            throw std::invalid_argument(name + " has an invalid size (" + std::to_string(idxs.value().size()) +
-                                        " != " + std::to_string(isize) + ")");
-        auto begin = idxs.value().data();
-        auto end = begin + idxs.value().size();
-        auto [min, max] = std::minmax_element(begin, end);
-        if (*max >= static_cast<I>(xsize) || *min < I())
-            throw std::out_of_range(name + " is out of range");
-    }
-}
-
 template <typename ForwardIt, typename V, int ExtraFlags>
 void check_optional(const std::string & name, ForwardIt first, ForwardIt last,
                     std::optional<py::array_t<V, ExtraFlags>> & opt, V fill_value)
