@@ -1,183 +1,116 @@
-from functools import partial
-from typing import Dict, Protocol, Sequence, Tuple, TypeAlias, Union, cast
+from typing import Callable, Dict, Literal, Sequence, Tuple, Union, cast
 import numpy as np
 import jax.numpy as jnp
-from jax import core, dtypes, custom_vjp
-from jax.lib import xla_client
-from jax.interpreters import mlir, xla
-from jaxlib.hlo_helpers import custom_call
-from ..src import cpu_ops
+from jax import core, dtypes
+from jax.interpreters import ad, mlir
+from ..src import (QuadStackDouble, QuadStackFloat, build_quad_stack,
+                   OctStackDouble, OctStackFloat, build_oct_stack)
 from ..annotations import RealArray, IntArray
 
-# Helper functions
+Kind = Literal['2d', '3d']
+TreeStack = Union[QuadStackDouble, QuadStackFloat, OctStackDouble, OctStackFloat]
+Query = Callable[[RealArray, IntArray], IntArray]
+BuildAndQuery = Callable[[RealArray, IntArray, RealArray, IntArray], IntArray]
+BuildStack = Callable[[RealArray, IntArray, Sequence[float]], TreeStack]
 
-def default_layouts(*shapes):
-    return [range(len(shape) - 1, -1, -1) for shape in shapes]
+def knn_query(stack: TreeStack, k: int, num_threads: int=1) -> Query:
+    knn_query_p = core.Primitive("knn_query")
 
-MLIRValue : TypeAlias = mlir.ir.Value
-MLIRType : TypeAlias = mlir.ir.Type
+    # The abstract evaluation rule tells us the expected shape & dtype of the output.
+    def _knn_query_abstract_eval(query: core.ShapedArray, idxs: core.ShapedArray):
+        assert query.shape[-1] == 4 or query.shape[-1] == 6
+        assert query.shape[:-1] == idxs.shape
+        itype = dtypes.canonicalize_dtype(idxs.dtype)
+        return core.ShapedArray(idxs.shape + (k,), itype)
 
-class RankedTensorTypeProtocol(Protocol):
-    shape : Sequence[Union[int, MLIRValue]]
-    element_type : MLIRType
+    # The impl rule defines how the primitive is evaluated *outside* jit.
+    def _knn_query_impl(query: RealArray, idxs: IntArray) -> IntArray:
+        _, idxs = stack.find_k_nearest(np.asarray(query), np.asarray(idxs), k, num_threads)
+        return idxs
 
-    @classmethod
-    def get(cls, shape: Sequence[Union[int, MLIRValue]], element_type: MLIRType
-            ) -> 'RankedTensorTypeProtocol':
-        ...
+    # The lowering rule defines how the primitive is evaluated *within* jit
+    def _knn_query_lowering(ctx: mlir.LoweringRuleContext, query: mlir.Value, idxs: mlir.Value
+                              ) -> Sequence[Union[mlir.Value, Tuple[mlir.Value, ...]]]:
+        # Note: callback function must return a tuple of arrays with the expected shape & dtype
+        def _knn_callback(query, idxs):
+            _, idxs = stack.find_k_nearest(query, idxs, k, num_threads)
+            return (idxs.astype(ctx.avals_out[0].dtype),)
+        token = None
+        avals_in = cast(Sequence[core.ShapedArray], ctx.avals_in)
+        result, token, keepalive = mlir.emit_python_callback(
+            ctx, _knn_callback, token, [query, idxs], avals_in, ctx.avals_out,
+            has_side_effect=False
+        )
+        ctx.module_context.add_keepalive(keepalive)
+        return result
 
-RankedTensorType : RankedTensorTypeProtocol = mlir.ir.RankedTensorType
+    knn_query_p.def_abstract_eval(_knn_query_abstract_eval)
+    knn_query_p.def_impl(_knn_query_impl)
+    mlir.register_lowering(knn_query_p, cast(mlir.LoweringRule, _knn_query_lowering))
 
-class MLIRArray(Protocol):
-    type : RankedTensorTypeProtocol
+    ad.defjvp_zero(knn_query_p)
 
-# Register the CPU XLA custom calls
-for _name, _value in cpu_ops.registrations().items():
-    xla_client.register_custom_call_target(_name, _value, platform="cpu")
+    def wrapper(query: RealArray, idxs: IntArray) -> IntArray:
+        return cast(IntArray, knn_query_p.bind(query, idxs))
 
-line_distances_fwd_keys : Dict[Tuple[str, str], str] = {
-    ('float32', 'int32') : 'line_distances_fwd_f32_i32',
-    ('float64', 'int32') : 'line_distances_fwd_f64_i32',
-    ('float32', 'int64') : 'line_distances_fwd_f32_i64',
-    ('float64', 'int64') : 'line_distances_fwd_f64_i64'
-}
+    return wrapper
 
-line_distances_bwd_keys : Dict[Tuple[str, str], str] = {
-    ('float32', 'int32') : 'line_distances_bwd_f32_i32',
-    ('float64', 'int32') : 'line_distances_bwd_f64_i32',
-    ('float32', 'int64') : 'line_distances_bwd_f32_i64',
-    ('float64', 'int64') : 'line_distances_bwd_f64_i64'
-}
+def build_and_knn_query(box: Sequence[float], k: int, num_threads: int=1, kind: Kind='2d'
+                        ) -> BuildAndQuery:
+    knn_query_p = core.Primitive("knn_query")
+    build_stack: Dict[Kind, BuildStack] = {'2d': build_quad_stack, '3d': build_oct_stack}
+    element_size: Dict[Kind, int] = {'2d': 4, '3d': 6}
 
-# Create _line_distances_fwd_p for forward operation
-_line_distances_fwd_p = core.Primitive("line_distances_fwd")
-_line_distances_fwd_p.multiple_results = True
-_line_distances_fwd_p.def_impl(partial(xla.apply_primitive, _line_distances_fwd_p))
+    # The abstract evaluation rule tells us the expected shape & dtype of the output.
+    def _knn_query_abstract_eval(database: core.ShapedArray, didxs: core.ShapedArray,
+                                 query: core.ShapedArray, idxs: core.ShapedArray
+                                 ) -> core.ShapedArray:
+        assert query.shape[-1] == element_size[kind] and database.shape[-1] == element_size[kind]
+        assert query.shape[:-1] == idxs.shape and database.shape[:-1] == didxs.shape
 
-# Create abstract evaluation, used to figure out the shapes and datatypes of outputs
-def _line_distances_fwd_abstract(image: core.ShapedArray, lines: core.ShapedArray, idxs: core.ShapedArray
-                                 ) -> Tuple[core.ShapedArray, core.ShapedArray]:
-    shape = image.shape
-    float_dtype = dtypes.canonicalize_dtype(image.dtype)
-    int_dtype = dtypes.canonicalize_dtype(idxs.dtype)
+        assert jnp.issubdtype(dtypes.canonicalize_dtype(database.dtype), jnp.floating)
+        assert jnp.issubdtype(dtypes.canonicalize_dtype(query.dtype), jnp.floating)
 
-    assert lines.shape[:-1] == idxs.shape
-    assert float_dtype == dtypes.canonicalize_dtype(lines.dtype)
+        assert jnp.issubdtype(dtypes.canonicalize_dtype(didxs.dtype), jnp.integer)
+        assert jnp.issubdtype(dtypes.canonicalize_dtype(idxs.dtype), jnp.integer)
 
-    return (core.ShapedArray(shape, float_dtype),
-            core.ShapedArray(shape, int_dtype))
+        itype = dtypes.result_type(dtypes.canonicalize_dtype(idxs.dtype),
+                                   dtypes.canonicalize_dtype(didxs.dtype),
+                                   return_weak_type_flag=False)
+        return core.ShapedArray(idxs.shape + (k,), itype)
 
-_line_distances_fwd_p.def_abstract_eval(_line_distances_fwd_abstract)
+    # The impl rule defines how the primitive is evaluated *outside* jit.
+    def _knn_query_impl(database: RealArray, didxs: IntArray, query: RealArray,
+                        idxs: IntArray) -> IntArray:
+        stack = build_stack[kind](np.asarray(database), np.asarray(didxs), box)
+        _, idxs = stack.find_k_nearest(np.asarray(query), np.asarray(idxs), k, num_threads)
+        return idxs
 
-# This provides a mechanism for exposing our custom C++ interfaces to the JAX XLA backend.
-def _line_distances_fwd_cpu_lowering(ctx: mlir.LoweringRuleContext, out: MLIRArray, lines: MLIRArray, idxs: MLIRArray):
-    out_type = out.type
-    lines_type = lines.type
-    idxs_type = idxs.type
+    # The lowering rule defines how the primitive is evaluated *within* jit
+    def _knn_query_lowering(ctx: mlir.LoweringRuleContext, database: mlir.Value,
+                            didxs: mlir.Value, query: mlir.Value, idxs: mlir.Value
+                            ) -> Sequence[Union[mlir.Value, Tuple[mlir.Value, ...]]]:
+        # Note: callback function must return a tuple of arrays with the expected shape & dtype
+        def _knn_callback(database, didxs, query, idxs):
+            stack = build_stack[kind](database, didxs, box)
+            _, idxs = stack.find_k_nearest(query, idxs, k, num_threads)
+            return (idxs.astype(ctx.avals_out[0].dtype),)
+        token = None
+        avals_in = cast(Sequence[core.ShapedArray], ctx.avals_in)
+        result, token, keepalive = mlir.emit_python_callback(
+            ctx, _knn_callback, token, [database, didxs, query, idxs], avals_in, ctx.avals_out,
+            has_side_effect=False
+        )
+        ctx.module_context.add_keepalive(keepalive)
+        return result
 
-    out_shape = out_type.shape
-    lines_shape = lines_type.shape
-    idxs_shape = idxs_type.shape
+    knn_query_p.def_abstract_eval(_knn_query_abstract_eval)
+    knn_query_p.def_impl(_knn_query_impl)
+    mlir.register_lowering(knn_query_p, cast(mlir.LoweringRule, _knn_query_lowering))
 
-    _, lines_aval, idxs_aval = cast(Sequence[core.ShapedArray], ctx.avals_in)
-    float_dtype = np.dtype(lines_aval.dtype)
-    int_dtype = np.dtype(idxs_aval)
+    ad.defjvp_zero(knn_query_p)
 
-    op_name = line_distances_fwd_keys[(float_dtype.name, int_dtype.name)]
+    def wrapper(database: RealArray, didxs: IntArray, query: RealArray, idxs: IntArray) -> IntArray:
+        return cast(IntArray, knn_query_p.bind(database, didxs, query, idxs))
 
-    return custom_call(
-        op_name,
-        result_types=[
-            RankedTensorType.get(out_shape, out_type.element_type),
-            RankedTensorType.get(out_shape, idxs_type.element_type)
-        ],
-        operands=[
-            mlir.ir_constant(np.prod(out_shape[:-2], dtype=int)),
-            mlir.ir_constant(out_shape[-2]),
-            mlir.ir_constant(out_shape[-1]),
-            mlir.ir_constant(np.prod(lines_shape[:-1], dtype=int)),
-            mlir.ir_constant(ctx.module_context.backend.device_count()),
-            lines, idxs,
-        ],
-        operand_layouts=5 * [(),] + default_layouts(lines_shape, idxs_shape),
-        result_layouts=default_layouts(out_shape, out_shape)
-    ).results
-
-mlir.register_lowering(_line_distances_fwd_p, cast(mlir.LoweringRule, _line_distances_fwd_cpu_lowering),
-                       platform="cpu")
-
-# Create _line_distances_bwd_p for backward operation
-_line_distances_bwd_p = core.Primitive("line_distances_bwd")
-_line_distances_bwd_p.def_impl(partial(xla.apply_primitive, _line_distances_bwd_p))
-
-def _line_distances_bwd_abstract(cotangents: core.ShapedArray, line_idxs: core.ShapedArray,
-                                 lines: core.ShapedArray, idxs: core.ShapedArray):
-    out_shape = lines.shape
-    float_dtype = dtypes.canonicalize_dtype(cotangents.dtype)
-    int_dtype = dtypes.canonicalize_dtype(line_idxs.dtype)
-
-    assert cotangents.shape == line_idxs.shape
-    assert lines.shape[:-1] == idxs.shape
-    assert float_dtype == dtypes.canonicalize_dtype(lines.dtype)
-    assert int_dtype == dtypes.canonicalize_dtype(idxs.dtype)
-
-    return core.ShapedArray(out_shape, float_dtype)
-
-_line_distances_bwd_p.def_abstract_eval(_line_distances_bwd_abstract)
-
-def _line_distances_bwd_cpu_lowering(ctx: mlir.LoweringRuleContext, cotangents: MLIRArray,
-                                     line_idxs: MLIRArray, lines: MLIRArray, idxs: MLIRArray):
-    ct_type = cotangents.type
-    lidxs_type = line_idxs.type
-    lines_type = lines.type
-    idxs_type = idxs.type
-
-    ct_shape = ct_type.shape
-    lidxs_shape = lidxs_type.shape
-    lines_shape = lines_type.shape
-    idxs_shape = idxs_type.shape
-
-    ct_aval, lidxs_aval, _, _ = cast(Sequence[core.ShapedArray], ctx.avals_in)
-    float_dtype = np.dtype(ct_aval.dtype)
-    int_dtype = np.dtype(lidxs_aval.dtype)
-
-    op_name = line_distances_bwd_keys[(float_dtype.name, int_dtype.name)]
-
-    return custom_call(
-        op_name,
-        result_types=[RankedTensorType.get(lines_shape, ct_type.element_type),],
-        operands=[
-            mlir.ir_constant(np.prod(ct_shape[:-2], dtype=int)),
-            mlir.ir_constant(ct_shape[-2]),
-            mlir.ir_constant(ct_shape[-1]),
-            mlir.ir_constant(np.prod(lines_shape[:-1], dtype=int)),
-            mlir.ir_constant(ctx.module_context.backend.device_count()),
-            cotangents, line_idxs, lines, idxs
-        ],
-        operand_layouts=5 * [(),] + default_layouts(ct_shape, lidxs_shape,
-                                                    lines_shape, idxs_shape),
-        result_layouts=default_layouts(lines_shape),
-    ).results
-
-mlir.register_lowering(_line_distances_bwd_p, cast(mlir.LoweringRule, _line_distances_bwd_cpu_lowering),
-                       platform="cpu")
-
-# Define JAX functions for custom differentiation rule
-def line_distances_fwd(image: RealArray, lines: RealArray, idxs: IntArray
-                       ) -> Tuple[RealArray, Tuple[IntArray, RealArray, IntArray]]:
-    out, line_idxs = _line_distances_fwd_p.bind(image, lines, idxs)
-    return out + image, (line_idxs, lines, idxs)
-
-def line_distances_bwd(res: Tuple[IntArray, RealArray, IntArray], g: RealArray
-                       ) -> Tuple[RealArray, RealArray, IntArray]:
-    line_idxs, lines, idxs = res
-    grad_lines = cast(RealArray, _line_distances_bwd_p.bind(g, line_idxs, lines, idxs))
-    return g, grad_lines, jnp.zeros(idxs.shape, dtype=idxs.dtype)
-
-# Define the main function
-@partial(custom_vjp)
-def line_distances(image: RealArray, lines: RealArray, idxs: IntArray) -> RealArray:
-    out, _ = line_distances_fwd(image, lines, idxs)
-    return out
-
-line_distances.defvjp(line_distances_fwd, line_distances_bwd)
+    return wrapper

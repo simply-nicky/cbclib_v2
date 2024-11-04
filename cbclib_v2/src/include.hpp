@@ -41,7 +41,6 @@ inline py::array_t<typename Container::value_type> as_pyarray(Container && seq, 
     );
 }
 
-
 template <typename Container, typename = std::enable_if_t<std::is_rvalue_reference_v<Container &&>>>
 inline py::array_t<typename Container::value_type> as_pyarray(Container && seq)
 {

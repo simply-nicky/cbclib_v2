@@ -272,18 +272,18 @@ class StringFormatting:
 
     @overload
     @classmethod
-    def to_string(cls, node: Union[Any, NDArray]) -> str:
+    def to_string(cls, node: Union[Any, Array]) -> str:
         ...
 
     @classmethod
-    def to_string(cls, node: Union[Any, Dict[str, Any], List[Any], NDArray]
+    def to_string(cls, node: Union[Any, Dict[str, Any], List[Any], Array]
                   ) -> Union[str, List[str], Dict[str, str]]:
         if isinstance(node, dict):
             return {k: cls.to_string(v) for k, v in node.items()}
         if isinstance(node, list):
             return [cls.to_string(v) for v in node]
-        if isinstance(node, np.ndarray):
-            return np.array2string(node, separator=',')
+        if isinstance(node, (np.ndarray, JaxArray)):
+            return np.array2string(np.array(node), separator=',')
         return str(node)
 
     @staticmethod

@@ -1,6 +1,22 @@
 from typing import Tuple
 import jax.numpy as jnp
-from ..annotations import IntArray, RealArray
+import numpy as np
+from ..annotations import Array, BoolArray, IntArray, RealArray, RealSequence, Shape
+
+def arange(shape: Shape) -> IntArray:
+    return jnp.reshape(jnp.arange(np.prod(shape), dtype=int), shape)
+
+def safe_sqrt(x: Array) -> Array:
+    _x = jnp.where(x <= 0.0, 0.0, x)
+    return jnp.where(x <= 0.0, 0.0, jnp.sqrt(_x))
+
+def safe_divide(x: Array, y: Array) -> Array:
+    _y = jnp.where(y == 0.0, 1.0, y)
+    return jnp.where(y == 0.0, 0.0, x / _y)
+
+def kxy_to_k(kxy: RealArray) -> RealArray:
+    kz = safe_sqrt(1 - jnp.sum(kxy[..., :2]**2, axis=-1))
+    return jnp.stack((kxy[..., 0], kxy[..., 1], kz), axis=-1)
 
 def euler_angles(rmats: RealArray) -> RealArray:
     r"""Calculate Euler angles with Bunge convention [EUL]_.
@@ -153,17 +169,44 @@ def k_to_smp(k: RealArray, z: RealArray, src: RealArray, idxs: IntArray
     xy = src[:2] + theta * (z - src[2])[..., None]
     return jnp.stack((xy[..., 0], xy[..., 1], jnp.broadcast_to(z, xy.shape[:-1])), axis=-1)
 
+def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray) -> RealArray:
+    return jnp.stack((jnp.clip(point[..., 0], vmin[0], vmax[0]),
+                      jnp.clip(point[..., 1], vmin[1], vmax[1])), axis=-1)
+
 def project_to_streak(point: RealArray, pt0: RealArray, pt1: RealArray) -> RealArray:
+    tau = jnp.asarray(pt1 - pt0)
+    center = 0.5 * (pt0 + pt1)
+    r = point - center
+    r_tau = safe_divide(jnp.sum(tau * r, axis=-1), jnp.sum(tau**2, axis=-1))
+    r_tau = jnp.clip(r_tau[..., None], -0.5, 0.5)
+    return tau * r_tau + center
+
+def vector_dot(a: Array, b: Array) -> Array:
+    return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+
+def line_intersection(pt0: RealArray, pt1: RealArray, pt2: RealArray, pt3: RealArray) -> RealArray:
+    tau_first = pt1 - pt0
+    tau_second = pt3 - pt2
+
+    t = safe_divide(vector_dot(pt2 - pt0, tau_second), vector_dot(tau_first, tau_second))
+    return pt0 + t[..., None] * tau_first
+
+def normal_distance(point: RealArray, pt0: RealArray, pt1: RealArray) -> RealArray:
     tau = pt1 - pt0
-    r = point - pt0
-    r_tau = jnp.sum(tau * r, axis=-1) / jnp.sum(tau**2, axis=-1)
-    return tau * jnp.clip(r_tau[..., None], 0.0, 1.0) + pt0
+    center = 0.5 * (pt0 + pt1)
+    dist = vector_dot(point - center, tau)
+    tau_abs = jnp.sqrt(jnp.sum(tau**2, axis=-1))
+    return safe_divide(dist, tau_abs)
 
-def distance_to_streak(point: RealArray, pt0: RealArray, pt1: RealArray) -> RealArray:
-    dist = point - project_to_streak(point, pt0, pt1)
-    return jnp.sqrt(jnp.sum(dist**2, axis=-1))
+def smooth_step(x: RealArray, vmin: RealSequence, vmax: RealSequence) -> RealArray:
+    delta = jnp.asarray(vmax) - jnp.asarray(vmin)
+    x_scaled = safe_divide(x, delta)
 
-def source_lines(q: RealArray, kmin: RealArray, kmax: RealArray) -> RealArray:
+    step = jnp.where(x >=vmax, 1.0, 0.0)
+    step = jnp.where((x >= vmin) & (x < vmax), 3 * x_scaled**2 - 2 * x_scaled**3, step)
+    return step
+
+def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6) -> Tuple[RealArray, BoolArray]:
     r"""Calculate the source lines for a set of reciprocal lattice points ``q``.
 
     Args:
@@ -174,15 +217,11 @@ def source_lines(q: RealArray, kmin: RealArray, kmax: RealArray) -> RealArray:
     Returns:
         A set of source lines in the aperture function.
     """
-    edges = jnp.array([[[kmin[0], kmin[1]], [kmin[0], kmax[1]]],
-                       [[kmin[0], kmin[1]], [kmax[0], kmin[1]]],
-                       [[kmax[0], kmin[1]], [kmax[0], kmax[1]]],
-                       [[kmin[0], kmax[1]], [kmax[0], kmax[1]]]])
     tau = edges[:, 1] - edges[:, 0]
     point = edges[:, 0]
-    q_mag = -0.5 * jnp.sum(q**2, axis=-1)
+    q_mag = jnp.sum(q**2, axis=-1)
 
-    f1 = q_mag[..., None] - jnp.sum(edges[:, 0] * q[..., None, :2], axis=-1)
+    f1 = -0.5 * q_mag[..., None] - jnp.sum(edges[:, 0] * q[..., None, :2], axis=-1)
     f2 = jnp.sum(tau * q[..., None, :2], axis=-1)
 
     a = f2 * f2 + q[..., None, 2]**2 * jnp.sum(tau**2, axis=-1)
@@ -190,26 +229,25 @@ def source_lines(q: RealArray, kmin: RealArray, kmax: RealArray) -> RealArray:
     c = f1 * f1 - q[..., None, 2]**2 * (1 - jnp.sum(point**2, axis=-1))
 
     def get_k(t):
-        kxy = point + t[..., None] * tau
-        kz_sq = 1 - jnp.sum(kxy**2, axis=-1)
-        kz_sq = jnp.where(kz_sq <= 0.0, 0.0, kz_sq)
-        kz = jnp.where(kz_sq <= 0.0, 0.0, jnp.sqrt(kz_sq))
-        return jnp.stack((kxy[..., 0], kxy[..., 1], kz), axis=-1)
+        return kxy_to_k(point + t[..., None] * tau)
 
-    is_intersect = b * b > a * c
-    delta = jnp.where(is_intersect, b * b - a * c, 0)
-    k0 = jnp.where(is_intersect[..., None], get_k((b - jnp.sqrt(delta)) / a), 0)
-    k1 = jnp.where(is_intersect[..., None], get_k((b + jnp.sqrt(delta)) / a), 0)
+    delta = jnp.where(b * b > a * c, b * b - a * c, 0.0)
 
-    kin = jnp.stack((k0, k1), axis=-3)
-    dist = distance_to_streak(kin[..., :2], edges[:, 0], edges[:, 1])
-    prod = jnp.abs(jnp.sum(kin * q[..., None, None, :], axis=-1) - q_mag[..., None, None])
-    fitness = dist + prod
+    a = jnp.where(a == 0.0, 1.0, a)
+    t0 = jnp.where(a == 0.0, 0.0, (b - jnp.sqrt(delta)) / a)
+    t1 = jnp.where(a == 0.0, 0.0, (b + jnp.sqrt(delta)) / a)
+    t = jnp.stack((t0, t1), axis=-2)
+
+    kin = get_k(t)
+    prod = jnp.abs(jnp.sum(kin * q[..., None, None, :], axis=-1) + 0.5 * q_mag[..., None, None])
+    prod = jnp.where(jnp.isclose(prod, 0.0, atol=atol), 0.0, prod)
+    fitness = 0.5 * (jnp.abs(t - jnp.clip(t, 0.0, 1.0)) + jnp.sqrt(prod / q_mag[..., None, None]))
 
     kin = jnp.reshape(kin, (*kin.shape[:-3], -1, *kin.shape[-1:]))
     fitness = jnp.reshape(fitness, (*fitness.shape[:-2], -1))
 
     kin = jnp.take_along_axis(kin, jnp.argsort(fitness[..., None], axis=-2)[..., :2, :], axis=-2)
-    fitness = jnp.sort(fitness, axis=-1)[..., :2]
-    kin = jnp.where(jnp.isclose(jnp.sum(fitness, axis=-1), 0.0)[..., None, None], kin, 0.0)
-    return kin
+    fitness = jnp.mean(jnp.sort(fitness, axis=-1)[..., :2], axis=-1)
+
+    mask = fitness == 0.0
+    return jnp.where(mask[..., None, None], kin, 0.0), mask

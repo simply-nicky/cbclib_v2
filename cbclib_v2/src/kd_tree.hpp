@@ -4,76 +4,58 @@
 
 namespace cbclib {
 
-template <typename Point, typename Data>
-class KDTree;
-
-template <typename Point, typename Data>
-class KDNode
-{
-public:
-    using point_type = typename Point::value_type;
-
-    using item_type = std::pair<Point, Data>;
-    using node_ptr = KDNode *;
-
-    item_type item;
-    int cut_dim;
-
-    KDNode() = default;
-
-    template <typename Item, typename = std::enable_if_t<std::is_same_v<item_type, std::remove_cvref_t<Item>>>>
-    KDNode(Item && item, int dir, node_ptr lt = node_ptr(), node_ptr rt = node_ptr(), node_ptr par = node_ptr()) :
-        item(std::forward<Item>(item)), cut_dim(dir), left(lt), right(rt), parent(par) {}
-
-    Point & point() {return item.first;}
-    const Point & point() const {return item.first;}
-
-    Data & data() {return item.second;}
-    const Data & data() const {return item.second;}
-
-    template <typename Pt>
-    bool is_left(const Pt & pt) const
-    {
-        return pt[cut_dim] < point()[cut_dim];
-    }
-
-private:
-    node_ptr left;
-    node_ptr right;
-    node_ptr parent;
-
-    friend class KDTree<Point, Data>;
-};
-
-template <typename Node, typename Point, typename Data, typename = void>
-struct is_node : std::false_type {};
-
-template <typename Node, typename Point, typename Data>
-struct is_node<Node, Point, Data,
-    typename std::enable_if_t<std::is_base_of_v<KDNode<Point, Data>, std::remove_cvref_t<Node>>>
-> : std::true_type {};
-
-template <typename Node, typename F, typename Data>
-constexpr bool is_node_v = is_node<Node, F, Data>::value;
-
 template<typename Point, typename Data>
 class KDTree
 {
 public:
-    using node_t = KDNode<Point, Data>;
+    using point_type = typename Point::value_type;
+    using item_type = std::pair<Point, Data>;
 
-    using point_type = typename node_t::point_type;
-    using item_type = typename node_t::item_type;
-    using node_ptr = typename node_t::node_ptr;
+    class KDNode
+    {
+    public:
+        using node_ptr = KDNode *;
+
+        item_type item;
+        int cut_dim;
+
+        KDNode() = default;
+
+        template <typename Item, typename = std::enable_if_t<std::is_same_v<item_type, std::remove_cvref_t<Item>>>>
+        KDNode(Item && item, int dir, node_ptr lt = node_ptr(), node_ptr rt = node_ptr(), node_ptr par = node_ptr()) :
+            item(std::forward<Item>(item)), cut_dim(dir), left(lt), right(rt), parent(par) {}
+
+        Point & point() {return item.first;}
+        const Point & point() const {return item.first;}
+
+        Data & data() {return item.second;}
+        const Data & data() const {return item.second;}
+
+        template <typename Pt>
+        bool is_left(const Pt & pt) const
+        {
+            return pt[cut_dim] < point()[cut_dim];
+        }
+
+    private:
+        node_ptr left;
+        node_ptr right;
+        node_ptr parent;
+
+        friend class KDTree<Point, Data>;
+    };
+
+    using node_t = KDNode;
+    using node_ptr = KDNode *;
 
     class KDIterator
     {
     public:
         using iterator_category = std::bidirectional_iterator_tag;
-        using value_type = KDNode<Point, Data>;
+        using value_type = node_t;
         using difference_type = std::ptrdiff_t;
-        using pointer = typename KDNode<Point, Data>::node_ptr;
-        using reference = const value_type &;
+        using pointer = node_ptr;
+        using reference = const node_t &;
 
         KDIterator() : ptr(nullptr), root(nullptr) {}
 
@@ -196,6 +178,9 @@ public:
         KDIterator(node_ptr ptr, node_ptr root) : ptr(ptr), root(root) {}
     };
 
+    using const_iterator = KDIterator;
+    using iterator = const_iterator;
+
     class Rectangle
     {
     public:
@@ -236,29 +221,27 @@ public:
     private:
         friend class KDTree<Point, Data>;
 
-        void trim_back(node_ptr node, const std::pair<bool, point_type> & value)
+        template <bool IsLeft>
+        void trim_back(node_ptr node, const point_type & value)
         {
-            if (value.first) high[node->cut_dim] = value.second;
-            else low[node->cut_dim] = value.second;
+            if constexpr (IsLeft) high[node->cut_dim] = value;
+            else low[node->cut_dim] = value;
         }
 
-        std::pair<bool, point_type> trim_left(node_ptr node)
+        point_type trim_left(node_ptr node)
         {
             auto value = high[node->cut_dim];
             high[node->cut_dim] = node->point()[node->cut_dim];
-            return std::make_pair(true, value);
+            return value;
         }
 
-        std::pair<bool, point_type> trim_right(node_ptr node)
+        point_type trim_right(node_ptr node)
         {
             auto value = low[node->cut_dim];
             low[node->cut_dim] = node->point()[node->cut_dim];
-            return std::make_pair(false, value);
+            return value;
         }
     };
-
-    using const_iterator = KDIterator;
-    using iterator = const_iterator;
 
     using rect_t = Rectangle;
     using rect_ptr = rect_t *;
@@ -306,7 +289,7 @@ public:
         return *this;
     }
 
-    bool empty() const {return !root;}
+    bool is_empty() const {return !root;}
 
     void clear()
     {
@@ -421,6 +404,12 @@ public:
         else return Rectangle();
     }
 
+    Point & point(iterator pos) {return pos->point();}
+    const Point & point(const_iterator pos) const {return pos->point();}
+
+    Data & data(iterator pos) {return pos->data();}
+    const Data & data(const_iterator pos) const {return pos->data();}
+
     void print(std::ostream & os) const
     {
         print_node(os, root);
@@ -527,7 +516,7 @@ private:
         return {node, inserted};
     }
 
-    std::tuple<node_ptr, size_t> remove_node(node_ptr node, Point point) const
+    std::tuple<node_ptr, size_t> remove_node(node_ptr node, const Point & point) const
     {
         // Fell out of tree
         if (!node) return {node, 0};
@@ -656,11 +645,11 @@ private:
             // First left then right
             auto lvalue = rect->trim_left(node);
             query = find_node(node->left, point, rect, query);
-            rect->trim_back(node, lvalue);
+            rect->template trim_back<true>(node, lvalue);
 
             auto rvalue = rect->trim_right(node);
             query = find_node(node->right, point, rect, query);
-            rect->trim_back(node, rvalue);
+            rect->template trim_back<false>(node, rvalue);
         }
         // pt is closer to right child
         else
@@ -668,11 +657,11 @@ private:
             // First right then left
             auto rvalue = rect->trim_right(node);
             query = find_node(node->right, point, rect, query);
-            rect->trim_back(node, rvalue);
+            rect->template trim_back<false>(node, rvalue);
 
             auto lvalue = rect->trim_left(node);
             query = find_node(node->left, point, rect, query);
-            rect->trim_back(node, lvalue);
+            rect->template trim_back<true>(node, lvalue);
         }
 
         return query;
@@ -696,11 +685,11 @@ private:
             // First left then right
             auto lvalue = rect->trim_left(node);
             nearest_node(query, node->left, rect, point);
-            rect->trim_back(node, lvalue);
+            rect->template trim_back<true>(node, lvalue);
 
             auto rvalue = rect->trim_right(node);
             nearest_node(query, node->right, rect, point);
-            rect->trim_back(node, rvalue);
+            rect->template trim_back<false>(node, rvalue);
         }
         // pt is closer to right child
         else
@@ -708,16 +697,16 @@ private:
             // First right then left
             auto rvalue = rect->trim_right(node);
             nearest_node(query, node->right, rect, point);
-            rect->trim_back(node, rvalue);
+            rect->template trim_back<false>(node, rvalue);
 
             auto lvalue = rect->trim_left(node);
             nearest_node(query, node->left, rect, point);
-            rect->trim_back(node, lvalue);
+            rect->template trim_back<true>(node, lvalue);
         }
     }
 
     template <typename T>
-    void stack_insert_node(stack_t<T> & stack, node_ptr node, T dist_sq) const
+    void insert_to_stack(stack_t<T> & stack, node_ptr node, T dist_sq) const
     {
         auto compare = [](const std::pair<const_iterator, T> & elem, T dist_sq)
         {
@@ -739,7 +728,7 @@ private:
         {
             // Insert in the stack according to its distance
             auto dist_sq = distance(node->point(), point);
-            stack_insert_node(stack, node, dist_sq);
+            insert_to_stack(stack, node, dist_sq);
         }
         // The stack is full
         else
@@ -751,7 +740,7 @@ private:
             auto dist_sq = distance(node->point(), point);
             if (dist_sq < stack.back().second)
             {
-                stack_insert_node(stack, node, dist_sq);
+                insert_to_stack(stack, node, dist_sq);
                 stack.pop_back();
             }
         }
@@ -762,11 +751,11 @@ private:
             // First left then right
             auto lvalue = rect->trim_left(node);
             nearest_k_nodes(stack, node->left, rect, point, k);
-            rect->trim_back(node, lvalue);
+            rect->template trim_back<true>(node, lvalue);
 
             auto rvalue = rect->trim_right(node);
             nearest_k_nodes(stack, node->right, rect, point, k);
-            rect->trim_back(node, rvalue);
+            rect->template trim_back<false>(node, rvalue);
         }
         // pt is closer to right child
         else
@@ -774,11 +763,11 @@ private:
             // First right then left
             auto rvalue = rect->trim_right(node);
             nearest_k_nodes(stack, node->right, rect, point, k);
-            rect->trim_back(node, rvalue);
+            rect->template trim_back<false>(node, rvalue);
 
             auto lvalue = rect->trim_left(node);
             nearest_k_nodes(stack, node->left, rect, point, k);
-            rect->trim_back(node, lvalue);
+            rect->template trim_back<true>(node, lvalue);
         }
     }
 
@@ -812,12 +801,12 @@ private:
         // Search left subtree
         auto lvalue = rect->trim_left(node);
         find_range_node(stack, node->left, rect, point, range_sq);
-        rect->trim_back(node, lvalue);
+        rect->template trim_back<true>(node, lvalue);
 
         // Search right subtree
         auto rvalue = rect->trim_right(node);
         find_range_node(stack, node->right, rect, point, range_sq);
-        rect->trim_back(node, rvalue);
+        rect->template trim_back<false>(node, rvalue);
     }
 
     std::ostream & print_rect(std::ostream & os) const

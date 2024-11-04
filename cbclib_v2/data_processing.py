@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
-from .jax import Streaks
+from .jax import Patterns
 from .cxi_protocol import CrystProtocol, FileStore, Kinds
 from .data_container import StringFormatting, DataContainer, Transform, ReferenceType
 from .streak_finder import PatternsStreakFinder
@@ -531,17 +531,16 @@ class DetectorBase(DataContainer):
         return self.replace(data=np.clip(self.data, vmin, vmax))
 
     def streak_coordinates(self, streaks: List[NDRealArray]) -> NDRealArray:
-        return np.concatenate(streaks).T
+        return np.concatenate(streaks)
 
-    def export_streaks(self, streaks: List[NDRealArray]) -> Streaks:
+    def export_patterns(self, streaks: List[NDRealArray]) -> Patterns:
         if len(streaks) != self.shape[0]:
             raise ValueError(f'Number of streaks ({len(streaks)}) must be equal to the '\
                              f'number of frames ({self.shape[0]}) in the container')
 
-        x0, y0, x1, y1 = self.streak_coordinates(streaks)
         idxs = np.concatenate([np.full((len(pattern),), idx)
                                for idx, pattern in zip(self.indices, streaks)])
-        return Streaks(x0, y0, x1, y1, idxs)
+        return Patterns(self.streak_coordinates(streaks), idxs)
 
     def export_coordinates(self, frames: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
         table = {'bgd': self.parent().scales[frames] * self.parent().whitefield[y, x],
@@ -572,7 +571,7 @@ class MaskedDetector(DetectorBase):
                             scale=scale)
 
     def streak_coordinates(self, streaks: List[NDRealArray]) -> NDRealArray:
-        return self.scale * np.concatenate(streaks).T
+        return self.scale * np.concatenate(streaks)
 
     def get_frames(self: MDet, idxs: Indices) -> MDet:
         return self.replace(data=self.data[idxs], mask=self.mask[idxs], indices=self.indices[idxs])
@@ -612,8 +611,8 @@ class StreakDetectorBase(DetectorBase):
         if self.parent() is None:
             raise ValueError('Invalid parent: the parent data container was deleted')
 
-        table = self.export_streaks(streaks).pattern_dataframe(width, shape=self.parent().shape,
-                                                               kernel=kernel)
+        table = self.export_patterns(streaks).pattern_dataframe(width, shape=self.parent().shape,
+                                                                kernel=kernel)
         table2 = self.export_coordinates(table['frames'].to_numpy(),
                                          table['y'].to_numpy(), table['x'].to_numpy())
         columns = set(table.columns) - {'frames', 'y', 'x'}

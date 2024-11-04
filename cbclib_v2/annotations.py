@@ -1,5 +1,4 @@
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, NamedTuple, Sequence, Set,
-                    Tuple, Type, Union)
+from typing import Any, Dict, List, Literal, NamedTuple, Sequence, Set, Tuple, Type, Union
 import numpy as np
 import numpy.typing as npt
 from jax import Array as JaxArray

@@ -226,7 +226,10 @@ protected:
 template <class T>
 inline size_t hash_combine(size_t seed, const T & v)
 {
-    return seed ^ (std::hash<T>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+    //  Golden Ratio constant used for better hash scattering
+    //  See https://softwareengineering.stackexchange.com/a/402543 
+    size_t GOLDEN_RATIO = 0x9e3779b1
+    return seed ^ (std::hash<T>()(v) + GOLDEN_RATIO + (seed << 6) + (seed >> 2));
 }
 
 template <typename T, size_t N>

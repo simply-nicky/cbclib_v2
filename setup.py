@@ -36,6 +36,10 @@ extensions = [Pybind11Extension("cbclib_v2.src.fft_functions",
                                 sources=["cbclib_v2/src/median.cpp"],
                                 define_macros = [('VERSION_INFO', __version__)],
                                 **extension_args),
+              Pybind11Extension("cbclib_v2.src.nd_tree",
+                                sources=["cbclib_v2/src/nd_tree.cpp"],
+                                define_macros = [('VERSION_INFO', __version__)],
+                                **extension_args),
               Pybind11Extension("cbclib_v2.src.signal_proc",
                                 sources=["cbclib_v2/src/signal_proc.cpp"],
                                 define_macros = [('VERSION_INFO', __version__)],
@@ -43,11 +47,7 @@ extensions = [Pybind11Extension("cbclib_v2.src.fft_functions",
               Pybind11Extension("cbclib_v2.src.streak_finder",
                                 sources=["cbclib_v2/src/streak_finder.cpp"],
                                 define_macros = [('VERSION_INFO', __version__)],
-                                **extension_args),
-              Pybind11Extension("cbclib_v2.src.cpu_ops",
-                                sources=["cbclib_v2/src/cpu_ops.cc"],
-                                define_macros = [('VERSION_INFO', __version__)],
-                                **extension_args),]
+                                **extension_args)]
 
 with open('README.md', 'r') as readme:
     long_description = readme.read()
