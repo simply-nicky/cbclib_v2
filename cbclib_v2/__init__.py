@@ -4,10 +4,14 @@
 
 (c) Nikolay Ivanov, 2024
 """
-from .cxi_protocol import CXIProtocol, CXIStore, ExtraProtocol, ExtraStore
-from .data_container import Transform, Crop, Downscale, Mirror, ComposeTransforms
-from .data_processing import (read_hdf, write_hdf, CrystData, CrystDataPart, CrystDataFull,
-                              StreakDetector, RegionDetector, ModelDetector)
-from .streak_finder import PatternStreakFinder, PatternsStreakFinder, StreakFinderResult
-from . import src
+from ._src.cbc_table import CBCTable
+from ._src.cxi_protocol import CXIProtocol, CXIStore, ExtraProtocol, ExtraStore
+from ._src.data_container import Transform, Crop, Downscale, Mirror, ComposeTransforms
+from ._src.data_processing import (CrystData, CrystDataFull, CrystDataPart, StreakDetector,
+                                   RegionDetector, read_hdf, write_hdf)
+from . import fft
 from . import jax
+from . import kdtree
+from . import label
+from . import ndimage
+from . import streak_finder

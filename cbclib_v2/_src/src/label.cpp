@@ -102,7 +102,7 @@ PYBIND11_MODULE(label, m)
         .def(py::init([](std::vector<typename point_t::value_type> xvec, std::vector<typename point_t::value_type> yvec)
         {
             PointsSet::container_type points;
-            for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace(x, y);
+            for (auto [x, y] : zip::zip(xvec, yvec)) points.insert(point_t{x, y});
             return PointsSet(std::move(points));
         }), py::arg("x"), py::arg("y"))
         .def_property("size", [](const PointsSet & points){return points.points.size();}, nullptr, py::keep_alive<0, 1>())

@@ -1,25 +1,15 @@
-from typing import Optional, Tuple
+from typing import Tuple
 import numpy as np
 import pytest
-from cbclib_v2 import PatternStreakFinder, StreakFinderResult
-from cbclib_v2.src import draw_line_image, Peaks, PointsSet, Regions, Structure
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
+from cbclib_v2.label import PointsSet, Regions, Structure
+from cbclib_v2.ndimage import draw_line_image
+from cbclib_v2.streak_finder import PatternStreakFinder, Peaks, StreakFinderResult
+from cbclib_v2.test_util import check_close
 
 class TestStreakFinder():
-    atol = {np.dtype(np.float32): 1e-4, np.dtype(np.float64): 1e-5,
-            np.dtype(np.complex64): 1e-4, np.dtype(np.complex128): 1e-5}
-    rtol = {np.dtype(np.float32): 1e-3, np.dtype(np.float64): 1e-4,
-            np.dtype(np.complex64): 1e-3, np.dtype(np.complex128): 1e-4}
     ATOL: float = 1e-8
     RTOL: float = 1e-5
-
-    def check_close(self, a: np.ndarray, b: np.ndarray, rtol: Optional[float]=None,
-                    atol: Optional[float]=None):
-        if rtol is None:
-            rtol = max(self.rtol.get(a.dtype, self.RTOL), self.rtol.get(b.dtype, self.RTOL))
-        if atol is None:
-            atol = max(self.atol.get(a.dtype, self.ATOL), self.atol.get(b.dtype, self.ATOL))
-        np.testing.assert_allclose(a, b, rtol=rtol, atol=atol)
 
     @pytest.fixture(params=[(50, 70)])
     def n_lines(self, request: pytest.FixtureRequest, rng: np.random.Generator) -> int:
@@ -137,7 +127,7 @@ class TestStreakFinder():
         linelets = np.concatenate([self.get_line(ctr[0], ctr[1], finder)
                                    for ctr in ctrs.values()], axis=0)
         streakpoints = np.stack(list(pts.values()))
-        self.check_close(linelets[np.lexsort(linelets.T)], streakpoints[np.lexsort(streakpoints.T)])
+        check_close(linelets[np.lexsort(linelets.T)], streakpoints[np.lexsort(streakpoints.T)])
 
         pts = np.unique(np.concatenate([self.get_pixels(ctr[0], ctr[1], finder)
                                         for ctr in ctrs.values()], axis=1).T, axis=0)

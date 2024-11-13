@@ -6,6 +6,8 @@ namespace cbclib {
 
 namespace detail{
 
+static const size_t GOLDEN_RATIO = 0x9e3779b9;
+
 template <typename T>
 inline constexpr int signum(T val)
 {
@@ -226,7 +228,9 @@ protected:
 template <class T>
 inline size_t hash_combine(size_t seed, const T & v)
 {
-    return seed ^ (std::hash<T>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+    //  Golden Ratio constant used for better hash scattering
+    //  See https://softwareengineering.stackexchange.com/a/402543
+    return seed ^ (std::hash<T>()(v) + GOLDEN_RATIO + (seed << 6) + (seed >> 2));
 }
 
 template <typename T, size_t N>
@@ -259,7 +263,6 @@ struct HashValueImpl<Tuple, 0>
         return hash_combine(seed, std::get<0>(tuple));
     }
 };
-
 
 template <typename ... Ts>
 struct TupleHasher
@@ -380,7 +383,7 @@ public:
     array(shape_handler handler, T * ptr) : shape_handler(std::move(handler)), ptr(ptr) {}
 
     array(ShapeContainer shape, T * ptr) : shape_handler(std::move(shape)), ptr(ptr) {}
-    
+
     array(size_t count, T * ptr) : shape_handler({count}) , ptr(ptr) {}
 
     array(const py::buffer_info & buf) : array(buf.shape, static_cast<T *>(buf.ptr)) {}

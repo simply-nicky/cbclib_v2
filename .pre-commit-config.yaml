@@ -1,9 +1,27 @@
+# To use:
+#
+#     pre-commit run -a
+#
+# Or:
+#
+#     pre-commit install  # (runs every time you commit in git)
+#
+# To update this file:
+#
+#     pre-commit autoupdate
+#
+# See https://github.com/pre-commit/pre-commit
+
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v2.3.0
+    rev: v2.3.0  # Use the ref you want to point at
     hooks:
+    -   id: check-added-large-files
+    -   id: check-case-conflict
+    -   id: check-merge-conflict
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
+
 -   repo: https://github.com/srstevenson/nb-clean
     rev: 3.2.0
     hooks:

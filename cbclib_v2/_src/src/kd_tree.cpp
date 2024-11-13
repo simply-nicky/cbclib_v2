@@ -3,7 +3,7 @@
 namespace cbclib {
 
 template <typename T, typename I>
-KDTree<array<T>, I> build_tree(py::array_t<T> database)
+KDTree<array<T>, I> build_kd_tree(py::array_t<T> database)
 {
     auto dbuf = database.request();
     size_t ndim = dbuf.shape[dbuf.ndim - 1];
@@ -25,7 +25,7 @@ void declare_kd_tree(py::module & m, const std::string & typestr)
     py::class_<KDTree<array<T>, I>>(m, (std::string("KDTree") + typestr).c_str())
         .def(py::init([](py::array_t<T> database)
             {
-                return build_tree<T, I>(database);
+                return build_kd_tree<T, I>(database);
             }), py::arg("database"))
         .def_property("high", [](const KDTree<array<T>, I> & tree)
             {
@@ -50,8 +50,10 @@ void declare_kd_tree(py::module & m, const std::string & typestr)
 
                 std::vector<size_t> shape {qarr.shape.begin(), std::prev(qarr.shape.end())};
                 shape.push_back(k);
+
                 py::array_t<I> result {shape};
                 array<I> rarr {result.request()};
+
                 py::array_t<double> dist {shape};
                 array<double> darr {dist.request()};
 
@@ -81,12 +83,8 @@ void declare_kd_tree(py::module & m, const std::string & typestr)
                 if (ndim != tree.ndim)
                     throw std::invalid_argument("query has invalid number of dimensions (" + std::to_string(ndim) + ")");
 
+                std::vector<std::vector<T>> dist;
                 std::vector<std::vector<I>> result;
-
-                auto get_index = [](const std::pair<typename KDTree<array<T>, I>::const_iterator, T> & item)
-                {
-                    return item.first->data();
-                };
 
                 py::gil_scoped_release release;
 
@@ -94,13 +92,20 @@ void declare_kd_tree(py::module & m, const std::string & typestr)
                 for (size_t i = 0; i < qsize; i++)
                 {
                     auto stack = tree.find_range(array<T>(ndim, qarr.data() + i * ndim), range * range);
-                    auto & neighbours = result.emplace_back();
-                    std::transform(stack.begin(), stack.end(), std::back_inserter(neighbours), get_index);
+
+                    auto & rvec = result.emplace_back();
+                    auto & dvec = dist.emplace_back();
+
+                    for (auto [iter, dist] : stack)
+                    {
+                        rvec.push_back(iter->data());
+                        dvec.push_back(std::sqrt(dist));
+                    }
                 }
 
                 py::gil_scoped_acquire acquire;
 
-                return result;
+                return std::make_tuple(dist, result);
             }, py::arg("query"), py::arg("range"), py::arg("num_threads")=1);
 }
 
@@ -125,10 +130,9 @@ PYBIND11_MODULE(kd_tree, m)
     declare_kd_tree<double, long>(m, "Double");
     declare_kd_tree<long, long>(m, "Int");
 
-    m.def("build_tree", &build_tree<float, long>, py::arg("database"));
-    m.def("build_tree", &build_tree<double, long>, py::arg("database"));
-    m.def("build_tree", &build_tree<long, long>, py::arg("database"));
-
+    m.def("build_kd_tree", &build_kd_tree<float, long>, py::arg("database"));
+    m.def("build_kd_tree", &build_kd_tree<double, long>, py::arg("database"));
+    m.def("build_kd_tree", &build_kd_tree<long, long>, py::arg("database"));
 
 #ifdef VERSION_INFO
     m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

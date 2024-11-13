@@ -1,6 +1,6 @@
 #ifndef STREAK_FINDER_
 #define STREAK_FINDER_
-#include "array.hpp"
+#include "image_proc.hpp"
 #include "label.hpp"
 #include "kd_tree.hpp"
 #include "signal_proc.hpp"
@@ -8,20 +8,6 @@
 namespace cbclib {
 
 namespace detail{
-
-// Taken from the boost::hash_combine: https://www.boost.org/doc/libs/1_35_0/doc/html/boost/hash_combine_id241013.html
-template <typename T>
-struct PointHasher
-{
-    std::size_t operator()(const Point<T> & point) const
-    {
-        std::size_t h = 0;
-
-        h ^= std::hash<T>{}(point.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<T>{}(point.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        return h;
-    }
-};
 
 // Return log(binomial_tail(n, k, p))
 // binomial_tail(n, k, p) = sum_{i = k}^n bincoef(n, i) * p^i * (1 - p)^{n - i}
@@ -222,7 +208,7 @@ struct Streak
     Streak(PSet && pset, Pt && ctr) : pixels(std::forward<PSet>(pset)), center(std::forward<Pt>(ctr))
     {
         auto line = pixels.get_line();
-        tau = line.tau;
+        tau = line.tangent();
 
         centers.emplace(make_pair(center));
         points.emplace(make_pair(line.pt0));
@@ -251,7 +237,7 @@ struct Streak
 
     void update()
     {
-        tau = line().tau;
+        tau = line().tangent();
         std::map<T, Point<T>> new_points;
         std::map<T, point_type> new_centers;
         for (auto && [_, pt]: points) new_points.emplace_hint(new_points.end(), make_pair(std::forward<decltype(pt)>(pt)));
@@ -337,47 +323,6 @@ struct StreakFinderResult
             return mask.at(point.coordinate()) == flags::not_used;
         }
         return false;
-    }
-
-    T line_minimum(const array<T> & data, const Line<integer_type> & line, T default_value) const
-    {
-        if (magnitude(line.tau))
-        {
-            T minimum = std::numeric_limits<T>::max();
-
-            BresenhamIterator<integer_type, true> pix {line.norm(), line};
-            point_type end = BresenhamTraits<integer_type, true>::end(line);
-
-            do
-            {
-                pix.step_xy();
-
-                if (mask.is_inbound(pix.point.coordinate()))
-                {
-                    auto index = mask.ravel_index(pix.point.coordinate());
-
-                    if (mask[index] != flags::bad && data[index] < minimum)
-                    {
-                        minimum = data[index];
-                    }
-                }
-
-                if (pix.is_xnext())
-                {
-                    pix.x_is_next();
-                }
-                if (pix.is_ynext())
-                {
-                    pix.y_is_next();
-                }
-            }
-            while (!pix.is_end(end));
-
-            if (minimum == std::numeric_limits<T>::max()) return default_value;
-            return minimum;
-        }
-
-        return default_value;
     }
 
     T probability(const array<T> & data, T vmin) const
@@ -480,7 +425,7 @@ struct StreakFinder
             auto seed = *peaks.points.begin();
             peaks.erase(peaks.points.begin());
 
-            auto streak = get_streak(seed, result, data, peaks, xtol, vmin);
+            auto streak = get_streak(seed, result, data, peaks, xtol);
             if (result.p_value(streak, xtol, vmin, p) < log_eps)
             {
                 auto [iter, is_added] = result.insert(std::make_pair(++cnt, std::move(streak)));
@@ -502,7 +447,7 @@ struct StreakFinder
     }
 
     template <typename T>
-    Streak<T> get_streak(const point_type & seed, const StreakFinderResult<T> & result, const array<T> & data, Peaks peaks, T xtol, T vmin) const
+    Streak<T> get_streak(const point_type & seed, const StreakFinderResult<T> & result, const array<T> & data, Peaks peaks, T xtol) const
     {
         Streak<T> streak {get_pset(result, data, seed), seed};
 
@@ -511,8 +456,8 @@ struct StreakFinder
         {
             old_size = streak.points.size();
 
-            streak = grow_streak<T, false>(std::move(streak), result, data, streak.central_line().pt0, peaks, xtol, vmin);
-            streak = grow_streak<T, true>(std::move(streak), result, data, streak.central_line().pt1, peaks, xtol, vmin);
+            streak = grow_streak<T, false>(std::move(streak), result, data, streak.central_line().pt0, peaks, xtol);
+            streak = grow_streak<T, true>(std::move(streak), result, data, streak.central_line().pt1, peaks, xtol);
         }
 
         return streak;
@@ -545,19 +490,19 @@ struct StreakFinder
 
 private:
     template <typename T>
-    std::pair<bool, Streak<T>> add_point_to_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, const point_type & pt, T xtol, T vmin) const
+    std::pair<bool, Streak<T>> add_point_to_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, const point_type & pt, T xtol) const
     {
         auto new_streak = streak;
         new_streak.insert(Streak<T>{get_pset(result, data, pt), pt});
         auto new_line = new_streak.central_line();
 
-        auto is_close = [&new_line, xtol](const std::pair<T, Point<T>> & item)
+        auto is_unaligned = [&new_line, xtol](const std::pair<T, Point<T>> & item)
         {
             return new_line.normal_distance(item.second) >= xtol;
         };
-        auto num_unaligned = std::transform_reduce(new_streak.points.begin(), new_streak.points.end(), unsigned(), std::plus(), is_close);
+        auto num_unaligned = std::transform_reduce(new_streak.points.begin(), new_streak.points.end(), unsigned(), std::plus(), is_unaligned);
 
-        if (num_unaligned <= nfa && result.line_minimum(data, new_line, vmin) > vmin)
+        if (num_unaligned <= nfa)
         {
             return std::make_pair(true, std::move(new_streak));
         }
@@ -584,7 +529,7 @@ private:
     }
 
     template <typename T, bool IsForward>
-    Streak<T> grow_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, point_type point, const Peaks & peaks, T xtol, T vmin) const
+    Streak<T> grow_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, point_type point, const Peaks & peaks, T xtol) const
     {
         unsigned tries = 0;
 
@@ -604,7 +549,7 @@ private:
 
             if (!result.is_bad(pt))
             {
-                auto [is_add, new_streak] = add_point_to_streak(std::move(streak), result, data, pt, xtol, vmin);
+                auto [is_add, new_streak] = add_point_to_streak(std::move(streak), result, data, pt, xtol);
 
                 if (is_add) return new_streak;
                 else

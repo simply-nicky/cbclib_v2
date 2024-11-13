@@ -14,7 +14,8 @@ class KDTreeFloat:
                      ) -> Tuple[NDRealArray, NDIntArray]:
         ...
 
-    def find_range(self, query: NDRealArray, range: float, num_threads: int=1) -> List[List[int]]:
+    def find_range(self, query: NDRealArray, range: float, num_threads: int=1
+                   ) -> Tuple[List[List[float]], List[List[int]]]:
         ...
 
 class KDTreeDouble(KDTreeFloat):
@@ -33,16 +34,17 @@ class KDTreeInt:
                      ) -> Tuple[NDRealArray, NDIntArray]:
         ...
 
-    def find_range(self, query: NDIntArray, range: float, num_threads: int=1) -> List[List[int]]:
+    def find_range(self, query: NDIntArray, range: float, num_threads: int=1
+                   ) -> Tuple[List[List[float]], List[List[int]]]:
         ...
 
 @overload
-def build_tree(database: NDRealArray) -> Union[KDTreeDouble, KDTreeFloat]:
+def build_kd_tree(database: NDRealArray) -> Union[KDTreeDouble, KDTreeFloat]:
     ...
 
 @overload
-def build_tree(database: NDIntArray) -> KDTreeInt:
+def build_kd_tree(database: NDIntArray) -> KDTreeInt:
     ...
 
-def build_tree(database: Union[NDRealArray, NDIntArray]) -> Union[KDTreeDouble, KDTreeFloat, KDTreeInt]:
+def build_kd_tree(database: Union[NDRealArray, NDIntArray]) -> Union[KDTreeDouble, KDTreeFloat, KDTreeInt]:
     ...

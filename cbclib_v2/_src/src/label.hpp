@@ -1,7 +1,7 @@
 #ifndef LABEL_H_
 #define LABEL_H_
 #include "array.hpp"
-#include "image_proc.hpp"
+#include "geometry.hpp"
 
 namespace cbclib {
 
@@ -10,6 +10,17 @@ using pixel_t = std::tuple<point_t, T>;
 
 template <typename T>
 using pset_t = std::set<pixel_t<T>>;
+
+template <typename Pt, typename = void>
+struct is_point : std::false_type {};
+
+template <typename Pt>
+struct is_point <Pt,
+    typename std::enable_if_t<std::is_base_of_v<Point<typename Pt::value_type>, std::remove_cvref_t<Pt>>>
+> : std::true_type {};
+
+template <typename Pt>
+constexpr bool is_point_v = is_point<Pt>::value;
 
 namespace detail {
 
@@ -95,7 +106,8 @@ struct Moments
 
     static Moments from_pset(const pset_t<T> & pset)
     {
-        Point<T> pt0; T mu = T();
+        Point<T> pt0 {T(), T()};
+        T mu = T();
         for (const auto & [pt, val] : pset)
         {
             pt0 += val * pt;
@@ -287,9 +299,9 @@ struct PointsSet : public PointsContainer<std::set<point_t>>
         if (std::forward<Func>(func)(seed))
         {
             std::vector<point_type> last_pixels;
-            std::vector<point_type> new_pixels;
+            std::unordered_set<point_type, detail::PointHasher<value_type>> new_pixels;
 
-            last_pixels.push_back(seed);
+            last_pixels.emplace_back(std::move(seed));
 
             while (last_pixels.size())
             {
@@ -297,17 +309,19 @@ struct PointsSet : public PointsContainer<std::set<point_t>>
                 {
                     for (const auto & shift: srt.points)
                     {
-                        auto pt = point + shift;
-
-                        if (std::forward<Func>(func)(pt))
-                        {
-                            auto [iter, is_added] = points.insert(std::move(pt));
-                            if (is_added) new_pixels.push_back(*iter);
-                        }
+                        new_pixels.insert(point + shift);
                     }
                 }
+                last_pixels.clear();
 
-                last_pixels = std::move(new_pixels);
+                for (auto && point: new_pixels)
+                {
+                    if (std::forward<Func>(func)(point))
+                    {
+                        auto [iter, is_added] = points.insert(std::forward<decltype(point)>(point));
+                        if (is_added) last_pixels.push_back(*iter);
+                    }
+                }
                 new_pixels.clear();
             }
         }
