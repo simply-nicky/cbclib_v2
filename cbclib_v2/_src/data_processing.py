@@ -10,25 +10,27 @@ Examples:
     >>> data = cbc.CrystData(inp_file)
     >>> data = data.load()
 """
-from __future__ import annotations
 from multiprocessing import cpu_count
 from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
-from .jax import Patterns
+from ..jax import Patterns
 from .cxi_protocol import CrystProtocol, FileStore, Kinds
-from .data_container import StringFormatting, DataContainer, Transform, ReferenceType
+from .data_container import StringFormatting, DataContainer, Transform
 from .streak_finder import PatternsStreakFinder
 from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray, NDRealArray,
-                          ROI, Shape)
-from .src import binterpolate, kr_grid, label, median, robust_mean, robust_lsq, Regions, Structure
+                          ReferenceType, ROI, Shape)
+from .src.label import label, Regions, Structure
+from .src.signal_proc import binterpolate, kr_grid
+from .src.median import median, robust_mean, robust_lsq
+
+AnyCryst = Union['CrystData', 'CrystDataPart', 'CrystDataFull']
 
 def read_hdf(input_file: FileStore, attributes: Union[str, List[str]],
              idxs: Optional[IntSequence]=None, transform: Optional[Transform] = None,
-             processes: int=1, verbose: bool=True
-             ) -> Union[CrystData, CrystDataPart, CrystDataFull]:
+             processes: int=1, verbose: bool=True) -> AnyCryst:
     """Load data attributes from the input files in `files` file handler object.
 
     Args:
@@ -72,12 +74,12 @@ def read_hdf(input_file: FileStore, attributes: Union[str, List[str]],
         data_dict[attr] = data
 
     if 'data' in data_dict:
-        if 'whitefield' in data_dict:
+        if 'whitefield' in data_dict and 'snr' in data_dict:
             return CrystDataFull(**data_dict)
         return CrystDataPart(**data_dict)
     return CrystData(**data_dict)
 
-def write_hdf(container: Union[CrystData, CrystDataPart, CrystDataFull], output_file: FileStore,
+def write_hdf(container: AnyCryst, output_file: FileStore,
               attributes: Union[str, List[str], None]=None, good_frames: Optional[Indices]=None,
               transform: Optional[Transform] = None, input_file: Optional[FileStore]=None,
               mode: str='overwrite', idxs: Optional[Indices]=None):
@@ -111,7 +113,7 @@ def write_hdf(container: Union[CrystData, CrystDataPart, CrystDataFull], output_
         good_frames = np.arange(container.shape[0])
 
     for attr in StringFormatting.str_to_list(attributes):
-        data = np.asarray(container.get(attr))
+        data = np.asarray(getattr(container, attr))
         if data is not None:
             kind = container.get_kind(attr)
 
@@ -159,17 +161,17 @@ class CrystDataBase(CrystProtocol, DataContainer):
     @property
     def shape(self) -> Shape:
         shape = [0, 0, 0]
-        for attr, data in self.items():
+        for attr, data in self.contents().items():
             if data is not None and self.get_kind(attr) == Kinds.SEQUENCE:
                 shape[0] = data.shape[0]
                 break
 
-        for attr, data in self.items():
+        for attr, data in self.contents().items():
             if data is not None and self.get_kind(attr) == Kinds.FRAME:
                 shape[1:] = data.shape
                 break
 
-        for attr, data in self.items():
+        for attr, data in self.contents().items():
             if data is not None and self.get_kind(attr) == Kinds.STACK:
                 shape[:] = data.shape
                 break
@@ -194,9 +196,9 @@ class CrystDataBase(CrystProtocol, DataContainer):
         data_dict = {}
         for attr in self.contents():
             if self.get_kind(attr) in (Kinds.SEQUENCE, Kinds.STACK):
-                data_dict[attr] = self.get(attr)[idxs]
+                data_dict[attr] = getattr(self, attr)[idxs]
             else:
-                data_dict[attr] = self.get(attr)
+                data_dict[attr] = getattr(self, attr)
         return self.replace(**data_dict)
 
 Cryst = TypeVar("Cryst", bound="CrystDataPartBase")
@@ -403,7 +405,7 @@ class CrystDataPartBase(CrystDataBase):
 
         return self.replace(std=std)
 
-    def update_snr(self) -> CrystDataFull:
+    def update_snr(self) -> 'CrystDataFull':
         """Return a new :class:`CrystData` object with new background corrected detector
         images.
 
@@ -490,7 +492,7 @@ class CrystDataFull(CrystDataPartBase):
     snr         : NDRealArray
     whitefield  : NDRealArray
 
-    def streak_detector(self, structure: Structure) -> StreakDetector:
+    def streak_detector(self, structure: Structure) -> 'StreakDetector':
         """Return a new :class:`cbclib.StreakDetector` object that detects lines in SNR frames.
 
         Raises:
@@ -540,7 +542,7 @@ class DetectorBase(DataContainer):
 
         idxs = np.concatenate([np.full((len(pattern),), idx)
                                for idx, pattern in zip(self.indices, streaks)])
-        return Patterns(self.streak_coordinates(streaks), idxs)
+        return Patterns(index=idxs, lines=self.streak_coordinates(streaks))
 
     def export_coordinates(self, frames: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
         table = {'bgd': self.parent().scales[frames] * self.parent().whitefield[y, x],

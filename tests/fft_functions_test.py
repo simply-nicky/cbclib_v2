@@ -1,30 +1,16 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Tuple, cast
 import numpy as np
 import pytest
 import scipy.ndimage
 import scipy.signal
-from cbclib_v2.src import (fftn, fft_convolve, gaussian_filter, gaussian_gradient_magnitude,
-                           gaussian_kernel, ifftn)
-from cbclib_v2.annotations import Norm, Mode
+from cbclib_v2.fft import fftn, ifftn, fft_convolve
+from cbclib_v2.ndimage import gaussian_filter, gaussian_gradient_magnitude, gaussian_kernel
+from cbclib_v2.annotations import Norm, NDRealArray, Mode
+from cbclib_v2.test_util import check_close
 
 class TestPyBind11Functions:
     ArrayGenerator = Callable[[Tuple[int, ...]], np.ndarray]
     ShapeGenerator = Callable[[], Tuple[int, ...]]
-
-    atol = {np.dtype(np.float32): 1e-4, np.dtype(np.float64): 1e-5,
-            np.dtype(np.complex64): 1e-4, np.dtype(np.complex128): 1e-5}
-    rtol = {np.dtype(np.float32): 1e-3, np.dtype(np.float64): 1e-4,
-            np.dtype(np.complex64): 1e-3, np.dtype(np.complex128): 1e-4}
-    ATOL: float = 1e-8
-    RTOL: float = 1e-5
-
-    def check_close(self, a: np.ndarray, b: np.ndarray, rtol: Optional[float]=None,
-                    atol: Optional[float]=None):
-        if rtol is None:
-            rtol = max(self.rtol.get(a.dtype, self.RTOL), self.rtol.get(b.dtype, self.RTOL))
-        if atol is None:
-            atol = max(self.atol.get(a.dtype, self.ATOL), self.atol.get(b.dtype, self.ATOL))
-        np.testing.assert_allclose(a, b, rtol=rtol, atol=atol)
 
     @pytest.fixture(params=[np.float32, np.float64])
     def float_type(self, request: pytest.FixtureRequest) -> np.dtype:
@@ -69,15 +55,15 @@ class TestPyBind11Functions:
         shape = random_shape()
         out_shape = tuple(2 * ax for ax in shape)
         inp = random_complex(shape)
-        self.check_close(fftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
-                         np.fft.fftn(inp, s=out_shape[1:], norm=norm))
-        self.check_close(ifftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
-                         np.fft.ifftn(inp, s=out_shape[1:], norm=norm))
+        check_close(fftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
+                    np.fft.fftn(inp, s=out_shape[1:], norm=norm))
+        check_close(ifftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
+                    np.fft.ifftn(inp, s=out_shape[1:], norm=norm))
 
         inp = random_float(shape)
-        self.check_close(fftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
+        check_close(fftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
                          np.fft.fftn(inp, s=out_shape[1:], norm=norm))
-        self.check_close(ifftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
+        check_close(ifftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
                          np.fft.ifftn(inp, s=out_shape[1:], norm=norm))
 
     def test_fft_convolve(self, random_float: ArrayGenerator, random_complex: ArrayGenerator,
@@ -85,20 +71,22 @@ class TestPyBind11Functions:
         ishape, kshape = random_shape(), random_shape()
         inp = random_float(ishape)
         kernel = random_float(kshape)
-        self.check_close(fft_convolve(inp, kernel, num_threads=num_threads),
-                         scipy.signal.fftconvolve(inp, kernel, mode='same'))
+        check_close(fft_convolve(inp, kernel, num_threads=num_threads),
+                    cast(NDRealArray, scipy.signal.fftconvolve(inp, kernel, mode='same')))
         kernel = random_float(kshape[1:])
         axes = np.arange(-kernel.ndim, 0)
-        self.check_close(fft_convolve(inp, kernel, axis=axes, num_threads=num_threads),
-                         scipy.signal.fftconvolve(inp, kernel[None, ...], mode='same', axes=axes))
+        check_close(fft_convolve(inp, kernel, axis=axes, num_threads=num_threads),
+                    cast(NDRealArray, scipy.signal.fftconvolve(inp, kernel[None, ...],
+                                                               mode='same', axes=axes)))
         inp = random_complex(ishape)
         kernel = random_complex(kshape)
-        self.check_close(fft_convolve(inp, kernel, num_threads=num_threads),
-                         scipy.signal.fftconvolve(inp, kernel, mode='same'))
+        check_close(fft_convolve(inp, kernel, num_threads=num_threads),
+                    cast(NDRealArray, scipy.signal.fftconvolve(inp, kernel, mode='same')))
         kernel = random_complex(kshape[1:])
         axes = np.arange(-kernel.ndim, 0)
-        self.check_close(fft_convolve(inp, kernel, axis=axes, num_threads=num_threads),
-                         scipy.signal.fftconvolve(inp, kernel[None, ...], mode='same', axes=axes))
+        check_close(fft_convolve(inp, kernel, axis=axes, num_threads=num_threads),
+                    cast(NDRealArray, scipy.signal.fftconvolve(inp, kernel[None, ...],
+                                                               mode='same', axes=axes)))
 
     @pytest.mark.xfail(raises=ValueError)
     def test_gaussian_kernel_zero(self):
@@ -112,24 +100,21 @@ class TestPyBind11Functions:
                              random_shape: ShapeGenerator, sigma: float, order: int, mode: Mode,
                              num_threads: int):
         inp = random_float(random_shape())
-        self.check_close(gaussian_filter(inp, sigma, order=order, mode=mode,
-                                                 num_threads=num_threads),
-                         scipy.ndimage.gaussian_filter(inp, sigma, order=order, mode=mode))
+        check_close(gaussian_filter(inp, sigma, order=order, mode=mode, num_threads=num_threads),
+                    scipy.ndimage.gaussian_filter(inp, sigma, order=order, mode=mode))
         inp = random_complex(random_shape())
-        self.check_close(gaussian_filter(inp, sigma, order=order, mode=mode,
-                                                 num_threads=num_threads),
-                         scipy.ndimage.gaussian_filter(inp, sigma, order=order, mode=mode))
+        check_close(gaussian_filter(inp, sigma, order=order, mode=mode, num_threads=num_threads),
+                    scipy.ndimage.gaussian_filter(inp, sigma, order=order, mode=mode))
 
     def test_gaussian_gradient(self, random_float: ArrayGenerator, random_complex: ArrayGenerator,
                                random_shape: ShapeGenerator, sigma: float, mode: Mode,
                                num_threads: int):
         inp = random_float(random_shape())
-        self.check_close(gaussian_gradient_magnitude(inp, sigma, mode=mode,
-                                                             num_threads=num_threads),
-                         scipy.ndimage.gaussian_gradient_magnitude(inp, sigma, mode=mode),
-                         atol=1e-4)
+        check_close(gaussian_gradient_magnitude(inp, sigma, mode=mode, num_threads=num_threads),
+                    scipy.ndimage.gaussian_gradient_magnitude(inp, sigma, mode=mode),
+                    atol=1e-4)
         inp = random_complex(random_shape())
-        self.check_close(np.abs(gaussian_gradient_magnitude(inp, sigma, mode=mode,
-                                                                    num_threads=num_threads)),
-                         np.abs(scipy.ndimage.gaussian_gradient_magnitude(inp, sigma, mode=mode)),
-                         atol=1e-4)
+        check_close(np.abs(gaussian_gradient_magnitude(inp, sigma, mode=mode,
+                                                       num_threads=num_threads)),
+                    np.abs(scipy.ndimage.gaussian_gradient_magnitude(inp, sigma, mode=mode)),
+                    atol=1e-4)

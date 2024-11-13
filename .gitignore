@@ -7,7 +7,7 @@ notebooks/
 trace/
 
 # C++ debugging
-cbclib_v2/src/debug
+cbclib_v2/_src/src/debug
 
 #jupyter checkpoints
 .ipynb_checkpoints/

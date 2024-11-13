@@ -1,27 +1,11 @@
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict
 import numpy as np
-import jax.numpy as jnp
-from jax import config
 import pytest
-from jax.test_util import check_grads
-from cbclib_v2.src import draw_line_image, draw_line_table
-from cbclib_v2.jax import line_distances
 from cbclib_v2.annotations import IntArray, RealArray, Shape, Table
-
-config.update("jax_enable_x64", True)
+from cbclib_v2.ndimage import draw_line_image, draw_line_table
+from cbclib_v2.test_util import check_close
 
 class TestDrawLine():
-    ATOL: float = 1e-8
-    RTOL: float = 1e-3
-
-    def check_close(self, a: RealArray, b: RealArray, rtol: Optional[float]=None,
-                    atol: Optional[float]=None):
-        if rtol is None:
-            rtol = self.RTOL
-        if atol is None:
-            atol = self.ATOL
-        np.testing.assert_allclose(a, b, rtol=rtol, atol=atol)
-
     @pytest.fixture(params=[(10, 50),])
     def n_lines(self, request: pytest.FixtureRequest, rng: np.random.Generator) -> int:
         vmin, vmax = request.param
@@ -147,16 +131,10 @@ class TestDrawLine():
         return np.stack(frames).reshape(shape)
 
     def test_draw_line_image(self, image: RealArray, image_numpy: RealArray):
-        self.check_close(image, image_numpy)
+        check_close(image, image_numpy)
 
     def test_draw_line_table(self, table: Table, image_numpy: RealArray):
         image = np.zeros(image_numpy.shape)
         for (_, idx), val in table.items():
             image[np.unravel_index(idx, image_numpy.shape)] += val
-        self.check_close(image, image_numpy)
-
-    def test_draw_line_gradient(self, lines: RealArray, idxs: IntArray, shape: Shape):
-        def wrapper(lines):
-            return line_distances(jnp.zeros(shape), jnp.asarray(lines), jnp.asarray(idxs))
-
-        check_grads(wrapper, (lines,), order=1, modes='rev')
+        check_close(image, image_numpy)

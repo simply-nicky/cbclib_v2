@@ -1,4 +1,3 @@
-from __future__ import annotations
 from typing import Callable, ClassVar, Iterable, List, Optional, cast
 from dataclasses import dataclass
 import numpy as np
@@ -15,7 +14,7 @@ class CBCTable():
             self.table = self.table[self.columns]
 
     @classmethod
-    def read_hdf(cls, path: str, key: str) -> CBCTable:
+    def read_hdf(cls, path: str, key: str) -> 'CBCTable':
         """Initialize a CBC table with data saved in a HDF5 file ``path`` at a ``key`` key inside
         the file and an experimental geometry object ``setup``.
 

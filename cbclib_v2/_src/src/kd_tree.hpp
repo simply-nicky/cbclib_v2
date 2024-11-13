@@ -206,7 +206,7 @@ public:
             }
         }
 
-        template <typename Pt, typename T = std::common_type_t<point_type, typename Pt::value_type>> 
+        template <typename Pt, typename T = std::common_type_t<point_type, typename Pt::value_type>>
         T distance(const Pt & point) const
         {
             T dist = T();
@@ -537,7 +537,7 @@ private:
             // Take replacement from left
             else if (node->left)
             {
-                // Swapping the nodes 
+                // Swapping the nodes
                 node->item = find_min_node(node->left, node->cut_dim)->item;
 
                 // move left subtree to right!

@@ -9,7 +9,6 @@ Examples:
     >>> cbc.CXIProtocol.import_default()
     CXIProtocol(load_paths={...})
 """
-from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import partial
 from enum import auto, Enum
@@ -24,8 +23,8 @@ from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Prot
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
-from .xfel_data import open_run, stack_detector_data, DataCollection
-from .xfel_geom import JUNGFRAUGeometry
+from extra_data import open_run, stack_detector_data, DataCollection
+from extra_geom import JUNGFRAUGeometry
 from .data_container import DataContainer, Parser, INIParser, JSONParser, StringFormatting
 from .annotations import Indices, IntTuple, NDArray, NDIntArray, Shape
 
@@ -99,7 +98,7 @@ class CXIProtocol(DataContainer):
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
-    def read(cls, file: Optional[str]=None, ext: str='ini') -> CXIProtocol:
+    def read(cls, file: Optional[str]=None, ext: str='ini') -> 'CXIProtocol':
         """Return the default :class:`CXIProtocol` object.
 
         Returns:
@@ -109,7 +108,7 @@ class CXIProtocol(DataContainer):
             file = CXI_PROTOCOL
         return cls(**cls.parser(ext).read(file))
 
-    def add_attribute(self, attr: str, load_paths: List[str]) -> CXIProtocol:
+    def add_attribute(self, attr: str, load_paths: List[str]) -> 'CXIProtocol':
         """Add a data attribute to the protocol.
 
         Args:
@@ -426,7 +425,7 @@ class CXIStore(FileStore):
             isopen &= bool(cxi_file)
         return isopen
 
-    def __enter__(self) -> CXIStore:
+    def __enter__(self) -> 'CXIStore':
         self.open()
         return self
 
@@ -575,7 +574,7 @@ class ExtraProtocol(DataContainer):
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
-    def read(cls, file: str, ext: str='ini') -> ExtraProtocol:
+    def read(cls, file: str, ext: str='ini') -> 'ExtraProtocol':
         return cls(**cls.parser(ext).read(file))
 
     @classmethod
@@ -612,8 +611,8 @@ class ExtraProtocol(DataContainer):
 
     def find_files(self, prop_dir: str, run: Union[int, List[int]], include: str='*') -> List[str]:
         files = []
-        for run in np.atleast_1d(run):
-            path = os.path.join(prop_dir, self.folder, f'r{run:04d}')
+        for current in np.atleast_1d(run):
+            path = os.path.join(prop_dir, self.folder, f'r{current:04d}')
             new_files = [f for f in os.listdir(path)
                          if f.endswith('.h5') and (f.lower() != 'overview.h5')]
             new_files = [os.path.join(path, f) for f in fnmatch.filter(new_files, include)]

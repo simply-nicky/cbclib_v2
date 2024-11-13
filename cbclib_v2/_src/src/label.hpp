@@ -299,9 +299,9 @@ struct PointsSet : public PointsContainer<std::set<point_t>>
         if (std::forward<Func>(func)(seed))
         {
             std::vector<point_type> last_pixels;
-            std::vector<point_type> new_pixels;
+            std::unordered_set<point_type, detail::PointHasher<value_type>> new_pixels;
 
-            last_pixels.push_back(seed);
+            last_pixels.emplace_back(std::move(seed));
 
             while (last_pixels.size())
             {
@@ -309,17 +309,19 @@ struct PointsSet : public PointsContainer<std::set<point_t>>
                 {
                     for (const auto & shift: srt.points)
                     {
-                        auto pt = point + shift;
-
-                        if (std::forward<Func>(func)(pt))
-                        {
-                            auto [iter, is_added] = points.insert(std::move(pt));
-                            if (is_added) new_pixels.push_back(*iter);
-                        }
+                        new_pixels.insert(point + shift);
                     }
                 }
+                last_pixels.clear();
 
-                last_pixels = std::move(new_pixels);
+                for (auto && point: new_pixels)
+                {
+                    if (std::forward<Func>(func)(point))
+                    {
+                        auto [iter, is_added] = points.insert(std::forward<decltype(point)>(point));
+                        if (is_added) last_pixels.push_back(*iter);
+                    }
+                }
                 new_pixels.clear();
             }
         }

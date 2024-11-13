@@ -1,7 +1,7 @@
 from typing import Tuple
 import jax.numpy as jnp
 import numpy as np
-from ..annotations import Array, BoolArray, IntArray, RealArray, RealSequence, Shape
+from .._src.annotations import Array, BoolArray, IntArray, RealArray, Shape
 
 def arange(shape: Shape) -> IntArray:
     return jnp.reshape(jnp.arange(np.prod(shape), dtype=int), shape)
@@ -170,8 +170,7 @@ def k_to_smp(k: RealArray, z: RealArray, src: RealArray, idxs: IntArray
     return jnp.stack((xy[..., 0], xy[..., 1], jnp.broadcast_to(z, xy.shape[:-1])), axis=-1)
 
 def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray) -> RealArray:
-    return jnp.stack((jnp.clip(point[..., 0], vmin[0], vmax[0]),
-                      jnp.clip(point[..., 1], vmin[1], vmax[1])), axis=-1)
+    return jnp.clip(point, vmin, vmax)
 
 def project_to_streak(point: RealArray, pt0: RealArray, pt1: RealArray) -> RealArray:
     tau = jnp.asarray(pt1 - pt0)
@@ -197,14 +196,6 @@ def normal_distance(point: RealArray, pt0: RealArray, pt1: RealArray) -> RealArr
     dist = vector_dot(point - center, tau)
     tau_abs = jnp.sqrt(jnp.sum(tau**2, axis=-1))
     return safe_divide(dist, tau_abs)
-
-def smooth_step(x: RealArray, vmin: RealSequence, vmax: RealSequence) -> RealArray:
-    delta = jnp.asarray(vmax) - jnp.asarray(vmin)
-    x_scaled = safe_divide(x, delta)
-
-    step = jnp.where(x >=vmax, 1.0, 0.0)
-    step = jnp.where((x >= vmin) & (x < vmax), 3 * x_scaled**2 - 2 * x_scaled**3, step)
-    return step
 
 def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6) -> Tuple[RealArray, BoolArray]:
     r"""Calculate the source lines for a set of reciprocal lattice points ``q``.

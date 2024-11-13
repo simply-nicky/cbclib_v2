@@ -4,17 +4,12 @@ from typing import (Any, Callable, ClassVar, Dict, List, Optional, Tuple, Type, 
                     cast, get_type_hints, overload)
 from dataclasses import dataclass, is_dataclass, fields
 import pandas as pd
-import numpy as np
 import jax.numpy as jnp
 from jax import jit, random, tree_util
 from .dataclasses import jax_dataclass, field
-from .geometry import (det_to_k, euler_angles, euler_matrix, k_to_det, k_to_smp, kxy_to_k,
-                       project_to_rect, tilt_angles, tilt_matrix, safe_divide)
-from .primitives import build_and_knn_query
-from ..src import draw_line_image, draw_line_mask, draw_line_table
-from ..data_container import DataclassInstance, DataContainer, Parser, INIParser, JSONParser
-from ..annotations import (BoolArray, Indices, IntArray, IntSequence, KeyArray, RealArray,
-                           RealSequence, Pattern, PatternWithHKL, PatternWithHKLID, Shape)
+from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
+from .._src.annotations import IntArray, KeyArray, RealArray, Shape
+from .._src.data_container import DataclassInstance, Parser, INIParser, JSONParser
 
 State = DataclassInstance
 KNNQuery = Callable[[RealArray, IntArray, RealArray, IntArray], IntArray]
@@ -23,239 +18,12 @@ KNNQuery = Callable[[RealArray, IntArray, RealArray, IntArray], IntArray]
 class Detector():
     x_pixel_size : float
     y_pixel_size : float
-    roi          : Tuple[float, float, float, float]
-
-    def knn_query(self, k: int, num_threads: int=1) -> KNNQuery:
-        return build_and_knn_query(self.roi, k, num_threads)
 
     def to_indices(self, x: RealArray, y: RealArray) -> Tuple[RealArray, RealArray]:
         return x / self.x_pixel_size, y / self.y_pixel_size
 
     def to_coordinates(self, i: RealArray, j: RealArray) -> Tuple[RealArray, RealArray]:
         return i * self.x_pixel_size, j * self.y_pixel_size
-
-@dataclass
-class Patterns(DataContainer):
-    """Detector streak lines container. Provides an interface to draw a pattern for a set of
-    lines.
-
-    Args:
-        x0 : x coordinates of the first point of a line.
-        y0 : y coordinates of the first point of a line.
-        x1 : x coordinates of the second point of a line.
-        y1 : y coordinates of the second point of a line.
-        length: Line's length in pixels.
-        h : First Miller index.
-        k : Second Miller index.
-        l : Third Miller index.
-        hkl_id : Bragg reflection index.
-    """
-    lines       : RealArray
-    frames      : IntArray
-    hkl         : Optional[IntArray] = None
-
-    def __post_init__(self):
-        if self.lines.shape[-1] != 4:
-            raise ValueError(f"lines has an invalid shape: {self.lines.shape}")
-        if self.frames.shape != self.shape:
-            raise ValueError("lines and frames have incompatible shapes:"\
-                             f" {self.lines.shape} and {self.frames.shape}")
-
-    @property
-    def length(self) -> RealArray:
-        return jnp.sqrt((self.lines[..., 2] - self.lines[..., 0])**2 + \
-                        (self.lines[..., 3] - self.lines[..., 1])**2)
-
-    @property
-    def shape(self) -> Shape:
-        return self.lines.shape[:-1]
-
-    @property
-    def points(self) -> RealArray:
-        return jnp.reshape(self.lines, self.shape + (2, 2))
-
-    @property
-    def x(self) -> RealArray:
-        return jnp.stack((self.lines[..., 0], self.lines[..., 2]), axis=-1)
-
-    @property
-    def y(self) -> RealArray:
-        return jnp.stack((self.lines[..., 1], self.lines[..., 3]), axis=-1)
-
-    def mask_streaks(self, idxs: Union[Indices, BoolArray]) -> 'Patterns':
-        """Return a new streaks container with a set of streaks discarded.
-
-        Args:
-            idxs : A set of indices of the streaks to discard.
-
-        Returns:
-            A new :class:`cbclib.Streaks` container.
-        """
-        return Patterns(**{attr: self[attr][idxs] for attr in self.contents()})
-
-    def offset(self, x: float, y: float) -> 'Patterns':
-        return self.replace(lines=self.lines + jnp.array([x, y, x, y]))
-
-    def pattern_dict(self, width: float, shape: Shape, kernel: str='rectangular',
-                     num_threads: int=1) -> Union[Pattern, PatternWithHKL, PatternWithHKLID]:
-        """Draw a pattern in the :class:`dict` format.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern in dictionary format.
-        """
-        table = draw_line_table(lines=self.to_lines(width=width), shape=shape, idxs=self.frames,
-                                kernel=kernel, num_threads=num_threads)
-        ids, idxs = np.array(list(table)).T
-        normalised_shape = (np.prod(shape[:-2], dtype=int),) + shape[-2:]
-        frames, y, x = jnp.unravel_index(idxs, normalised_shape)
-
-        if self.hkl is not None:
-            vals = np.array(list(table.values()))
-            h, k, l = self.hkl[ids].T
-            return PatternWithHKL(ids, frames, y, x, vals, h, k, l)
-        return Pattern(ids, frames, y, x)
-
-    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                          num_threads: int=1) -> pd.DataFrame:
-        """Draw a pattern in the :class:`pandas.DataFrame` format.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-            reduce : Discard the pixel data with reflection profile values equal to
-                zero.
-
-        Returns:
-            A pattern in :class:`pandas.DataFrame` format.
-        """
-        return pd.DataFrame(self.pattern_dict(width=width, shape=shape, kernel=kernel,
-                                              num_threads=num_threads)._asdict())
-
-    def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian',
-                      num_threads: int=1) -> RealArray:
-        """Draw a pattern in the :class:`numpy.ndarray` format.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern in :class:`numpy.ndarray` format.
-        """
-        return draw_line_image(self.to_lines(width=width), shape=shape, idxs=self.frames,
-                               kernel=kernel, num_threads=num_threads)
-
-    def pattern_mask(self, width: float, shape: Tuple[int, int], max_val: int=1,
-                     kernel: str='rectangular', num_threads: int=1) -> IntArray:
-        """Draw a pattern mask.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            max_val : Mask maximal value.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern mask.
-        """
-        return draw_line_mask(self.to_lines(width=width), shape=shape, idxs=self.frames,
-                              max_val=max_val, kernel=kernel, num_threads=num_threads)
-
-    def to_dataframe(self) -> pd.DataFrame:
-        """Export a streaks container into :class:`pandas.DataFrame`.
-
-        Returns:
-            A dataframe with all the data specified in :class:`cbclib.Streaks`.
-        """
-        return pd.DataFrame({attr: self[attr] for attr in self.contents()})
-
-    def to_lines(self, frames: Optional[IntSequence]=None,
-                 width: Optional[RealSequence]=None) -> RealArray:
-        """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
-
-        * `[x0, y0]`, `[x1, y1]` : The coordinates of the line's ends.
-        * `width` : Line's width.
-
-        Returns:
-            An array of line parameters.
-        """
-        if width is None:
-            lines = self.lines
-        else:
-            widths = jnp.broadcast_to(jnp.asarray(width), self.shape)
-            lines = jnp.concatenate((self.lines, widths[..., None]), axis=-1)
-
-        if frames is not None:
-            lines = jnp.concat([lines[self.frames == frame] for frame in np.atleast_1d(frames)])
-        return lines
-
-@jax_dataclass
-class MillerIndices():
-    hkl     : IntArray
-    index   : IntArray
-
-    @property
-    def h(self) -> IntArray:
-        return self.hkl[..., 0]
-
-    @property
-    def k(self) -> IntArray:
-        return self.hkl[..., 1]
-
-    @property
-    def l(self) -> IntArray:
-        return self.hkl[..., 2]
-
-    def collapse(self) -> 'MillerIndices':
-        index = jnp.broadcast_to(self.index, self.hkl.shape[:-1])
-        idxs = jnp.concatenate((self.hkl, index[..., None]), axis=-1)
-        idxs = jnp.unique(jnp.reshape(idxs, (-1,) + idxs.shape[-1:]), axis=0)
-        return MillerIndices(idxs[..., :3], idxs[..., 3])
-
-    def floor(self) -> 'MillerIndices':
-        return MillerIndices(jnp.array(jnp.floor(self.hkl), dtype=int), self.index)
-
-    def offset(self, offsets: IntArray) -> 'MillerIndices':
-        hkl = self.hkl
-        shape = offsets.shape[:-1] + hkl.shape
-        hkl = jnp.reshape(jnp.reshape(hkl, (-1, 3)) + offsets[..., None, :], shape)
-        return MillerIndices(hkl, self.index)
 
 @jax_dataclass
 class XtalCell():
@@ -378,43 +146,6 @@ class XtalState():
         return jnp.stack((lengths, jnp.arccos(self.basis[..., 2] / lengths),
                           jnp.arctan2(self.basis[..., 1], self.basis[..., 0])), axis=-1)
 
-class Xtal():
-    def hkl_in_aperture(self, theta: Union[float, RealArray], hkl: IntArray, state: XtalState
-                        ) -> MillerIndices:
-        index = jnp.broadcast_to(jnp.expand_dims(jnp.arange(state.num), axis=range(1, hkl.ndim)),
-                                 (state.num,) + hkl.shape[:-1])
-        hkl = jnp.broadcast_to(hkl[None, ...], (state.num,) + hkl.shape)
-
-        rec_vec = self.hkl_to_q(MillerIndices(hkl, index), state)
-        rec_abs = jnp.sqrt((rec_vec**2).sum(axis=-1))
-        rec_th = jnp.arccos(-rec_vec[..., 2] / rec_abs)
-        src_th = rec_th - jnp.arccos(0.5 * rec_abs)
-        idxs = jnp.where((jnp.abs(src_th) < theta))
-        return MillerIndices(hkl[idxs], index[idxs])
-
-    def hkl_in_ball(self, q_abs: Union[float, RealArray], state: XtalState) -> IntArray:
-        constants = state.lattice_constants()
-        lat_size = jnp.asarray(jnp.rint(q_abs / constants.lengths), dtype=int)
-        lat_size = jnp.max(jnp.reshape(lat_size, (-1, 3)), axis=0)
-        h_idxs = jnp.arange(-lat_size[0], lat_size[0] + 1)
-        k_idxs = jnp.arange(-lat_size[1], lat_size[1] + 1)
-        l_idxs = jnp.arange(-lat_size[2], lat_size[2] + 1)
-        h_grid, k_grid, l_grid = jnp.meshgrid(h_idxs, k_idxs, l_idxs)
-        hkl = jnp.stack((jnp.ravel(h_grid), jnp.ravel(k_grid), jnp.ravel(l_grid)), axis=1)
-        hkl = jnp.compress(jnp.any(hkl, axis=1), hkl, axis=0)
-
-        rec_vec = jnp.dot(hkl, state.basis)
-        rec_abs = jnp.sqrt(jnp.sum(rec_vec**2, axis=-1))
-        rec_abs = jnp.reshape(rec_abs, (hkl.shape[0], -1))
-        return hkl[jnp.any(rec_abs < q_abs, axis=-1)]
-
-    def hkl_to_q(self, miller: MillerIndices, state: XtalState) -> RealArray:
-        return jnp.sum(state.basis[miller.index] * miller.hkl[..., None], axis=-2)
-
-    def q_to_hkl(self, q: RealArray, idxs: IntArray, state: XtalState) -> MillerIndices:
-        hkl = jnp.sum(jnp.linalg.inv(state.basis)[idxs] * q[..., None], axis=-2)
-        return MillerIndices(hkl, idxs)
-
 @jax_dataclass
 class LensState():
     foc_pos         : RealArray
@@ -434,82 +165,11 @@ class LensState():
     def read(cls, file: str, ext: str='ini') -> 'LensState':
         return cls(**cls.parser(ext).read(file))
 
-@jax_dataclass
-class Pupil():
-    vmin    : RealArray
-    vmax    : RealArray
-
-    def center(self) -> RealArray:
-        return 0.5 * (self.vmin + self.vmax)
-
-    def diagonals(self) -> RealArray:
-        return jnp.array([[self.vmin, self.vmax],
-                          [[self.vmin[0], self.vmax[1]], [self.vmax[0], self.vmin[1]]]])
-
-    def edges(self, offset: float=0.0) -> RealArray:
-        vmin = self.vmin - jnp.clip(offset, 0.0, 1.0) * (self.vmax - self.vmin)
-        vmax = self.vmax + jnp.clip(offset, 0.0, 1.0) * (self.vmax - self.vmin)
-        return jnp.array([[[vmin[0], vmax[1]], [vmax[0], vmax[1]]],
-                          [[vmax[0], vmax[1]], [vmax[0], vmin[1]]],
-                          [[vmax[0], vmin[1]], [vmin[0], vmin[1]]],
-                          [[vmin[0], vmin[1]], [vmin[0], vmax[1]]]])
-
-    def project(self, kxy: RealArray) -> RealArray:
-        return project_to_rect(kxy, self.vmin, self.vmax)
-
-class Lens():
-    def project_to_pupil(self, kin: RealArray, pupil: Pupil) -> RealArray:
-        kin = safe_divide(kin, jnp.sqrt(jnp.sum(kin**2, axis=-1))[..., None])
-        return kxy_to_k(pupil.project(kin[..., :2]))
-
-    def kin_center(self, state: LensState) -> RealArray:
-        pupil_roi = jnp.asarray(state.pupil_roi)
-        x, y = jnp.mean(pupil_roi[2:]), jnp.mean(pupil_roi[:2])
-        return det_to_k(x, y, state.foc_pos, jnp.zeros(x.shape, dtype=int))
-
-    def kin_max(self, state: LensState) -> RealArray:
-        return det_to_k(jnp.array(state.pupil_roi[3]), jnp.array(state.pupil_roi[1]),
-                        state.foc_pos, jnp.array(0))
-
-    def kin_min(self, state: LensState) -> RealArray:
-        return det_to_k(jnp.array(state.pupil_roi[2]), jnp.array(state.pupil_roi[0]),
-                        state.foc_pos, jnp.array(0))
-
-    def kin_to_sample(self, kin: RealArray, z: RealArray, idxs: IntArray, state: LensState
-                      ) -> RealArray:
-        """Project incident wave-vectors to the sample planes.
-
-        Args:
-            setup : Experimental setup.
-            kin : An array of incident wave-vectors.
-            idxs : Sample indices.
-
-        Returns:
-            Array of sample coordinates.
-        """
-        return k_to_smp(kin, z, state.foc_pos, idxs)
-
-    # def in_laue(self, kin: RealArray, edges: RealArray, pupil: Pupil) -> RealArray:
-    #     max_dist = normal_distance(pupil.edges().mean(axis=-2), edges[:, 0], edges[:, 1])
-    #     diags = pupil.diagonals()
-    #     pts = line_intersection(diags[..., 0, :], diags[..., 1, :],
-    #                             kin[..., 0, None, :2], kin[..., 1, None, :2])
-    #     dist = normal_distance(pts[..., None, :], edges[:, 0], edges[:, 1])
-    #     idxs = jnp.argmin(jnp.abs(dist), axis=-1)
-    #     dist = jnp.squeeze(jnp.take_along_axis(dist, idxs[..., None], axis=-1))
-    #     return jnp.max(smooth_step(dist, 0.0, max_dist[idxs]), axis=-1)
-
-    def pupil(self, state: LensState) -> Pupil:
-        return Pupil(self.kin_min(state)[:2], self.kin_max(state)[:2])
-
-    def zero_order(self, state: LensState):
-        return k_to_det(self.kin_center(state), state.foc_pos, jnp.array(0))
-
 Params = Union[RealArray, float]
 S = TypeVar('S', bound=State)
 
-def init_from_bounds(state: S, bounds: Dict[str, Any], default: Callable[[Params], Params]
-                     ) -> Callable[[KeyArray,], S]:
+def init_from_bounds(state: S, default: Callable[[Params], Params],
+                     bounds: Optional[Dict[str, Any]]=None) -> Callable[[KeyArray,], S]:
     def asdict(obj: DataclassInstance) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         _T = TypeVar("_T", Tuple, List, Dict)
 
@@ -746,3 +406,9 @@ class ChainTransform():
         for s, transform in zip(state, self.transforms):
             xtal = transform.apply(xtal, s)
         return xtal
+
+@jax_dataclass
+class InternalState():
+    xtal    : XtalState
+    lens    : LensState
+    z       : RealArray

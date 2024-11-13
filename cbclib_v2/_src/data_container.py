@@ -3,33 +3,16 @@
 container :class:`cbclib.CrystData`. All transform classes are inherited from the abstract
 :class:`cbclib.Transform` class.
 """
-from __future__ import annotations
 from configparser import ConfigParser
-from dataclasses import dataclass, fields, Field
+from dataclasses import dataclass, fields
 import json
 import os
 import re
-from typing import (Any, Callable, ClassVar, Dict, Generic, ItemsView, Iterator, List,
-                    Optional, Protocol, Tuple, Type, Union, ValuesView, TypeVar,
-                    get_args, get_origin, overload, runtime_checkable)
+from typing import (Any, Callable, ClassVar, Dict, Iterator, List, Tuple, Type, Union, TypeVar,
+                    get_args, get_origin, overload)
 import numpy as np
 import jax.numpy as jnp
-from .annotations import Array, ExpandedType, NDArray, JaxArray, NDIntArray
-
-T = TypeVar('T')
-Self = TypeVar('Self')
-
-class ReferenceType(Generic[T]):
-    __callback__: Callable[[ReferenceType[T]], Any]
-    def __new__(cls: type[Self], o: T,
-                callback: Optional[Callable[[ReferenceType[T]], Any]]=...) -> Self:
-        ...
-    def __call__(self) -> T:
-        ...
-
-@runtime_checkable
-class DataclassInstance(Protocol):
-    __dataclass_fields__: ClassVar[Dict[str, Field[Any]]]
+from .annotations import Array, DataclassInstance, ExpandedType, NDArray, JaxArray, NDIntArray
 
 D = TypeVar("D", bound="DataContainer")
 
@@ -37,54 +20,14 @@ class DataContainer(DataclassInstance):
     """Abstract data container class based on :class:`dataclass`. Has :class:`dict` interface,
     and :func:`DataContainer.replace` to create a new obj with a set of data attributes replaced.
     """
-    def __getitem__(self, attr: str) -> Any:
-        return self.__getattribute__(attr)
-
-    def contents(self) -> List[str]:
+    def contents(self) -> Dict[str, Any]:
         """Return a list of the attributes stored in the container that are initialised.
 
         Returns:
             List of the attributes stored in the container.
         """
-        return [attr for attr in self.keys() if self.get(attr) is not None]
-
-    def get(self, attr: str, value: Any=None) -> Any:
-        """Retrieve a dataset, return ``value`` if the attribute is not found.
-
-        Args:
-            attr : Data attribute.
-            value : Data which is returned if the attribute is not found.
-
-        Returns:
-            Attribute's data stored in the container, ``value`` if ``attr`` is not found.
-        """
-        if attr in self.keys():
-            return self[attr]
-        return value
-
-    def keys(self) -> List[str]:
-        """Return a list of the attributes available in the container.
-
-        Returns:
-            List of the attributes available in the container.
-        """
-        return [field.name for field in fields(self)]
-
-    def values(self) -> ValuesView:
-        """Return the attributes' data stored in the container.
-
-        Returns:
-            List of data stored in the container.
-        """
-        return dict(self).values()
-
-    def items(self) -> ItemsView:
-        """Return (key, value) pairs of the datasets stored in the container.
-
-        Returns:
-            (key, value) pairs of the datasets stored in the container.
-        """
-        return dict(self).items()
+        return {field.name: getattr(self, field.name) for field in fields(self)
+                if getattr(self, field.name) is not None}
 
     def replace(self: D, **kwargs: Any) -> D:
         """Return a new container object with a set of attributes replaced.
@@ -95,7 +38,7 @@ class DataContainer(DataclassInstance):
         Returns:
             A new container object with updated attributes.
         """
-        return type(self)(**dict(self, **kwargs))
+        return type(self)(**(self.to_dict() | kwargs))
 
     def to_dict(self) -> Dict[str, Any]:
         """Export the :class:`Sample` object to a :class:`dict`.
@@ -103,7 +46,7 @@ class DataContainer(DataclassInstance):
         Returns:
             A dictionary of :class:`Sample` object's attributes.
         """
-        return {attr: self.get(attr) for attr in self.contents()}
+        return {field.name: getattr(self, field.name) for field in fields(self)}
 
 class BaseFormatter:
     aliases : ClassVar[Tuple[Type, ...]]
@@ -113,7 +56,7 @@ class BaseFormatter:
         if isinstance(t, tuple):
             return any(t[0] is alias for alias in cls.aliases)
 
-        return any(t is alias for alias in cls.aliases)    
+        return any(t is alias for alias in cls.aliases)
 
 class SimpleFormatter(BaseFormatter):
     @classmethod

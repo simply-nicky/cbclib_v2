@@ -2,7 +2,8 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import KDTree
 import pytest
-from cbclib_v2.src import median, median_filter, build_tree
+from cbclib_v2.kdtree import build_kd_tree
+from cbclib_v2.ndimage import median, median_filter
 from cbclib_v2.annotations import Mode, NDBoolArray, NDRealArray, Shape
 
 class TestImageProcessing():
@@ -31,22 +32,6 @@ class TestImageProcessing():
     def footprint(self, request: pytest.FixtureRequest, size: Shape) -> NDBoolArray:
         return np.broadcast_to(np.asarray(request.param, dtype=bool), size)
 
-    @pytest.fixture(params=[100,])
-    def num_points(self, request: pytest.FixtureRequest) -> int:
-        return request.param
-
-    @pytest.fixture(params=[(10, 10), (3, 2, 5)])
-    def num_queries(self, request: pytest.FixtureRequest) -> Shape:
-        return request.param
-
-    @pytest.fixture(params=[1,])
-    def num_neighbours(self, request: pytest.FixtureRequest) -> int:
-        return request.param
-
-    @pytest.fixture(params=[1, 3])
-    def ndim(self, request: pytest.FixtureRequest) -> int:
-        return request.param
-
     def test_median(self, input: NDRealArray, mask: NDBoolArray):
         axes = list(range(input.ndim))
         out = median(input, axis=axes)
@@ -71,12 +56,14 @@ class TestImageProcessing():
 
         assert np.all(out == out2)
 
+    @pytest.mark.parametrize("num_points,num_queries,num_neighbours,ndim",
+                             [(100, (10, 10), 3, 1), (100, (3, 2, 5), 1, 3)])
     def test_kd_tree(self, rng: np.random.Generator, num_points: int, num_queries: Shape,
                      num_neighbours: int, ndim: int):
         points = rng.random((num_points, ndim))
         query = rng.random(num_queries + (ndim,))
 
-        dist, out = build_tree(points).find_nearest(query, num_neighbours)
+        dist, out = build_kd_tree(points).find_nearest(query, num_neighbours)
         dist2, out2 = KDTree(points).query(query, num_neighbours)
 
         np.testing.assert_allclose(np.squeeze(dist), dist2)

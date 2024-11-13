@@ -6,8 +6,8 @@ from typing import (Any, ClassVar, Dict, Hashable, Iterable, List, Optional, Pro
                     Type, TypeVar, Union, overload, runtime_checkable)
 from typing_extensions import dataclass_transform
 from jax.tree_util import register_pytree_with_keys
-from ..annotations import PyTree
-from ..data_container import DataclassInstance
+from .._src.annotations import PyTree
+from .._src.data_container import DataclassInstance
 
 T = TypeVar('T')
 
@@ -16,19 +16,19 @@ T = TypeVar('T')
 @overload
 def field(*, static: bool=False, default: T, init: bool=...,
           repr: bool=..., hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=...) -> T:
+          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> T:
     ...
 
 @overload
 def field(*, static: bool=False, default_factory: Callable[[], T], init: bool=...,
           repr: bool=..., hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=...) -> T:
+          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> T:
     ...
 
 @overload
 def field(*, static: bool=False, init: bool=..., repr: bool=...,
           hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=...) -> Any:
+          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> Any:
     ...
 
 def add_static_to_metadata(func: Callable):
@@ -41,7 +41,8 @@ def add_static_to_metadata(func: Callable):
 
 def field(*, static: bool=False, default: Any=MISSING, default_factory: Any=MISSING,
           init: bool=True, repr: bool=True, hash: Optional[bool]=None,
-          compare: bool=True, metadata: Optional[Mapping[str, Any]]=None) -> Any:
+          compare: bool=True, metadata: Optional[Mapping[str, Any]]=None,
+          kw_only=MISSING) -> Any:
     """A field creator with a static indicator.
 
     The static flag indicates whether a field is a pytree or static.  Pytree fields are
@@ -49,7 +50,8 @@ def field(*, static: bool=False, default: Any=MISSING, default_factory: Any=MISS
     """
     wrapper = add_static_to_metadata(dataclasses.field)
     return wrapper(static=static, default=default, default_factory=default_factory,
-                   init=init, repr=repr, hash=hash, compare=compare, metadata=metadata)
+                   init=init, repr=repr, hash=hash, compare=compare, metadata=metadata,
+                   kw_only=kw_only)
 
 @runtime_checkable
 class JaxDataclassInstance(DataclassInstance, Protocol):
@@ -59,18 +61,23 @@ class JaxDataclassInstance(DataclassInstance, Protocol):
 @overload
 @dataclass_transform(field_specifiers=(field,))
 def jax_dataclass(*, init: bool=True, repr: bool=True, eq: bool=True,
-                  order: bool=False) -> Callable[[Type[Any]], Type[JaxDataclassInstance]]:
+                  order: bool=False, unsafe_hash=False, frozen=False,
+                  match_args=True, kw_only=False, slots=False
+                  ) -> Callable[[Type[Any]], Type[JaxDataclassInstance]]:
     ...
 
 @overload
 @dataclass_transform(field_specifiers=(field,))
 def jax_dataclass(cls: Type[Any], /, *, init: bool=True, repr: bool=True,
-                  eq: bool=True, order: bool=False) -> Type[JaxDataclassInstance]:
+                  eq: bool=True, order: bool=False, unsafe_hash=False,
+                  frozen=False, match_args=True, kw_only=False,
+                  slots=False) -> Type[JaxDataclassInstance]:
     ...
 
 @dataclass_transform(field_specifiers=(field,))
 def jax_dataclass(cls: Optional[Type[Any]]=None, /, *, init: bool=True, repr: bool=True,
-                  eq: bool=True, order: bool=False
+                  eq: bool=True, order: bool=False, unsafe_hash=False, frozen=False,
+                  match_args=True, kw_only=False, slots=False
                   ) -> Union[Type[JaxDataclassInstance], Callable[[Type[Any]], Type[JaxDataclassInstance]]]:
     """A dataclass creator that creates a pytree.
 
@@ -132,13 +139,17 @@ def jax_dataclass(cls: Optional[Type[Any]]=None, /, *, init: bool=True, repr: bo
     """
     if cls is None:
         def f(x: Type[Any], /) -> Type[JaxDataclassInstance]:
-            return jax_dataclass(x, init=init, repr=repr, eq=eq, order=order)
+            return jax_dataclass(x, init=init, repr=repr, eq=eq, order=order,
+                                 unsafe_hash=unsafe_hash, frozen=frozen,
+                                 match_args=match_args, kw_only=kw_only, slots=slots)
         return f  # Type checking support partial is poor.
     non_none_cls = cls
 
     # Apply dataclass function to cls.
-    data_clz : Type[JaxDataclassInstance] = dataclasses.dataclass(init=init, repr=repr,
-                                                                  eq=eq, order=order)(cls)
+    data_clz : Type[JaxDataclassInstance] = dataclasses.dataclass(
+        init=init, repr=repr, eq=eq, order=order, unsafe_hash=unsafe_hash,
+        frozen=frozen, match_args=match_args, kw_only=kw_only, slots=slots
+    )(cls)
 
     # Partition fields into static, and dynamic; and assign these to the class.
     static_fields: List[str] = []

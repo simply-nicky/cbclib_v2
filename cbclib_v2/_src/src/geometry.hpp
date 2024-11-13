@@ -147,7 +147,7 @@ struct PointND : public std::array<T, N>
         PointND<U, N> result = rhs;
         result *= lhs;
         return result;
-    }    
+    }
 
     template <typename V, typename U = std::common_type_t<T, V>>
     friend PointND<U, N> operator/(const PointND & lhs, const PointND<V, N> & rhs)
@@ -275,7 +275,7 @@ struct Line
     Line() = default;
 
     template <typename Pt0, typename Pt1, typename = std::enable_if_t<
-        std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt0>> && 
+        std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt0>> &&
         std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt1>>
     >>
     Line(Pt0 && pt0, Pt1 && pt1) : pt0(std::forward<Pt0>(pt0)), pt1(std::forward<Pt1>(pt1)) {}
@@ -283,7 +283,7 @@ struct Line
     Line(T x0, T y0, T x1, T y1) : Line(Point<T>{x0, y0}, Point<T>{x1, y1}) {}
 
     Point<T> norm() const {return {pt1.y() - pt0.y(), pt0.x() - pt1.x()};}
-    
+
     Point<T> tangent() const {return {pt1.x() - pt0.x(), pt1.y() - pt0.y()};}
 
     auto theta() const {return std::atan(pt1.y() - pt0.y(), pt1.x() - pt0.x());}
@@ -331,6 +331,22 @@ struct Line
 
     std::array<T, 4> to_array() const {return {pt0.x(), pt0.y(), pt1.x(), pt1.y()};}
 };
+
+namespace detail{
+
+template <typename T>
+struct PointHasher
+{
+    size_t operator()(const Point<T> & point) const
+    {
+        size_t h = 0;
+        h = detail::hash_combine(h, point.x());
+        h = detail::hash_combine(h, point.y());
+        return h;
+    }
+};
+
+}
 
 }
 

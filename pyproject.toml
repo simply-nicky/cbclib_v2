@@ -1,0 +1,15 @@
+[build-system]
+requires = [
+    "setuptools>=42",
+    "pybind11>=2.10.0",
+    "numpy>=1.19"
+]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = [
+    "--import-mode=importlib",
+]
+markers = ["slow: mark a test that takes a long time to run."]
+testpaths = ["tests"]
+python_files = ["*_test.py", "test_*.py"]

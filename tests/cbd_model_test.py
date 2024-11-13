@@ -1,126 +1,71 @@
 from typing import Any, Callable, Tuple
 import pytest
 import jax.numpy as jnp
-from jax import config
-from jax.test_util import check_grads
+from jax import random, jit
 import cbclib_v2 as cbc
-from cbclib_v2.jax import jax_dataclass
-from cbclib_v2.annotations import KeyArray, RealArray
-
-config.update("jax_enable_x64", True)
-
-class Parameters():
-    ChainState = Tuple[cbc.jax.RotationState, ...]
-
-    a_vec           = [-0.00093604, -0.00893389, -0.00049815]
-    b_vec           = [ 0.00688718, -0.00039195, -0.00573877]
-    c_vec           = [ 0.01180108, -0.00199115,  0.01430421]
-    foc_pos         = [ 0.14292289,  0.16409828, -0.39722229]
-    frames          = (10, 20, 30)
-    roi             = (1100, 3260, 1040, 3108)
-    pupil_roi       = [0.16583517, 0.17700936, 0.14640569, 0.15699476]
-    rot_axis        = [ 1.57123908, -1.56927065]
-    rotations       = [[[ 9.9619448e-01,  3.2783555e-05, -8.7157689e-02],
-                        [-4.4395445e-05,  1.0000000e+00, -1.3129010e-04],
-                        [ 8.7157689e-02,  1.3465989e-04,  9.9619448e-01]],
-                       [[ 9.8480743e-01,  5.3705335e-05, -1.7364986e-01],
-                        [-1.0006334e-04,  9.9999994e-01, -2.5820805e-04],
-                        [ 1.7364983e-01,  2.7166118e-04,  9.8480743e-01]],
-                       [[ 9.6592510e-01,  6.2607127e-05, -2.5882185e-01],
-                        [-1.6658218e-04,  9.9999988e-01, -3.7979320e-04],
-                        [ 2.5882179e-01,  4.0996689e-04,  9.6592498e-01]]]
-    smp_dist        = 0.006571637911728528
-    dist            = -0.3906506481396024
-    wavelength      = 7.09291721831675e-11
-    x_pixel_size    = 7.5e-05
-    y_pixel_size    = 7.5e-05
-
-    @classmethod
-    def xtal(cls) -> cbc.jax.XtalState:
-        return cbc.jax.XtalState(jnp.stack([jnp.asarray(cls.a_vec),
-                                            jnp.asarray(cls.b_vec),
-                                            jnp.asarray(cls.c_vec)]))
-
-    @classmethod
-    def lens(cls) -> cbc.jax.LensState:
-        return cbc.jax.LensState(jnp.asarray(cls.foc_pos), jnp.asarray(cls.pupil_roi))
-
-    @classmethod
-    def pixel_size(cls) -> Tuple[float, float]:
-        return (cls.x_pixel_size, cls.y_pixel_size)
-
-    @classmethod
-    def tilt(cls) -> cbc.jax.TiltAxisState:
-        theta, phi = cls.rot_axis
-        axis = jnp.array([jnp.sin(theta) * jnp.cos(phi),
-                          jnp.sin(theta) * jnp.sin(phi), jnp.cos(theta)])
-        return cbc.jax.TiltAxisState(angles=-jnp.pi / 360 * jnp.array(cls.frames), axis=axis)
-
-    @classmethod
-    def transforms(cls) -> ChainState:
-        return tuple(cbc.jax.RotationState(jnp.asarray(mat)) for mat in cls.rotations)
-
-    @classmethod
-    def z(cls) -> RealArray:
-        return jnp.array(cls.smp_dist + cls.foc_pos[2])
-
-@jax_dataclass
-class TestState:
-    transform       : cbc.jax.TiltAxisState
-    xtal            : cbc.jax.XtalState
-    lens            : cbc.jax.LensState
-    z               : RealArray
-
-@jax_dataclass
-class TestModel(cbc.jax.CBDModel):
-    init_state  : Callable[[KeyArray,], TestState]
-    transform   : cbc.jax.TiltAxis = cbc.jax.TiltAxis()
-
-    def init(self, rng) -> TestState:
-        return self.init_state(rng)
-
-    def to_internal(self, state: TestState) -> cbc.jax.InternalState:
-        xtal = self.transform.apply(state.xtal, state.transform)
-        z = state.z * jnp.ones(xtal.num)
-        return cbc.jax.InternalState(xtal, state.lens, z)
+from cbclib_v2.annotations import IntArray, KeyArray
+from cbclib_v2.test_util import check_gradient, TestSetup, TestModel, Criterion
 
 class TestCBDModel():
-    REL_TOL: float = 0.05
-    Q_ABS: float = 0.25
-    EPS: float = 1e-11
-
-    @pytest.fixture(params=[1.0])
-    def width(self, request: pytest.FixtureRequest) -> float:
-        return request.param
+    EPS: float = 5e-7
 
     @pytest.fixture
-    def model(self) -> TestModel:
-        state = TestState(Parameters.tilt(), Parameters.xtal(), Parameters.lens(), Parameters.z())
-        bounds = {'transform': {'angles': jnp.full(3, 1.0 / 180 * jnp.pi), 'axis': jnp.full(3, 0.05)}}
-        init = cbc.jax.init_from_bounds(state, bounds=bounds, default=lambda val: self.REL_TOL * val)
-        return TestModel(init)
+    def patterns(self, key: KeyArray, model: TestModel, int_state: cbc.jax.InternalState,
+                 num_lines: int) -> cbc.jax.Patterns:
+        keys = random.split(key, 4)
+        center = model.lens.zero_order(int_state.lens)
+
+        length = random.uniform(keys[0], (num_lines,), jnp.float32, 1.5e-3, 1.5e-2)
+        x = random.uniform(keys[2], (num_lines,), jnp.float32,
+                           TestSetup.roi[2] * TestSetup.x_pixel_size,
+                           TestSetup.roi[3] * TestSetup.x_pixel_size)
+        y = random.uniform(keys[3], (num_lines,), jnp.float32,
+                           TestSetup.roi[0] * TestSetup.y_pixel_size,
+                           TestSetup.roi[1] * TestSetup.y_pixel_size)
+        phi = jnp.arctan2(y - center[1], x - center[0])
+        angles = phi + jnp.pi / 2 + random.uniform(keys[1], (num_lines,), jnp.float32,
+                                                   -jnp.pi / 50, jnp.pi / 50)
+
+        lines = jnp.stack((x - 0.5 * length * jnp.cos(angles),
+                           y - 0.5 * length * jnp.sin(angles),
+                           x + 0.5 * length * jnp.cos(angles),
+                           y + 0.5 * length * jnp.sin(angles)), axis=-1)
+        index = jnp.concatenate((jnp.full((num_lines // 2), 0),
+                                 jnp.full((num_lines - num_lines // 2), 1)))
+        return cbc.jax.Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def miller(self, model: TestModel, jax_rng: KeyArray) -> cbc.jax.MillerIndices:
-        return model.init_miller(self.Q_ABS, model.to_internal(model.init(jax_rng)))
+    def offsets(self, patterns: cbc.jax.Patterns, model: TestModel,
+                int_state: cbc.jax.InternalState) -> IntArray:
+        return model.init_offsets(patterns, int_state)
 
     @pytest.fixture
-    def criterion(self, model: TestModel, miller: cbc.jax.MillerIndices, width: float
-                  ) -> Callable[[TestState,], RealArray]:
+    def dynamic_sampler(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
+                       offsets: IntArray, num_points: int) -> cbc.jax.LaueSampler:
+        return model.dynamic_sampler(key, patterns, offsets, num_points)
 
-        def wrapper(state: TestState) -> RealArray:
-            int_state = model.to_internal(state)
-            streaks = model.init_streaks(miller, False, Parameters.pixel_size(), int_state)
-            return jnp.mean(streaks.length)
+    @pytest.fixture
+    def static_sampler(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
+                       offsets: IntArray, num_points: int, int_state: cbc.jax.InternalState
+                       ) -> cbc.jax.LaueSampler:
+        return model.static_sampler(key, patterns, offsets, num_points, int_state)
 
-        return wrapper
+    @pytest.fixture
+    def dynamic_criterion(self, model: TestModel, dynamic_sampler: cbc.jax.LaueSampler,
+                          num_lines: int) -> Criterion:
+        return jit(model.criterion(dynamic_sampler, model.pupil_projector, num_lines))
+
+    @pytest.fixture
+    def static_criterion(self, model: TestModel, static_sampler: cbc.jax.LaueSampler,
+                          num_lines: int) -> Criterion:
+        return jit(model.criterion(static_sampler, model.line_projector, num_lines))
 
     def check_gradient(self, f: Callable, args: Tuple[Any, ...]):
-        def wrapper(*args):
-            return f(*args)
-        check_grads(wrapper, args, order=1, modes='rev', eps=self.EPS)
+        check_gradient(f, args, eps=self.EPS)
 
     @pytest.mark.slow
-    def test_model_gradients(self, criterion: Callable[[TestState,], RealArray], model: TestModel,
-                             jax_rng: KeyArray):
-        self.check_gradient(criterion, (model.init(jax_rng),))
+    @pytest.mark.parametrize('num_lines,num_points', [(200, 4)])
+    def test_model_gradients(self, key: KeyArray, static_criterion: Criterion,
+                             dynamic_criterion: Criterion, model: TestModel):
+        self.check_gradient(static_criterion, (model.init(key),))
+        self.check_gradient(dynamic_criterion, (model.init(key),))

@@ -248,7 +248,7 @@ PYBIND11_MODULE(streak_finder, m)
         .def(py::init([](std::vector<integer_type> xvec, std::vector<integer_type> yvec)
             {
                 Peaks::container_type points;
-                for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace_back(x, y);
+                for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace_back(point_t{x, y});
                 return Peaks(std::move(points));
             }), py::arg("x"), py::arg("y"))
         .def("filter",
