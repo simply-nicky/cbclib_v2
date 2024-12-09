@@ -6,6 +6,27 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = 'cbclib_v2'
+authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
+description = 'Convergent beam crystallography data processing library'
+version = '0.9.1'
+dependencies = [
+    'extra_data',
+    'extra_geom'
+]
+license = {file = 'LICENSE'}
+readme = 'README.md'
+requires-python = '>=3.10'
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent"
+]
+
+[project.urls]
+Repository = "https://github.com/simply-nicky/cbclib_v2"
+
 [tool.pytest.ini_options]
 addopts = [
     "--import-mode=importlib",

@@ -4,7 +4,7 @@ from setuptools import setup, find_namespace_packages
 from pybind11.setup_helpers import Pybind11Extension
 import numpy
 
-__version__ = '0.9.0'
+__version__ = '0.9.1'
 
 extension_args = {'extra_compile_args': ['-fopenmp', '-std=c++20'],
                   'extra_link_args': ['-lgomp'],
@@ -45,23 +45,8 @@ extensions = [Pybind11Extension("cbclib_v2._src.src.fft_functions",
                                 define_macros = [('VERSION_INFO', __version__)],
                                 **extension_args)]
 
-with open('README.md', 'r') as readme:
-    long_description = readme.read()
-
-setup(name='cbclib_v2',
-      version=__version__,
-      author='Nikolay Ivanov',
-      author_email="nikolay.ivanov@desy.de",
-      long_description=long_description,
-      long_description_content_type='text/markdown',
-      url="https://github.com/simply-nicky/cbclib_v2",
+setup(version=__version__,
       packages=find_namespace_packages(),
       include_package_data=True,
-      install_requires=['h5py', 'numpy', 'scipy'],
-      ext_modules=extensions,
-      classifiers=[
-          "Programming Language :: Python",
-          "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-          "Operating System :: OS Independent"
-      ],
-      python_requires='>=3.10')
+      install_requires=['numpy', 'pybind11'],
+      ext_modules=extensions)

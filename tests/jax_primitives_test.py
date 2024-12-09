@@ -51,8 +51,8 @@ class TestJaxPrimitives():
 
     def test_det_to_k(self, generate_coords: Generator, generate_vecs: Generator,
                       idxs: JaxIntArray):
-        self.check_gradient(det_to_k, (generate_coords(), generate_coords(),
-                                       generate_vecs()), idxs=idxs)
+        xy = jnp.stack((generate_coords(), generate_coords()), axis=-1)
+        self.check_gradient(det_to_k, (xy, generate_vecs()), idxs=idxs)
 
     def test_k_to_det(self, generate_vecs: Generator, idxs: JaxIntArray):
         self.check_gradient(k_to_det, (generate_vecs(), generate_vecs()), idxs=idxs)

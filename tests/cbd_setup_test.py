@@ -7,6 +7,14 @@ from cbclib_v2.annotations import KeyArray
 from cbclib_v2.test_util import TestModel, check_close
 
 class TestCBDSetup():
+    @pytest.fixture
+    def xtal(self, int_state: cbc.jax.InternalState) -> cbc.jax.XtalState:
+        return int_state.xtal
+
+    @pytest.fixture
+    def cell(self, xtal: cbc.jax.XtalState) -> cbc.jax.XtalCell:
+        return xtal.lattice_constants()
+
     @pytest.fixture(params=[0.3,])
     def q_abs(self, request: pytest.FixtureRequest) -> float:
         return request.param
@@ -35,6 +43,20 @@ class TestCBDSetup():
     def points(self, laue: cbc.jax.LaueVectors, model: TestModel,
                int_state: cbc.jax.InternalState) -> cbc.jax.CBDPoints:
         return model.kout_to_points(laue, int_state)
+
+    def text_xtal_to_cell(self, xtal: cbc.jax.XtalState, cell: cbc.jax.XtalCell):
+        orient = xtal.orientation_matrix()
+        basis = cell.to_basis()
+        check_close(jnp.linalg.det(orient.matrix), jnp.array(1.0))
+        check_close(cbc.jax.Rotation().apply(basis, orient).basis, xtal.basis)
+
+    def text_reciprocate_xtal(self, xtal: cbc.jax.XtalState):
+        check_close(xtal.basis, xtal.reciprocate().reciprocate().basis)
+
+    def test_cell_to_xtal(self, cell: cbc.jax.XtalCell):
+        new_cell = cell.to_basis().lattice_constants()
+        check_close(cell.angles, new_cell.angles)
+        check_close(cell.lengths, new_cell.lengths)
 
     def test_hkl_and_q(self, miller: cbc.jax.Miller, rlp: cbc.jax.MillerWithRLP,
                        model: TestModel, int_state: cbc.jax.InternalState):

@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from jax import random, jit
 import cbclib_v2 as cbc
 from cbclib_v2.annotations import IntArray, KeyArray
-from cbclib_v2.test_util import check_gradient, TestSetup, TestModel, Criterion
+from cbclib_v2.test_util import check_gradient, Criterion, TestSetup, TestState, TestModel
 
 class TestCBDModel():
     EPS: float = 5e-7
@@ -37,35 +37,32 @@ class TestCBDModel():
     @pytest.fixture
     def offsets(self, patterns: cbc.jax.Patterns, model: TestModel,
                 int_state: cbc.jax.InternalState) -> IntArray:
-        return model.init_offsets(patterns, int_state)
+        hkl_min, hkl_max = model.patterns_to_hkl(patterns, int_state)
+        return model.hkl_offsets(hkl_min, hkl_max)
 
     @pytest.fixture
-    def dynamic_sampler(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
-                       offsets: IntArray, num_points: int) -> cbc.jax.LaueSampler:
-        return model.dynamic_sampler(key, patterns, offsets, num_points)
+    def data(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
+             offsets: IntArray, int_state: cbc.jax.InternalState, num_points: int
+             ) -> cbc.jax.CBData:
+        return model.init_data(key, patterns, offsets, num_points, int_state)
 
     @pytest.fixture
-    def static_sampler(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
-                       offsets: IntArray, num_points: int, int_state: cbc.jax.InternalState
-                       ) -> cbc.jax.LaueSampler:
-        return model.static_sampler(key, patterns, offsets, num_points, int_state)
+    def pupil_loss(self, model: TestModel, num_lines: int) -> Criterion:
+        return jit(model.pupil_loss(num_lines))
 
     @pytest.fixture
-    def dynamic_criterion(self, model: TestModel, dynamic_sampler: cbc.jax.LaueSampler,
-                          num_lines: int) -> Criterion:
-        return jit(model.criterion(dynamic_sampler, model.pupil_projector, num_lines))
+    def line_loss(self, model: TestModel, num_lines: int) -> Criterion:
+        return jit(model.line_loss(num_lines))
 
-    @pytest.fixture
-    def static_criterion(self, model: TestModel, static_sampler: cbc.jax.LaueSampler,
-                          num_lines: int) -> Criterion:
-        return jit(model.criterion(static_sampler, model.line_projector, num_lines))
+    def check_loss(self, f: Criterion, data: cbc.jax.CBData, state: TestState):
+        def loss(state):
+            return f(data, state)
 
-    def check_gradient(self, f: Callable, args: Tuple[Any, ...]):
-        check_gradient(f, args, eps=self.EPS)
+        check_gradient(loss, (state,), eps=self.EPS)
 
     @pytest.mark.slow
     @pytest.mark.parametrize('num_lines,num_points', [(200, 4)])
-    def test_model_gradients(self, key: KeyArray, static_criterion: Criterion,
-                             dynamic_criterion: Criterion, model: TestModel):
-        self.check_gradient(static_criterion, (model.init(key),))
-        self.check_gradient(dynamic_criterion, (model.init(key),))
+    def test_model_gradients(self, key: KeyArray, data: cbc.jax.CBData,
+                             pupil_loss: Criterion, line_loss: Criterion):
+        self.check_loss(line_loss, data, TestState.random(key))
+        self.check_loss(pupil_loss, data, TestState.random(key))

@@ -15,12 +15,11 @@ def key() -> KeyArray:
 
 @pytest.fixture
 def state() -> TestState:
-    return TestState(TestSetup.xtal(), TestSetup.lens(), TestSetup.z())
+    return TestState(TestSetup.lens(), TestSetup.xtal(), TestSetup.z())
 
 @pytest.fixture
-def model(state: TestState) -> TestModel:
-    init = cbc.jax.init_from_bounds(state, default=lambda val: 0.25 * val)
-    return TestModel(init)
+def model() -> TestModel:
+    return TestModel()
 
 @pytest.fixture
 def int_state(model: TestModel, state: TestState) -> cbc.jax.InternalState:

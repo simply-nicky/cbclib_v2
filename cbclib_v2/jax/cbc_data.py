@@ -3,20 +3,19 @@ from dataclasses import fields
 import pandas as pd
 import numpy as np
 import jax.numpy as jnp
-from .dataclasses import jax_dataclass
 from .geometry import safe_divide
+from .state import State
 from ..ndimage import draw_line_image, draw_line_mask, draw_line_table
-from .._src.annotations import (BoolArray, Indices, IntArray, IntSequence, RealArray, RealSequence,
-                                Shape)
-from .._src.data_container import DataContainer
+from .._src.annotations import (BoolArray, Indices, IntArray, IntSequence, RealArray,
+                                RealSequence, Shape)
 
-D = TypeVar("D", bound="CBCData")
+D = TypeVar("D", bound="BaseData")
 AnyPoints = Union['Points', 'PointsWithK', 'CBDPoints']
 
-@jax_dataclass
-class CBCData(DataContainer):
+class BaseData(State):
     def filter(self: D, idxs: Union[Indices, BoolArray]) -> D:
-        data = {attr: val[idxs] for attr, val in self.to_dict().items()}
+        data = {attr: None for attr in self.to_dict()}
+        data = data | {attr: val[idxs] for attr, val in self.contents().items()}
         return self.replace(**data)
 
     def to_dataframe(self) -> pd.DataFrame:
@@ -27,8 +26,7 @@ class CBCData(DataContainer):
         """
         return pd.DataFrame(self.to_dict().items())
 
-@jax_dataclass
-class Patterns(CBCData):
+class Patterns(BaseData):
     """Detector streak lines container. Provides an interface to draw a pattern for a set of
     lines.
 
@@ -49,13 +47,6 @@ class Patterns(CBCData):
     hkl         : Optional[IntArray] = None
     q           : Optional[RealArray] = None
     kin         : Optional[RealArray] = None
-
-    def __post_init__(self):
-        if self.lines.shape[-1] != 4:
-            raise ValueError(f"lines has an invalid shape: {self.lines.shape}")
-        if self.index.shape != self.shape:
-            raise ValueError("lines and index have incompatible shapes:"\
-                             f" {self.lines.shape} and {self.index.shape}")
 
     @classmethod
     def extra_attributes(cls) -> List[str]:
@@ -171,6 +162,10 @@ class Patterns(CBCData):
         return draw_line_mask(self.to_lines(width=width), shape=shape, idxs=self.index,
                               max_val=max_val, kernel=kernel, num_threads=num_threads)
 
+    def sample(self, x: RealArray) -> 'Points':
+        pts = self.pt0.points + x[..., None] * (self.pt1.points - self.pt0.points)
+        return Points(points=pts, index=self.index)
+
     def to_lines(self, frames: Optional[IntSequence]=None,
                  width: Optional[RealSequence]=None) -> RealArray:
         """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
@@ -195,8 +190,7 @@ class Patterns(CBCData):
         points = jnp.reshape(self.lines, self.shape + (2, 2))
         return Points(index=self.index[..., None], points=points)
 
-@jax_dataclass
-class Points(CBCData):
+class Points(BaseData):
     index   : IntArray
     points  : RealArray
 
@@ -212,12 +206,10 @@ class Points(CBCData):
     def y(self) -> RealArray:
         return self.points[..., 1]
 
-@jax_dataclass
 class PointsWithK(Points):
     kout    : RealArray
 
-@jax_dataclass
-class Miller(CBCData):
+class Miller(BaseData):
     hkl     : Union[IntArray, RealArray]
     index   : IntArray
 
@@ -249,8 +241,7 @@ class Miller(CBCData):
         hkl = jnp.reshape(jnp.reshape(hkl, (-1, 3)) + offsets[..., None, :], shape)
         return self.replace(hkl=hkl)
 
-@jax_dataclass
-class RLP(CBCData):
+class RLP(BaseData):
     q       : RealArray
     index   : IntArray
 
@@ -261,11 +252,9 @@ class RLP(CBCData):
         return jnp.stack((jnp.sin(theta) * jnp.cos(phi), jnp.sin(theta) * jnp.sin(phi),
                           jnp.cos(theta)), axis=-1)
 
-@jax_dataclass
 class MillerWithRLP(Miller, RLP):
     pass
 
-@jax_dataclass
 class LaueVectors(MillerWithRLP):
     kin     : RealArray
     kout    : RealArray
@@ -280,6 +269,9 @@ class LaueVectors(MillerWithRLP):
                         jnp.sum(kin * tau, axis=-1) + jnp.sqrt(tau_mag))
         return kin - s[..., None] * tau
 
-@jax_dataclass
 class CBDPoints(LaueVectors, Points):
     pass
+
+class CBData(BaseData):
+    miller  : Miller
+    points  : Points

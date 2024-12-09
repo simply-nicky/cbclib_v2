@@ -112,7 +112,7 @@ def tilt_matrix(angles: RealArray) -> RealArray:
                       vec[..., 0]**2 + vec[..., 3]**2 - vec[..., 1]**2 - vec[..., 2]**2], axis=-1)
     return jnp.stack((row0, row1, row2), axis=-2)
 
-def det_to_k(x: RealArray, y: RealArray, src: RealArray, idxs: IntArray) -> RealArray:
+def det_to_k(pts: RealArray, src: RealArray, idxs: IntArray) -> RealArray:
     """Convert coordinates on the detector ``x`, ``y`` to wave-vectors originating from
     the source points ``src``.
 
@@ -125,8 +125,9 @@ def det_to_k(x: RealArray, y: RealArray, src: RealArray, idxs: IntArray) -> Real
         A set of wave-vectors.
     """
     src = jnp.reshape(jnp.reshape(src, (-1, 3))[jnp.ravel(idxs)], idxs.shape + (3,))
-    vec = jnp.stack((x, y, jnp.zeros(x.shape)), axis=-1) - src
-    norm = jnp.sqrt(jnp.sum(vec**2, axis=-1))
+    xy = pts - src[..., :2]
+    norm = jnp.sqrt(jnp.sum(xy**2, axis=-1) + src[..., 2]**2)
+    vec = jnp.append(xy, jnp.broadcast_to(-src[..., 2], pts.shape[:-1])[..., None], axis=-1)
     return vec / norm[..., None]
 
 def k_to_det(k: RealArray, src: RealArray, idxs: IntArray) -> RealArray:

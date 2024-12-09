@@ -1,9 +1,13 @@
 from typing import Any, Callable, Dict, Optional, Union
 import numpy as np
 import jax.numpy as jnp
+from jax import tree
 from jax.test_util import check_grads
-from .jax import CBDModel, InternalState, LensState, XtalState, jax_dataclass
-from ._src.annotations import ComplexArray, KeyArray, RealArray
+from .jax import (CBData, CBDModel, InternalState, LensState, XtalState, field, random_array,
+                  random_state)
+from ._src.annotations import ComplexArray, RealArray
+
+REL_TOL = 0.025
 
 class TestSetup():
     basis           = [[[-0.00088935, -0.00893378, -0.00057904],
@@ -31,16 +35,18 @@ class TestSetup():
     def z(cls) -> RealArray:
         return jnp.full((len(cls.basis),), cls.smp_dist + cls.foc_pos[2])
 
-TestState = InternalState
-Criterion = Callable[[TestState,], RealArray]
+random_lens = random_state(TestSetup.lens(), tree.map(lambda val: REL_TOL * val, TestSetup.lens()))
+random_xtal = random_state(TestSetup.xtal(), tree.map(lambda val: REL_TOL * val, TestSetup.xtal()))
+random_z = random_array(TestSetup.z(), REL_TOL)
 
-@jax_dataclass
+class TestState(InternalState, random=True):
+    lens    : LensState = field(random=random_lens)
+    xtal    : XtalState = field(random=random_xtal)
+    z       : RealArray = field(random=random_z)
+
+Criterion = Callable[[CBData, TestState,], RealArray]
+
 class TestModel(CBDModel):
-    init_state  : Callable[[KeyArray,], TestState]
-
-    def init(self, rng) -> TestState:
-        return self.init_state(rng)
-
     def to_internal(self, state: TestState) -> InternalState:
         return state
 
