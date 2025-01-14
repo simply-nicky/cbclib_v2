@@ -90,7 +90,7 @@ OutputIt unravel_index_impl(InputIt sfirst, InputIt slast, T index, OutputIt cfi
 {
     for (; sfirst != slast; ++sfirst)
     {
-        auto stride = index / *sfirst;
+        auto stride = (*sfirst) ? index / *sfirst : index;
         index -= stride * *sfirst;
         *cfirst++ = stride;
     }
@@ -139,8 +139,8 @@ public:
 
     ssize_t stride(size_t dim) const
     {
-        if (dim >= this->ndim) fail_dim_check(dim, "invalid axis");
-        return this->strides[dim];
+        if (dim >= ndim) fail_dim_check(dim, "invalid axis");
+        return strides[dim];
     }
 
     size_t index_along_dim(size_t index, size_t dim) const
@@ -155,7 +155,7 @@ public:
         bool flag = true;
         for (size_t i = 0; first != last; ++first, ++i)
         {
-            flag &= *first >= 0 && *first < static_cast<decltype(+*std::declval<CoordIter &>())>(this->shape[i]);
+            flag &= *first >= 0 && *first < static_cast<decltype(+*std::declval<CoordIter &>())>(shape[i]);
         }
         return flag;
     }
@@ -177,13 +177,13 @@ public:
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
     auto ravel_index(CoordIter first, CoordIter last) const
     {
-        return ravel_index_impl(first, last, this->strides.begin());
+        return ravel_index_impl(first, last, strides.begin());
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
     auto ravel_index(const Container & coord) const
     {
-        return ravel_index_impl(coord.begin(), coord.end(), this->strides.begin());
+        return ravel_index_impl(coord.begin(), coord.end(), strides.begin());
     }
 
     template <typename... Ix, typename = std::enable_if_t<(std::is_integral_v<Ix> && ...)>>
@@ -199,7 +199,7 @@ public:
     template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
     auto ravel_index(const std::initializer_list<T> & coord) const
     {
-        return ravel_index_impl(coord.begin(), coord.end(), this->strides.begin());
+        return ravel_index_impl(coord.begin(), coord.end(), strides.begin());
     }
 
     template <
@@ -211,7 +211,7 @@ public:
     >
     CoordIter unravel_index(CoordIter first, size_t index) const
     {
-        return unravel_index_impl(this->strides.begin(), this->strides.end(), index, first);
+        return unravel_index_impl(strides.begin(), strides.end(), index, first);
     }
 
 protected:
@@ -220,7 +220,7 @@ protected:
 
     void fail_dim_check(size_t dim, const std::string & msg) const
     {
-        throw std::out_of_range(msg + ": " + std::to_string(dim) + " (ndim = " + std::to_string(this->ndim) + ')');
+        throw std::out_of_range(msg + ": " + std::to_string(dim) + " (ndim = " + std::to_string(ndim) + ')');
     }
 };
 
@@ -554,33 +554,146 @@ public:
 /*--------------------------- Rectangular iterator ---------------------------*/
 /*----------------------------------------------------------------------------*/
 
-class rect_iterator : public detail::shape_handler
+template <typename point_type>
+struct rectangle_range_basic
 {
 public:
-    std::vector<size_t> coord;
-    size_t index;
-
-    rect_iterator(ShapeContainer shape) : shape_handler(std::move(shape)), index(0)
+    class rectangle_iterator
     {
-        unravel_index(std::back_inserter(coord), index);
+    public:
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = std::ptrdiff_t;
+        using difference_type = point_type;
+        using pointer = const point_type *;
+        using reference = const point_type &;
+
+        rectangle_iterator & operator++()
+        {
+            index++;
+            update();
+            return *this;
+        }
+
+        rectangle_iterator operator++(int)
+        {
+            auto saved = *this;
+            operator++();
+            return saved;
+        }
+
+        rectangle_iterator & operator--()
+        {
+            index--;
+            update();
+            return *this;
+        }
+
+        rectangle_iterator operator--(int)
+        {
+            auto saved = *this;
+            operator--();
+            return saved;
+        }
+
+        rectangle_iterator & operator+=(difference_type offset)
+        {
+            index += offset;
+            update();
+            return *this;
+        }
+
+        rectangle_iterator operator+(difference_type offset) const
+        {
+            auto saved = *this;
+            return saved += offset;
+        }
+
+        rectangle_iterator & operator-=(difference_type offset)
+        {
+            index -= offset;
+            update();
+            return *this;
+        }
+
+        rectangle_iterator operator-(difference_type offset) const
+        {
+            auto saved = *this;
+            return saved -= offset;
+        }
+
+        difference_type operator-(const rectangle_iterator & rhs) const
+        {
+            return index - rhs.index;
+        }
+
+        reference operator[](difference_type offset) const
+        {
+            return *(*this + offset);
+        }
+
+        bool operator==(const rectangle_iterator & rhs) const {return coord == rhs.coord;}
+        bool operator!=(const rectangle_iterator & rhs) const {return !(*this == rhs);}
+
+        bool operator<(const rectangle_iterator & rhs) const {return index < rhs.index;}
+        bool operator>(const rectangle_iterator & rhs) const {return index > rhs.index;}
+
+        bool operator<=(const rectangle_iterator & rhs) const {return !(*this > rhs);}
+        bool operator>=(const rectangle_iterator & rhs) const {return !(*this < rhs);}
+
+        reference operator*() const {return coord;}
+        pointer operator->() const {return &coord;}
+
+    private:
+        point_type coord, strides;
+        size_t index;
+
+
+        rectangle_iterator(point_type st, size_t idx) : coord(st), strides(std::move(st)), index(idx)
+        {
+            update();
+        }
+
+        void update()
+        {
+            detail::unravel_index_impl(strides.begin(), strides.end(), index, coord.begin());
+        }
+
+        friend class rectangle_range_basic;
+    };
+
+    using iterator = rectangle_iterator;
+    using reverse_iterator = std::reverse_iterator<rectangle_iterator>;
+
+    rectangle_range_basic(point_type sh) : strides(sh), shape(std::move(sh)), size(1)
+    {
+        for (auto length : shape) size *= length;
+
+        size_t stride = size;
+        for (size_t i = 0; i < shape.size(); i++)
+        {
+            stride = (shape[i]) ? stride / shape[i] : stride;
+            strides[i] = stride;
+        }
     }
 
-    rect_iterator & operator++()
-    {
-        index++;
-        unravel_index(coord.begin(), index);
-        return *this;
-    }
+    iterator begin() const {return iterator(strides, 0);}
 
-    rect_iterator operator++(int)
-    {
-        rect_iterator temp = *this;
-        index++;
-        unravel_index(coord.begin(), index);
-        return temp;
-    }
+    iterator end() const {return iterator(strides, size);}
 
-    bool is_end() const {return index >= size; }
+    size_t index(const iterator & iter) const {return iter.index;}
+
+private:
+    point_type strides, shape;
+    size_t size;
+};
+
+struct rectangle_range : rectangle_range_basic<std::vector<size_t>>
+{
+private:
+    using ShapeContainer = detail::any_container<size_t>;
+
+public:
+    rectangle_range(ShapeContainer sh) : rectangle_range_basic<std::vector<size_t>>(std::move(sh)) {};
 };
 
 /*----------------------------------------------------------------------------*/

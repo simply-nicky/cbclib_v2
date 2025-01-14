@@ -98,6 +98,19 @@ class Xtal():
         hkl = jnp.sum(jnp.linalg.inv(state.basis)[rlp.index] * rlp.q[..., None], axis=-2)
         return MillerWithRLP(q=rlp.q, index=rlp.index, hkl=hkl)
 
+    def hkl_bounds(self, rlp1: RLP, rlp2: RLP, state: XtalState) -> Tuple[Miller, Miller]:
+        miller1, miller2 = self.q_to_hkl(rlp1, state), self.q_to_hkl(rlp2, state)
+        hkl_min, hkl_max = jnp.sort(jnp.stack((miller1.hkl, miller2.hkl)), axis=0)
+        hkl_min, hkl_max = jnp.floor(hkl_min), jnp.ceil(hkl_max)
+        return Miller(hkl_min, rlp1.index), Miller(hkl_max, rlp1.index)
+
+    def hkl_offsets(self, hkl_min: Miller, hkl_max: Miller) -> IntArray:
+        dhkl = jnp.max(jnp.reshape(hkl_max.hkl_indices - hkl_min.hkl_indices, (-1, 3)), axis=-2) + 1
+        offsets = jnp.meshgrid(jnp.arange(-dhkl[0] // 2 + 1, dhkl[0] // 2 + 1),
+                               jnp.arange(-dhkl[1] // 2 + 1, dhkl[1] // 2 + 1),
+                               jnp.arange(-dhkl[2] // 2 + 1, dhkl[2] // 2 + 1))
+        return jnp.reshape(jnp.stack(offsets, axis=-1), (-1, 3))
+
 class Lens():
     def kin_center(self, state: LensState) -> RealArray:
         point = 0.5 * jnp.array([state.pupil_roi[2] + state.pupil_roi[3],
@@ -199,43 +212,40 @@ class CBDModel():
         points = k_to_det(laue.kout, smp_pos, arange(smp_pos.shape[:-1]))
         return CBDPoints(**laue.to_dict(), points=points)
 
-    def init_hkl(self, patterns: Patterns, offsets: IntArray, state: InternalState
-                 ) -> Miller:
-        hkl_min, hkl_max = self.patterns_to_hkl(patterns, state)
-        return Miller(hkl=(hkl_min + hkl_max) // 2, index=patterns.index).offset(offsets)
-
-    def hkl_offsets(self, hkl_min: IntArray, hkl_max: IntArray) -> IntArray:
-        dhkl = jnp.max(jnp.reshape(hkl_max - hkl_min, (-1, 3)), axis=-2) + 1
-        offsets = jnp.meshgrid(jnp.arange(-dhkl[0] // 2 + 1, dhkl[0] // 2 + 1),
-                               jnp.arange(-dhkl[1] // 2 + 1, dhkl[1] // 2 + 1),
-                               jnp.arange(-dhkl[2] // 2 + 1, dhkl[2] // 2 + 1))
-        return jnp.reshape(jnp.stack(offsets, axis=-1), (-1, 3))
+    def init_hkl(self, hkl_min: Miller, hkl_max: Miller, offsets: IntArray) -> Miller:
+        return Miller(hkl=(hkl_min.hkl_indices + hkl_max.hkl_indices) // 2,
+                      index=hkl_min.index).offset(offsets)
 
     def init_patterns(self, miller: MillerWithRLP, state: InternalState) -> Patterns:
         laue = self.lens.source_lines(miller, state.lens)
         laue = self.kout_to_points(laue, state)
         return Patterns.from_points(laue)
 
-    def patterns_to_hkl(self, patterns: Patterns, state: InternalState) -> Tuple[IntArray, IntArray]:
-        rlp = self.patterns_to_q(patterns, state)
-        miller = self.xtal.q_to_hkl(rlp, state.xtal)
-        hkl = jnp.sort(miller.hkl, axis=-2)
-        hkl_min, hkl_max = jnp.floor(hkl[..., 0, :]), jnp.ceil(hkl[..., 1, :])
-        return jnp.asarray(hkl_min, dtype=int), jnp.asarray(hkl_max, dtype=int)
+    def patterns_to_kout(self, patterns: Patterns, state: InternalState) -> Tuple[RealArray, RealArray]:
+        pts = self.points_to_kout(patterns.to_points(), state)
+        return jnp.min(pts.kout[..., :2], axis=-2), jnp.max(pts.kout[..., :2], axis=-2)
 
-    def patterns_to_q(self, patterns: Patterns, state: InternalState) -> RLP:
+    def patterns_to_q(self, patterns: Patterns, state: InternalState) -> Tuple[RLP, RLP]:
         kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
-        points = patterns.to_points()
-        points = self.points_to_kout(points, state)
-        kout_min = jnp.min(points.kout[..., :2], axis=-2)
-        dkout = jnp.max(points.kout[..., :2], axis=-2) - kout_min
-        q = jnp.stack((kxy_to_k(kout_min) - kmin,
-                       kxy_to_k(kout_min) - kxy_to_k(kmax[:2] - dkout)), axis=-2)
-        return RLP(q=q, index=patterns.index[..., None])
+        kout_min, kout_max = self.patterns_to_kout(patterns, state)
+        q1 = kxy_to_k(kout_min) - kxy_to_k(kmax[:2] - (kout_max - kout_min))
+        q2 = kxy_to_k(kout_max) - kmin
+        return RLP(q1, patterns.index), RLP(q2, patterns.index)
 
-    def init_data(self, key: KeyArray, patterns: Patterns, offsets: IntArray, num_points: int,
+    def points_to_q(self, points: Points, patterns: Patterns, state: InternalState) -> Tuple[RLP, RLP]:
+        kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
+        kout_min, kout_max = self.patterns_to_kout(patterns, state)
+        points = self.points_to_kout(points, state)
+        q1, q2 = points.kout - kxy_to_k(kmax[:2] - (kout_max - kout_min)), points.kout - kmin
+        return RLP(q1, points.index), RLP(q2, points.index)
+
+    def init_data(self, key: KeyArray, patterns: Patterns, num_points: int,
                   state: InternalState, combine_key: bool=False) -> 'CBData':
-        miller = self.init_hkl(patterns, offsets, state)
+        q1, q2 = self.patterns_to_q(patterns, state)
+        hkl_min, hkl_max = self.xtal.hkl_bounds(q1, q2, state.xtal)
+        offsets = self.xtal.hkl_offsets(hkl_min, hkl_max)
+        miller = self.init_hkl(hkl_min, hkl_max, offsets)
+
         if combine_key:
             x = uniform(key_combine(key, miller.hkl_indices), num_points)
         else:

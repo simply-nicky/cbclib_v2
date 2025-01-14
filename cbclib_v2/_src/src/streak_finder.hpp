@@ -1,6 +1,6 @@
 #ifndef STREAK_FINDER_
 #define STREAK_FINDER_
-#include "image_proc.hpp"
+#include "bresenham.hpp"
 #include "label.hpp"
 #include "kd_tree.hpp"
 #include "signal_proc.hpp"
@@ -192,18 +192,15 @@ private:
 template <typename T>
 struct Streak
 {
-    using point_type = point_t;
-    using integer_type = point_type::value_type;
-
     Pixels<T> pixels;
-    std::map<T, point_type> centers;
-    point_type center;
+    std::map<T, Point<long>> centers;
+    Point<long> center;
     std::map<T, Point<T>> points;
     Point<T> tau;
 
     template <typename PSet, typename Pt, typename = std::enable_if_t<
         std::is_same_v<pset_t<T>, std::remove_cvref_t<PSet>> &&
-        std::is_constructible_v<point_type, std::remove_cvref_t<Pt>>
+        std::is_constructible_v<Point<long>, std::remove_cvref_t<Pt>>
     >>
     Streak(PSet && pset, Pt && ctr) : pixels(std::forward<PSet>(pset)), center(std::forward<Pt>(ctr))
     {
@@ -223,11 +220,11 @@ struct Streak
         for (auto && [_, pt] : streak.points) points.emplace(make_pair(std::forward<decltype(pt)>(pt)));
     }
 
-    Line<integer_type> central_line() const
+    Line<long> central_line() const
     {
         if (!centers.size())
             throw std::runtime_error("Streak object has no centers");
-        return Line<integer_type>{centers.begin()->second, std::prev(centers.end())->second};
+        return Line<long>{centers.begin()->second, std::prev(centers.end())->second};
     }
 
     Line<T> line() const
@@ -239,7 +236,7 @@ struct Streak
     {
         tau = line().tangent();
         std::map<T, Point<T>> new_points;
-        std::map<T, point_type> new_centers;
+        std::map<T, Point<long>> new_centers;
         for (auto && [_, pt]: points) new_points.emplace_hint(new_points.end(), make_pair(std::forward<decltype(pt)>(pt)));
         for (auto && [_, pt]: centers) new_centers.emplace_hint(new_centers.end(), make_pair(std::forward<decltype(pt)>(pt)));
         points = std::move(new_points);
@@ -266,9 +263,6 @@ struct StreakFinderResult
     vector_array<int> mask;
     std::vector<size_t> idxs;
     std::map<int, Streak<T>> streaks;
-
-    using point_type = Peaks::point_type;
-    using integer_type = typename point_type::value_type;
 
     using streak_iterator = std::map<int, Streak<T>>::iterator;
     using const_streak_iterator = std::map<int, Streak<T>>::const_iterator;
@@ -307,7 +301,7 @@ struct StreakFinderResult
         return std::make_pair(iter, is_added);
     }
 
-    bool is_bad(const point_type & point) const
+    bool is_bad(const Point<long> & point) const
     {
         if (mask.is_inbound(point.coordinate()))
         {
@@ -316,7 +310,7 @@ struct StreakFinderResult
         return true;
     }
 
-    bool is_free(const point_type & point) const
+    bool is_free(const Point<long> & point) const
     {
         if (mask.is_inbound(point.coordinate()))
         {
@@ -394,9 +388,6 @@ private:
 
 struct StreakFinder
 {
-    using point_type = Peaks::point_type;
-    using integer_type = typename point_type::value_type;
-
     Structure structure;
     unsigned min_size;
     unsigned lookahead;
@@ -415,7 +406,7 @@ struct StreakFinder
         std::map<std::pair<size_t, int>, typename StreakFinderResult<T>::streak_iterator> streaks;
         int cnt = 0;
 
-        auto is_good = [&result](const point_type & point)
+        auto is_good = [&result](const Point<long> & point)
         {
             return result.is_free(point);
         };
@@ -447,7 +438,7 @@ struct StreakFinder
     }
 
     template <typename T>
-    Streak<T> get_streak(const point_type & seed, const StreakFinderResult<T> & result, const array<T> & data, Peaks peaks, T xtol) const
+    Streak<T> get_streak(const Point<long> & seed, const StreakFinderResult<T> & result, const array<T> & data, Peaks peaks, T xtol) const
     {
         Streak<T> streak {get_pset(result, data, seed), seed};
 
@@ -469,7 +460,7 @@ struct StreakFinder
         pset_t<T> pset;
         for (auto shift : structure.points)
         {
-            point_type pt {x + shift.x(), y + shift.y()};
+            Point<long> pt {x + shift.x(), y + shift.y()};
 
             if (!result.is_bad(pt)) pset.emplace_hint(pset.end(), make_pixel(std::move(pt), data));
         }
@@ -490,7 +481,7 @@ struct StreakFinder
 
 private:
     template <typename T>
-    std::pair<bool, Streak<T>> add_point_to_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, const point_type & pt, T xtol) const
+    std::pair<bool, Streak<T>> add_point_to_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, const Point<long> & pt, T xtol) const
     {
         auto new_streak = streak;
         new_streak.insert(Streak<T>{get_pset(result, data, pt), pt});
@@ -511,31 +502,25 @@ private:
     }
 
     template <typename T, bool IsForward>
-    point_type find_next_step(const Streak<T> & streak, const point_type & point, int max_cnt) const
+    Point<long> find_next_step(const Streak<T> & streak, const Point<long> & point, int max_cnt) const
     {
         auto line = streak.line();
 
-        BresenhamIterator<T, IsForward> pix {line.norm(), point, point, line};
+        auto iter = BresenhamPlotter<T, 2, IsForward>{line}.begin(point);
 
-        for (int i = 0; i <= max_cnt; i++)
-        {
-            pix.step_xy();
+        for (int i = 0; i < max_cnt; i++) iter++;
 
-            if (pix.is_xnext()) pix.x_is_next();
-            if (pix.is_ynext()) pix.y_is_next();
-        }
-
-        return pix.point;
+        return *iter;
     }
 
     template <typename T, bool IsForward>
-    Streak<T> grow_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, point_type point, const Peaks & peaks, T xtol) const
+    Streak<T> grow_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, Point<long> point, const Peaks & peaks, T xtol) const
     {
         unsigned tries = 0;
 
         while (tries <= lookahead)
         {
-            point_type pt = find_next_step<T, IsForward>(streak, point, structure.rank);
+            Point<long> pt = find_next_step<T, IsForward>(streak, point, structure.rank);
 
             auto stack = peaks.tree.find_range(pt, structure.rank * structure.rank);
             std::sort(stack.begin(), stack.end(), [](auto a, auto b){return a.second > b.second;});

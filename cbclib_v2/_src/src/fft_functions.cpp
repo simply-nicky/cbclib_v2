@@ -301,12 +301,13 @@ py::array_t<T> gaussian_kernel_vec(std::vector<T> sigma, U order, T truncate)
 
     auto out = py::array_t<T>(shape);
     auto oarr = array<T>(out.request());
+    auto range = rectangle_range(oarr.shape);
 
-    for (auto riter = rect_iterator(oarr.shape); !riter.is_end(); ++riter)
+    for (auto iter = range.begin(); iter != range.end(); ++iter)
     {
         T val = T(1.0);
-        for (size_t i = 0; i < oarr.ndim; i++) val *= gaussians[i][riter.coord[i]];
-        oarr[riter.index] = val;
+        for (size_t i = 0; i < oarr.ndim; i++) val *= gaussians[i][(*iter)[i]];
+        oarr[range.index(iter)] = val;
     }
 
     return out;

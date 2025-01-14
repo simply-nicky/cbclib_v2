@@ -5,8 +5,8 @@
 
 namespace cbclib {
 
-template <typename T, typename I = typename point_t::value_type>
-using table_t = std::map<std::pair<I, I>, T>;
+template <typename T>
+using table_t = std::map<std::pair<long, long>, T>;
 
 namespace detail {
 
@@ -39,12 +39,11 @@ private:
 };
 
 template <typename T, typename I>
-void draw_pixel(ImageBuffer<std::pair<I, T>> & buffer, const point_t & pt, I frame, T val)
+void draw_pixel(ImageBuffer<std::pair<I, T>> & buffer, const Point<long> & pt, I frame, T val)
 {
-    using integer_type = typename point_t::value_type;
     if (val)
     {
-        std::array<integer_type, 3> coord {static_cast<integer_type>(frame), pt.y(), pt.x()};
+        std::array<long, 3> coord {static_cast<long>(frame), pt.y(), pt.x()};
         if (buffer.is_inbound(coord))
         {
             buffer.emplace_back(coord, val);
@@ -55,12 +54,11 @@ void draw_pixel(ImageBuffer<std::pair<I, T>> & buffer, const point_t & pt, I fra
 }
 
 template <typename T, typename I>
-void draw_pixel(ImageBuffer<std::tuple<I, I, T>> & buffer, const point_t & pt, I frame, I index, T val)
+void draw_pixel(ImageBuffer<std::tuple<I, I, T>> & buffer, const Point<long> & pt, I frame, I index, T val)
 {
-    using integer_type = typename point_t::value_type;
     if (val)
     {
-        std::array<integer_type, 3> coord {static_cast<integer_type>(frame), pt.y(), pt.x()};
+        std::array<long, 3> coord {static_cast<long>(frame), pt.y(), pt.x()};
         if (buffer.is_inbound(coord))
         {
             buffer.emplace_back(coord, index, val);
@@ -71,7 +69,7 @@ void draw_pixel(ImageBuffer<std::tuple<I, I, T>> & buffer, const point_t & pt, I
 }
 
 template <typename T>
-T get_pixel(const array<T> & image, const point_t & pt)
+T get_pixel(const array<T> & image, const Point<long> & pt)
 {
     if (image.is_inbound(pt.coordinate()))
     {
@@ -117,11 +115,11 @@ struct BresenhamTraits;
 template <typename T>
 struct BresenhamTraits<T, true>
 {
-    static point_t start(const Line<T> & line) {return line.pt0.round();}
-    static point_t end(const Line<T> & line) {return line.pt1.round();}
-    static point_t step(const Point<T> & tau)
+    static Point<long> start(const Line<T> & line) {return line.pt0.round();}
+    static Point<long> end(const Line<T> & line) {return line.pt1.round();}
+    static Point<long> step(const Point<T> & tau)
     {
-        point_t point {};
+        Point<long> point {};
         point.x() = (tau.x() >= 0) ? 1 : -1;
         point.y() = (tau.y() >= 0) ? 1 : -1;
         return point;
@@ -131,11 +129,11 @@ struct BresenhamTraits<T, true>
 template <typename T>
 struct BresenhamTraits<T, false>
 {
-    static point_t start(const Line<T> & line) {return line.pt1.round();}
-    static point_t end(const Line<T> & line) {return line.pt0.round();}
-    static point_t step(const Point<T> & tau)
+    static Point<long> start(const Line<T> & line) {return line.pt1.round();}
+    static Point<long> end(const Line<T> & line) {return line.pt0.round();}
+    static Point<long> step(const Point<T> & tau)
     {
-        point_t point {};
+        Point<long> point {};
         point.x() = (tau.x() >= 0) ? -1 : 1;
         point.y() = (tau.y() >= 0) ? -1 : 1;
         return point;
@@ -147,15 +145,15 @@ struct BresenhamTraits<T, false>
 template <typename T, bool IsForward>
 struct BresenhamIterator
 {
-    point_t step;       /* Unit step                                                        */
+    Point<long> step;       /* Unit step                                                        */
     Point<T> tau;       /* Line norm, derivative of a line error function:                  */
                         /* error(x + dx, y + dy) = error(x, y) + tau.x * dx + tau.y * dy    */
 
     /* Temporal loop variables */
 
     T error;            /* Current error value                                              */
-    point_t next_step;  /* Next step                                                        */
-    point_t point;      /* Current point position                                           */
+    Point<long> next_step;  /* Next step                                                        */
+    Point<long> point;      /* Current point position                                           */
 
     template <typename Point1, typename Point2>
     BresenhamIterator(Point1 && tau, Point2 && start, const Point<T> & origin, const Line<T> & line) :
@@ -233,9 +231,9 @@ struct BresenhamIterator
         return 2 * e_xy() >= step.y() * tau.y();
     }
 
-    bool is_end(const point_t & end) const
+    bool is_end(const Point<long> & end) const
     {
-        bool isend = (next_step == point_t{});
+        bool isend = (next_step == Point<long>{});
         if (next_step.x()) isend |= (end.x() - point.x()) * step.x() <= 0;
         if (next_step.y()) isend |= (end.y() - point.y()) * step.y() <= 0;
         return isend;
@@ -267,11 +265,11 @@ private:
 template <typename T, class Func, typename = std::enable_if_t<
     std::is_invocable_v<std::remove_cvref_t<Func>, BresenhamIterator<T, true>, BresenhamIterator<T, true>>
 >>
-void draw_bresenham_func(const point_t & ubound, const Line<T> & line, T width, Func && func)
+void draw_bresenham_func(const Point<long> & ubound, const Line<T> & line, T width, Func && func)
 {
     /* Discrete line */
-    point_t pt0 (line.pt0.round());
-    point_t pt1 (line.pt1.round());
+    Point<long> pt0 (line.pt0.round());
+    Point<long> pt1 (line.pt1.round());
 
     T length = amplitude(line.tangent());
     int wi = std::ceil(width) + 1;
@@ -280,10 +278,10 @@ void draw_bresenham_func(const point_t & ubound, const Line<T> & line, T width, 
 
     /* Define bounds of the line plot */
     auto step = BresenhamTraits<T, true>::step(line.tangent());
-    auto bnd0 = (pt0 - wi * step).clamp(point_t{}, ubound);
-    auto bnd1 = (pt1 + wi * step).clamp(point_t{}, ubound);
+    auto bnd0 = (pt0 - wi * step).clamp(Point<long>{}, ubound);
+    auto bnd1 = (pt1 + wi * step).clamp(Point<long>{}, ubound);
 
-    BresenhamIterator<T, true> lpix {line.norm(), bnd0, line};
+    BresenhamIterator<T, true> lpix {line.normal(), bnd0, line};
     BresenhamIterator<T, true> epix {line.tangent(), bnd0, line};
 
     do
@@ -324,11 +322,10 @@ void draw_bresenham_func(const point_t & ubound, const Line<T> & line, T width, 
 }
 
 template <typename I>
-point_t get_ubound(const std::vector<I> & shape)
+Point<long> get_ubound(const std::vector<I> & shape)
 {
-    using integer_type = typename point_t::value_type;
-    return point_t{static_cast<integer_type>((shape[shape.size() - 1]) ? shape[shape.size() - 1] - 1 : 0),
-                   static_cast<integer_type>((shape[shape.size() - 2]) ? shape[shape.size() - 2] - 1 : 0)};
+    return Point<long>{static_cast<long>((shape[shape.size() - 1]) ? shape[shape.size() - 1] - 1 : 0),
+                       static_cast<long>((shape[shape.size() - 2]) ? shape[shape.size() - 2] - 1 : 0)};
 }
 
 }

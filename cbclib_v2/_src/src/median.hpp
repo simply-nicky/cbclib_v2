@@ -118,12 +118,13 @@ public:
 
     ImageFilter(const array<bool> & footprint)
     {
-        for (auto riter = rect_iterator(footprint.shape); !riter.is_end(); ++riter)
+        auto range = rectangle_range(footprint.shape);
+        for (auto iter = range.begin(); iter != range.end(); ++iter)
         {
-            if (footprint[riter.index])
+            if (footprint[range.index(iter)])
             {
                 auto & offset = offsets.emplace_back();
-                std::transform(riter.coord.begin(), riter.coord.end(), footprint.shape.begin(), std::back_inserter(offset),
+                std::transform(iter->begin(), iter->end(), footprint.shape.begin(), std::back_inserter(offset),
                                [](long crd, size_t dim){return crd - dim / 2;});
             }
         }

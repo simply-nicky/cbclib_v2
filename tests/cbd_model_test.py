@@ -35,16 +35,10 @@ class TestCBDModel():
         return cbc.jax.Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def offsets(self, patterns: cbc.jax.Patterns, model: TestModel,
-                int_state: cbc.jax.InternalState) -> IntArray:
-        hkl_min, hkl_max = model.patterns_to_hkl(patterns, int_state)
-        return model.hkl_offsets(hkl_min, hkl_max)
-
-    @pytest.fixture
     def data(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
-             offsets: IntArray, int_state: cbc.jax.InternalState, num_points: int
+             int_state: cbc.jax.InternalState, num_points: int
              ) -> cbc.jax.CBData:
-        return model.init_data(key, patterns, offsets, num_points, int_state)
+        return model.init_data(key, patterns, num_points, int_state)
 
     @pytest.fixture
     def pupil_loss(self, model: TestModel, num_lines: int) -> Criterion:

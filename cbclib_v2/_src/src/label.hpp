@@ -6,7 +6,7 @@
 namespace cbclib {
 
 template <typename T>
-using pixel_t = std::tuple<point_t, T>;
+using pixel_t = std::tuple<Point<long>, T>;
 
 template <typename T>
 using pset_t = std::set<pixel_t<T>>;
@@ -257,14 +257,14 @@ struct PointsContainer
     }
 };
 
-struct PointsList : public PointsContainer<std::vector<point_t>>
+struct PointsList : public PointsContainer<std::vector<Point<long>>>
 {
     using PointsContainer::PointsContainer;
 };
 
 // Connectivity structure class
 
-struct Structure : public PointsContainer<std::set<point_t>>
+struct Structure : public PointsContainer<std::set<Point<long>>>
 {
     int radius, rank;
 
@@ -289,7 +289,7 @@ struct Structure : public PointsContainer<std::set<point_t>>
 
 // Extended interface of set of points - needed for Regions
 
-struct PointsSet : public PointsContainer<std::set<point_t>>
+struct PointsSet : public PointsContainer<std::set<Point<long>>>
 {
     using PointsContainer::PointsContainer;
 

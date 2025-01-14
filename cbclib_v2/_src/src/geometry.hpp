@@ -256,55 +256,57 @@ auto amplitude(const Array<T, N> & a) -> decltype(std::sqrt(std::declval<T &>())
     return std::sqrt(magnitude(a));
 }
 
-template <class Container, typename T = typename Container::value_type, size_t N>
+template <size_t N, class Container, typename T = typename Container::value_type>
 constexpr PointND<T, N> to_point(Container & a, size_t start)
 {
-    return apply_to_sequence<N>([&a, start](auto... idxs){return {a[start + idxs]...};});
+    return apply_to_sequence<N>([&a, start](auto... idxs) -> PointND<T, N> {return {a[start + idxs]...};});
 }
 
 template <typename T>
 using Point = PointND<T, 2>;
 
-using point_t = Point<long>;
-
-template <typename T>
-struct Line
+template <typename T, size_t N>
+struct LineND
 {
-    Point<T> pt0, pt1;
+    PointND<T, N> pt0, pt1;
 
-    Line() = default;
+    LineND() = default;
 
     template <typename Pt0, typename Pt1, typename = std::enable_if_t<
-        std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt0>> &&
-        std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt1>>
+        std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt0>> &&
+        std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt1>>
     >>
-    Line(Pt0 && pt0, Pt1 && pt1) : pt0(std::forward<Pt0>(pt0)), pt1(std::forward<Pt1>(pt1)) {}
+    LineND(Pt0 && pt0, Pt1 && pt1) : pt0(std::forward<Pt0>(pt0)), pt1(std::forward<Pt1>(pt1)) {}
 
-    Line(T x0, T y0, T x1, T y1) : Line(Point<T>{x0, y0}, Point<T>{x1, y1}) {}
+    bool operator==(const LineND<T, N> & rhs) const {return pt0 == rhs.pt0 && pt1 == rhs.pt1;}
+    bool operator!=(const LineND<T, N> & rhs) const {return !operator==(rhs);}
 
-    Point<T> norm() const {return {pt1.y() - pt0.y(), pt0.x() - pt1.x()};}
+    PointND<T, N> normal() const requires(N >= 2)
+    {
+        PointND<T, N> norm {};
+        norm[0] = pt1[1] - pt0[1];
+        norm[1] = pt0[0] - pt1[0];
+        return norm;
+    }
 
-    Point<T> tangent() const {return {pt1.x() - pt0.x(), pt1.y() - pt0.y()};}
-
-    auto theta() const {return std::atan(pt1.y() - pt0.y(), pt1.x() - pt0.x());}
+    PointND<T, N> tangent() const {return pt1 - pt0;}
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
-    W distance(const Point<V> & point) const
+    W distance(const PointND<V, N> & point) const
     {
-        auto tau = tangent(), n = norm();
+        auto tau = tangent();
         auto mag = magnitude(tau);
 
         if (mag)
         {
-            auto compare_point = [](const Point<V> & a, const Point<V> & b){return magnitude(a) < magnitude(b);};
+            auto compare_point = [](const PointND<V, N> & a, const PointND<V, N> & b){return magnitude(a) < magnitude(b);};
             auto r = std::min(point - pt0, pt1 - point, compare_point);
 
-            // need to divide by mag : dist = amplitude(norm() * dot(norm(), r) / magnitude(norm()))
             auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            auto r_norm = static_cast<W>(dot(n, r)) / mag;
-            if (r_tau > 1) return amplitude(n * r_norm + tau * (r_tau - 1));
-            if (r_tau < 0) return amplitude(n * r_norm + tau * r_tau);
-            return amplitude(n * r_norm);
+            auto r_norm = r - r_tau * tau;
+            if (r_tau > 1) return amplitude(r_norm + tau * (r_tau - 1));
+            if (r_tau < 0) return amplitude(r_norm + tau * r_tau);
+            return amplitude(r_norm);
         }
         return amplitude(pt0 - point);
     }
@@ -312,25 +314,31 @@ struct Line
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
     W normal_distance(const Point<V> & point) const
     {
-        auto mag = magnitude(tangent());
+        auto tau = tangent();
+        auto mag = magnitude(tau);
 
         if (mag)
         {
             auto compare_point = [](const Point<V> & a, const Point<V> & b){return magnitude(a) < magnitude(b);};
             auto r = std::min(point - pt0, pt1 - point, compare_point);
-            return abs(dot(norm(), r) / std::sqrt(mag));
+
+            auto r_tau = static_cast<W>(dot(tau, r)) / mag;
+            return amplitude(r - r_tau * tau);
         }
         return amplitude(pt0 - point);
     }
 
-    friend std::ostream & operator<<(std::ostream & os, const Line<T> & line)
+    friend std::ostream & operator<<(std::ostream & os, const LineND<T, N> & line)
     {
         os << "{" << line.pt0 << ", " << line.pt1 << "}";
         return os;
     }
 
-    std::array<T, 4> to_array() const {return {pt0.x(), pt0.y(), pt1.x(), pt1.y()};}
+    std::array<T, 2 * N> to_array() const {return concatenate(pt0.to_array(), pt1.to_array());}
 };
+
+template <typename T>
+using Line = LineND<T, 2>;
 
 namespace detail{
 

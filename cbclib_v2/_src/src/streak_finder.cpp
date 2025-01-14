@@ -204,16 +204,15 @@ void declare_streak_finder_result(py::module & m, const std::string & typestr)
         }, py::arg("index"), py::arg("xtol"), py::arg("vmin"), py::arg("probability"))
         .def("get_streak", [](const StreakFinderResult<T> & result, int index)
         {
-            using integer_type = typename StreakFinderResult<T>::integer_type;
             auto iter = result.streaks.find(index);
             if (iter == result.streaks.end())
                 throw std::out_of_range("No streak with index " + std::to_string(index) + "in the result");
 
-            std::set<std::tuple<integer_type, integer_type, T>> pset;
+            std::set<std::tuple<long, long, T>> pset;
             for (auto [pt, val] : iter->second.pixels.pset) pset.emplace_hint(pset.end(), pt.x(), pt.y(), val);
             std::map<T, std::array<T, 2>> points;
             for (auto [dist, pt] : iter->second.points) points.emplace_hint(points.end(), dist, pt.to_array());
-            std::map<integer_type, std::array<integer_type, 2>> centers;
+            std::map<long, std::array<long, 2>> centers;
             for (auto [dist, ctr] : iter->second.centers) centers.emplace_hint(centers.end(), dist, ctr.to_array());
             return std::make_tuple(pset, points, centers, iter->second.line().to_array());
         }, py::arg("index"))
@@ -233,7 +232,6 @@ void declare_streak_finder_result(py::module & m, const std::string & typestr)
 PYBIND11_MODULE(streak_finder, m)
 {
     using namespace cbclib;
-    using integer_type = typename point_t::value_type;
 
     try
     {
@@ -245,10 +243,10 @@ PYBIND11_MODULE(streak_finder, m)
     }
 
     py::class_<Peaks>(m, "Peaks")
-        .def(py::init([](std::vector<integer_type> xvec, std::vector<integer_type> yvec)
+        .def(py::init([](std::vector<long> xvec, std::vector<long> yvec)
             {
                 Peaks::container_type points;
-                for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace_back(point_t{x, y});
+                for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace_back(Point<long>{x, y});
                 return Peaks(std::move(points));
             }), py::arg("x"), py::arg("y"))
         .def("filter",
@@ -264,9 +262,9 @@ PYBIND11_MODULE(streak_finder, m)
             },
             py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"))
         .def("find_nearest",
-            [](const Peaks & peaks, integer_type x, integer_type y)
+            [](const Peaks & peaks, long x, long y)
             {
-                auto [iter, dist_sq] = peaks.tree.find_nearest(point_t{x, y});
+                auto [iter, dist_sq] = peaks.tree.find_nearest(Point<long>{x, y});
                 return std::make_tuple(iter->point().to_array(), std::sqrt(dist_sq));
             }, py::arg("x"), py::arg("y"))
         .def("find_nearest",
@@ -282,10 +280,10 @@ PYBIND11_MODULE(streak_finder, m)
                 return std::make_tuple(iter->point().to_array(), std::sqrt(dist_sq));
             }, py::arg("x"), py::arg("y"))
         .def("find_range",
-            [](const Peaks & peaks, integer_type x, integer_type y, double range)
+            [](const Peaks & peaks, long x, long y, double range)
             {
-                auto stack = peaks.tree.find_range(point_t{x, y}, integer_type(range * range));
-                std::vector<std::tuple<std::array<integer_type, 2>, double>> result;
+                auto stack = peaks.tree.find_range(Point<long>{x, y}, long(range * range));
+                std::vector<std::tuple<std::array<long, 2>, double>> result;
                 for (auto [iter, dist_sq] : stack) result.emplace_back(iter->point().to_array(), std::sqrt(dist_sq));
                 return result;
             }, py::arg("x"), py::arg("y"), py::arg("range"))
@@ -293,7 +291,7 @@ PYBIND11_MODULE(streak_finder, m)
             [](const Peaks & peaks, double x, double y, double range)
             {
                 auto stack = peaks.tree.find_range(std::array<double, 2>{x, y}, range * range);
-                std::vector<std::tuple<std::array<integer_type, 2>, double>> result;
+                std::vector<std::tuple<std::array<long, 2>, double>> result;
                 for (auto [iter, dist_sq] : stack) result.emplace_back(iter->point().to_array(), std::sqrt(dist_sq));
                 return result;
             }, py::arg("x"), py::arg("y"), py::arg("range"))
@@ -301,14 +299,14 @@ PYBIND11_MODULE(streak_finder, m)
             [](const Peaks & peaks, float x, float y, float range)
             {
                 auto stack = peaks.tree.find_range(std::array<float, 2>{x, y}, range * range);
-                std::vector<std::tuple<std::array<integer_type, 2>, double>> result;
+                std::vector<std::tuple<std::array<long, 2>, double>> result;
                 for (auto [iter, dist_sq] : stack) result.emplace_back(iter->point().to_array(), std::sqrt(dist_sq));
                 return result;
             }, py::arg("x"), py::arg("y"), py::arg("range"))
         .def("mask",
             [](Peaks & peaks, py::array_t<bool> mask)
             {
-                return peaks.mask([m = array<bool>(mask.request())](const point_t & point){return m.at(point.coordinate());});
+                return peaks.mask([m = array<bool>(mask.request())](const Point<long> & point){return m.at(point.coordinate());});
             },
             py::arg("mask"))
         .def("sort",

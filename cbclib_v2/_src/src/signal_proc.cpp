@@ -272,9 +272,9 @@ auto kr_grid(py::array_t<T, py::array::c_style | py::array::forcecast> y, py::ar
                     origin[n] = origin_index - roi[2 * n];
                 }
 
-                for (auto riter = rect_iterator(shape); !riter.is_end(); ++riter)
+                for (const auto & point : rectangle_range(shape))
                 {
-                    std::transform(origin.begin(), origin.end(), riter.coord.begin(), coord.begin(), std::plus<long>());
+                    std::transform(origin.begin(), origin.end(), point.begin(), coord.begin(), std::plus<long>());
 
                     T dist = T();
                     for (size_t n = 0; n < ndim; n++)

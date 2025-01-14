@@ -423,13 +423,13 @@ OutputIt write_origin(InputIt1 first1, InputIt1 last1, InputIt2 first2, OutputIt
 template <typename T, typename U, class Shape>
 void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape)
 {
-    for (auto riter = rect_iterator(fshape); !riter.is_end(); ++riter)
+    for (const auto & pt : rectangle_range(fshape))
     {
-        auto bindex = buffer.ravel_index(riter.coord.begin(), riter.coord.end());
+        auto bindex = buffer.ravel_index(pt.begin(), pt.end());
 
-        if (data.is_inbound(riter.coord.begin(), riter.coord.end()))
+        if (data.is_inbound(pt.begin(), pt.end()))
         {
-            buffer[bindex] = data.at(riter.coord.begin(), riter.coord.end());
+            buffer[bindex] = data.at(pt.begin(), pt.end());
         }
         else buffer[bindex] = T();
     }
@@ -438,15 +438,15 @@ void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape
 template <typename T, typename U, class Shape, class Origin>
 void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape, const Origin & origin)
 {
-    std::vector<long> coord (buffer.ndim, 0);
-    for (auto riter = rect_iterator(fshape); !riter.is_end(); ++riter)
+    std::vector<long> temp (buffer.ndim, 0);
+    for (const auto & pt : rectangle_range(fshape))
     {
-        std::transform(riter.coord.begin(), riter.coord.end(), origin.begin(), coord.begin(), std::minus<long>());
-        auto bindex = buffer.ravel_index(riter.coord.begin(), riter.coord.end());
+        std::transform(pt.begin(), pt.end(), origin.begin(), temp.begin(), std::minus<long>());
+        auto bindex = buffer.ravel_index(pt.begin(), pt.end());
 
-        if (data.is_inbound(coord.begin(), coord.end()))
+        if (data.is_inbound(temp.begin(), temp.end()))
         {
-            buffer[bindex] = data.at(coord.begin(), coord.end());
+            buffer[bindex] = data.at(temp.begin(), temp.end());
         }
         else buffer[bindex] = T();
     }
@@ -465,25 +465,27 @@ OutputIt read_origin(InputIt1 first1, InputIt1 last1, InputIt2 first2, OutputIt 
 template <typename T, typename U, class Shape>
 void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape)
 {
-    std::vector<long> coord (buffer.ndim, 0);
-    for (auto riter = rect_iterator(data.shape); !riter.is_end(); ++riter)
+    std::vector<long> temp (buffer.ndim, 0);
+    auto range = rectangle_range(data.shape);
+    for (auto iter = range.begin(); iter != range.end(); ++iter)
     {
-        std::transform(riter.coord.begin(), riter.coord.end(), fshape.begin(), coord.begin(), detail::modulo<long, size_t>);
+        std::transform(iter->begin(), iter->end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
-        data[riter.index] = buffer.at(coord.begin(), coord.end());
+        data[range.index(iter)] = buffer.at(temp.begin(), temp.end());
     }
 }
 
 template <typename T, typename U, class Shape, class Origin>
 void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape, const Origin & origin)
 {
-    std::vector<long> coord (buffer.ndim, 0);
-    for (auto riter = rect_iterator(data.shape); !riter.is_end(); ++riter)
+    std::vector<long> temp (buffer.ndim, 0);
+    auto range = rectangle_range(data.shape);
+    for (auto iter = range.begin(); iter != range.end(); ++iter)
     {
-        std::transform(origin.begin(), origin.end(), riter.coord.begin(), coord.begin(), std::plus<long>());
-        std::transform(coord.begin(), coord.end(), fshape.begin(), coord.begin(), detail::modulo<long, size_t>);
+        std::transform(origin.begin(), origin.end(), iter->begin(), temp.begin(), std::plus<long>());
+        std::transform(temp.begin(), temp.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
-        data[riter.index] = buffer.at(coord.begin(), coord.end());
+        data[range.index(iter)] = buffer.at(temp.begin(), temp.end());
     }
 }
 
