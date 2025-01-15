@@ -194,9 +194,9 @@ def line_intersection(pt0: RealArray, pt1: RealArray, pt2: RealArray, pt3: RealA
 def normal_distance(point: RealArray, pt0: RealArray, pt1: RealArray) -> RealArray:
     tau = pt1 - pt0
     center = 0.5 * (pt0 + pt1)
-    dist = vector_dot(point - center, tau)
-    tau_abs = jnp.sqrt(jnp.sum(tau**2, axis=-1))
-    return safe_divide(dist, tau_abs)
+    r = point - center
+    r_tau = safe_divide(jnp.sum(tau * r, axis=-1), jnp.sum(tau**2, axis=-1))
+    return np.sqrt(jnp.sum((r - r_tau * tau)**2, axis=-1))
 
 def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6) -> Tuple[RealArray, BoolArray]:
     r"""Calculate the source lines for a set of reciprocal lattice points ``q``.

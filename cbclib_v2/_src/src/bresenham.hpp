@@ -48,12 +48,12 @@ public:
 
     static const UniquePairs & instance()
     {
-        static UniquePairs<N> axes;
+        static UniquePairs axes;
         return axes;
     }
 
-    UniquePairs(const UniquePairs &)          = delete;
-    void operator=(const UniquePairs &)    = delete;
+    UniquePairs(const UniquePairs &)        = delete;
+    void operator=(const UniquePairs &)     = delete;
 
     const std::array<std::pair<size_t, size_t>, NumPairs> & pairs() const {return m_pairs;}
     const std::array<std::array<size_t, N - 1>, N> & lookup() const {return m_lookup;}
@@ -107,6 +107,7 @@ private:
 
         T error_at() const {return error;}
 
+        // Return e(x + sx, y + sy)
         T error_at(const PointND<T, N> & step) const
         {
             return error_at() + dot(step, derror);
@@ -129,8 +130,6 @@ private:
 
         TangentError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
             BaseError(std::move(derr), point, origin), length(amplitude(derr)) {}
-
-        // Return e(x + sx, y + sy)
 
         T error_at() const {return std::max(std::max(-this->error, this->error - length * length), T());}
     };
@@ -238,21 +237,14 @@ public:
     using const_iterator = LineIterator;
     using iterator = const_iterator;
 
-    BresenhamPlotter(LineND<T, N> l, PointND<long, N> p0, PointND<long, N> p1) : line(std::move(l)), m_pt0(std::move(p0)), m_pt1(std::move(p1))
-    {
-        m_pt1 += step();
-    }
+    BresenhamPlotter(LineND<T, N> l, PointND<long, N> p0, PointND<long, N> p1) :
+        line(std::move(l)), m_pt0(std::move(p0)), m_pt1(p1 + step()) {}
 
-    BresenhamPlotter(LineND<T, N> l, const PointND<long, N> & bound, long offset) : line(std::move(l))
-    {
-        m_pt0 = (pt0().round() - step() * offset).clamp(PointND<long, N>{}, bound);
-        m_pt1 = (pt1().round() + step() * offset).clamp(PointND<long, N>{}, bound) + step();
-    }
+    BresenhamPlotter(LineND<T, N> l, long offset) :
+        line(std::move(l)), m_pt0(pt0().round() - step() * offset), m_pt1(pt1().round() + step() * (offset + 1)) {}
 
-    BresenhamPlotter(LineND<T, N> l) : line(std::move(l)), m_pt0(pt0().round()), m_pt1(pt1().round())
-    {
-        m_pt1 += step();
-    }
+    BresenhamPlotter(LineND<T, N> l) :
+        line(std::move(l)), m_pt0(pt0().round()), m_pt1(pt1().round() + step()) {}
 
     iterator begin(PointND<long, N> point) const
     {
@@ -274,16 +266,17 @@ public:
         return iterator(iter, axis);
     }
 
-    T normal_error(const iterator & iter, T width) const
+    T normal_error(const iterator & iter) const
     {
         T error = T();
-        for (size_t i = 0; i < NumPairs; i++) error += std::pow(iter.nerrors[i].error_at() / (iter.terror.length * width), 2);
+        for (size_t i = 0; i < NumPairs; i++) error += std::pow(iter.nerrors[i].error_at() / iter.terror.length, 2);
         return error;
     }
 
     T error(const iterator & iter, T width) const
     {
-        return std::pow(iter.terror.error_at() / (iter.terror.length * width), 2) + normal_error(iter, width);
+        if (width <= T()) return std::numeric_limits<T>::infinity();
+        return (std::pow(iter.terror.error_at() / iter.terror.length, 2) + normal_error(iter)) / (width * width);
     }
 
     bool is_next(const iterator & iter, size_t axis) const
@@ -347,9 +340,9 @@ namespace detail {
 template <typename T, class Func, typename = std::enable_if_t<
     std::is_invocable_v<std::remove_cvref_t<Func>, const PointND<long, 2> &, T>
 >>
-void draw_line_2d(const PointND<long, 2> & bound, const LineND<T, 2> & line, T width, Func && func)
+void draw_line_2d(const LineND<T, 2> & line, T width, Func && func)
 {
-    BresenhamPlotter<T, 2, true> plotter {line, bound, long(std::ceil(width) + 1)};
+    BresenhamPlotter<T, 2, true> plotter {line, long(std::ceil(width) + 1)};
 
     for (auto iter = plotter.begin(); iter != plotter.end(); ++iter)
     {
@@ -358,7 +351,7 @@ void draw_line_2d(const PointND<long, 2> & bound, const LineND<T, 2> & line, T w
         if (plotter.is_next(iter, 0))
         {
             for (auto iter_y = std::next(plotter.begin(iter, 0));
-                 plotter.normal_error(iter_y, width) <= 1.0 && iter_y != plotter.end();
+                 plotter.normal_error(iter_y) <= width * width && iter_y != plotter.end();
                  ++iter_y)
             {
                 std::forward<Func>(func)(*iter_y, plotter.error(iter_y, width));
@@ -368,7 +361,7 @@ void draw_line_2d(const PointND<long, 2> & bound, const LineND<T, 2> & line, T w
         if (plotter.is_next(iter, 1))
         {
             for (auto iter_x = std::next(plotter.begin(iter, 1));
-                 plotter.normal_error(iter_x, width) <= 1.0 && iter_x != plotter.end();
+                 plotter.normal_error(iter_x) <= width * width && iter_x != plotter.end();
                  ++iter_x)
             {
                 std::forward<Func>(func)(*iter_x, plotter.error(iter_x, width));
@@ -384,9 +377,9 @@ void draw_line_2d(const PointND<long, 2> & bound, const LineND<T, 2> & line, T w
 template <typename T, class Func, typename = std::enable_if_t<
     std::is_invocable_v<std::remove_cvref_t<Func>, const PointND<long, 3> &, T>
 >>
-void draw_line_3d(const PointND<long, 3> & bound, const LineND<T, 3> & line, T width, Func && func)
+void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
 {
-    BresenhamPlotter<T, 3, true> plotter {line, bound, long(std::ceil(width) + 1)};
+    BresenhamPlotter<T, 3, true> plotter {line, long(std::ceil(width) + 1)};
 
     for (auto iter = plotter.begin(); iter != plotter.end(); ++iter)
     {
@@ -401,26 +394,43 @@ void draw_line_3d(const PointND<long, 3> & bound, const LineND<T, 3> & line, T w
                 if (plotter.is_next(iter_xy, m % 3) && (!plotter.is_next(iter, m % 3) || n < m % 3))
                 {
                     for (auto iter_x = std::next(plotter.begin(iter_xy, m % 3));
-                         plotter.normal_error(iter_x, width) <= 1.0 && iter_x != plotter.end();
-                         ++iter_x)
+                         iter_x != plotter.end(); ++iter_x)
                     {
+                        auto error = plotter.normal_error(iter_x);
+                        if (error > width * width)
+                        {
+                            if (error > plotter.normal_error(std::next(iter_x))) continue;
+                            else break;
+                        }
+
                         std::forward<Func>(func)(*iter_x, plotter.error(iter_x, width));
                     }
                 }
             }
 
-            for (iter_xy = std::next(iter_xy);
-                 plotter.normal_error(iter_xy, width) <= 1.0 && iter_xy != plotter.end();
-                 ++iter_xy)
+            for (iter_xy = std::next(iter_xy); iter_xy != plotter.end(); ++iter_xy)
             {
+                auto error = plotter.normal_error(iter_xy);
+                if (error > width * width)
+                {
+                    if (error > plotter.normal_error(std::next(iter_xy))) continue;
+                    else break;
+                }
+
                 std::forward<Func>(func)(*iter_xy, plotter.error(iter_xy, width));
 
                 for (size_t m = n + 1; m < n + 3; m++) if (plotter.is_next(iter_xy, m % 3))
                 {
                     for (auto iter_x = std::next(plotter.begin(iter_xy, m % 3));
-                         plotter.normal_error(iter_x, width) <= 1.0 && iter_x != plotter.end();
-                         ++iter_x)
+                         iter_x != plotter.end(); ++iter_x)
                     {
+                        auto error = plotter.normal_error(iter_x);
+                        if (error > width * width)
+                        {
+                            if (error > plotter.normal_error(std::next(iter_x))) continue;
+                            else break;
+                        }
+
                         std::forward<Func>(func)(*iter_x, plotter.error(iter_x, width));
                     }
                 }
@@ -434,12 +444,12 @@ void draw_line_3d(const PointND<long, 3> & bound, const LineND<T, 3> & line, T w
 template <typename T, class Func, size_t N, typename = std::enable_if_t<
     std::is_invocable_v<std::remove_cvref_t<Func>, const PointND<long, N> &, T>
 >>
-void draw_line_nd(const PointND<long, N> & bound, const LineND<T, N> & line, T width, Func && func)
+void draw_line_nd(const LineND<T, N> & line, T width, Func && func)
 {
     static_assert(N == 2 || N == 3);
 
-    if constexpr(N == 2) detail::draw_line_2d(bound, line, width, std::forward<Func>(func));
-    else detail::draw_line_3d(bound, line, width, std::forward<Func>(func));
+    if constexpr(N == 2) detail::draw_line_2d(line, width, std::forward<Func>(func));
+    else detail::draw_line_3d(line, width, std::forward<Func>(func));
 }
 
 }

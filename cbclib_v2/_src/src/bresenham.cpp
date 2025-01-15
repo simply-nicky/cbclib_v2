@@ -49,14 +49,6 @@ std::array<size_t, N + 1> normalise_shape(const std::vector<size_t> & shape)
     return res;
 }
 
-template <size_t N>
-PointND<long, N> get_bound(const std::array<size_t, N + 1> & shape)
-{
-    PointND<long, N> out;
-    for (size_t i = 0; i < N; i++) out[i] = (shape[N - i]) ? shape[N - i] - 1 : 0;
-    return out;
-}
-
 template <typename Out, typename T, typename I, size_t N>
 py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, Out max_val,
                                std::string kernel, unsigned threads)
@@ -68,7 +60,6 @@ py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::
     auto oarr = array<Out>(out.request());
 
     auto shape = normalise_shape<N>(oarr.shape);
-    auto bound = get_bound<N>(shape);
 
     auto larr = array<T>(lines.request());
     check_dimensions("lines", larr.ndim - 1, larr.shape, L);
@@ -106,7 +97,7 @@ py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::
                     }
                 };
 
-                draw_line_nd(bound, LineND<T, N>{to_point<N>(larr, L * i), to_point<N>(larr, L * i + N)}, larr[L * i + 2 * N], draw_pixel);
+                draw_line_nd(LineND<T, N>{to_point<N>(larr, L * i), to_point<N>(larr, L * i + N)}, larr[L * i + 2 * N], draw_pixel);
             });
         }
 
@@ -148,7 +139,6 @@ auto draw_lines_table_nd(py::array_t<T> lines, std::vector<size_t> shape, std::o
     auto krn = kernels<T>::get_kernel(kernel);
 
     auto new_shape = normalise_shape<N>(shape);
-    auto bound = get_bound<N>(new_shape);
 
     auto larr = array<T>(lines.request());
     check_dimensions("lines", larr.ndim - 1, larr.shape, L);
@@ -180,11 +170,14 @@ auto draw_lines_table_nd(py::array_t<T> lines, std::vector<size_t> shape, std::o
                     {
                         std::array<long, N + 1> coord {long(frame)};
                         for (size_t i = 0; i < N; i++) coord[i + 1] = pt[N - i - 1];
-                        buffer.emplace(std::make_pair(index, handler.ravel_index(coord)), max_val * krn(std::sqrt(error)));
+                        if (handler.is_inbound(coord))
+                        {
+                            buffer.emplace(std::make_pair(index, handler.ravel_index(coord)), max_val * krn(std::sqrt(error)));
+                        }
                     }
                 };
 
-                draw_line_nd(bound, LineND<T, N>{to_point<N>(larr, L * i), to_point<N>(larr, L * i + N)}, larr[L * i + 2 * N], draw_pixel);
+                draw_line_nd(LineND<T, N>{to_point<N>(larr, L * i), to_point<N>(larr, L * i + N)}, larr[L * i + 2 * N], draw_pixel);
             });
         }
 
@@ -296,4 +289,9 @@ PYBIND11_MODULE(bresenham, m)
             return draw_lines(out, lines, idxs, max_val, kernel, threads);
         },
         py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+
+    m.def("draw_line_table", &draw_lines_table<float, size_t>, py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+    m.def("draw_line_table", &draw_lines_table<double, size_t>, py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+    m.def("draw_line_table", &draw_lines_table<float, long>, py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+    m.def("draw_line_table", &draw_lines_table<double, long>, py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
 }

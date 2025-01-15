@@ -4,9 +4,26 @@ import pytest
 from cbclib_v2.annotations import IntArray, RealArray, Shape, Table
 from cbclib_v2.ndimage import draw_line_image, draw_line_table
 from cbclib_v2.test_util import check_close
+from cbclib_v2.jax import project_to_streak
 
 class TestDrawLine():
-    @pytest.fixture(params=[(10, 50),])
+    def kernel_dict(self) -> Dict[str, Callable[[RealArray, RealArray], RealArray]]:
+        def biweight(x, sigma):
+            return 0.9375 * np.clip(1 - (x / sigma)**2, 0, np.infty)**2
+        def gaussian(x, sigma):
+            return np.where(np.abs(x) < sigma,
+                            np.exp(-(3 * x / sigma)**2 / 2) / np.sqrt(2 * np.pi), 0)
+        def parabolic(x, sigma):
+            return 0.75 * np.clip(1 - (x / sigma)**2, 0, np.infty)
+        def rectangular(x, sigma):
+            return np.where(np.abs(x) < sigma, 1, 0)
+        def triangular(x, sigma):
+            return np.clip(1 - np.abs(x / sigma), 0, np.infty)
+
+        return {'biweight': biweight, 'gaussian': gaussian, 'parabolic': parabolic,
+                'rectangular': rectangular, 'triangular': triangular}
+
+    @pytest.fixture(params=[(30, 80),])
     def n_lines(self, request: pytest.FixtureRequest, rng: np.random.Generator) -> int:
         vmin, vmax = request.param
         return rng.integers(vmin, vmax)
@@ -16,6 +33,10 @@ class TestDrawLine():
         vmin, vmax, size = request.param
         return tuple(rng.integers(vmin, vmax, size=size))
 
+    @pytest.fixture(params=[2, 3])
+    def ndim(self, request: pytest.FixtureRequest) -> int:
+        return request.param
+
     @pytest.fixture(params=[10.0])
     def length(self, request: pytest.FixtureRequest) -> float:
         return request.param
@@ -24,29 +45,28 @@ class TestDrawLine():
     def width(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
-    @pytest.fixture(params=["biweight", "gaussian", "parabolic", "rectangular", "triangular"])
-    def kernel(self, request: pytest.FixtureRequest) -> str:
-        return request.param
+    @pytest.fixture(params=[0, 3])
+    def kernel(self, rng: np.random.Generator, request: pytest.FixtureRequest) -> str:
+        keys = list(self.kernel_dict().keys())
+        index = (rng.integers(0, len(keys)) + request.param) % len(keys)
+        return keys[index]
 
     @pytest.fixture(params=[1.0, 10.0])
     def max_val(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
     @pytest.fixture
-    def idxs(self, rng: np.random.Generator, n_lines: int, shape: Shape) -> IntArray:
-        return rng.integers(0, np.prod(shape[:-2]) - 1, size=n_lines)
+    def idxs(self, rng: np.random.Generator, shape: Shape, ndim: int, n_lines: int) -> IntArray:
+        return rng.integers(0, np.prod(shape[:-ndim]) - 1, size=n_lines)
 
     @pytest.fixture
-    def lines(self, rng: np.random.Generator, n_lines: int, shape: Shape,
+    def lines(self, rng: np.random.Generator, shape: Shape, ndim: int, n_lines: int,
               length: float, width: float) -> RealArray:
         lengths = length * rng.random((n_lines,))
-        thetas = 2 * np.pi * rng.random((n_lines,))
-        x0, y0 = np.array([[shape[-1]], [shape[-2]]]) * rng.random((2, n_lines))
-        return np.stack((x0 - 0.5 * lengths * np.cos(thetas),
-                         y0 - 0.5 * lengths * np.sin(thetas),
-                         x0 + 0.5 * lengths * np.cos(thetas),
-                         y0 + 0.5 * lengths * np.sin(thetas),
-                         width * np.ones(n_lines)), axis=1)
+        pt0 = np.array(shape[-ndim:]) * rng.random((n_lines, ndim))
+        vec = rng.normal(np.zeros(ndim), size=(n_lines, ndim))
+        pt1 = pt0 + vec * (lengths / np.sqrt(np.sum(vec**2, axis=-1)))[:, None]
+        return np.concatenate((pt0, pt1, np.full((n_lines, 1), width)), axis=-1)
 
     @pytest.fixture
     def image(self, lines: RealArray, idxs: IntArray, shape: Shape, max_val: float,
@@ -93,40 +113,18 @@ class TestDrawLine():
         assert np.min(list(table.values())) >= 0
         assert np.all(np.array(list(table.values())) <= max_val)
 
-    def kernel_dict(self) -> Dict[str, Callable[[RealArray, RealArray], RealArray]]:
-        def biweight(x, sigma):
-            return 0.9375 * np.clip(1 - (x / sigma)**2, 0, np.infty)**2
-        def gaussian(x, sigma):
-            return np.where(np.abs(x) < sigma,
-                            np.exp(-(3 * x / sigma)**2 / 2) / np.sqrt(2 * np.pi), 0)
-        def parabolic(x, sigma):
-            return 0.75 * np.clip(1 - (x / sigma)**2, 0, np.infty)
-        def rectangular(x, sigma):
-            return np.where(np.abs(x) < sigma, 1, 0)
-        def triangular(x, sigma):
-            return np.clip(1 - np.abs(x / sigma), 0, np.infty)
-
-        return {'biweight': biweight, 'gaussian': gaussian, 'parabolic': parabolic,
-                'rectangular': rectangular, 'triangular': triangular}
-
     @pytest.fixture
-    def image_numpy(self, lines: RealArray, idxs: IntArray, shape: Shape,
-                    max_val: float, kernel: str) -> np.ndarray:
+    def image_numpy(self, lines: RealArray, idxs: IntArray, shape: Shape, ndim: int, max_val: float,
+                    kernel: str) -> np.ndarray:
         kernel_func = self.kernel_dict()[kernel]
-        x, y = np.meshgrid(np.arange(shape[-1]), np.arange(shape[-2]))
+        pts = np.meshgrid(*(np.arange(length) for length in shape[-ndim:]), indexing='ij')
+        pts = np.stack(pts[::-1], axis=-1)[..., None, :]
 
         frames = []
-        for fnum in range(np.prod(shape[:-2])):
+        for fnum in range(np.prod(shape[:-ndim])):
             lns = lines[idxs == fnum]
-            tau = np.array([lns[:, 2] - lns[:, 0], lns[:, 3] - lns[:, 1]])
-            norm = np.array([lns[:, 3] - lns[:, 1], lns[:, 0] - lns[:, 2]])
-            length = np.sqrt(np.sum(tau**2, axis=0))
-            r1 = ((x[..., None] - lns[:, 0]) * norm[0] +
-                  (y[..., None] - lns[:, 1]) * norm[1]) / length
-            r2 = ((x[..., None] - lns[:, 0]) * tau[0] +
-                  (y[..., None] - lns[:, 1]) * tau[1]) / length
-            r2 = np.where(r2 < 0, r2, np.where(r2 > length, r2 - length, 0))
-            frame = max_val * kernel_func(np.sqrt(r1 * r1 + r2 * r2), lns[:, 4])
+            dist = pts - project_to_streak(pts, lns[:, :ndim], lns[:, ndim:2 * ndim])
+            frame = max_val * kernel_func(np.sqrt(np.sum(dist**2, axis=-1)), lns[:, 2 * ndim])
             frames.append(np.sum(frame, axis=-1))
         return np.stack(frames).reshape(shape)
 
