@@ -19,6 +19,15 @@
 #include <pybind11/numpy.h>
 #include <fftw3.h>
 
+#include <numpy/numpyconfig.h>
+#ifdef NPY_1_7_API_VERSION
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+#define NPE_PY_ARRAY_OBJECT PyArrayObject
+#else
+//TODO Remove this as soon as support for Numpy version before 1.7 is dropped
+#define NPE_PY_ARRAY_OBJECT PyObject
+#endif
+
 #define STRINGIFY(x) #x
 #define MACRO_STRINGIFY(x) STRINGIFY(x)
 
@@ -64,6 +73,14 @@ template <typename Container>
 inline py::array_t<typename Container::value_type> to_pyarray(const Container & seq)
 {
     return py::array(seq.size(), seq.data());
+}
+
+template <template <typename ...> class R=std::vector, typename Top, typename Sub = typename Top::value_type>
+R<typename Sub::value_type> flatten(const Top & all)
+{
+    R<typename Sub::value_type> accum;
+    for(auto & sub : all) accum.insert(std::end(accum), std::begin(sub), std::end(sub));
+    return accum;
 }
 
 template <typename T, typename = void>

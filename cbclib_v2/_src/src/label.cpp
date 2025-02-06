@@ -81,6 +81,38 @@ auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::option
     return result;
 }
 
+template <typename T, typename Func>
+py::array_t<T> apply(const Regions & regions, const array<T> & data, Func && func)
+{
+    std::vector<T> results;
+    for (const auto & region : regions.regions)
+    {
+        auto result = std::forward<Func>(func)(Pixels<T>{region, data});
+        results.insert(results.end(), result.begin(), result.end());
+    }
+
+    return as_pyarray(std::move(results), std::array<size_t, 2>{regions.regions.size(), results.size() / regions.regions.size()});
+}
+
+template <typename T, typename Func>
+std::vector<py::array_t<T>> apply_and_vectorise(const std::vector<Regions> & stack, const py::array_t<T> & data, Func && func)
+{
+    auto dbuf = data.request();
+    auto shape = normalise_shape<2>(dbuf.shape);
+    check_dimensions("data", 0, shape, stack.size());
+
+    array<T> darr {shape, static_cast<T *>(dbuf.ptr)};
+    std::vector<py::array_t<T>> results;
+    std::array<size_t, 2> axes {1, 2};
+
+    for (size_t i = 0; i < stack.size(); i++)
+    {
+        results.emplace_back(apply(stack[i], darr.slice(i, axes), std::forward<Func>(func)));
+    }
+
+    return results;
+}
+
 }
 
 PYBIND11_MODULE(label, m)
@@ -187,46 +219,6 @@ PYBIND11_MODULE(label, m)
         {
             return as_pyarray(regions.mask(), regions.shape);
         })
-        .def("center_of_mass", [](Regions & regions, py::array_t<double> data)
-        {
-            return regions.center_of_mass(array<double>{data.request()});
-        }, py::arg("data"))
-        .def("center_of_mass", [](Regions & regions, py::array_t<float> data)
-        {
-            return regions.center_of_mass(array<float>{data.request()});
-        }, py::arg("data"))
-        .def("gauss_fit", [](Regions & regions, py::array_t<double> data)
-        {
-            return regions.gauss_fit(array<double>{data.request()});
-        }, py::arg("data"))
-        .def("gauss_fit", [](Regions & regions, py::array_t<float> data)
-        {
-            return regions.gauss_fit(array<float>{data.request()});
-        }, py::arg("data"))
-        .def("ellipse_fit", [](Regions & regions, py::array_t<double> data)
-        {
-            return regions.ellipse_fit(array<double>{data.request()});
-        }, py::arg("data"))
-        .def("ellipse_fit", [](Regions & regions, py::array_t<float> data)
-        {
-            return regions.ellipse_fit(array<float>{data.request()});
-        }, py::arg("data"))
-        .def("line_fit", [](Regions & regions, py::array_t<double> data)
-        {
-            return regions.line_fit(array<double>{data.request()});
-        }, py::arg("data"))
-        .def("line_fit", [](Regions & regions, py::array_t<float> data)
-        {
-            return regions.line_fit(array<float>{data.request()});
-        }, py::arg("data"))
-        .def("moments", [](Regions & regions, py::array_t<double> data)
-        {
-            return regions.moments(array<double>{data.request()});
-        }, py::arg("data"))
-        .def("moments", [](Regions & regions, py::array_t<float> data)
-        {
-            return regions.moments(array<float>{data.request()});
-        }, py::arg("data"))
         .def_property("x", [](const Regions & regions)
         {
             std::vector<typename PointsSet::value_type> x;
@@ -250,5 +242,215 @@ PYBIND11_MODULE(label, m)
 
     m.def("label", &label<float>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
     m.def("label", &label<double>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+
+    m.def("center_of_mass", [](Regions regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
+        };
+        return apply(regions, array<float>{data.request()}, func);
+    });
+    m.def("center_of_mass", [](Regions regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
+        };
+        return apply(regions, array<double>{data.request()}, func);
+    });
+    m.def("center_of_mass", [](std::vector<Regions> regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+    m.def("center_of_mass", [](std::vector<Regions> regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+
+    m.def("central_moments", [](Regions regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.central_moments().to_array();
+        };
+        return apply(regions, array<float>{data.request()}, func);
+    });
+    m.def("central_moments", [](Regions regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.central_moments().to_array();
+        };
+        return apply(regions, array<double>{data.request()}, func);
+    });
+    m.def("central_moments", [](std::vector<Regions> regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.central_moments().to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+    m.def("central_moments", [](std::vector<Regions> regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.central_moments().to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+
+   m.def("gauss_fit", [](Regions regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.central_moments().gauss();
+        };
+        return apply(regions, array<float>{data.request()}, func);
+    });
+    m.def("gauss_fit", [](Regions regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.central_moments().gauss();
+        };
+        return apply(regions, array<double>{data.request()}, func);
+    });
+    m.def("gauss_fit", [](std::vector<Regions> regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.central_moments().gauss();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+    m.def("gauss_fit", [](std::vector<Regions> regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.central_moments().gauss();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+
+   m.def("ellipse_fit", [](Regions regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            auto cm = region.moments.central_moments();
+            auto [a, b] = cm.principal_axes();
+            auto theta = cm.theta();
+            return std::array<float, 3>{a, b, theta};
+        };
+        return apply(regions, array<float>{data.request()}, func);
+    });
+    m.def("ellipse_fit", [](Regions regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            auto cm = region.moments.central_moments();
+            auto [a, b] = cm.principal_axes();
+            auto theta = cm.theta();
+            return std::array<double, 3>{a, b, theta};
+        };
+        return apply(regions, array<double>{data.request()}, func);
+    });
+    m.def("ellipse_fit", [](std::vector<Regions> regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            auto cm = region.moments.central_moments();
+            auto [a, b] = cm.principal_axes();
+            auto theta = cm.theta();
+            return std::array<float, 3>{a, b, theta};
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+    m.def("ellipse_fit", [](std::vector<Regions> regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            auto cm = region.moments.central_moments();
+            auto [a, b] = cm.principal_axes();
+            auto theta = cm.theta();
+            return std::array<double, 3>{a, b, theta};
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+
+    m.def("line_fit", [](Regions regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.get_line().to_array();
+        };
+        return apply(regions, array<float>{data.request()}, func);
+    });
+    m.def("line_fit", [](Regions regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.get_line().to_array();
+        };
+        return apply(regions, array<double>{data.request()}, func);
+    });
+    m.def("line_fit", [](std::vector<Regions> regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.get_line().to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+    m.def("line_fit", [](std::vector<Regions> regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.get_line().to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+
+  m.def("moments", [](Regions regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.to_array();
+        };
+        return apply(regions, array<float>{data.request()}, func);
+    });
+    m.def("moments", [](Regions regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.to_array();
+        };
+        return apply(regions, array<double>{data.request()}, func);
+    });
+    m.def("moments", [](std::vector<Regions> regions, py::array_t<float> data)
+    {
+        auto func = [](const Pixels<float> & region)
+        {
+            return region.moments.to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
+    m.def("moments", [](std::vector<Regions> regions, py::array_t<double> data)
+    {
+        auto func = [](const Pixels<double> & region)
+        {
+            return region.moments.to_array();
+        };
+        return apply_and_vectorise(regions, data, func);
+    });
 
 }

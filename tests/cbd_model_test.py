@@ -1,9 +1,8 @@
-from typing import Any, Callable, Tuple
 import pytest
 import jax.numpy as jnp
 from jax import random, jit
 import cbclib_v2 as cbc
-from cbclib_v2.annotations import IntArray, KeyArray
+from cbclib_v2.annotations import KeyArray
 from cbclib_v2.test_util import check_gradient, Criterion, TestSetup, TestState, TestModel
 
 class TestCBDModel():

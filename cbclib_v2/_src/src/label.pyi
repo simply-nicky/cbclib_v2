@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Iterator, List, Optional, Tuple, Union, overload
-from ..annotations import CPPIntSequence, Line, NDRealArray, NDBoolArray
+from ..annotations import CPPIntSequence, NDRealArray, NDBoolArray
 
 class PointsSet:
     x : List[int]
@@ -85,21 +85,78 @@ class Regions:
     def mask(self) -> NDBoolArray:
         ...
 
-    def center_of_mass(self, data: NDRealArray) -> List[List[float]]:
-        ...
-
-    def gauss_fit(self, data: NDRealArray) -> List[List[float]]:
-        ...
-
-    def ellipse_fit(self, data: NDRealArray) -> List[List[float]]:
-        ...
-
-    def line_fit(self, data: NDRealArray) -> List[Line]:
-        ...
-
-    def moments(self, data: NDRealArray) -> List[List[float]]:
-        ...
-
 def label(mask: NDBoolArray, structure: Structure, npts: int=1,
           axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Regions]:
+    ...
+
+@overload
+def center_of_mass(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def center_of_mass(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def center_of_mass(regions: Union[Regions, List[Regions]], data: NDRealArray
+                   ) -> Tuple[NDRealArray, List[NDRealArray]]:
+    ...
+
+@overload
+def central_moments(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def central_moments(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def central_moments(regions: Union[Regions, List[Regions]], data: NDRealArray
+                    ) -> Tuple[NDRealArray, List[NDRealArray]]:
+    ...
+
+@overload
+def gauss_fit(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def gauss_fit(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def gauss_fit(regions: Union[Regions, List[Regions]], data: NDRealArray
+              ) -> Tuple[NDRealArray, List[NDRealArray]]:
+    ...
+
+@overload
+def ellipse_fit(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def ellipse_fit(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def ellipse_fit(regions: Union[Regions, List[Regions]], data: NDRealArray
+                ) -> Tuple[NDRealArray, List[NDRealArray]]:
+    ...
+
+@overload
+def line_fit(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def line_fit(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def line_fit(regions: Union[Regions, List[Regions]], data: NDRealArray
+             ) -> Tuple[NDRealArray, List[NDRealArray]]:
+    ...
+
+@overload
+def moments(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def moments(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def moments(regions: Union[Regions, List[Regions]], data: NDRealArray
+            ) -> Tuple[NDRealArray, List[NDRealArray]]:
     ...

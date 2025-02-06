@@ -1,7 +1,7 @@
 """Transforms are common image transformations. They can be chained together using
-:class:`cbclib.ComposeTransforms`. You pass a :class:`cbclib.Transform` instance to a data
-container :class:`cbclib.CrystData`. All transform classes are inherited from the abstract
-:class:`cbclib.Transform` class.
+:class:`cbclib_v2.ComposeTransforms`. You pass a :class:`cbclib_v2.Transform` instance to a data
+container :class:`cbclib_v2.CrystData`. All transform classes are inherited from the abstract
+:class:`cbclib_v2.Transform` class.
 """
 from configparser import ConfigParser
 from dataclasses import dataclass, fields
@@ -12,7 +12,8 @@ from typing import (Any, Callable, ClassVar, Dict, Iterator, List, Tuple, Type, 
                     get_args, get_origin, overload)
 import numpy as np
 import jax.numpy as jnp
-from .annotations import Array, DataclassInstance, ExpandedType, NDArray, JaxArray, NDIntArray
+from .annotations import (Array, BoolArray, DataclassInstance, ExpandedType, Indices, NDArray,
+                          JaxArray, NDIntArray)
 
 D = TypeVar("D", bound="DataContainer")
 
@@ -47,6 +48,12 @@ class DataContainer(DataclassInstance):
             A dictionary of :class:`Sample` object's attributes.
         """
         return {field.name: getattr(self, field.name) for field in fields(self)}
+
+class ArrayContainer(DataContainer):
+    def filter(self: D, idxs: Union[Indices, BoolArray]) -> D:
+        data = {attr: None for attr in self.to_dict()}
+        data = data | {attr: val[idxs] for attr, val in self.contents().items()}
+        return self.replace(**data)
 
 class BaseFormatter:
     aliases : ClassVar[Tuple[Type, ...]]

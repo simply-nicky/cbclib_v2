@@ -292,40 +292,47 @@ struct LineND
     PointND<T, N> tangent() const {return pt1 - pt0;}
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
-    W distance(const PointND<V, N> & point) const
+    PointND<W, N> project_to_streak(const PointND<V, N> & point) const
     {
         auto tau = tangent();
         auto mag = magnitude(tau);
 
         if (mag)
         {
-            auto compare_point = [](const PointND<V, N> & a, const PointND<V, N> & b){return magnitude(a) < magnitude(b);};
-            auto r = std::min(point - pt0, pt1 - point, compare_point);
-
+            auto center = 0.5 * (pt0 + pt1);
+            auto r = point - center;
             auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            auto r_norm = r - r_tau * tau;
-            if (r_tau > 1) return amplitude(r_norm + tau * (r_tau - 1));
-            if (r_tau < 0) return amplitude(r_norm + tau * r_tau);
-            return amplitude(r_norm);
+            return std::clamp<W>(r_tau, -0.5, 0.5) * tau + center;
         }
-        return amplitude(pt0 - point);
+        return pt0;
     }
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
-    W normal_distance(const Point<V> & point) const
+    W distance(const PointND<V, N> & point) const
+    {
+        return amplitude(point - project_to_streak(point));
+    }
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    PointND<W, N> project_to_line(const PointND<V, N> & point) const
     {
         auto tau = tangent();
         auto mag = magnitude(tau);
 
         if (mag)
         {
-            auto compare_point = [](const Point<V> & a, const Point<V> & b){return magnitude(a) < magnitude(b);};
-            auto r = std::min(point - pt0, pt1 - point, compare_point);
-
+            auto center = 0.5 * (pt0 + pt1);
+            auto r = point - center;
             auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            return amplitude(r - r_tau * tau);
+            return r_tau * tau + center;
         }
-        return amplitude(pt0 - point);
+        return pt0;
+    }
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    W normal_distance(const PointND<V, N> & point) const
+    {
+        return amplitude(point - project_to_line(point));
     }
 
     friend std::ostream & operator<<(std::ostream & os, const LineND<T, N> & line)
@@ -354,6 +361,17 @@ struct PointHasher
     }
 };
 
+}
+
+template <size_t N, typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+std::array<I, N + 1> normalise_shape(const std::vector<I> & shape)
+{
+    if (shape.size() < N)
+        fail_container_check("wrong number of dimensions (" + std::to_string(shape.size()) +
+                             " < " + std::to_string(N) + ")", shape);
+    std::array<I, N + 1> res {std::reduce(shape.begin(), std::prev(shape.end(), N), I(1), std::multiplies())};
+    for (size_t i = 0; i < N; i++) res[i + 1] = shape[shape.size() - N + i];
+    return res;
 }
 
 }

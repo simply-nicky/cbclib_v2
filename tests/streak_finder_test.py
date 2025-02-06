@@ -2,7 +2,7 @@ from typing import Tuple
 import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
-from cbclib_v2.label import PointsSet, Regions, Structure
+from cbclib_v2.label import PointsSet, Regions, Structure, line_fit
 from cbclib_v2.ndimage import draw_line_image
 from cbclib_v2.streak_finder import PatternStreakFinder, Peaks, StreakFinderResult
 from cbclib_v2.test_util import check_close
@@ -109,7 +109,8 @@ class TestStreakFinder():
                ) -> StreakFinderResult:
         return finder.detect_streaks(peaks, xtol, vmin)
 
-    def get_pixels(self, x: int, y: int, finder: PatternStreakFinder) -> Tuple[NDIntArray, NDIntArray]:
+    def get_pixels(self, x: int, y: int, finder: PatternStreakFinder
+                   ) -> Tuple[NDIntArray, NDIntArray]:
         xs, ys = np.array(finder.structure.x) + x, np.array(finder.structure.y) + y
         mask = (xs >= 0) & (xs < finder.mask.shape[1]) & (ys >= 0) & (ys < finder.mask.shape[0])
         mask &= finder.mask[ys, xs]
@@ -118,7 +119,7 @@ class TestStreakFinder():
     def get_line(self, x: int, y: int, finder: PatternStreakFinder) -> NDRealArray:
         xvec, yvec = self.get_pixels(x, y, finder)
         region = Regions(finder.data.shape, [PointsSet(xvec, yvec)])
-        return np.array(region.line_fit(finder.data)[0]).reshape(2, 2)
+        return line_fit(region, finder.data).reshape(2, 2)
 
     def test_streak_points(self, result: StreakFinderResult, finder: PatternStreakFinder,
                            rng: np.random.Generator):

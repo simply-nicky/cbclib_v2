@@ -2,8 +2,8 @@ from typing import Optional
 from ..annotations import IntArray, NDIntArray, NDRealArray, RealArray, Shape, Table
 
 def draw_line_mask(lines: RealArray, shape: Shape, idxs: Optional[IntArray]=None,
-                   max_val: int=255, kernel: str='rectangular', num_threads: int=1
-                   ) -> NDIntArray:
+                   max_val: int=255, kernel: str='rectangular', overlap: str='sum',
+                   num_threads: int=1) -> NDIntArray:
     """Draw thick lines with variable thickness and the antialiasing applied on a single frame
     by using the Bresenham's algorithm [BSH]_.
 
@@ -42,8 +42,8 @@ def draw_line_mask(lines: RealArray, shape: Shape, idxs: Optional[IntArray]=None
     ...
 
 def draw_line_image(lines: RealArray, shape: Shape, idxs: Optional[IntArray]=None,
-                    max_val: float=1.0, kernel: str='rectangular', num_threads: int=1
-                    ) -> NDRealArray:
+                    max_val: float=1.0, kernel: str='rectangular', overlap: str='sum',
+                    num_threads: int=1) -> NDRealArray:
     """Draw thick lines with variable thickness and the antialiasing applied on a single frame.
 
     Args:

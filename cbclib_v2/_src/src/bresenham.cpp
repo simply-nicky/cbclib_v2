@@ -5,6 +5,64 @@ namespace cbclib {
 template <typename T>
 using kernel_t = typename kernels<T>::kernel;
 
+namespace detail {
+
+template <typename T>
+T sum(const T & a, const T & b)
+{
+    return a + b;
+}
+
+template <typename T>
+T max(const T & a, const T & b)
+{
+    return std::max(a, b);
+}
+
+};
+
+template <typename T>
+struct combiners
+{
+    enum combiner_type
+    {
+        sum = 0,
+        max = 1
+    };
+
+    using combiner = T(*)(const T &, const T &);
+
+    static inline std::map<std::string, combiner_type> combiner_names =
+    {
+        {"sum", combiner_type::sum},
+        {"max", combiner_type::max}
+    };
+
+    static inline std::map<combiner_type, combiner> registered_combiners =
+    {
+        {combiner_type::sum, detail::sum},
+        {combiner_type::max, detail::max}
+    };
+
+    static combiner get_combiner(combiner_type c, bool throw_if_missing = true)
+    {
+        auto it = registered_combiners.find(c);
+        if (it != registered_combiners.end()) return it->second;
+        if (throw_if_missing)
+            throw std::invalid_argument("combiner is missing for " + std::to_string(c));
+        return nullptr;
+    }
+
+    static combiner get_combiner(std::string name, bool throw_if_missing = true)
+    {
+        auto it = combiner_names.find(name);
+        if (it != combiner_names.end()) return get_combiner(it->second, throw_if_missing);
+        if (throw_if_missing)
+            throw std::invalid_argument("combiner is missing for " + name);
+        return nullptr;
+    }
+};
+
 template <typename I, int ExtraFlags>
 void fill_indices(std::string name, size_t xsize, size_t isize, std::optional<py::array_t<I, ExtraFlags>> & idxs)
 {
@@ -38,25 +96,18 @@ void check_indices(std::string name, size_t xsize, size_t isize, std::optional<p
     }
 }
 
-template <size_t N>
-std::array<size_t, N + 1> normalise_shape(const std::vector<size_t> & shape)
-{
-    if (shape.size() < N)
-        fail_container_check("wrong number of dimensions (" + std::to_string(shape.size()) +
-                             " < " + std::to_string(N) + ")", shape);
-    std::array<size_t, N + 1> res {std::reduce(shape.begin(), std::prev(shape.end(), N), size_t(1), std::multiplies())};
-    for (size_t i = 0; i < N; i++) res[i + 1] = shape[shape.size() - N + i];
-    return res;
-}
+template <typename T>
+using combiner_t = typename combiners<T>::combiner;
 
 template <typename Out, typename T, typename I, size_t N>
 py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, Out max_val,
-                               std::string kernel, unsigned threads)
+                               std::string kernel, std::string overlap, unsigned threads)
 {
     assert(PyArray_API);
     constexpr static size_t L = 2 * N + 1;
 
     auto krn = kernels<T>::get_kernel(kernel);
+    auto cbn = combiners<T>::get_combiner(overlap);
     auto oarr = array<Out>(out.request());
 
     auto shape = normalise_shape<N>(oarr.shape);
@@ -77,9 +128,9 @@ py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::
     {
         detail::ImageBuffer<std::pair<I, T>> buffer (shape);
 
-        auto write = [&buffer, &oarr](const std::pair<I, T> & value)
+        auto write = [&buffer, &oarr, &cbn](const std::pair<I, T> & value)
         {
-            oarr[value.first] += value.second;
+            oarr[value.first] = cbn(oarr[value.first], value.second);
         };
 
         #pragma omp for nowait
@@ -114,15 +165,15 @@ py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::
 
 template <typename Out, typename T, typename I>
 py::array_t<Out> draw_lines(py::array_t<Out> out, py::array_t<T> lines, std::optional<py::array_t<I>> idxs, Out max_val,
-                            std::string kernel, unsigned threads)
+                            std::string kernel, std::string overlap, unsigned threads)
 {
     size_t L = lines.shape(lines.ndim() - 1);
     switch (L)
     {
         case 5:
-            return draw_lines_nd<Out, T, I, 2>(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines_nd<Out, T, I, 2>(out, lines, idxs, max_val, kernel, overlap, threads);
         case 7:
-            return draw_lines_nd<Out, T, I, 3>(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines_nd<Out, T, I, 3>(out, lines, idxs, max_val, kernel, overlap, threads);
         default:
             throw std::runtime_error("Invalid lines size (" + std::to_string(L) + ") at axis " +
                                      std::to_string(lines.ndim() - 1));
@@ -225,70 +276,70 @@ PYBIND11_MODULE(bresenham, m)
     }
 
     m.def("draw_line_mask",
-        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, uint32_t max_val, std::string kernel, unsigned threads)
+        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, uint32_t max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_line_mask",
-        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, uint32_t max_val, std::string kernel, unsigned threads)
+        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, uint32_t max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_line_mask",
-        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, uint32_t max_val, std::string kernel, unsigned threads)
+        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, uint32_t max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_line_mask",
-        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, uint32_t max_val, std::string kernel, unsigned threads)
+        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, uint32_t max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<uint32_t> out {shape};
             fill_array(out, uint32_t());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
 
     m.def("draw_line_image",
-        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, double max_val, std::string kernel, unsigned threads)
+        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, double max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<double> out {shape};
             fill_array(out, double());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_line_image",
-        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, float max_val, std::string kernel, unsigned threads)
+        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<size_t>> idxs, float max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<float> out {shape};
             fill_array(out, float());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_line_image",
-        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, double max_val, std::string kernel, unsigned threads)
+        [](py::array_t<double> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, double max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<double> out {shape};
             fill_array(out, double());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_line_image",
-        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, float max_val, std::string kernel, unsigned threads)
+        [](py::array_t<float> lines, std::vector<size_t> shape, std::optional<py::array_t<long>> idxs, float max_val, std::string kernel, std::string overlap, unsigned threads)
         {
             py::array_t<float> out {shape};
             fill_array(out, float());
-            return draw_lines(out, lines, idxs, max_val, kernel, threads);
+            return draw_lines(out, lines, idxs, max_val, kernel, overlap, threads);
         },
-        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+        py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
 
     m.def("draw_line_table", &draw_lines_table<float, size_t>, py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
     m.def("draw_line_table", &draw_lines_table<double, size_t>, py::arg("lines"), py::arg("shape"), py::arg("idxs") = nullptr, py::arg("max_val") = 1.0, py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);

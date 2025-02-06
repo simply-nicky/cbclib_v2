@@ -48,6 +48,8 @@ KeyArray = JaxArray
 
 Indices = Union[int, slice, IntArray, Sequence[int], Tuple[IntArray, ...]]
 
+AnyFloat = Union[float, np.floating[Any], RealArray]
+
 IntSequence = Union[int, np.integer[Any], Sequence[int], IntArray]
 CPPIntSequence = Union[Sequence[int], IntArray]
 RealSequence = Union[float, np.floating[Any], Sequence[float], RealArray]
@@ -64,3 +66,5 @@ Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
 Line = List[float]
 Streak = Tuple[Set[Tuple[int, int, float]], Dict[float, List[float]],
                Dict[float, List[int]], Line]
+
+Processor = Callable[[NDArray], Union[NDArray, int, float]]

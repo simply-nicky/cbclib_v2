@@ -1,32 +1,19 @@
-from typing import List, Optional, Tuple, TypeVar, Union
+from typing import List, Optional, TypeVar, Union
 from dataclasses import fields
-import pandas as pd
-import numpy as np
 import jax.numpy as jnp
 from .geometry import safe_divide
 from .state import State
-from ..ndimage import draw_line_image, draw_line_mask, draw_line_table
-from .._src.annotations import (BoolArray, Indices, IntArray, IntSequence, RealArray,
-                                RealSequence, Shape)
+from .._src.annotations import IntArray, RealArray, Shape
+from .._src.data_container import ArrayContainer
+from .._src.streaks import BaseLines
 
 D = TypeVar("D", bound="BaseData")
 AnyPoints = Union['Points', 'PointsWithK', 'CBDPoints']
 
-class BaseData(State):
-    def filter(self: D, idxs: Union[Indices, BoolArray]) -> D:
-        data = {attr: None for attr in self.to_dict()}
-        data = data | {attr: val[idxs] for attr, val in self.contents().items()}
-        return self.replace(**data)
+class BaseData(State, ArrayContainer):
+    ...
 
-    def to_dataframe(self) -> pd.DataFrame:
-        """Export a streaks container into :class:`pandas.DataFrame`.
-
-        Returns:
-            A dataframe with all the data specified in :class:`cbclib.Streaks`.
-        """
-        return pd.DataFrame(self.to_dict().items())
-
-class Patterns(BaseData):
+class Patterns(BaseData, BaseLines):
     """Detector streak lines container. Provides an interface to draw a pattern for a set of
     lines.
 
@@ -67,10 +54,6 @@ class Patterns(BaseData):
                         (self.lines[..., 3] - self.lines[..., 1])**2)
 
     @property
-    def shape(self) -> Shape:
-        return self.lines.shape[:-1]
-
-    @property
     def pt0(self) -> 'Points':
         return Points(points=self.lines[..., :2], index=self.index)
 
@@ -78,113 +61,9 @@ class Patterns(BaseData):
     def pt1(self) -> 'Points':
         return Points(points=self.lines[..., 2:], index=self.index)
 
-    @property
-    def x(self) -> RealArray:
-        return self.lines[..., ::2]
-
-    @property
-    def y(self) -> RealArray:
-        return self.lines[..., 1::2]
-
-    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                     num_threads: int=1) -> pd.DataFrame:
-        """Draw a pattern in the :class:`dict` format.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern in dictionary format.
-        """
-        table = draw_line_table(lines=self.to_lines(width=width), shape=shape, idxs=self.index,
-                                kernel=kernel, num_threads=num_threads)
-        ids, idxs = np.array(list(table)).T
-        normalised_shape = (np.prod(shape[:-2], dtype=int),) + shape[-2:]
-        frames, y, x = jnp.unravel_index(idxs, normalised_shape)
-        vals = np.array(list(table.values()))
-
-        data = {'index': ids, 'frames': frames, 'y': y, 'x': x, 'value': vals}
-        data = data | {attr: getattr(self, attr)[ids] for attr in self.extra_attributes()}
-
-        return pd.DataFrame(data)
-
-    def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian',
-                      num_threads: int=1) -> RealArray:
-        """Draw a pattern in the :class:`numpy.ndarray` format.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern in :class:`numpy.ndarray` format.
-        """
-        return draw_line_image(self.to_lines(width=width), shape=shape, idxs=self.index,
-                               kernel=kernel, num_threads=num_threads)
-
-    def pattern_mask(self, width: float, shape: Tuple[int, int], max_val: int=1,
-                     kernel: str='rectangular', num_threads: int=1) -> IntArray:
-        """Draw a pattern mask.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            max_val : Mask maximal value.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern mask.
-        """
-        return draw_line_mask(self.to_lines(width=width), shape=shape, idxs=self.index,
-                              max_val=max_val, kernel=kernel, num_threads=num_threads)
-
     def sample(self, x: RealArray) -> 'Points':
         pts = self.pt0.points + x[..., None] * (self.pt1.points - self.pt0.points)
         return Points(points=pts, index=self.index)
-
-    def to_lines(self, frames: Optional[IntSequence]=None,
-                 width: Optional[RealSequence]=None) -> RealArray:
-        """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
-
-        * `[x0, y0]`, `[x1, y1]` : The coordinates of the line's ends.
-        * `width` : Line's width.
-
-        Returns:
-            An array of line parameters.
-        """
-        if width is None:
-            lines = self.lines
-        else:
-            widths = jnp.broadcast_to(jnp.asarray(width), self.shape)
-            lines = jnp.concatenate((self.lines, widths[..., None]), axis=-1)
-
-        if frames is not None:
-            lines = jnp.concat([lines[self.index == frame] for frame in np.atleast_1d(frames)])
-        return lines
 
     def to_points(self) -> 'Points':
         points = jnp.reshape(self.lines, self.shape + (2, 2))

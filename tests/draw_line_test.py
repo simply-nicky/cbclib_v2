@@ -9,16 +9,16 @@ from cbclib_v2.jax import project_to_streak
 class TestDrawLine():
     def kernel_dict(self) -> Dict[str, Callable[[RealArray, RealArray], RealArray]]:
         def biweight(x, sigma):
-            return 0.9375 * np.clip(1 - (x / sigma)**2, 0, np.infty)**2
+            return 0.9375 * np.clip(1 - (x / sigma)**2, 0, np.inf)**2
         def gaussian(x, sigma):
             return np.where(np.abs(x) < sigma,
                             np.exp(-(3 * x / sigma)**2 / 2) / np.sqrt(2 * np.pi), 0)
         def parabolic(x, sigma):
-            return 0.75 * np.clip(1 - (x / sigma)**2, 0, np.infty)
+            return 0.75 * np.clip(1 - (x / sigma)**2, 0, np.inf)
         def rectangular(x, sigma):
             return np.where(np.abs(x) < sigma, 1, 0)
         def triangular(x, sigma):
-            return np.clip(1 - np.abs(x / sigma), 0, np.infty)
+            return np.clip(1 - np.abs(x / sigma), 0, np.inf)
 
         return {'biweight': biweight, 'gaussian': gaussian, 'parabolic': parabolic,
                 'rectangular': rectangular, 'triangular': triangular}

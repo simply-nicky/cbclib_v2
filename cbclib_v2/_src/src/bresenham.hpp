@@ -113,9 +113,9 @@ private:
             return error_at() + dot(step, derror);
         }
 
-        BaseError & increment(long step, size_t axis)
+        BaseError & increment(long x, size_t axis)
         {
-            error += step * derror[axis];
+            error += x * derror[axis];
             return *this;
         }
     };
@@ -141,11 +141,14 @@ private:
         NormalError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
             BaseError(std::move(derr), point, origin) {}
 
+        //  Increment x if:
+        //      | e(x + sx, y + sy) | < | e(x, y + sy) | or | e(x + sx, y) | < | e(x, y + sy) |
         bool is_next(const PointND<long, N> & step, size_t axis) const
         {
-            if (step[axis] * this->derror[axis] == 0) return true;
-            if (step[axis] * this->derror[axis] > 0) return 2 * this->error_at(step) <= step[axis] * this->derror[axis];
-            return 2 * this->error_at(step) >= step[axis] * this->derror[axis];
+            auto e_xy = this->error_at(step);
+            auto e_y = e_xy - step[axis] * this->derror[axis];
+            auto e_x = this->error_at() + step[axis] * this->derror[axis];
+            return std::abs(e_xy) < std::abs(e_y) || std::abs(e_x) < std::abs(e_y);
         }
     };
 
@@ -159,9 +162,30 @@ public:
         using pointer = PointND<long, N> *;
         using reference = const PointND<long, N> &;
 
+        LineIterator & flip(size_t axis)
+        {
+            step[axis] *= -1;
+            update();
+            return *this;
+        }
+
+        LineIterator & flip(const std::array<bool, N> & to_flip)
+        {
+            for (size_t i = 0; i < N; i++) if (to_flip[i]) step[i] *= -1;
+            update();
+            return *this;
+        }
+
+        LineIterator & move(size_t axis)
+        {
+            increment(step[axis], axis);
+            update();
+            return *this;
+        }
+
         LineIterator & operator++()
         {
-            for (size_t i = 0; i < N; i++) if (next[i]) increment(i);
+            for (size_t i = 0; i < N; i++) if (next[i]) increment(step[i], i);
             update();
             return *this;
         }
@@ -190,25 +214,30 @@ public:
         TangentError terror;
         std::array<NormalError, NumPairs> nerrors;
 
-        LineIterator(PointND<long, N> current) : current(std::move(current)) {}
+        LineIterator(PointND<long, N> current) :
+            step(), current(std::move(current)), next(), terror(), nerrors() {}
 
         LineIterator(PointND<long, N> step, PointND<long, N> current, TangentError terror, std::array<NormalError, NumPairs> nerrors) :
-            step(std::move(step)), current(std::move(current)), terror(std::move(terror)), nerrors(std::move(nerrors))
+            step(std::move(step)), current(std::move(current)), next(), terror(std::move(terror)), nerrors(std::move(nerrors))
         {
             update();
         }
 
-        LineIterator(const LineIterator & p, size_t axis) : step(p.step), current(p.current), terror(p.terror), nerrors(p.nerrors)
+        template <typename ... Ix> requires is_all_integral<Ix ...>
+        LineIterator(const LineIterator & p, Ix ... axes) :
+            step(p.step), current(p.current), next(), terror(p.terror), nerrors(p.nerrors)
         {
-            step[axis] = 0;
+            (step[axes] = ... = 0);
             update();
         }
 
-        LineIterator & increment(size_t axis)
+        LineIterator & increment(long x, size_t axis)
         {
-            current[axis] += step[axis];
-            terror.increment(step[axis], axis);
-            for (auto index : axes().lookup()[axis]) nerrors[index].increment(step[axis], axis);
+            current[axis] += x;
+
+            terror.increment(x, axis);
+            for (auto index : axes().lookup()[axis]) nerrors[index].increment(x, axis);
+
             return *this;
         }
 
@@ -237,14 +266,19 @@ public:
     using const_iterator = LineIterator;
     using iterator = const_iterator;
 
-    BresenhamPlotter(LineND<T, N> l, PointND<long, N> p0, PointND<long, N> p1) :
-        line(std::move(l)), m_pt0(std::move(p0)), m_pt1(p1 + step()) {}
+    BresenhamPlotter(LineND<T, N> l) :
+        line(std::move(l)), m_pt0(pt0().round()), m_pt1(pt1().round() + step()), m_axis(long_axis()) {}
 
     BresenhamPlotter(LineND<T, N> l, long offset) :
-        line(std::move(l)), m_pt0(pt0().round() - step() * offset), m_pt1(pt1().round() + step() * (offset + 1)) {}
+        line(std::move(l)), m_axis(long_axis())
+    {
+        auto tau = (pt1() - pt0()) / amplitude(pt1() - pt0());
+        m_pt0 = (pt0() - std::abs(offset / tau[m_axis]) * tau).round();
+        m_pt1 = (pt1() + std::abs(offset / tau[m_axis]) * tau).round();
+        m_pt1 += step();
 
-    BresenhamPlotter(LineND<T, N> l) :
-        line(std::move(l)), m_pt0(pt0().round()), m_pt1(pt1().round() + step()) {}
+        // std::cout << "m_axis = " << m_axis << ", m_pt0 = " << m_pt0 << ", m_pt1 = " << m_pt1 << std::endl;
+    }
 
     iterator begin(PointND<long, N> point) const
     {
@@ -261,10 +295,14 @@ public:
         return iterator(m_pt1);
     }
 
-    iterator begin(const iterator & iter, size_t axis) const
+    template <typename ... Ix> requires is_all_integral<Ix ...>
+    iterator collapse(const iterator & iter, Ix ... axes) const
     {
-        return iterator(iter, axis);
+        return iterator(iter, axes...);
     }
+
+    size_t axis() const {return m_axis;}
+    size_t axis(size_t offset) const {return (axis() + offset) % N;}
 
     T normal_error(const iterator & iter) const
     {
@@ -276,7 +314,8 @@ public:
     T error(const iterator & iter, T width) const
     {
         if (width <= T()) return std::numeric_limits<T>::infinity();
-        return (std::pow(iter.terror.error_at() / iter.terror.length, 2) + normal_error(iter)) / (width * width);
+        auto error = std::pow(iter.terror.error_at() / iter.terror.length, 2) + normal_error(iter);
+        return error / (width * width);
     }
 
     bool is_next(const iterator & iter, size_t axis) const
@@ -287,6 +326,14 @@ public:
 private:
     LineND<T, N> line;
     PointND<long, N> m_pt0, m_pt1;
+    size_t m_axis;
+
+    size_t long_axis() const
+    {
+        auto tau = line.tangent();
+        auto compare = [](const T & a, const T & b){return std::abs(a) < std::abs(b);};
+        return std::distance(tau.begin(), std::max_element(tau.begin(), tau.end(), compare));
+    }
 
     PointND<T, N> normal(const std::pair<size_t, size_t> & pair) const
     {
@@ -311,14 +358,7 @@ private:
     PointND<long, N> step() const
     {
         PointND<long, N> point;
-        auto tau = line.tangent();
-
-        for (size_t i = 0; i < N; i++)
-        {
-            if constexpr(IsForward) point[i] = (tau[i] >= 0) ? 1 : -1;
-            else point[i] = (tau[i] >= 0) ? -1 : 1;
-        }
-
+        for (size_t i = 0; i < N; i++) point[i] = (pt1()[i] >= pt0()[i]) ? 1 : -1;
         return point;
     }
 
@@ -342,29 +382,31 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_2d(const LineND<T, 2> & line, T width, Func && func)
 {
-    BresenhamPlotter<T, 2, true> plotter {line, long(std::ceil(width) + 1)};
+    // std::cout << "line = " << line << std::endl;
+    BresenhamPlotter<T, 2, true> p {line, long(std::ceil(width) + 1)};
 
-    for (auto iter = plotter.begin(); iter != plotter.end(); ++iter)
+    for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
-        std::forward<Func>(func)(*iter, plotter.error(iter, width));
+        // std::cout << "pt = " << *iter << std::endl;
 
-        if (plotter.is_next(iter, 0))
+        if (p.is_next(iter, p.axis()))
         {
-            for (auto iter_y = std::next(plotter.begin(iter, 0));
-                 plotter.normal_error(iter_y) <= width * width && iter_y != plotter.end();
-                 ++iter_y)
+            std::forward<Func>(func)(*iter, p.error(iter, width));
+
+            for (auto iter_x = std::next(p.collapse(iter, p.axis()));
+                 p.normal_error(iter_x) < width * width; ++iter_x)
             {
-                std::forward<Func>(func)(*iter_y, plotter.error(iter_y, width));
+                // std::cout << "pt_x = " << *iter_x << std::endl;
+                // std::cout << "normal_error = " << p.normal_error(iter_x) << std::endl;
+                std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
             }
-        }
 
-        if (plotter.is_next(iter, 1))
-        {
-            for (auto iter_x = std::next(plotter.begin(iter, 1));
-                 plotter.normal_error(iter_x) <= width * width && iter_x != plotter.end();
-                 ++iter_x)
+            for (auto iter_x = std::next(p.collapse(iter, p.axis()).flip(p.axis(1)));
+                 p.normal_error(iter_x) < width * width; ++iter_x)
             {
-                std::forward<Func>(func)(*iter_x, plotter.error(iter_x, width));
+                // std::cout << "pt_x = " << *iter_x << std::endl;
+                // std::cout << "normal_error = " << p.normal_error(iter_x) << std::endl;
+                std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
             }
         }
     }
@@ -379,59 +421,42 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
 {
-    BresenhamPlotter<T, 3, true> plotter {line, long(std::ceil(width) + 1)};
+    // std::cout << "line = " << line << std::endl;
+    BresenhamPlotter<T, 3, true> p {line, long(std::ceil(width))};
 
-    for (auto iter = plotter.begin(); iter != plotter.end(); ++iter)
+    for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
-        std::forward<Func>(func)(*iter, plotter.error(iter, width));
+        // std::cout << "pt = " << *iter << std::endl;
+        // std::cout << "normal_error = " << p.normal_error(iter) << std::endl;
 
-        for (size_t n = 0; n < 3; n++) if (plotter.is_next(iter, n))
+        if (p.is_next(iter, p.axis()))
         {
-            auto iter_xy = plotter.begin(iter, n);
+            std::forward<Func>(func)(*iter, p.error(iter, width));
 
-            for (size_t m = n + 1; m < n + 3; m++)
+            for (size_t i = 0; i < 4; i++)
             {
-                if (plotter.is_next(iter_xy, m % 3) && (!plotter.is_next(iter, m % 3) || n < m % 3))
+                std::array<bool, 3> flip {};
+                flip[p.axis(1)] |= i & 1;
+                flip[p.axis(2)] |= i >> 1;
+
+                // std::cout << "i = " << i << std::endl;
+
+                for (auto iter_xy = p.collapse(iter, p.axis()).flip(flip).move(p.axis(1 + ((i & 1) ^ (i >> 1))));
+                     p.normal_error(iter_xy) < width * width; ++iter_xy)
                 {
-                    for (auto iter_x = std::next(plotter.begin(iter_xy, m % 3));
-                         iter_x != plotter.end(); ++iter_x)
+                    // std::cout << "pt_xy = " << *iter_xy << std::endl;
+                    // std::cout << "normal_error = " << p.normal_error(iter_xy) << std::endl;
+                    std::forward<Func>(func)(*iter_xy, p.error(iter_xy, width));
+
+                    for (size_t j = 1; j < 3; j++) if (p.is_next(iter_xy, p.axis(j)))
                     {
-                        auto error = plotter.normal_error(iter_x);
-                        if (error > width * width)
+                        for (auto iter_x = std::next(p.collapse(iter_xy, p.axis(j)));
+                             p.normal_error(iter_x) < width * width; ++iter_x)
                         {
-                            if (error > plotter.normal_error(std::next(iter_x))) continue;
-                            else break;
+                            // std::cout << "pt_x = " << *iter_x << std::endl;
+                            // std::cout << "normal_error = " << p.normal_error(iter_x) << std::endl;
+                            std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
                         }
-
-                        std::forward<Func>(func)(*iter_x, plotter.error(iter_x, width));
-                    }
-                }
-            }
-
-            for (iter_xy = std::next(iter_xy); iter_xy != plotter.end(); ++iter_xy)
-            {
-                auto error = plotter.normal_error(iter_xy);
-                if (error > width * width)
-                {
-                    if (error > plotter.normal_error(std::next(iter_xy))) continue;
-                    else break;
-                }
-
-                std::forward<Func>(func)(*iter_xy, plotter.error(iter_xy, width));
-
-                for (size_t m = n + 1; m < n + 3; m++) if (plotter.is_next(iter_xy, m % 3))
-                {
-                    for (auto iter_x = std::next(plotter.begin(iter_xy, m % 3));
-                         iter_x != plotter.end(); ++iter_x)
-                    {
-                        auto error = plotter.normal_error(iter_x);
-                        if (error > width * width)
-                        {
-                            if (error > plotter.normal_error(std::next(iter_x))) continue;
-                            else break;
-                        }
-
-                        std::forward<Func>(func)(*iter_x, plotter.error(iter_x, width));
                     }
                 }
             }

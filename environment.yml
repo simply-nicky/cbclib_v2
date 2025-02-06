@@ -1,8 +1,8 @@
 name: cbc
 channels:
   - conda-forge
-  - defaults
 dependencies:
+  - cxx_compiler
   - fftw
   - h5py
   - hdf5plugin
@@ -12,6 +12,6 @@ dependencies:
   - pandas
   - pybind11
   - pytables
-  - python>=3.10
+  - python==3.10
   - scipy
   - tqdm

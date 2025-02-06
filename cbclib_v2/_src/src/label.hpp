@@ -85,6 +85,11 @@ struct CentralMoments
         T p = std::sqrt((a - b) * (a - b) + 4 * c * c);
         return {std::sqrt(1 / (a + b - p)), std::sqrt(1 / (a + b + p))};
     }
+
+    std::array<T, 5> to_array() const
+    {
+        return {mu_x, mu_y, mu_xx, mu_xy, mu_yy};
+    }
 };
 
 template <typename T>
@@ -216,6 +221,8 @@ struct Moments
                 mu_xy + dist.x() * mu_y + dist.y() * mu_x + dist.x() * dist.y() * mu,
                 mu_yy + 2 * dist.y() * mu_y + dist.y() * dist.y() * mu};
     }
+
+    std::array<T, 6> to_array() const {return {mu, mu_x, mu_y, mu_xx, mu_xy, mu_yy};}
 
     friend std::ostream & operator<<(std::ostream & os, const Moments & m)
     {
@@ -488,72 +495,7 @@ struct Regions
 
         return vec;
     }
-
-    template <typename T>
-    auto center_of_mass(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            return std::move(region.moments.central_moments().center_of_mass(region.moments.pt0)).to_array();
-        });
-    }
-
-    template <typename T>
-    auto gauss_fit(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            return region.moments.central_moments().gauss();
-        });
-    }
-
-    template <typename T>
-    auto ellipse_fit(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            auto cm = region.moments.central_moments();
-            auto [a, b] = cm.principal_axes();
-            auto theta = cm.theta();
-            return std::array<T, 3>{a, b, theta};
-        });
-    }
-
-    template <typename T>
-    auto line_fit(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region) -> std::array<T, 4>
-        {
-            return region.get_line().to_array();
-        });
-    }
-
-    template <typename T>
-    auto moments(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            auto cm = region.moments.central_moments();
-            return std::array<T, 4>{region.moments.mu, cm.mu_xx, cm.mu_xy, cm.mu_yy};
-        });
-    }
-
-private:
-    template <typename T, typename Func>
-    auto apply(const array<T> & data, Func && func) const
-    {
-        std::vector<std::invoke_result_t<Func, Pixels<T>>> results;
-        for (const auto & region : regions)
-        {
-            results.emplace_back(std::forward<Func>(func)(Pixels<T>{region, data}));
-        }
-
-        return results;
-    }
 };
-
-template <typename T>
-auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::optional<std::tuple<size_t, size_t>> ax, unsigned threads);
 
 }
 

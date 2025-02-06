@@ -3,10 +3,11 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 from jax import random, vmap
 from .cbc_data import (AnyPoints, CBData, CBDPoints, Miller, MillerWithRLP, LaueVectors, RLP,
-                       Patterns, Points, PointsWithK)
-from .cbc_setup import (EulerState, InternalState, LensState, Pupil, RotationState, TiltState,
+                       Patterns, PointsWithK)
+from .cbc_setup import (EulerState, InternalState, LensState, RotationState, TiltState,
                         TiltOverAxisState, XtalState)
-from .geometry import arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, safe_divide, source_lines
+from .geometry import (arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, project_to_rect, safe_divide,
+                       source_lines)
 from .state import State
 from .._src.annotations import KeyArray, IntArray, RealArray
 
@@ -113,17 +114,21 @@ class Xtal():
 
 class Lens():
     def kin_center(self, state: LensState) -> RealArray:
-        point = 0.5 * jnp.array([state.pupil_roi[2] + state.pupil_roi[3],
-                                 state.pupil_roi[0] + state.pupil_roi[1]])
+        point = 0.5 * (state.pupil_min + state.pupil_max)
         return det_to_k(point, state.foc_pos, jnp.array(0))
 
     def kin_max(self, state: LensState) -> RealArray:
-        return det_to_k(jnp.array([state.pupil_roi[3], state.pupil_roi[1]]),
-                        state.foc_pos, jnp.array(0))
+        return det_to_k(state.pupil_max, state.foc_pos, jnp.array(0))
 
     def kin_min(self, state: LensState) -> RealArray:
-        return det_to_k(jnp.array([state.pupil_roi[2], state.pupil_roi[0]]),
-                        state.foc_pos, jnp.array(0))
+        return det_to_k(state.pupil_min, state.foc_pos, jnp.array(0))
+
+    def kin_edges(self, state: LensState) -> RealArray:
+        kmin, kmax = self.kin_min(state), self.kin_max(state)
+        return jnp.array([[[kmin[0], kmax[1]], [kmax[0], kmax[1]]],
+                          [[kmax[0], kmax[1]], [kmax[0], kmin[1]]],
+                          [[kmax[0], kmin[1]], [kmin[0], kmin[1]]],
+                          [[kmin[0], kmin[1]], [kmin[0], kmax[1]]]])
 
     def kin_to_sample(self, kin: RealArray, z: RealArray, idxs: IntArray, state: LensState
                       ) -> RealArray:
@@ -140,17 +145,16 @@ class Lens():
         return k_to_smp(kin, z, state.foc_pos, idxs)
 
     def source_lines(self, miller: MillerWithRLP, state: LensState) -> LaueVectors:
-        kin, is_good = source_lines(miller.q, self.pupil(state).edges())
-        laue = LaueVectors(index=miller.index[..., None], q=miller.q[..., None, :],
-                           hkl=miller.hkl, kin=kin, kout=kin + miller.q[..., None, :])
+        kin, is_good = source_lines(miller.q, self.kin_edges(state))
+        index = jnp.broadcast_to(miller.index, miller.q.shape[:-1])
+        laue = LaueVectors(index=index[..., None], q=miller.q[..., None, :], hkl=miller.hkl,
+                           kin=kin, kout=kin + miller.q[..., None, :])
         return laue.filter(is_good)
 
     def project_to_pupil(self, kin: RealArray, state: LensState) -> RealArray:
         kin = safe_divide(kin, jnp.sqrt(jnp.sum(kin**2, axis=-1))[..., None])
-        return kxy_to_k(self.pupil(state).project(kin[..., :2]))
-
-    def pupil(self, state: LensState) -> Pupil:
-        return Pupil(self.kin_min(state)[:2], self.kin_max(state)[:2])
+        kxy = project_to_rect(kin[..., :2], self.kin_min(state)[:2], self.kin_max(state)[:2])
+        return kxy_to_k(kxy)
 
     def zero_order(self, state: LensState):
         return k_to_det(self.kin_center(state), state.foc_pos, jnp.array(0))
@@ -221,23 +225,32 @@ class CBDModel():
         laue = self.kout_to_points(laue, state)
         return Patterns.from_points(laue)
 
-    def patterns_to_kout(self, patterns: Patterns, state: InternalState) -> Tuple[RealArray, RealArray]:
+    def patterns_to_kout(self, patterns: Patterns, state: InternalState
+                         ) -> Tuple[RealArray, RealArray]:
         pts = self.points_to_kout(patterns.to_points(), state)
         return jnp.min(pts.kout[..., :2], axis=-2), jnp.max(pts.kout[..., :2], axis=-2)
+
+    # def patterns_to_q(self, patterns: Patterns, state: InternalState) -> Tuple[RLP, RLP]:
+    #     kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
+    #     kout_min, kout_max = self.patterns_to_kout(patterns, state)
+    #     q1 = kxy_to_k(kout_min) - kxy_to_k(kmax[:2] - (kout_max - kout_min))
+    #     q2 = kxy_to_k(kout_max) - kmin
+    #     return RLP(q1, patterns.index), RLP(q2, patterns.index)
+
+    # def points_to_q(self, points: Points, patterns: Patterns, state: InternalState
+    #                 ) -> Tuple[RLP, RLP]:
+    #     kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
+    #     kout_min, kout_max = self.patterns_to_kout(patterns, state)
+    #     points = self.points_to_kout(points, state)
+    #     q1, q2 = points.kout - kxy_to_k(kmax[:2] - (kout_max - kout_min)), points.kout - kmin
+    #     return RLP(q1, points.index), RLP(q2, points.index)
 
     def patterns_to_q(self, patterns: Patterns, state: InternalState) -> Tuple[RLP, RLP]:
         kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
         kout_min, kout_max = self.patterns_to_kout(patterns, state)
-        q1 = kxy_to_k(kout_min) - kxy_to_k(kmax[:2] - (kout_max - kout_min))
-        q2 = kxy_to_k(kout_max) - kmin
+        q1 = kxy_to_k(kout_min) - kmin
+        q2 = kxy_to_k(kout_max) - kmax
         return RLP(q1, patterns.index), RLP(q2, patterns.index)
-
-    def points_to_q(self, points: Points, patterns: Patterns, state: InternalState) -> Tuple[RLP, RLP]:
-        kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
-        kout_min, kout_max = self.patterns_to_kout(patterns, state)
-        points = self.points_to_kout(points, state)
-        q1, q2 = points.kout - kxy_to_k(kmax[:2] - (kout_max - kout_min)), points.kout - kmin
-        return RLP(q1, points.index), RLP(q2, points.index)
 
     def init_data(self, key: KeyArray, patterns: Patterns, num_points: int,
                   state: InternalState, combine_key: bool=False) -> 'CBData':

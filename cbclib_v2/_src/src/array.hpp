@@ -4,14 +4,32 @@
 
 namespace cbclib {
 
+template <typename T, typename ... Types>
+concept is_all_same = (... && std::is_same_v<T, Types>);
+
+template <typename ... Types>
+concept is_all_integral = (... && std::is_integral_v<Types>);
+
 namespace detail{
 
 static const size_t GOLDEN_RATIO = 0x9e3779b9;
 
 template <typename T>
-inline constexpr int signum(T val)
+inline constexpr int signum(T x, std::false_type is_signed)
 {
-    return (T(0) < val) - (val < T(0));
+    return T(0) < x;
+}
+
+template <typename T>
+inline constexpr int signum(T x, std::true_type is_signed)
+{
+    return (T(0) < x) - (x < T(0));
+}
+
+template <typename T>
+inline constexpr int signum(T x)
+{
+    return signum(x, std::is_signed<T>());
 }
 
 /* Returns a positive remainder of division */
@@ -186,7 +204,7 @@ public:
         return ravel_index_impl(coord.begin(), coord.end(), strides.begin());
     }
 
-    template <typename... Ix, typename = std::enable_if_t<(std::is_integral_v<Ix> && ...)>>
+    template <typename... Ix> requires is_all_integral<Ix ...>
     auto ravel_index(Ix... index) const
     {
         if (sizeof...(index) > ndim) fail_dim_check(sizeof...(index), "too many indices for an array");
@@ -426,7 +444,6 @@ public:
         return array<T>(std::move(new_shape), std::move(new_strides), ptr + ravel_index(coord.begin(), coord.end()));
     }
 
-
     /* Line slice iterators:
         Take a slice of an array 'array' as follows:
         - array[..., :, ...] slice, where ':' is at 'axis'-th axis
@@ -500,13 +517,13 @@ public:
         return ptr[ravel_index(coord)];
     }
 
-    template <typename... Ix, typename = std::enable_if_t<(std::is_integral_v<Ix> && ...)>>
+    template <typename ... Ix> requires is_all_integral<Ix ...>
     const T & at(Ix... index) const
     {
         return ptr[ravel_index(index...)];
     }
 
-    template <typename... Ix, typename = std::enable_if_t<(std::is_integral_v<Ix> && ...)>>
+    template <typename ... Ix> requires is_all_integral<Ix ...>
     T & at(Ix... index)
     {
         return ptr[ravel_index(index...)];

@@ -78,12 +78,14 @@ def tilt_angles(rmats: RealArray) -> RealArray:
         angle between the axis of rotation and OZ axis :math:`\alpha`, and a polar angle of the
         axis of rotation :math:`\beta`.
         """
+    # This transformation is accurate for proper rotations ONLY => det(rmats) == 1
+    # from http://scipp.ucsc.edu/~haber/ph116A/rotation_11.pdf
     vec = jnp.stack([rmats[..., 2, 1] - rmats[..., 1, 2],
                      rmats[..., 0, 2] - rmats[..., 2, 0],
                      rmats[..., 1, 0] - rmats[..., 0, 1]], axis=-1)
-    mag = jnp.sum(vec**2, axis=-1)
-    return jnp.stack([jnp.arccos(0.5 * (jnp.trace(rmats, axis1=-2, axis2=-1) - 1)),
-                      jnp.arccos(vec[..., 2] / jnp.sqrt(mag)),
+    rabs = jnp.sqrt(jnp.sum(vec**2, axis=-1))
+    return jnp.stack([jnp.arctan2(rabs, jnp.trace(rmats, axis1=-2, axis2=-1) - 1),
+                      jnp.arccos(vec[..., 2] / rabs),
                       jnp.arctan2(vec[..., 1], vec[..., 0])], axis=-1)
 
 def tilt_matrix(angles: RealArray) -> RealArray:

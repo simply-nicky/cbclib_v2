@@ -1,4 +1,4 @@
-"""CXI protocol (:class:`cbclib.CXIProtocol`) is a helper class for a :class:`cbclib.CrystData`
+"""CXI protocol (:class:`cbclib_v2.CXIProtocol`) is a helper class for a :class:`cbclib_v2.CrystData`
 data container, which tells it where to look for the necessary data fields in a CXI file. The
 class is fully customizable so you can tailor it to your particular data structure of CXI file.
 
@@ -26,7 +26,7 @@ from tqdm.auto import tqdm
 from extra_data import open_run, stack_detector_data, DataCollection
 from extra_geom import JUNGFRAUGeometry
 from .data_container import DataContainer, Parser, INIParser, JSONParser, StringFormatting
-from .annotations import Indices, IntTuple, NDArray, NDIntArray, Shape
+from .annotations import Indices, IntTuple, NDArray, NDIntArray, Processor, Shape
 
 EXP_ROOT_DIR = '/gpfs/exfel/exp'
 CXI_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cxi_protocol.ini')
@@ -51,10 +51,17 @@ class CrystProtocol():
     def get_kind(cls, attr: str) -> Kinds:
         return cls.kinds.get(attr, Kinds.NO_KIND)
 
+    @classmethod
+    def has_kind(cls, attributes: List[str], kind: Kinds) -> bool:
+        for attr in attributes:
+            if cls.get_kind(attr) is kind:
+                return True
+        return False
+
 @dataclass
 class CXIProtocol(DataContainer):
     """CXI protocol class. Contains a CXI file tree path with the paths written to all the data
-    attributes necessary for the :class:`cbclib.CrystData` detector data container, their
+    attributes necessary for the :class:`cbclib_v2.CrystData` detector data container, their
     corresponding attributes' data types, and data structure.
 
     Args:
@@ -118,7 +125,7 @@ class CXIProtocol(DataContainer):
         Returns:
             A new protocol with the new attribute included.
         """
-        return self.replace(load_paths = dict(**self.load_paths, **{attr: load_paths}))
+        return self.replace(load_paths = {**self.load_paths, **{attr: load_paths}})
 
     def find_path(self, attr: str, cxi_file: h5py.File) -> str:
         """Find attribute's path in a CXI file `cxi_file`.
@@ -227,8 +234,6 @@ class CXIProtocol(DataContainer):
 class ReadWorker(Protocol):
     def __call__(self, index: NDArray, ss_idxs: Indices, fs_idxs: Indices) -> NDArray:
         ...
-
-Processor = Callable[[NDArray], Union[NDArray, int, float]]
 
 @dataclass
 class CXIReader():
@@ -388,7 +393,7 @@ class CXIStore(FileStore):
     Attributes:
         files : Dictionary of paths to the files and their file
             objects.
-        protocol : :class:`cbclib.CXIProtocol` protocol object.
+        protocol : :class:`cbclib_v2.CXIProtocol` protocol object.
         mode : File mode. Valid modes are:
 
             * 'r' : Readonly, file must exist (default).
@@ -409,7 +414,8 @@ class CXIStore(FileStore):
         if self.mode not in ['r', 'r+', 'w', 'w-', 'x', 'a']:
             raise ValueError(f'Wrong file mode: {self.mode}')
         if len(self.files) != len(StringFormatting.str_to_list(self.names)):
-            self.files = {fname: None for fname in StringFormatting.str_to_list(self.names)}
+            self.files = {fname: h5py.File(fname, mode=self.mode)
+                          for fname in StringFormatting.str_to_list(self.names)}
 
     @property
     def size(self) -> int:
@@ -426,7 +432,6 @@ class CXIStore(FileStore):
         return isopen
 
     def __enter__(self) -> 'CXIStore':
-        self.open()
         return self
 
     def __exit__(self, exc_type: Optional[BaseException], exc: Optional[BaseException],
@@ -440,10 +445,11 @@ class CXIStore(FileStore):
 
     def close(self):
         """Close the files."""
-        for fname, cxi_file in self.files.items():
-            if cxi_file is not None:
-                cxi_file.close()
-            self.files[fname] = None
+        if self:
+            for fname, cxi_file in self.files.items():
+                if cxi_file is not None:
+                    cxi_file.close()
+                self.files[fname] = None
 
     def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
@@ -462,6 +468,9 @@ class CXIStore(FileStore):
         Returns:
             Attribute's data array.
         """
+        if not self:
+            raise KeyError("Unable to load data (file is closed)")
+
         kind = CrystProtocol.get_kind(attr)
 
         if kind == Kinds.NO_KIND:
@@ -476,22 +485,16 @@ class CXIStore(FileStore):
             return reader.load_stack(attr=attr, idxs=self.indices[attr][idxs],
                                      processes=processes, ss_idxs=ss_idxs,
                                      fs_idxs=fs_idxs, proc=proc, verbose=verbose)
-        elif kind == Kinds.FRAME:
+        if kind == Kinds.FRAME:
             return np.asarray(reader.load_frame(index=self.indices[attr][0],
                                                 ss_idxs=ss_idxs, fs_idxs=fs_idxs,
                                                 proc=proc))
-        elif kind == Kinds.SCALAR:
+        if kind == Kinds.SCALAR:
             return reader.load_sequence(idxs=self.indices[attr][0])
-        elif kind == Kinds.SEQUENCE:
+        if kind == Kinds.SEQUENCE:
             return reader.load_sequence(idxs=self.indices[attr][idxs])
-        else:
-            raise ValueError("Wrong kind: " + str(kind))
 
-    def open(self):
-        """Open the files."""
-        if not self:
-            for fname in self.files:
-                self.files[fname] = h5py.File(fname, mode=self.mode)
+        raise ValueError("Wrong kind: " + str(kind))
 
     def read_frame_shape(self) -> Tuple[int, int]:
         """Read the input files and return a shape of the `frame` type data attribute.
@@ -502,10 +505,9 @@ class CXIStore(FileStore):
         Returns:
             The shape of the 2D `frame`-like data attribute.
         """
-        with self:
-            for cxi_file in self.files.values():
-                return self.protocol.read_frame_shape(cast(h5py.File, cxi_file))
-            return (0, 0)
+        for cxi_file in self.files.values():
+            return self.protocol.read_frame_shape(cast(h5py.File, cxi_file))
+        return (0, 0)
 
     def save(self, attr: str, data: NDArray, mode: str='overwrite',
              idxs: Optional[Indices]=None):
@@ -527,19 +529,20 @@ class CXIStore(FileStore):
             ValueError : If the file is opened in read-only mode.
             RuntimeError : If the file is not opened.
         """
+        if not self:
+            raise KeyError("Unable to save data (file is closed)")
         if self.mode == 'r':
             raise ValueError('File is open in read-only mode')
         kind = CrystProtocol.get_kind(attr)
 
-        with self:
-            writer = CXIWriter(cast(List[h5py.File], list(self.files.values())),
-                               self.protocol)
+        writer = CXIWriter(cast(List[h5py.File], list(self.files.values())),
+                            self.protocol)
 
-            if kind in (Kinds.STACK, Kinds.SEQUENCE):
-                return writer.save_stack(attr=attr, data=data, mode=mode, idxs=idxs)
+        if kind in (Kinds.STACK, Kinds.SEQUENCE):
+            writer.save_stack(attr=attr, data=data, mode=mode, idxs=idxs)
 
-            if kind in (Kinds.FRAME, Kinds.SCALAR):
-                return writer.save_data(attr=attr, data=data)
+        if kind in (Kinds.FRAME, Kinds.SCALAR):
+            writer.save_data(attr=attr, data=data)
 
     def update(self):
         """Read the files for the data attributes contained in the protocol."""
@@ -631,7 +634,8 @@ class ExtraProtocol(DataContainer):
         return np.unique(np.concatenate(tids))
 
     def open_run(self, run: int) -> DataCollection:
-        run_data: DataCollection = open_run(proposal=self.proposal, run=run, data=self.folder)
+        run_data: DataCollection = open_run(proposal=self.proposal, run=run, data=self.folder,
+                                            parallelize=False)
         return run_data.select(self.source)
 
     def read_frame_shape(self) -> Shape:

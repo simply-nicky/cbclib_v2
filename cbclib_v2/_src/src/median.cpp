@@ -87,7 +87,7 @@ array<bool> get_footprint(py::array_t<T, py::array::c_style | py::array::forceca
     if (!fprint)
     {
         fprint = py::array_t<bool>(sequence<size_t>(size.value(), ibuf.ndim));
-        PyArray_FILLWBYTE(fprint.value().ptr(), 1);
+        PyArray_FILLWBYTE(reinterpret_cast<NPE_PY_ARRAY_OBJECT *>(fprint.value().ptr()), 1);
     }
     py::buffer_info fbuf = fprint.value().request();
     if (fbuf.ndim != ibuf.ndim)

@@ -3,7 +3,7 @@ import numpy as np
 import jax.numpy as jnp
 from jax import tree
 from jax.test_util import check_grads
-from .jax import (CBData, CBDModel, InternalState, LensState, XtalState, field, random_array,
+from .jax import (CBData, CBDModel, InternalState, FixedPupilState, XtalState, field, random_array,
                   random_state)
 from ._src.annotations import ComplexArray, RealArray
 
@@ -28,8 +28,8 @@ class TestSetup():
         return XtalState(jnp.array(cls.basis))
 
     @classmethod
-    def lens(cls) -> LensState:
-        return LensState(jnp.asarray(cls.foc_pos), cls.pupil_roi)
+    def lens(cls) -> FixedPupilState:
+        return FixedPupilState(jnp.asarray(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
     def z(cls) -> RealArray:
@@ -40,7 +40,7 @@ random_xtal = random_state(TestSetup.xtal(), tree.map(lambda val: REL_TOL * val,
 random_z = random_array(TestSetup.z(), REL_TOL)
 
 class TestState(InternalState, random=True):
-    lens    : LensState = field(random=random_lens)
+    lens    : FixedPupilState = field(random=random_lens)
     xtal    : XtalState = field(random=random_xtal)
     z       : RealArray = field(random=random_z)
 

@@ -1,12 +1,15 @@
 from typing import Callable, ClassVar, Dict, Iterator, Tuple, Type, TypeVar, cast, get_type_hints
 from dataclasses import dataclass
 import pandas as pd
+import numpy as np
 import jax.numpy as jnp
 from jax import random
-from .geometry import euler_angles, euler_matrix, project_to_rect, tilt_angles, tilt_matrix
+from .cbc_data import Patterns
+from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .state import State, dynamic_fields, field, static_fields
 from .._src.annotations import KeyArray, RealArray, RealSequence, Shape
 from .._src.data_container import Parser, INIParser, JSONParser
+from .._src.streaks import Streaks
 
 S = TypeVar('S', bound=State)
 
@@ -35,6 +38,10 @@ def random_state(state: S, span: S) -> Callable[[KeyArray], S]:
 
 def random_rotation(shape: Shape=()) -> Callable[[KeyArray], 'RotationState']:
     def rnd(key: KeyArray):
+        """Creates a random rotation matrix.
+        """
+        # from http://blog.lostinmyterminal.com/python/2015/05/12/random-rotation-matrix.html
+        # and  http://www.realtimerendering.com/resources/GraphicsGems/gemsiii/rand_rotation.c
         values = random.uniform(key, shape=shape + (3,))
         theta = 2.0 * jnp.pi * values[..., 0]
         phi = 2.0 * jnp.pi * values[..., 1]
@@ -60,6 +67,14 @@ class Detector():
 
     def to_coordinates(self, i: RealArray, j: RealArray) -> Tuple[RealArray, RealArray]:
         return i * self.x_pixel_size, j * self.y_pixel_size
+
+    def to_patterns(self, streaks: Streaks) -> Patterns:
+        pts = jnp.stack(self.to_coordinates(streaks.x, streaks.y), axis=-1)
+        return Patterns(jnp.asarray(streaks.index), jnp.reshape(pts, pts.shape[:-2] + (4,)))
+
+    def to_streaks(self, patterns: Patterns) -> Streaks:
+        pts = np.stack(self.to_indices(patterns.x, patterns.y), axis=-1)
+        return Streaks(np.asarray(patterns.index), np.reshape(pts, pts.shape[:-2] + (4,)))
 
 class XtalCell(State):
     angles  : RealArray
@@ -106,7 +121,6 @@ class XtalState(State):
     @property
     def c(self) -> RealArray:
         return self.basis[..., 2, :]
-
 
     def __len__(self) -> int:
         return self.basis.size // 9
@@ -184,8 +198,30 @@ class XtalState(State):
                 jnp.arctan2(self.basis[..., 1], self.basis[..., 0]))
 
 class LensState(State):
-    foc_pos         : RealArray
-    pupil_roi       : Tuple[float, float, float, float] = field(static=True)
+    foc_pos     : RealArray
+
+    @property
+    def pupil_min(self) -> RealArray:
+        raise NotImplementedError
+
+    @property
+    def pupil_max(self) -> RealArray:
+        raise NotImplementedError
+
+class FixedPupilState(LensState):
+    pupil_roi   : Tuple[float, float, float, float] = field(static=True)
+
+    @property
+    def pupil_min(self) -> RealArray:
+        return jnp.array([self.pupil_roi[2], self.pupil_roi[0]])
+
+    @property
+    def pupil_max(self) -> RealArray:
+        return jnp.array([self.pupil_roi[3], self.pupil_roi[1]])
+
+    @property
+    def pupil_center(self) -> RealArray:
+        return 0.5 * (self.pupil_min + self.pupil_max)
 
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
@@ -198,30 +234,20 @@ class LensState(State):
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
-    def read(cls, file: str, ext: str='ini') -> 'LensState':
+    def read(cls, file: str, ext: str='ini') -> 'FixedPupilState':
         return cls(**cls.parser(ext).read(file))
 
-class Pupil(State):
-    vmin    : RealArray
-    vmax    : RealArray
+class FixedApertureState(LensState):
+    pupil_center    : RealArray
+    aperture        : Tuple[float, float] = field(static=True)
 
-    def center(self) -> RealArray:
-        return 0.5 * (self.vmin + self.vmax)
+    @property
+    def pupil_min(self) -> RealArray:
+        return self.pupil_center - 0.5 * jnp.array(self.aperture)
 
-    def diagonals(self) -> RealArray:
-        return jnp.array([[self.vmin, self.vmax],
-                          [[self.vmin[0], self.vmax[1]], [self.vmax[0], self.vmin[1]]]])
-
-    def edges(self, offset: float=0.0) -> RealArray:
-        vmin = self.vmin - jnp.clip(offset, 0.0, 1.0) * (self.vmax - self.vmin)
-        vmax = self.vmax + jnp.clip(offset, 0.0, 1.0) * (self.vmax - self.vmin)
-        return jnp.array([[[vmin[0], vmax[1]], [vmax[0], vmax[1]]],
-                          [[vmax[0], vmax[1]], [vmax[0], vmin[1]]],
-                          [[vmax[0], vmin[1]], [vmin[0], vmin[1]]],
-                          [[vmin[0], vmin[1]], [vmin[0], vmax[1]]]])
-
-    def project(self, kxy: RealArray) -> RealArray:
-        return project_to_rect(kxy, self.vmin, self.vmax)
+    @property
+    def pupil_max(self) -> RealArray:
+        return self.pupil_center + 0.5 * jnp.array(self.aperture)
 
 class RotationState(State):
     matrix : RealArray
@@ -258,7 +284,7 @@ class RotationState(State):
         """
         return EulerState(euler_angles(self.matrix))
 
-    def to_tilt(self) -> RealArray:
+    def to_tilt(self) -> 'TiltState':
         r"""Calculate an axis of rotation and a rotation angle for a rotation matrix.
 
         Returns:
@@ -266,12 +292,14 @@ class RotationState(State):
             an angle between the axis of rotation and OZ axis :math:`\alpha`, and a polar angle
             of the axis of rotation :math:`\beta`.
         """
-        if jnp.allclose(self.matrix, self.matrix.T):
+        if jnp.allclose(self.matrix, jnp.swapaxes(self.matrix, -1, -2)):
             eigw, eigv = jnp.stack(jnp.linalg.eigh(self.matrix))
             axis = eigv[jnp.isclose(eigw, 1.0)]
             theta = jnp.arccos(0.5 * (jnp.trace(self.matrix) - 1.0))
-            return jnp.array([theta, jnp.arccos(axis[0, 2]), jnp.arctan2(axis[0, 1], axis[0, 0])])
-        return tilt_angles(self.matrix)
+            alpha = jnp.arccos(axis[0, 2])
+            beta = jnp.arctan2(axis[0, 1], axis[0, 0])
+            return TiltState(jnp.array([theta, alpha, beta]))
+        return TiltState(tilt_angles(self.matrix))
 
 class EulerState(State):
     angles : RealArray
@@ -282,22 +310,31 @@ class EulerState(State):
 class TiltState(State):
     angles : RealArray
 
+    def axis(self) -> RealArray:
+        return jnp.stack([jnp.sin(self.angles[..., 1]) * jnp.cos(self.angles[..., 2]),
+                          jnp.sin(self.angles[..., 1]) * jnp.sin(self.angles[..., 2]),
+                          jnp.cos(self.angles[..., 1])], axis=-1)
+
     def to_rotation(self) -> RotationState:
         return RotationState(tilt_matrix(self.angles))
+
+    def to_tilt_over_axis(self) -> 'TiltOverAxisState':
+        return TiltOverAxisState(self.angles[..., 0], self.axis())
 
 class TiltOverAxisState(State):
     angles : RealArray
     axis : RealArray
 
-    def axis_spherical(self) -> RealArray:
+    def alpha(self) -> RealArray:
         r = jnp.sqrt(jnp.sum(self.axis**2, axis=-1))
-        theta = jnp.broadcast_to(jnp.arccos(self.axis[..., 2] / r), self.angles.shape)
-        phi = jnp.broadcast_to(jnp.arctan2(self.axis[..., 1], self.axis[..., 0]), self.angles.shape)
-        return jnp.stack((theta, phi))
+        return jnp.broadcast_to(jnp.arccos(self.axis[..., 2] / r), self.angles.shape)
+
+    def beta(self) -> RealArray:
+        return jnp.broadcast_to(jnp.arctan2(self.axis[..., 1], self.axis[..., 0]),
+                                self.angles.shape)
 
     def to_tilt(self) -> TiltState:
-        theta, phi = self.axis_spherical()
-        return TiltState(jnp.stack((self.angles, theta, phi), axis=-1))
+        return TiltState(jnp.stack((self.angles, self.alpha(), self.beta()), axis=-1))
 
 class InternalState(State):
     lens    : LensState
