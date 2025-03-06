@@ -3,36 +3,32 @@
 
 namespace cbclib {
 
-template <typename T>
-Regions label2d(const array<T> & mask, const Structure & str, size_t npts)
+template <typename InputIt>
+Regions labelise(InputIt first, InputIt last, array<bool> && mask, const Structure & structure, size_t npts)
 {
     std::vector<PointsSet> regions;
-    std::vector<unsigned char> used (mask.size, false);
 
-    for (size_t idx = 0; idx < mask.size; idx++)
+    for (; first != last; ++first)
     {
-        if (mask[idx] && !used[idx])
+        size_t index = mask.index_at(first->coordinate());
+        if (mask[index])
         {
-            int y = mask.index_along_dim(idx, 0);
-            int x = mask.index_along_dim(idx, 1);
-            PointsSet points (PointsSet::point_type{x, y}, mask, str);
-
-            for (auto pt : *points)
-            {
-                used[mask.ravel_index(pt.coordinate())] = true;
-            }
-
-            if (points->size() > npts) regions.emplace_back(std::move(points));
+            PointsSet points {*first, mask, structure};
+            points.mask(mask, false);
+            if (points.size() >= npts) regions.emplace_back(std::move(points));
         }
     }
 
-    return Regions{std::array<size_t, 2>{mask.shape[0], mask.shape[1]}, std::move(regions)};
+    return Regions{std::move(regions)};
 }
 
 template <typename T>
-auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::optional<std::tuple<size_t, size_t>> ax, unsigned threads)
+auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::optional<std::vector<PointsSet>> seeds,
+           std::optional<std::tuple<size_t, size_t>> ax, unsigned threads)
 {
-    sequence<size_t> axes;
+    // Deep copy of mask array
+    mask = py::array_t<bool>{mask.request()};
+    Sequence<size_t> axes;
     if (ax)
     {
         axes = {std::get<0>(ax.value()), std::get<1>(ax.value())};
@@ -43,10 +39,12 @@ auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::option
     mask = axes.swap_axes(mask);
     array<bool> marr {mask.request()};
 
-    if (marr.shape.size() < 2)
-        fail_container_check("wrong number of dimensions(" + std::to_string(marr.shape.size()) + " < 2)", marr.shape);
+    if (marr.ndim() < 2)
+        fail_container_check("wrong number of dimensions(" + std::to_string(marr.ndim()) + " < 2)", marr.shape());
 
-    size_t repeats = std::reduce(marr.shape.begin(), std::next(marr.shape.begin(), marr.ndim - 2), 1, std::multiplies());
+    size_t repeats = std::reduce(marr.shape().begin(), std::next(marr.shape().begin(), marr.ndim() - 2), 1, std::multiplies());
+    if (seeds && seeds.value().size() != repeats)
+        throw std::invalid_argument("seeds length (" + std::to_string(seeds.value().size()) + ") is incompatible with mask shape");
 
     std::vector<Regions> result;
 
@@ -60,10 +58,22 @@ auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::option
     {
         std::vector<Regions> buffer;
 
-        #pragma omp for schedule(static) nowait
-        for (size_t i = 0; i < repeats; i++)
+        if (seeds)
         {
-            buffer.emplace_back(label2d(marr.slice(i, axes), structure, npts));
+            #pragma omp for schedule(static) nowait
+            for (size_t i = 0; i < repeats; i++)
+            {
+                buffer.emplace_back(labelise(seeds.value()[i].begin(), seeds.value()[i].end(), marr.slice_back(i, axes.size()), structure, npts));
+            }
+        }
+        else
+        {
+            #pragma omp for schedule(static) nowait
+            for (size_t i = 0; i < repeats; i++)
+            {
+                rectangle_range<Point<long>> range {Point<size_t>{marr.shape(axes[0]), marr.shape(axes[1])}};
+                buffer.emplace_back(labelise(range.begin(), range.end(), marr.slice_back(i, axes.size()), structure, npts));
+            }
         }
 
         #pragma omp for schedule(static) ordered
@@ -81,36 +91,101 @@ auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::option
     return result;
 }
 
-template <typename T, typename Func>
-py::array_t<T> apply(const Regions & regions, const array<T> & data, Func && func)
+template <typename T, typename Func, typename... Ix, typename = std::enable_if_t<
+    std::is_invocable_v<std::remove_cvref_t<Func>, Pixels<T>>
+>> requires is_all_integral<Ix...>
+py::array_t<T> apply(const Regions & regions, const array<T> & data, Func && func, Ix... sizes)
 {
     std::vector<T> results;
-    for (const auto & region : regions.regions)
+    for (const auto & region : regions)
     {
         auto result = std::forward<Func>(func)(Pixels<T>{region, data});
         results.insert(results.end(), result.begin(), result.end());
     }
 
-    return as_pyarray(std::move(results), std::array<size_t, 2>{regions.regions.size(), results.size() / regions.regions.size()});
+    return as_pyarray(std::move(results), std::array<size_t, 1 + sizeof...(Ix)>{regions.size(), static_cast<size_t>(sizes)...});
 }
 
-template <typename T, typename Func>
-std::vector<py::array_t<T>> apply_and_vectorise(const std::vector<Regions> & stack, const py::array_t<T> & data, Func && func)
+template <typename T, typename Func, typename... Ix, typename = std::enable_if_t<
+    std::is_invocable_v<std::remove_cvref_t<Func>, Pixels<T>>
+>> requires is_all_integral<Ix...>
+std::vector<py::array_t<T>> apply_and_vectorise(const std::vector<Regions> & stack, py::array_t<T> data, Func && func, std::optional<std::tuple<size_t, size_t>> ax, Ix... sizes)
 {
+    Sequence<size_t> axes;
+    if (ax)
+    {
+        axes = {std::get<0>(ax.value()), std::get<1>(ax.value())};
+        axes = axes.unwrap(data.ndim());
+    }
+    else axes = {data.ndim() - 2, data.ndim() - 1};
+
+    data = axes.swap_axes(data);
     auto dbuf = data.request();
     auto shape = normalise_shape<2>(dbuf.shape);
     check_dimensions("data", 0, shape, stack.size());
 
     array<T> darr {shape, static_cast<T *>(dbuf.ptr)};
     std::vector<py::array_t<T>> results;
-    std::array<size_t, 2> axes {1, 2};
 
     for (size_t i = 0; i < stack.size(); i++)
     {
-        results.emplace_back(apply(stack[i], darr.slice(i, axes), std::forward<Func>(func)));
+        results.emplace_back(apply(stack[i], darr.slice_back(i, axes.size()), std::forward<Func>(func), sizes...));
     }
 
     return results;
+}
+
+template <typename T>
+void declare_pixels(py::module & m, const std::string & typestr)
+{
+    py::class_<Pixels<T>>(m, (std::string("Pixels") + typestr).c_str())
+        .def(py::init([](std::vector<long> x, std::vector<long> y, std::vector<T> values)
+        {
+            PixelSet<T> result;
+            for (auto [x, y, val] : zip::zip(x, y, values)) result.insert(make_pixel(x, y, val));
+            return Pixels<T>{std::move(result)};
+        }), py::arg("x") = std::vector<long>{}, py::arg("y") = std::vector<long>{}, py::arg("value") = std::vector<T>{})
+        .def(py::init([](py::array_t<long> x, py::array_t<long> y, py::array_t<T> values)
+        {
+            PixelSet<T> result;
+            for (auto [x, y, val] : zip::zip(array<long>{x.request()}, array<long>{y.request()}, array<T>{values.request()}))
+            {
+                result.insert(make_pixel(x, y, val));
+            }
+            return Pixels<T>{std::move(result)};
+        }), py::arg("x") = py::array_t<long>{}, py::arg("y") = py::array_t<long>{}, py::arg("value") = py::array_t<T>{})
+        .def_property("x", [](const Pixels<T> & pixels)
+        {
+            std::vector<long> xvec;
+            for (const auto & [pt, _]: pixels.pixels()) xvec.push_back(pt.x());
+            return xvec;
+        }, nullptr)
+        .def_property("y", [](const Pixels<T> & pixels)
+        {
+            std::vector<long> yvec;
+            for (const auto & [pt, _]: pixels.pixels()) yvec.push_back(pt.y());
+            return yvec;
+        }, nullptr)
+        .def_property("value", [](const Pixels<T> & pixels)
+        {
+            std::vector<T> values;
+            for (const auto & [_, val]: pixels.pixels()) values.push_back(val);
+            return values;
+        }, nullptr)
+        .def("merge", [](Pixels<T> & pixels, Pixels<T> source) -> Pixels<T>
+        {
+            pixels.merge(source);
+            return pixels;
+        }, py::arg("source"))
+        .def("total_mass", [](const Pixels<T> & pixels){return pixels.moments().zeroth();})
+        .def("mean", [](const Pixels<T> & pixels){return pixels.moments().first();})
+        .def("center_of_mass", [](const Pixels<T> & pixels){return pixels.moments().central().first();})
+        .def("moment_of_inertia", [](const Pixels<T> & pixels){return pixels.moments().second();})
+        .def("covariance_matrix", [](const Pixels<T> & pixels){return pixels.moments().central().second();})
+        .def("__repr__", [typestr](const Pixels<T> & pixels)
+        {
+            return "<Pixels" + typestr + ", size = " + std::to_string(pixels.pixels().size()) + ">";
+        });
 }
 
 }
@@ -133,65 +208,88 @@ PYBIND11_MODULE(label, m)
     py::class_<PointsSet>(m, "PointsSet")
         .def(py::init([](std::vector<long> xvec, std::vector<long> yvec)
         {
-            PointsSet::container_type points;
+            std::set<Point<long>> points;
             for (auto [x, y] : zip::zip(xvec, yvec)) points.insert(Point<long>{x, y});
             return PointsSet(std::move(points));
         }), py::arg("x"), py::arg("y"))
-        .def_property("size", [](const PointsSet & points){return points.points.size();}, nullptr, py::keep_alive<0, 1>())
-        .def_property("x", [](const PointsSet & points){return points.x();}, nullptr, py::keep_alive<0, 1>())
-        .def_property("y", [](const PointsSet & points){return points.y();}, nullptr, py::keep_alive<0, 1>())
+        .def(py::init([](py::array_t<long> xarr, py::array_t<long> yarr)
+        {
+            std::set<Point<long>> points;
+            for (auto [x, y] : zip::zip(array<long>{xarr.request()}, array<long>{yarr.request()})) points.insert(Point<long>{x, y});
+            return PointsSet(std::move(points));
+        }), py::arg("x"), py::arg("y"))
+        .def_property("x", [](const PointsSet & points){return detail::get_x(points);}, nullptr)
+        .def_property("y", [](const PointsSet & points){return detail::get_y(points);}, nullptr)
         .def("__repr__", &PointsSet::info);
 
     py::class_<Structure>(m, "Structure")
         .def(py::init<int, int>(), py::arg("radius"), py::arg("rank"))
         .def_readonly("radius", &Structure::radius)
         .def_readonly("rank", &Structure::rank)
-        .def_property("size", [](const Structure & srt){return srt.points.size();}, nullptr, py::keep_alive<0, 1>())
-        .def_property("x", [](const Structure & srt){return srt.x();}, nullptr, py::keep_alive<0, 1>())
-        .def_property("y", [](const Structure & srt){return srt.y();}, nullptr, py::keep_alive<0, 1>())
+        .def_property("x", [](const Structure & srt){return detail::get_x(srt);}, nullptr)
+        .def_property("y", [](const Structure & srt){return detail::get_y(srt);}, nullptr)
         .def("__repr__", &Structure::info);
 
     py::class_<Regions>(m, "Regions")
-        .def(py::init([](std::array<size_t, 2> shape, std::vector<PointsSet> regions)
+        .def(py::init([](std::vector<PointsSet> regions)
         {
-            return Regions(std::move(shape), std::move(regions));
-        }), py::arg("shape"), py::arg("regions")=std::vector<PointsSet>{})
-        .def_readonly("shape", &Regions::shape)
+            return Regions(std::move(regions));
+        }), py::arg("regions") = std::vector<PointsSet>{}, py::keep_alive<1, 2>())
+        .def_property("x", [](const Regions & regions)
+        {
+            std::vector<long> x;
+            for (auto region : regions)
+            {
+                auto x_vec = detail::get_x(region);
+                x.insert(x.end(), x_vec.begin(), x_vec.end());
+            }
+            return x;
+        }, nullptr)
+        .def_property("y", [](const Regions & regions)
+        {
+            std::vector<long> y;
+            for (auto region : regions)
+            {
+                auto y_vec = detail::get_y(region);
+                y.insert(y.end(), y_vec.begin(), y_vec.end());
+            }
+            return y;
+        }, nullptr)
         .def("__delitem__", [](Regions & regions, size_t i)
         {
-            if (i >= regions.regions.size()) throw py::index_error();
-            regions.regions.erase(std::next(regions.regions.begin(), i));
+            if (i >= regions.size()) throw py::index_error();
+            regions->erase(std::next(regions.begin(), i));
         })
         .def("__getitem__", [](const Regions & regions, size_t i)
         {
-            if (i >= regions.regions.size()) throw py::index_error();
-            return regions.regions[i];
+            if (i >= regions.size()) throw py::index_error();
+            return (*regions)[i];
         })
         .def("__setitem__", [](Regions & regions, size_t i, PointsSet region)
         {
-            if (i >= regions.regions.size()) throw py::index_error();
-            regions.regions[i] = std::move(region);
-        })
+            if (i >= regions.size()) throw py::index_error();
+            (*regions)[i] = std::move(region);
+        }, py::keep_alive<1, 3>())
         .def("__delitem__", [](Regions & regions, const py::slice & slice)
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.regions.size(), &start, &stop, &step, &slicelength))
+            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
                 throw py::error_already_set();
             for (size_t i = 0; i < slicelength; ++i)
             {
-                regions.regions.erase(std::next(regions.regions.begin(), start));
+                regions->erase(std::next(regions.begin(), start));
                 start += step;
             }
         })
         .def("__getitem__", [](const Regions & regions, const py::slice & slice) -> Regions
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.regions.size(), &start, &stop, &step, &slicelength))
+            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
                 throw py::error_already_set();
-            Regions new_regions (regions.shape);
+            Regions new_regions {};
             for (size_t i = 0; i < slicelength; ++i)
             {
-                new_regions.regions.push_back(regions.regions[start]);
+                new_regions->push_back((*regions)[start]);
                 start += step;
             }
             return new_regions;
@@ -199,258 +297,136 @@ PYBIND11_MODULE(label, m)
         .def("__setitem__", [](Regions & regions, const py::slice & slice, const Regions & value)
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.regions.size(), &start, &stop, &step, &slicelength))
+            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
                 throw py::error_already_set();
             for (size_t i = 0; i < slicelength; ++i)
             {
-                regions.regions[start] = value.regions[i];
+                (*regions)[start] = (*value)[i];
                 start += step;
             }
-        })
+        }, py::keep_alive<1, 3>())
         .def("__iter__", [](Regions & regions)
         {
-            return py::make_iterator(regions.regions.begin(), regions.regions.end());
-        }, py::keep_alive<0, 1>())
-        .def("__len__", [](Regions & regions){return regions.regions.size();})
-        .def("__repr__", &Regions::info)
-        .def("append", [](Regions & regions, PointsSet region){regions.regions.emplace_back(std::move(region));}, py::keep_alive<1, 2>())
-        .def("filter", &Regions::filter, py::arg("structure"), py::arg("npts"))
-        .def("mask", [](Regions & regions) -> py::array_t<bool>
-        {
-            return as_pyarray(regions.mask(), regions.shape);
+            return py::make_iterator(regions.begin(), regions.end());
         })
-        .def_property("x", [](const Regions & regions)
-        {
-            std::vector<typename PointsSet::value_type> x;
-            for (auto region : regions.regions)
-            {
-                auto x_vec = region.x();
-                std::copy(std::make_move_iterator(x_vec.begin()), std::make_move_iterator(x_vec.end()), std::back_inserter(x));
-            }
-            return x;
-        }, nullptr)
-        .def_property("y", [](const Regions & regions)
-        {
-            std::vector<typename PointsSet::value_type> y;
-            for (auto region : regions.regions)
-            {
-                auto y_vec = region.y();
-                std::copy(std::make_move_iterator(y_vec.begin()), std::make_move_iterator(y_vec.end()), std::back_inserter(y));
-            }
-            return y;
-        }, nullptr);
+        .def("__len__", [](Regions & regions){return regions.size();})
+        .def("__repr__", &Regions::info)
+        .def("append", [](Regions & regions, PointsSet region){regions->emplace_back(std::move(region));}, py::keep_alive<1, 2>(), py::arg("region"), py::keep_alive<1, 2>());
 
-    m.def("label", &label<float>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("label", &label<double>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    declare_pixels<float>(m, "Float");
+    declare_pixels<double>(m, "Double");
 
-    m.def("center_of_mass", [](Regions regions, py::array_t<float> data)
-    {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
-        };
-        return apply(regions, array<float>{data.request()}, func);
-    });
-    m.def("center_of_mass", [](Regions regions, py::array_t<double> data)
-    {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
-        };
-        return apply(regions, array<double>{data.request()}, func);
-    });
-    m.def("center_of_mass", [](std::vector<Regions> regions, py::array_t<float> data)
-    {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
-    m.def("center_of_mass", [](std::vector<Regions> regions, py::array_t<double> data)
-    {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.central_moments().center_of_mass(region.moments.pt0).to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
+    m.def("label", &label<float>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("seeds") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("label", &label<double>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("seeds") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
 
-    m.def("central_moments", [](Regions regions, py::array_t<float> data)
+    auto total_mass = []<typename T>(const Pixels<T> & region)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.central_moments().to_array();
-        };
-        return apply(regions, array<float>{data.request()}, func);
-    });
-    m.def("central_moments", [](Regions regions, py::array_t<double> data)
-    {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.central_moments().to_array();
-        };
-        return apply(regions, array<double>{data.request()}, func);
-    });
-    m.def("central_moments", [](std::vector<Regions> regions, py::array_t<float> data)
-    {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.central_moments().to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
-    m.def("central_moments", [](std::vector<Regions> regions, py::array_t<double> data)
-    {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.central_moments().to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
+        return std::array<T, 1>{region.moments().zeroth()};
+    };
 
-   m.def("gauss_fit", [](Regions regions, py::array_t<float> data)
+    m.def("total_mass", [total_mass](Regions regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.central_moments().gauss();
-        };
-        return apply(regions, array<float>{data.request()}, func);
-    });
-    m.def("gauss_fit", [](Regions regions, py::array_t<double> data)
+        return apply(regions, array<float>{data.request()}, total_mass);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("total_mass", [total_mass](Regions regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.central_moments().gauss();
-        };
-        return apply(regions, array<double>{data.request()}, func);
-    });
-    m.def("gauss_fit", [](std::vector<Regions> regions, py::array_t<float> data)
+        return apply(regions, array<double>{data.request()}, total_mass);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("total_mass", [total_mass](std::vector<Regions> regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.central_moments().gauss();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
-    m.def("gauss_fit", [](std::vector<Regions> regions, py::array_t<double> data)
+        return apply_and_vectorise(regions, data, total_mass, ax);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("total_mass", [total_mass](std::vector<Regions> regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.central_moments().gauss();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
+        return apply_and_vectorise(regions, data, total_mass, ax);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
 
-   m.def("ellipse_fit", [](Regions regions, py::array_t<float> data)
+    auto mean = []<typename T>(const Pixels<T> & region)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            auto cm = region.moments.central_moments();
-            auto [a, b] = cm.principal_axes();
-            auto theta = cm.theta();
-            return std::array<float, 3>{a, b, theta};
-        };
-        return apply(regions, array<float>{data.request()}, func);
-    });
-    m.def("ellipse_fit", [](Regions regions, py::array_t<double> data)
-    {
-        auto func = [](const Pixels<double> & region)
-        {
-            auto cm = region.moments.central_moments();
-            auto [a, b] = cm.principal_axes();
-            auto theta = cm.theta();
-            return std::array<double, 3>{a, b, theta};
-        };
-        return apply(regions, array<double>{data.request()}, func);
-    });
-    m.def("ellipse_fit", [](std::vector<Regions> regions, py::array_t<float> data)
-    {
-        auto func = [](const Pixels<float> & region)
-        {
-            auto cm = region.moments.central_moments();
-            auto [a, b] = cm.principal_axes();
-            auto theta = cm.theta();
-            return std::array<float, 3>{a, b, theta};
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
-    m.def("ellipse_fit", [](std::vector<Regions> regions, py::array_t<double> data)
-    {
-        auto func = [](const Pixels<double> & region)
-        {
-            auto cm = region.moments.central_moments();
-            auto [a, b] = cm.principal_axes();
-            auto theta = cm.theta();
-            return std::array<double, 3>{a, b, theta};
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
+        return region.moments().first();
+    };
 
-    m.def("line_fit", [](Regions regions, py::array_t<float> data)
+    m.def("mean", [mean](Regions regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.get_line().to_array();
-        };
-        return apply(regions, array<float>{data.request()}, func);
-    });
-    m.def("line_fit", [](Regions regions, py::array_t<double> data)
+        return apply(regions, array<float>{data.request()}, mean, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("mean", [mean](Regions regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.get_line().to_array();
-        };
-        return apply(regions, array<double>{data.request()}, func);
-    });
-    m.def("line_fit", [](std::vector<Regions> regions, py::array_t<float> data)
+        return apply(regions, array<double>{data.request()}, mean, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("mean", [mean](std::vector<Regions> regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.get_line().to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
-    m.def("line_fit", [](std::vector<Regions> regions, py::array_t<double> data)
+        return apply_and_vectorise(regions, data, mean, ax, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("mean", [mean](std::vector<Regions> regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.get_line().to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
+        return apply_and_vectorise(regions, data, mean, ax, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
 
-  m.def("moments", [](Regions regions, py::array_t<float> data)
+    auto center_of_mass = []<typename T>(const Pixels<T> & region)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.to_array();
-        };
-        return apply(regions, array<float>{data.request()}, func);
-    });
-    m.def("moments", [](Regions regions, py::array_t<double> data)
+        return region.moments().central().first();
+    };
+
+    m.def("center_of_mass", [center_of_mass](Regions regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.to_array();
-        };
-        return apply(regions, array<double>{data.request()}, func);
-    });
-    m.def("moments", [](std::vector<Regions> regions, py::array_t<float> data)
+        return apply(regions, array<float>{data.request()}, center_of_mass, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("center_of_mass", [center_of_mass](Regions regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<float> & region)
-        {
-            return region.moments.to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
-    m.def("moments", [](std::vector<Regions> regions, py::array_t<double> data)
+        return apply(regions, array<double>{data.request()}, center_of_mass, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("center_of_mass", [center_of_mass](std::vector<Regions> regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
     {
-        auto func = [](const Pixels<double> & region)
-        {
-            return region.moments.to_array();
-        };
-        return apply_and_vectorise(regions, data, func);
-    });
+        return apply_and_vectorise(regions, data, center_of_mass, ax, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("center_of_mass", [center_of_mass](std::vector<Regions> regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply_and_vectorise(regions, data, center_of_mass, ax, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+
+    auto moment_of_inertia = []<typename T>(const Pixels<T> & region)
+    {
+        return region.moments().second();
+    };
+
+    m.def("moment_of_inertia", [moment_of_inertia](Regions regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply(regions, array<float>{data.request()}, moment_of_inertia, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("moment_of_inertia", [moment_of_inertia](Regions regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply(regions, array<double>{data.request()}, moment_of_inertia, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("moment_of_inertia", [moment_of_inertia](std::vector<Regions> regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply_and_vectorise(regions, data, moment_of_inertia, ax, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("moment_of_inertia", [moment_of_inertia](std::vector<Regions> regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply_and_vectorise(regions, data, moment_of_inertia, ax, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+
+    auto covariance_matrix = []<typename T>(const Pixels<T> & region)
+    {
+        return region.moments().central().second();
+    };
+
+    m.def("covariance_matrix", [covariance_matrix](Regions regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply(regions, array<float>{data.request()}, covariance_matrix, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("covariance_matrix", [covariance_matrix](Regions regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply(regions, array<double>{data.request()}, covariance_matrix, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("covariance_matrix", [covariance_matrix](std::vector<Regions> regions, py::array_t<float> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply_and_vectorise(regions, data, covariance_matrix, ax, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
+    m.def("covariance_matrix", [covariance_matrix](std::vector<Regions> regions, py::array_t<double> data, std::optional<std::tuple<size_t, size_t>> ax)
+    {
+        return apply_and_vectorise(regions, data, covariance_matrix, ax, 2, 2);
+    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
 
 }

@@ -6,39 +6,30 @@
 namespace cbclib {
 
 template <typename T>
-using pixel_t = std::tuple<Point<long>, T>;
+using Pixel = std::pair<Point<long>, T>;
 
 template <typename T>
-using pset_t = std::set<pixel_t<T>>;
-
-template <typename Pt, typename = void>
-struct is_point : std::false_type {};
-
-template <typename Pt>
-struct is_point <Pt,
-    typename std::enable_if_t<std::is_base_of_v<Point<typename Pt::value_type>, std::remove_cvref_t<Pt>>>
-> : std::true_type {};
-
-template <typename Pt>
-constexpr bool is_point_v = is_point<Pt>::value;
+using PixelSet = std::set<Pixel<T>>;
 
 namespace detail {
 
-template <typename Container, typename = std::enable_if_t<is_point_v<typename Container::value_type>>>
-auto get_x(const Container & list)
+template <typename Container, typename Element = typename Container::value_type, typename T = typename Element::value_type,
+    typename = std::enable_if_t<std::is_same_v<Element, Point<T>>>
+>
+std::vector<T> get_x(const Container & c)
 {
-    using T = Container::value_type::value_type;
     std::vector<T> x;
-    std::transform(list.begin(), list.end(), std::back_inserter(x), [](const Point<T> & elem){return elem.x();});
+    std::transform(c.begin(), c.end(), std::back_inserter(x), [](const Point<T> & elem){return elem.x();});
     return x;
 }
 
-template <typename Container, typename = std::enable_if_t<is_point_v<typename Container::value_type>>>
-auto get_y(const Container & list)
+template <typename Container, typename Element = typename Container::value_type, typename T = typename Element::value_type,
+    typename = std::enable_if_t<std::is_same_v<Element, Point<T>>>
+>
+std::vector<T> get_y(const Container & c)
 {
-    using T = Container::value_type::value_type;
     std::vector<T> y;
-    std::transform(list.begin(), list.end(), std::back_inserter(y), [](const Point<T> & elem){return elem.y();});
+    std::transform(c.begin(), c.end(), std::back_inserter(y), [](const Point<T> & elem){return elem.y();});
     return y;
 }
 
@@ -49,229 +40,192 @@ template <typename T, typename Pt, typename I = std::remove_cvref_t<Pt>::value_t
         std::is_base_of_v<Point<I>, std::remove_cvref_t<Pt>> && std::is_integral_v<I>
     >
 >
-pixel_t<T> make_pixel(Pt && point, const array<T> & data)
+Pixel<T> make_pixel(Pt && point, const array<T> & data)
 {
-    return std::make_tuple(std::forward<Pt>(point), data.at(point.coordinate()));
+    return std::make_pair(std::forward<Pt>(point), data.at(point.coordinate()));
+}
+
+template <typename T, typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+Pixel<T> make_pixel(I x, I y, T value)
+{
+    return std::make_pair(Point<long>{x, y}, value);
 }
 
 // Image moments class
 
 template <typename T>
-struct CentralMoments
+class Moments;
+
+template <typename T>
+class CentralMoments
 {
-    T mu_x, mu_y, mu_xx, mu_xy, mu_yy;
+public:
+    std::array<T, 2> first() const {return mu_x + origin;}
+    std::array<T, 4> second() const {return {mu_xx[0], mu_xy, mu_xy, mu_xx[1]};}
 
-    Point<T> center_of_mass(const Point<T> & origin) const
-    {
-        return {mu_x + origin.x(), mu_y + origin.y()};
-    }
-
+    // Angle between the largest eigenvector of the covariance matrix and x-axis
     T theta() const
     {
-        T theta = std::atan(2 * mu_xy / (mu_xx - mu_yy)) / 2;
-        if (mu_yy > mu_xx) theta += M_PI_2;
+        T theta = 0.5 * std::atan(2 * mu_xy / (mu_xx[0] - mu_xx[1]));
+        if (mu_xx[1] > mu_xx[0]) theta += M_PI_2;
         return detail::modulo(theta, M_PI);
     }
 
-    std::array<T, 3> gauss() const
+    Line<T> line() const
     {
-        T div = 2 * (mu_xx * mu_yy - mu_xy * mu_xy);
-        return {mu_yy / div, mu_xx / div, -mu_xy / div};
+        T angle = theta();
+        Point<T> tau {std::cos(angle), std::sin(angle)};
+        T delta = std::sqrt(4 * mu_xy * mu_xy + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
+        T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
+        return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
-    std::array<T, 2> principal_axes() const
-    {
-        auto [a, b, c] = gauss();
-        T p = std::sqrt((a - b) * (a - b) + 4 * c * c);
-        return {std::sqrt(1 / (a + b - p)), std::sqrt(1 / (a + b + p))};
-    }
+private:
+    Point<T> origin;
+    Point<T> mu_x, mu_xx;
+    T mu_xy;
 
-    std::array<T, 5> to_array() const
-    {
-        return {mu_x, mu_y, mu_xx, mu_xy, mu_yy};
-    }
+    friend class Moments<T>;
+
+    CentralMoments(Point<T> pt) : origin(std::move(pt)), mu_x(), mu_xx(), mu_xy() {}
+    CentralMoments(Point<T> pt, Point<T> mx, Point<T> mxx, T mxy) :
+        origin(std::move(pt)), mu_x(std::move(mx)), mu_xx(std::move(mxx)), mu_xy(mxy) {}
 };
 
 template <typename T>
-struct Moments
+class Moments
 {
-    Point<T> pt0;
-    T mu, mu_x, mu_y, mu_xx, mu_xy, mu_yy;
+public:
+    Moments() = default;
 
-    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<Point<T>,  std::remove_cvref_t<Pt>>>>
-    static Moments from_pset(Pt && pt0, const pset_t<T> & pset)
+    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt>>>>
+    Moments(Pt && pt) : org(std::forward<Pt>(pt)), mu(), mu_x(), mu_xx(), mu_xy() {}
+
+    Moments(const PixelSet<T> & pset) : Moments()
     {
-        Moments m {std::forward<Pt>(pt0)};
-        for (const auto & [pt, val] : pset)
+        if (pset.size())
         {
-            m.add_point(pt, val);
-        }
-        return m;
-    }
-
-    static Moments from_pset(const pset_t<T> & pset)
-    {
-        Point<T> pt0 {T(), T()};
-        T mu = T();
-        for (const auto & [pt, val] : pset)
-        {
-            pt0 += val * pt;
-            mu += val;
-        }
-
-        if (mu) return Moments::from_pset(pt0 / mu, pset);
-        else
-        {
-            Moments m;
-            for (const auto & [pt, _] : pset)
-            {
-                m.pt0 += pt;
-            }
-            m.pt0 /= pset.size();
-            return m;
+            org = std::next(pset.begin(), pset.size() / 2)->first;
+            insert(pset.begin(), pset.end());
         }
     }
 
-    Moments operator+(const Moments & m) const
+    // In-place operators
+
+    Moments & operator+=(Moments rhs)
     {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            return {pt0, mu + new_m.mu, mu_x + new_m.mu_x, mu_y + new_m.mu_y,
-                    mu_xx + new_m.mu_xx, mu_xy + new_m.mu_xy, mu_yy + new_m.mu_yy};
-        }
-
-        return {pt0, mu + m.mu, mu_x + m.mu_x, mu_y + m.mu_y,
-                mu_xx + m.mu_xx, mu_xy + m.mu_xy, mu_yy + m.mu_yy};
-    }
-
-    Moments operator-(const Moments & m) const
-    {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            return {pt0, mu - new_m.mu, mu_x - new_m.mu_x, mu_y - new_m.mu_y,
-                    mu_xx - new_m.mu_xx, mu_xy - new_m.mu_xy, mu_yy - new_m.mu_yy};
-        }
-
-        return {pt0, mu - m.mu, mu_x - m.mu_x, mu_y - m.mu_y,
-                mu_xx - m.mu_xx, mu_xy - m.mu_xy, mu_yy - m.mu_yy};
-    }
-
-    Moments & operator+=(const Moments & m)
-    {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            mu += new_m.mu; mu_x += new_m.mu_x; mu_y += new_m.mu_y;
-            mu_xx += new_m.mu_xx; mu_xy += new_m.mu_xy; mu_yy += new_m.mu_yy;
-            return *this;
-        }
-
-        mu += m.mu; mu_x += m.mu_x; mu_y += m.mu_y;
-        mu_xx += m.mu_xx; mu_xy += m.mu_xy; mu_yy += m.mu_yy;
+        rhs.move(org);
+        mu += rhs.mu;
+        mu_x += rhs.mu_x;
+        mu_xx += rhs.mu_xx;
+        mu_xy += rhs.mu_xy;
         return *this;
     }
 
-    Moments & operator-=(const Moments & m)
+    Moments & operator-=(Moments rhs)
     {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            mu -= new_m.mu; mu_x -= new_m.mu_x; mu_y -= new_m.mu_y;
-            mu_xx -= new_m.mu_xx; mu_xy -= new_m.mu_xy; mu_yy -= new_m.mu_yy;
-            return *this;
-        }
-
-        mu -= m.mu; mu_x -= m.mu_x; mu_y -= m.mu_y;
-        mu_xx -= m.mu_xx; mu_xy -= m.mu_xy; mu_yy -= m.mu_yy;
+        rhs.move(org);
+        mu -= rhs.mu;
+        mu_x -= rhs.mu_x;
+        mu_xx -= rhs.mu_xx;
+        mu_xy -= rhs.mu_xy;
         return *this;
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    void add_point(const Point<V> & point, T val)
+    void insert(const Point<V> & point, T val)
     {
-        auto dist = point - pt0;
-
+        auto r = point - org;
         mu += val;
-        mu_x += dist.x() * val;
-        mu_y += dist.y() * val;
-        mu_xx += dist.x() * dist.x() * val;
-        mu_xy += dist.x() * dist.y() * val;
-        mu_yy += dist.y() * dist.y() * val;
+        mu_x += r * val;
+        mu_xx += r * r * val;
+        mu_xy += r.x() * r.y() * val;
     }
 
-    CentralMoments<T> central_moments() const
+    template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
+    void insert(const Pixel<V> & pixel)
     {
-        if (mu)
+        insert(std::get<0>(pixel), std::get<1>(pixel));
+    }
+
+    template <typename InputIt, typename Value = typename std::iterator_traits<InputIt>::value_type, typename V = typename Value::second_type,
+        typename = std::enable_if_t<std::is_same_v<Pixel<V>, Value> && std::is_convertible_v<T, V>>
+    >
+    void insert(InputIt first, InputIt last)
+    {
+        for (; first != last; ++first) insert(*first);
+    }
+
+    void move(const Point<T> & point) const
+    {
+        if (org != point)
         {
-            T mx = mu_x / mu;
-            T my = mu_y / mu;
-            return CentralMoments<T>{mx, my, mu_xx / mu - mx * mx,
-                                     mu_xy / mu - mx * my, mu_yy / mu - my * my};
+            auto r = org - point;
+            mu_xx += 2 * r * mu_x + r * r * mu;
+            mu_xy += r.x() * mu_x.y() + r.y() * mu_x.x() + r.x() * r.y() * mu;
+            mu_x += r * mu;
+            org = point;
         }
-        return CentralMoments<T>{};
     }
 
-    Moments update_seed(const Point<T> & pt) const
+    // Friend members
+
+    friend Moments operator+(const Moments & lhs, const Moments & rhs)
     {
-        auto dist = pt0 - pt;
-        return {pt, mu, mu_x + dist.x() * mu, mu_y + dist.y() * mu,
-                mu_xx + 2 * dist.x() * mu_x + dist.x() * dist.x() * mu,
-                mu_xy + dist.x() * mu_y + dist.y() * mu_x + dist.x() * dist.y() * mu,
-                mu_yy + 2 * dist.y() * mu_y + dist.y() * dist.y() * mu};
+        Moments result = lhs;
+        result += rhs;
+        return result;
     }
 
-    std::array<T, 6> to_array() const {return {mu, mu_x, mu_y, mu_xx, mu_xy, mu_yy};}
+    friend Moments operator-(const Moments & lhs, const Moments & rhs)
+    {
+        Moments result = lhs;
+        result += rhs;
+        return result;
+    }
 
     friend std::ostream & operator<<(std::ostream & os, const Moments & m)
     {
-        os << "{" << m.x0 << ", " << m.y0 << ", " << m.mu << ", " << m.mu_x  << ", " << m.mu_y << ", "
-           << m.mu_xx << ", " << m.mu_xy << ", " << m.mu_yy << "}";
+        os << "{origin = " << m.org << ", mu = " << m.mu << ", mu_x = " << m.mu_x
+           << ", mu_xx = " << m.mu_xx << ", mu_xy = " << m.mu_xy << "}";
         return os;
     }
-};
 
-// Container of points (Python interface)
-template <class Container, typename = std::enable_if_t<is_point_v<typename Container::value_type>>>
-struct PointsContainer
-{
-    using container_type = Container;
-    using point_type = Container::value_type;
-    using value_type = Container::value_type::value_type;
+    // Other members
 
-    container_type points;
-
-    PointsContainer() = default;
-
-    template <typename Pts, typename = std::enable_if_t<std::is_same_v<Container, std::remove_cvref_t<Pts>>>>
-    PointsContainer(Pts && p) : points(std::forward<Pts>(p)) {}
-
-    operator container_type && () && { return std::move(points); }
-
-    container_type & operator*() {return points;}
-    const container_type & operator*() const {return points;}
-
-    container_type * operator->() {return &(points);}
-    const container_type * operator->() const {return &(points);}
-
-    std::vector<value_type> x() const {return detail::get_x(points);}
-    std::vector<value_type> y() const {return detail::get_y(points);}
-
-    std::string info() const
+    CentralMoments<T> central() const
     {
-        return "<Points, size = " + std::to_string(points.size()) + ">";
+        if (mu)
+        {
+            auto M_X = mu_x / mu;
+            auto M_XX = mu_xx / mu - M_X * M_X;
+            auto M_XY = mu_xy / mu - M_X[0] * M_X[1];
+            return CentralMoments<T>{org, std::move(M_X), std::move(M_XX), M_XY};
+        }
+        return CentralMoments<T>{org};
     }
-};
 
-struct PointsList : public PointsContainer<std::vector<Point<long>>>
-{
-    using PointsContainer::PointsContainer;
+    const Point<T> & origin() const {return org;}
+
+    T zeroth() const {return mu;}
+    std::array<T, 2> first() const {return mu_x + org * mu;}
+    std::array<T, 4> second() const
+    {
+        auto m_xx = mu_xx + 2 * org * mu_x + org * org * mu;
+        auto m_xy = mu_xy + org.x() * mu_x.y() + org.y() * mu_x.x() + org.x() * org.y() * mu;
+        return {m_xx[0], m_xy, m_xy, m_xx[1]};
+    }
+
+private:
+    Point<T> org;
+    T mu;
+    Point<T> mu_x, mu_xx;
+    T mu_xy;
 };
 
 // Connectivity structure class
 
-struct Structure : public PointsContainer<std::set<Point<long>>>
+struct Structure : public WrappedContainer<std::vector<Point<long>>>
 {
     int radius, rank;
 
@@ -282,31 +236,41 @@ struct Structure : public PointsContainer<std::set<Point<long>>>
         {
             for (int j = -radius; j <= radius; j++)
             {
-                if (std::abs(i) + std::abs(j) <= rank) points.emplace_hint(points.end(), point_type{j, i});
+                if (std::abs(i) + std::abs(j) <= rank) m_ctr.emplace_back(Point<long>{j, i});
             }
         }
+    }
+
+    Structure & sort()
+    {
+        auto compare = [](const Point<long> & a, const Point<long> & b)
+        {
+            return a.x() * a.x() + a.y() * a.y() < b.x() * b.x() + b.y() * b.y();
+        };
+        std::sort(begin(), end(), compare);
+        return *this;
     }
 
     std::string info() const
     {
         return "<Structure, radius = " + std::to_string(radius) + ", rank = " + std::to_string(rank) +
-                         ", points = <Points, size = " + std::to_string(points.size()) + ">>";
+                         ", points = <Points, size = " + std::to_string(size()) + ">>";
     }
 };
 
 // Extended interface of set of points - needed for Regions
 
-struct PointsSet : public PointsContainer<std::set<Point<long>>>
+struct PointsSet : public WrappedContainer<std::set<Point<long>>>
 {
-    using PointsContainer::PointsContainer;
+    using WrappedContainer<std::set<Point<long>>>::WrappedContainer;
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, point_type>>>
-    PointsSet(point_type seed, Func && func, const Structure & srt)
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, Point<long>>>>
+    PointsSet(Point<long> seed, Func && func, const Structure & structure)
     {
         if (std::forward<Func>(func)(seed))
         {
-            std::vector<point_type> last_pixels;
-            std::unordered_set<point_type, detail::PointHasher<value_type>> new_pixels;
+            std::vector<Point<long>> last_pixels;
+            std::unordered_set<Point<long>, detail::PointHasher<long>> new_pixels;
 
             last_pixels.emplace_back(std::move(seed));
 
@@ -314,7 +278,7 @@ struct PointsSet : public PointsContainer<std::set<Point<long>>>
             {
                 for (const auto & point: last_pixels)
                 {
-                    for (const auto & shift: srt.points)
+                    for (const auto & shift: structure)
                     {
                         new_pixels.insert(point + shift);
                     }
@@ -325,7 +289,7 @@ struct PointsSet : public PointsContainer<std::set<Point<long>>>
                 {
                     if (std::forward<Func>(func)(point))
                     {
-                        auto [iter, is_added] = points.insert(std::forward<decltype(point)>(point));
+                        auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
                         if (is_added) last_pixels.push_back(*iter);
                     }
                 }
@@ -334,166 +298,115 @@ struct PointsSet : public PointsContainer<std::set<Point<long>>>
         }
     }
 
-    PointsSet(point_type seed, const array<bool> & mask, const Structure & srt) :
-        PointsSet(seed, [&mask](point_type pt){return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());}, srt) {}
+    PointsSet(Point<long> seed, const array<bool> & mask, const Structure & structure) :
+        PointsSet(seed, [&mask](Point<long> pt){return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());}, structure) {}
 
-    PointsSet filter(array<bool> & mask, const Structure & srt, size_t npts) const
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> & array, bool value) const
     {
-        PointsSet result;
-
-        for (const auto & point : points)
+        for (const auto & pt : m_ctr)
         {
-            if (mask.is_inbound(point.coordinate()) && mask.at(point.coordinate()))
-            {
-                PointsSet support {point, mask, srt};
-
-                for (auto pt : *support) mask.at(pt.coordinate()) = false;
-
-                if (support->size() >= npts) result->merge(std::move(*support));
-            }
+            if (array.is_inbound(pt.coordinate())) array.at(pt.coordinate()) = value;
         }
-
-        return result;
     }
 
-    template <typename Mask, typename = std::enable_if_t<std::is_base_of_v<array<bool>, std::remove_cvref_t<Mask>>>>
-    Mask && mask(Mask && m) const
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> && array, bool value) const
     {
-        for (auto pt : points)
-        {
-            if (m.is_inbound(pt.coordinate())) m.at(pt.coordinate()) = true;
-        }
-        return std::forward<Mask>(m);
+        mask(array, value);
+    }
+
+    std::string info() const
+    {
+        return "<PointsSet, size = " + std::to_string(m_ctr.size()) + ">";
     }
 };
 
 // Set of [point, value] pairs
 
 template <typename T>
-struct Pixels
+class Pixels
 {
-    Moments<T> moments;
-    pset_t<T> pset;
-
+public:
     Pixels() = default;
-    Pixels(const pset_t<T> & pset) : moments(Moments<T>::from_pset(pset)), pset(pset) {}
-    Pixels(pset_t<T> && pset) : moments(Moments<T>::from_pset(pset)), pset(std::move(pset)) {}
+
+    Pixels(const PixelSet<T> & pset) : m_mnt(pset), m_pset(pset) {}
+    Pixels(PixelSet<T> && pset) : m_mnt(pset), m_pset(std::move(pset)) {}
 
     Pixels(const PointsSet & points, const array<T> & data)
     {
-        for (auto pt : points.points)
+        for (auto && pt : points)
         {
-            if (data.is_inbound(pt.coordinate())) pset.insert(make_pixel(pt, data));
-        }
-        moments = Moments<T>::from_pset(pset);
-    }
-
-    Pixels(PointsSet && points, const array<T> & data)
-    {
-        std::transform(std::make_move_iterator(points.points.begin()),
-                       std::make_move_iterator(points.points.end()),
-                       std::inserter(pset, pset.begin()),
-                       [&data](auto && point){return make_pixel(std::forward<decltype(point)>(point), data);});
-        moments = Moments<T>::from_pset(pset);
-    }
-
-    Pixels merge(const Pixels & pixels) const
-    {
-        pset_t<T> pint, pmrg;
-        std::set_intersection(pset.begin(), pset.end(), pixels.pset.begin(), pixels.pset.end(), std::inserter(pint, pint.begin()));
-        std::set_union(pset.begin(), pset.end(), pixels.pset.begin(), pixels.pset.end(), std::inserter(pmrg, pmrg.begin()));
-
-        auto m = moments + pixels.moments - Moments<T>::from_pset(moments.pt0, pint);
-
-        if (m.mu) return {pmrg, m.update_seed(moments.central_moments().center_of_mass(moments.pt0))};
-        return {pmrg, m};
-    }
-
-    void insert(Pixels && pixels)
-    {
-        pset_t<T> pint;
-        std::set_intersection(pset.begin(), pset.end(), pixels.pset.begin(), pixels.pset.end(), std::inserter(pint, pint.begin()));
-
-        moments += pixels.moments - Moments<T>::from_pset(moments.pt0, pint);
-
-        pset.insert(std::make_move_iterator(pixels.pset.begin()), std::make_move_iterator(pixels.pset.end()));
-    }
-
-    Line<T> get_line() const
-    {
-        if (moments.mu)
-        {
-            auto cm = moments.central_moments();
-            T theta = cm.theta();
-            Point<T> tau {std::cos(theta), std::sin(theta)};
-            Point<T> ctr = cm.center_of_mass(moments.pt0);
-
-            T tmin = std::numeric_limits<T>::max(), tmax = std::numeric_limits<T>::lowest();
-            for (const auto & [pt, _] : pset)
+            if (data.is_inbound(pt.coordinate()))
             {
-                T prod = dot(tau, pt - ctr);
-                if (prod < tmin) tmin = prod;
-                if (prod > tmax) tmax = prod;
+                m_pset.insert(m_pset.end(), make_pixel(std::forward<decltype(pt)>(pt), data));
             }
-
-            if (tmin != std::numeric_limits<T>::max() && tmax != std::numeric_limits<T>::lowest())
-                return {ctr + tmin * tau, ctr + tmax * tau};
         }
-        return {moments.pt0, moments.pt0};
+        m_mnt = m_pset;
     }
+
+    void merge(Pixels & source)
+    {
+        auto first1 = m_pset.begin(), last1 = m_pset.end();
+        auto first2 = source.m_pset.begin(), last2 = source.m_pset.end();
+        for (; first1 != last1 && first2 != last2;)
+        {
+            if (*first2 < *first1)
+            {
+                m_mnt.insert(*first2);
+                m_pset.insert(first1, source.m_pset.extract(first2++));
+            }
+            else if (*first2 > *first1) ++first1;
+            else
+            {
+                ++first1; ++first2;
+            }
+        }
+        for (; first2 != last2;)
+        {
+            m_mnt.insert(*first2);
+            m_pset.insert(first1, source.m_pset.extract(first2++));
+        }
+    }
+
+    void merge(Pixels && source)
+    {
+        merge(source);
+    }
+
+    Line<T> line() const
+    {
+        if (m_mnt.zeroth()) return m_mnt.central().line();
+        return {m_mnt.origin(), m_mnt.origin()};
+    }
+
+    const PixelSet<T> & pixels() const {return m_pset;}
+    const Moments<T> & moments() const {return m_mnt;}
+
+protected:
+    Moments<T> m_mnt;
+    PixelSet<T> m_pset;
 };
 
-struct Regions
+struct Regions : public WrappedContainer<std::vector<PointsSet>>
 {
-    std::array<size_t, 2> shape;
-    std::vector<PointsSet> regions;
-
-    template <typename Shape, typename Rgn, typename I = std::remove_cvref_t<Shape>::value_type, typename = std::enable_if_t<
-        std::is_same_v<std::array<I, 2>, std::remove_cvref_t<Shape>> &&
-        std::is_same_v<std::vector<PointsSet>, std::remove_cvref_t<Rgn>> &&
-        std::is_integral_v<I>
-    >>
-    Regions(Shape && s, Rgn && r) : shape(std::forward<Shape>(s)), regions(std::forward<Rgn>(r)) {}
-
-    template <typename Shape, typename I = std::remove_cvref_t<Shape>::value_type, typename = std::enable_if_t<
-        std::is_same_v<std::array<I, 2>, std::remove_cvref_t<Shape>> && std::is_integral_v<I>
-    >>
-    Regions(Shape && s) : Regions(std::forward<Shape>(s), std::vector<PointsSet>()) {}
-
-    std::vector<PointsSet> & operator*() {return regions;}
-    const std::vector<PointsSet> & operator*() const {return regions;}
-
-    std::vector<PointsSet> * operator->() {return &(regions);}
-    const std::vector<PointsSet> * operator->() const {return &(regions);}
+    using WrappedContainer<std::vector<PointsSet>>::WrappedContainer;
 
     std::string info() const
     {
-        return "<Regions, shape = {" + std::to_string(shape[0]) + ", " + std::to_string(shape[1]) +
-               "}, regions = <List[PointsSet], size = " + std::to_string(regions.size()) + ">>";
+        return "<Regions, regions = <List[PointsSet], size = " + std::to_string(size()) + ">>";
     }
 
-    Regions filter(const Structure & str, size_t npts) const
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> & array, bool value) const
     {
-        auto vec = mask();
-        array<bool> mask {shape, reinterpret_cast<bool *>(vec.data())};
-
-        Regions result {shape};
-        for (const auto & region : regions)
-        {
-            auto new_region = region.filter(mask, str, npts);
-            if (new_region.points.size()) result->emplace_back(std::move(new_region));
-        }
-        return result;
+        for (const auto & region: m_ctr) region.mask(array, value);
     }
 
-    std::vector<unsigned char> mask() const
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> && array, bool value) const
     {
-        std::vector<unsigned char> vec (shape[0] * shape[1], false);
-
-        array<bool> mask {shape, reinterpret_cast<bool *>(vec.data())};
-        for (const auto & region : regions) mask = region.mask(mask);
-
-        return vec;
+        mask(array, value);
     }
 };
 

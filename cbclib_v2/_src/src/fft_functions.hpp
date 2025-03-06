@@ -405,7 +405,7 @@ void fftw_execute(Plan & plan, From * inp, To * out)
 }
 
 template <typename T>
-std::vector<size_t> fftw_buffer_shape(typename detail::any_container<size_t> shape)
+std::vector<size_t> fftw_buffer_shape(AnyContainer<size_t> shape)
 {
     return detail::fftw_buffer_shape(std::move(shape), typename is_complex<T>::type ());
 }
@@ -425,7 +425,7 @@ void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape
 {
     for (const auto & pt : rectangle_range(fshape))
     {
-        auto bindex = buffer.ravel_index(pt.begin(), pt.end());
+        auto bindex = buffer.index_at(pt.begin(), pt.end());
 
         if (data.is_inbound(pt.begin(), pt.end()))
         {
@@ -438,11 +438,11 @@ void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape
 template <typename T, typename U, class Shape, class Origin>
 void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape, const Origin & origin)
 {
-    std::vector<long> temp (buffer.ndim, 0);
+    std::vector<long> temp (buffer.ndim(), 0);
     for (const auto & pt : rectangle_range(fshape))
     {
         std::transform(pt.begin(), pt.end(), origin.begin(), temp.begin(), std::minus<long>());
-        auto bindex = buffer.ravel_index(pt.begin(), pt.end());
+        auto bindex = buffer.index_at(pt.begin(), pt.end());
 
         if (data.is_inbound(temp.begin(), temp.end()))
         {
@@ -465,27 +465,25 @@ OutputIt read_origin(InputIt1 first1, InputIt1 last1, InputIt2 first2, OutputIt 
 template <typename T, typename U, class Shape>
 void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape)
 {
-    std::vector<long> temp (buffer.ndim, 0);
-    auto range = rectangle_range(data.shape);
-    for (auto iter = range.begin(); iter != range.end(); ++iter)
+    std::vector<long> temp (buffer.ndim(), 0);
+    for (size_t index = 0; const auto & pt : rectangle_range(data.shape()))
     {
-        std::transform(iter->begin(), iter->end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
+        std::transform(pt.begin(), pt.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
-        data[range.index(iter)] = buffer.at(temp.begin(), temp.end());
+        data[index++] = buffer.at(temp.begin(), temp.end());
     }
 }
 
 template <typename T, typename U, class Shape, class Origin>
 void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape, const Origin & origin)
 {
-    std::vector<long> temp (buffer.ndim, 0);
-    auto range = rectangle_range(data.shape);
-    for (auto iter = range.begin(); iter != range.end(); ++iter)
+    std::vector<long> temp (buffer.ndim(), 0);
+    for (size_t index = 0; const auto & pt : rectangle_range(data.shape()))
     {
-        std::transform(origin.begin(), origin.end(), iter->begin(), temp.begin(), std::plus<long>());
+        std::transform(origin.begin(), origin.end(), pt.begin(), temp.begin(), std::plus<long>());
         std::transform(temp.begin(), temp.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
-        data[range.index(iter)] = buffer.at(temp.begin(), temp.end());
+        data[index++] = buffer.at(temp.begin(), temp.end());
     }
 }
 

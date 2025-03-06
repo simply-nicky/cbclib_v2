@@ -19,7 +19,7 @@ T max(const T & a, const T & b)
     return std::max(a, b);
 }
 
-};
+}
 
 template <typename T>
 struct combiners
@@ -110,11 +110,11 @@ py::array_t<Out> draw_lines_nd(py::array_t<Out> out, py::array_t<T> lines, std::
     auto cbn = combiners<T>::get_combiner(overlap);
     auto oarr = array<Out>(out.request());
 
-    auto shape = normalise_shape<N>(oarr.shape);
+    auto shape = normalise_shape<N>(oarr.shape());
 
     auto larr = array<T>(lines.request());
-    check_dimensions("lines", larr.ndim - 1, larr.shape, L);
-    auto lsize = larr.size / larr.shape[larr.ndim - 1];
+    check_dimensions("lines", larr.ndim() - 1, larr.shape(), L);
+    auto lsize = larr.size() / larr.shape(larr.ndim() - 1);
 
     if (!idxs) fill_indices("idxs", shape[0], lsize, idxs);
     else check_indices("idxs", shape[0], lsize, idxs);
@@ -192,8 +192,8 @@ auto draw_lines_table_nd(py::array_t<T> lines, std::vector<size_t> shape, std::o
     auto new_shape = normalise_shape<N>(shape);
 
     auto larr = array<T>(lines.request());
-    check_dimensions("lines", larr.ndim - 1, larr.shape, L);
-    auto lsize = larr.size / larr.shape[larr.ndim - 1];
+    check_dimensions("lines", larr.ndim() - 1, larr.shape(), L);
+    auto lsize = larr.size() / larr.shape(larr.ndim() - 1);
 
     if (!idxs) fill_indices("idxs", new_shape[0], lsize, idxs);
     else check_indices("idxs", new_shape[0], lsize, idxs);
@@ -223,7 +223,7 @@ auto draw_lines_table_nd(py::array_t<T> lines, std::vector<size_t> shape, std::o
                         for (size_t i = 0; i < N; i++) coord[i + 1] = pt[N - i - 1];
                         if (handler.is_inbound(coord))
                         {
-                            buffer.emplace(std::make_pair(index, handler.ravel_index(coord)), max_val * krn(std::sqrt(error)));
+                            buffer.emplace(std::make_pair(index, handler.index_at(coord)), max_val * krn(std::sqrt(error)));
                         }
                     }
                 };

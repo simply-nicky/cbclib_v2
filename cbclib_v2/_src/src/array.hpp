@@ -83,7 +83,7 @@ constexpr std::make_signed_t<T> wrap(T a, U min, V max)
 }
 
 template <typename InputIt1, typename InputIt2>
-auto ravel_index_impl(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst)
+auto index_offset_impl(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst)
 {
     using value_t = decltype(+*std::declval<InputIt1 &>());
     value_t index = value_t();
@@ -92,25 +92,29 @@ auto ravel_index_impl(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst)
 }
 
 template <size_t Dim = 0, typename Strides>
-size_t ravel_index_var(const Strides & strides)
+size_t index_offset_unsafe(const Strides & strides)
 {
     return 0;
 }
 
 template <size_t Dim = 0, typename Strides, typename... Ix>
-size_t ravel_index_var(const Strides & strides, size_t i, Ix... index)
+size_t index_offset_unsafe(const Strides & strides, size_t i, Ix... index)
 {
-    return i * strides[Dim] + ravel_index_var<Dim + 1>(strides, index...);
+    return i * strides[Dim] + index_offset_unsafe<Dim + 1>(strides, index...);
 }
 
 template <typename InputIt, typename OutputIt, typename T>
-OutputIt unravel_index_impl(InputIt sfirst, InputIt slast, T index, OutputIt cfirst)
+OutputIt unravel_index_unsafe(InputIt sfirst, InputIt slast, size_t itemsize, T index, OutputIt cfirst)
 {
     for (; sfirst != slast; ++sfirst)
     {
-        auto stride = (*sfirst) ? index / *sfirst : index;
-        index -= stride * *sfirst;
-        *cfirst++ = stride;
+        if (*sfirst)
+        {
+            auto coord = index / (*sfirst / itemsize);
+            index -= coord * *sfirst;
+            *cfirst++ = coord;
+        }
+        else *cfirst++ = 0;
     }
     return cfirst;
 }
@@ -127,44 +131,31 @@ size_t offset_along_dim(const Strides & strides, size_t index, size_t dim)
 
 class shape_handler
 {
-public:
-    size_t ndim;
-    size_t size;
-    std::vector<size_t> shape;
+protected:
+    using ShapeContainer = AnyContainer<size_t>;
 
-    using ShapeContainer = detail::any_container<size_t>;
+public:
+    using size_type = size_t;
 
     shape_handler() = default;
 
-    shape_handler(ShapeContainer sh, ShapeContainer st) : shape(std::move(sh)), strides(std::move(st))
+    shape_handler(ShapeContainer sh, ShapeContainer st) : m_ndim(sh.size()), m_shape(std::move(sh))
     {
-        ndim = shape.size();
-        size = strides[ndim - 1];
-        for (size_t i = 0; i < ndim; i++) size += (shape[i] - 1) * strides[i];
+        for (size_t n = 0; n < m_ndim; n++) m_strides.push_back(st[n]);
     }
 
-    shape_handler(ShapeContainer sh) : shape(std::move(sh))
+    shape_handler(ShapeContainer sh) : m_ndim(sh.size()), m_shape(std::move(sh)), m_strides(m_ndim, 1)
     {
-        ndim = shape.size();
-        size = std::reduce(shape.begin(), shape.end(), 1, std::multiplies());
-        size_t stride = size;
-        for (auto length : shape)
+        if (m_ndim)
         {
-            stride = (length) ? stride / length : stride;
-            strides.push_back(stride);
+            for (size_t n = m_ndim - 1; n > 0; --n) m_strides[n - 1] = m_strides[n] * m_shape[n];
         }
-    }
-
-    ssize_t stride(size_t dim) const
-    {
-        if (dim >= ndim) fail_dim_check(dim, "invalid axis");
-        return strides[dim];
     }
 
     size_t index_along_dim(size_t index, size_t dim) const
     {
-        if (dim >= ndim) fail_dim_check(dim, "invalid axis");
-        return offset_along_dim(strides, index, dim) / strides[dim];
+        if (dim >= m_ndim) fail_dim_check(dim, "invalid axis");
+        return offset_along_dim(m_strides, index, dim) / m_strides[dim];
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
@@ -173,7 +164,7 @@ public:
         bool flag = true;
         for (size_t i = 0; first != last; ++first, ++i)
         {
-            flag &= *first >= 0 && *first < static_cast<decltype(+*std::declval<CoordIter &>())>(shape[i]);
+            flag &= *first >= 0 && *first < static_cast<decltype(+*std::declval<CoordIter &>())>(m_shape[i]);
         }
         return flag;
     }
@@ -193,52 +184,96 @@ public:
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
-    auto ravel_index(CoordIter first, CoordIter last) const
+    auto index_at(CoordIter first, CoordIter last) const
     {
-        return ravel_index_impl(first, last, strides.begin());
+        return offset_at(first, last) / itemsize();
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
-    auto ravel_index(const Container & coord) const
+    auto index_at(const Container & coord) const
     {
-        return ravel_index_impl(coord.begin(), coord.end(), strides.begin());
-    }
-
-    template <typename... Ix> requires is_all_integral<Ix ...>
-    auto ravel_index(Ix... index) const
-    {
-        if (sizeof...(index) > ndim) fail_dim_check(sizeof...(index), "too many indices for an array");
-
-        return ravel_index_var(strides, size_t(index)...);
+        return offset_at(coord) / itemsize();
     }
 
     // initializer_list's aren't deducible, so don't get matched by the above template;
     // we need this to explicitly allow implicit conversion from one:
     template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
-    auto ravel_index(const std::initializer_list<T> & coord) const
+    auto index_at(const std::initializer_list<T> & coord) const
     {
-        return ravel_index_impl(coord.begin(), coord.end(), strides.begin());
+        return offset_at(coord) / itemsize();
     }
 
-    template <
-        typename CoordIter,
-        typename = std::enable_if_t<
-            std::is_integral_v<typename std::iterator_traits<CoordIter>::value_type> ||
-            std::is_same_v<typename std::iterator_traits<CoordIter>::iterator_category, std::output_iterator_tag>
-        >
-    >
-    CoordIter unravel_index(CoordIter first, size_t index) const
+    template <typename ... Ix> requires is_all_integral<Ix ...>
+    auto index_at(Ix... index) const
     {
-        return unravel_index_impl(strides.begin(), strides.end(), index, first);
+        return offset_at(index...) / itemsize();
+    }
+
+    template <typename OutputIt> requires std::output_iterator<OutputIt, size_t>
+    OutputIt unravel_index(OutputIt first, size_t index) const
+    {
+        return unravel_index_unsafe(m_strides.begin(), m_strides.end(), itemsize(), index, first);
+    }
+
+    size_t ndim() const {return m_ndim;}
+    size_t size() const {return std::reduce(m_shape.begin(), m_shape.end(), size_t(1), std::multiplies());}
+
+    const std::vector<size_t> & shape() const {return m_shape;}
+    size_t shape(size_t dim) const
+    {
+        if (dim >= m_ndim) fail_dim_check(dim, "invalid axis");
+        return m_shape[dim];
+    }
+
+    const std::vector<size_t> & strides() const {return m_strides;}
+    size_t strides(size_t dim) const
+    {
+        if (dim >= m_ndim) fail_dim_check(dim, "invalid axis");
+        return m_strides[dim];
     }
 
 protected:
-    std::vector<size_t> strides;
+    size_t m_ndim;
+    std::vector<size_t> m_shape;
+    std::vector<size_t> m_strides;
 
+    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
+    auto offset_at(CoordIter first, CoordIter last) const
+    {
+        return index_offset_impl(first, last, m_strides.begin());
+    }
+
+    template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
+    auto offset_at(const Container & coord) const
+    {
+        return index_offset_impl(coord.begin(), coord.end(), m_strides.begin());
+    }
+
+    template <typename ... Ix> requires is_all_integral<Ix ...>
+    auto offset_at(Ix... index) const
+    {
+        if (sizeof...(index) > m_ndim) fail_dim_check(sizeof...(index), "too many indices for an array");
+
+        return index_offset_unsafe(m_strides, size_t(index)...);
+    }
+
+    // initializer_list's aren't deducible, so don't get matched by the above template;
+    // we need this to explicitly allow implicit conversion from one:
+    template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+    auto offset_at(const std::initializer_list<T> & coord) const
+    {
+        return index_offset_impl(coord.begin(), coord.end(), m_strides.begin());
+    }
+
+    size_t itemsize() const
+    {
+        if (m_ndim) return strides(m_ndim - 1);
+        return size_t(1);
+    }
 
     void fail_dim_check(size_t dim, const std::string & msg) const
     {
-        throw std::out_of_range(msg + ": " + std::to_string(dim) + " (ndim = " + std::to_string(ndim) + ')');
+        throw std::out_of_range(msg + ": " + std::to_string(dim) + " (ndim = " + std::to_string(m_ndim) + ')');
     }
 };
 
@@ -308,17 +343,17 @@ struct IteratorTraits;
 template <typename T>
 struct IteratorTraits<T, false>
 {
-  using value_type = T;
-  using pointer = T *;
-  using reference = T &;
+    using value_type = T;
+    using pointer = T *;
+    using reference = T &;
 };
 
 template <typename T>
 struct IteratorTraits<T, true>
 {
-  using value_type = const T;
-  using pointer = const T *;
-  using reference = const T &;
+    using value_type = const T;
+    using pointer = const T *;
+    using reference = const T &;
 };
 
 template <typename T>
@@ -327,6 +362,7 @@ class array;
 template <typename T, bool IsConst>
 class strided_iterator
 {
+private:
     friend class strided_iterator<T, !IsConst>;
     friend class array<T>;
     using traits = IteratorTraits<T, IsConst>;
@@ -371,8 +407,8 @@ public:
 
     difference_type operator-(const strided_iterator<T, IsConst> & rhs) const {return (ptr - rhs.ptr) / stride;}
 
-    reference operator[] (size_t index) const {return ptr[index * stride];}
-    reference operator*() const {return *(ptr);}
+    reference operator[] (size_t index) const {return *(ptr + index * stride);}
+    reference operator*() const {return *ptr;}
     pointer operator->() const {return ptr;}
 
 private:
@@ -386,12 +422,12 @@ template <typename T>
 class array : public detail::shape_handler
 {
 public:
-
     using value_type = T;
+    using size_type = typename detail::shape_handler::size_type;
     using iterator = strided_iterator<T, false>;
     using const_iterator = strided_iterator<T, true>;
 
-    operator py::array_t<T>() const {return {shape, ptr};}
+    operator py::array_t<T>() const {return {m_shape, m_strides, ptr};}
 
     array() : shape_handler(), ptr(nullptr) {}
 
@@ -406,164 +442,185 @@ public:
 
     array(const py::buffer_info & buf) : array(buf.shape, static_cast<T *>(buf.ptr)) {}
 
-    T & operator[] (size_t index) {return ptr[index];}
-    const T & operator[] (size_t index) const {return ptr[index];}
+    T & operator[] (size_t index) {return *(ptr + itemsize() * index);}
+    const T & operator[] (size_t index) const {return *(ptr + itemsize() * index);}
 
-    iterator begin() {return {ptr, strides[ndim - 1]};}
-    iterator end() {return {ptr + size, strides[ndim - 1]};}
-    const_iterator begin() const {return {ptr, strides[ndim - 1]};}
-    const_iterator end() const {return {ptr + size, strides[ndim - 1]};}
-
-    template <bool IsConst>
-    typename strided_iterator<T, IsConst>::difference_type index(const strided_iterator<T, IsConst> & iter) const
-    {
-        return iter.ptr - ptr;
-    }
+    iterator begin() {return {ptr, itemsize()};}
+    iterator end() {return {ptr + size() * itemsize(), itemsize()};}
+    const_iterator begin() const {return {ptr, itemsize()};}
+    const_iterator end() const {return {ptr + size() * itemsize(), itemsize()};}
 
     array<T> reshape(ShapeContainer new_shape) const
     {
         return {std::move(new_shape), ptr};
     }
 
-    array<T> slice(size_t index, ShapeContainer axes) const
-    {
-        std::sort(axes->begin(), axes->end());
-
-        std::vector<size_t> other_shape, new_shape, new_strides;
-        for (size_t i = 0; i < ndim; i++)
-        {
-            if (std::find(axes->begin(), axes->end(), i) == axes->end()) other_shape.push_back(shape[i]);
-        }
-        std::transform(axes->begin(), axes->end(), std::back_inserter(new_shape), [this](size_t axis){return shape[axis];});
-        std::transform(axes->begin(), axes->end(), std::back_inserter(new_strides), [this](size_t axis){return strides[axis];});
-
-        std::vector<size_t> coord;
-        shape_handler(std::move(other_shape)).unravel_index(std::back_inserter(coord), index);
-        for (auto axis : *axes) coord.insert(std::next(coord.begin(), axis), 0);
-
-        return array<T>(std::move(new_shape), std::move(new_strides), ptr + ravel_index(coord.begin(), coord.end()));
-    }
-
-    /* Line slice iterators:
+    /* Slice sub-array:
         Take a slice of an array 'array' as follows:
-        - array[..., :, ...] slice, where ':' is at 'axis'-th axis
-        - ravel_index(i_0, i_1, ..., i_axis-1, i_axis+1, ...., i_n-1) = index
+        - array[..., :, ...] slice, where ':' is at axis
     */
-    iterator line_begin(size_t axis, size_t index)
+    array<T> slice(size_t index, size_t axis) const
     {
-        check_index(axis, index);
-        size_t lsize = shape[axis] * strides[axis];
-        T * iter = ptr + lsize * (index / strides[axis]) + index % strides[axis];
-        return {iter, strides[axis]};
+        if (!m_ndim) return *this;
+
+        axis = axis  % m_ndim;
+        size_t offset = size_t();
+        if (size())
+        {
+            index = index % size();
+            for (size_t n = m_ndim; n > 0; --n)
+            {
+                if (n - 1 != axis)
+                {
+                    auto coord = index % m_shape[n - 1];
+                    index /= m_shape[n - 1];
+                    offset += m_strides[n - 1] * coord;
+                }
+            }
+        }
+        return array<T>{std::vector<size_t>{m_shape[axis]},
+                        std::vector<size_t>{m_strides[axis]},
+                        ptr + offset};
     }
 
-    const_iterator line_begin(size_t axis, size_t index) const
+    /* Slice sub-array:
+        Take a slice of an array 'array' as follows:
+        - array[..., :, :], where array[..., :, :].ndim() = ndim
+    */
+    array<T> slice_back(size_t index, size_t ndim) const
     {
-        check_index(axis, index);
-        size_t lsize = shape[axis] * strides[axis];
-        T * iter = ptr + lsize * (index / strides[axis]) + index % strides[axis];
-        return {iter, strides[axis]};
+        if (!m_ndim) return *this;
+
+        if (!ndim) return array<T>{std::vector<size_t>{}, ptr};
+        if (ndim < m_ndim)
+        {
+            size_t offset = size_t();
+            if (size())
+            {
+                index = index % size();
+                for (size_t n = m_ndim - ndim; n > 0; --n)
+                {
+                    auto coord = index % m_shape[n - 1];
+                    index /= m_shape[n - 1];
+                    offset += m_strides[n - 1] * coord;
+                }
+            }
+            return array<T>{std::vector<size_t>{std::prev(m_shape.end(), ndim), m_shape.end()},
+                            std::vector<size_t>{std::prev(m_strides.end(), ndim), m_strides.end()},
+                            ptr + offset};
+        }
+        return *this;
     }
 
-    iterator line_end(size_t axis, size_t index)
+    /* Slice sub-array:
+        Take a slice of an array 'array' as follows:
+        - array[:, :, ...], where array[:, :, ...].ndim() = ndim
+    */
+    array<T> slice_front(size_t index, size_t ndim) const
     {
-        check_index(axis, index);
-        size_t lsize = shape[axis] * strides[axis];
-        T * iter = ptr + lsize * (index / strides[axis]) + index % strides[axis];
-        return {iter + lsize, strides[axis]};
-    }
+        if (!m_ndim) return *this;
 
-    const_iterator line_end(size_t axis, size_t index) const
-    {
-        check_index(axis, index);
-        size_t lsize = shape[axis] * strides[axis];
-        T * iter = ptr + lsize * (index / strides[axis]) + index % strides[axis];
-        return {iter + lsize, strides[axis]};
+        if (!ndim) return array<T>{std::vector<size_t>{}, ptr};
+        if (ndim < m_ndim)
+        {
+            size_t offset = size_t();
+            if (size())
+            {
+                index = index % size();
+                for (size_t n = m_ndim; n > ndim; --n)
+                {
+                    auto coord = index % m_shape[n - 1];
+                    index /= m_shape[n - 1];
+                    offset += m_strides[n - 1] * coord;
+                }
+            }
+            return array<T>{std::vector<size_t>{m_shape.begin(), std::next(m_shape.begin(), ndim)},
+                            std::vector<size_t>{m_strides.begin(), std::next(m_strides.begin(), ndim)},
+                            ptr + offset};
+        }
+        return *this;
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
     const T & at(CoordIter first, CoordIter last) const
     {
-        return ptr[ravel_index(first, last)];
+        return *(ptr + offset_at(first, last));
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
     T & at(CoordIter first, CoordIter last)
     {
-        return ptr[ravel_index(first, last)];
+        return *(ptr + offset_at(first, last));
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
     const T & at(const Container & coord) const
     {
-        return ptr[ravel_index(coord)];
+        return *(ptr + offset_at(coord));
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
     T & at(const Container & coord)
     {
-        return ptr[ravel_index(coord)];
+        return *(ptr + offset_at(coord));
     }
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     const T & at(const std::initializer_list<I> & coord) const
     {
-        return ptr[ravel_index(coord)];
+        return *(ptr + offset_at(coord));
     }
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     T & at(const std::initializer_list<I> & coord)
     {
-        return ptr[ravel_index(coord)];
+        return *(ptr + offset_at(coord));
     }
 
     template <typename ... Ix> requires is_all_integral<Ix ...>
     const T & at(Ix... index) const
     {
-        return ptr[ravel_index(index...)];
+        return *(ptr + offset_at(index...));
     }
 
     template <typename ... Ix> requires is_all_integral<Ix ...>
     T & at(Ix... index)
     {
-        return ptr[ravel_index(index...)];
+        return *(ptr + offset_at(index...));
     }
 
     const T * data() const {return ptr;}
     T * data() {return ptr;}
 
 protected:
-    void check_index(size_t axis, size_t index) const
-    {
-        if (axis >= ndim || index >= (size / shape[axis]))
-            throw std::out_of_range("index " + std::to_string(index) + " is out of bound for axis "
-                                    + std::to_string(axis));
-    }
+    T * ptr;
 
     void set_data(T * new_ptr) {ptr = new_ptr;}
-
-private:
-    T * ptr;
 };
 
 template <typename T>
 class vector_array : public array<T>
 {
+protected:
+    using ShapeContainer = detail::shape_handler::ShapeContainer;
+    using array<T>::set_data;
+
     std::vector<T> buffer;
 
 public:
+    using array<T>::size;
+
     vector_array() = default;
 
     template <typename Vector, typename = std::enable_if_t<std::is_base_of_v<std::vector<T>, std::remove_cvref_t<Vector>>>>
-    vector_array(Vector && v, detail::shape_handler::ShapeContainer shape) : array<T>(std::move(shape), v.data()), buffer(std::forward<Vector>(v))
+    vector_array(ShapeContainer shape, Vector && v) : array<T>(std::move(shape), v.data()), buffer(std::forward<Vector>(v))
     {
-        if (buffer.size() != this->size) buffer.resize(this->size);
+        if (buffer.size() != size()) buffer.resize(size());
     }
 
-    vector_array(detail::shape_handler::ShapeContainer shape) : array<T>(std::move(shape), nullptr)
+    vector_array(ShapeContainer shape, T value = T()) : array<T>(std::move(shape), nullptr), buffer(size(), value)
     {
-        buffer = std::vector<T>(this->size, T());
-        array<T>::set_data(buffer.data());
+        set_data(buffer.data());
     }
 };
 
@@ -571,22 +628,24 @@ public:
 /*--------------------------- Rectangular iterator ---------------------------*/
 /*----------------------------------------------------------------------------*/
 
-template <typename point_type>
-struct rectangle_range_basic
+template <typename Point = std::vector<size_t>>
+struct rectangle_range
 {
 public:
     class rectangle_iterator
     {
     public:
         using iterator_category = std::random_access_iterator_tag;
-        using value_type = std::ptrdiff_t;
-        using difference_type = point_type;
-        using pointer = const point_type *;
-        using reference = const point_type &;
+        using value_type = Point;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Point *;
+        using reference = const Point &;
+
+        size_t index() const {return m_index;}
 
         rectangle_iterator & operator++()
         {
-            index++;
+            m_index++;
             update();
             return *this;
         }
@@ -600,7 +659,7 @@ public:
 
         rectangle_iterator & operator--()
         {
-            index--;
+            m_index--;
             update();
             return *this;
         }
@@ -614,7 +673,7 @@ public:
 
         rectangle_iterator & operator+=(difference_type offset)
         {
-            index += offset;
+            m_index += offset;
             update();
             return *this;
         }
@@ -627,7 +686,7 @@ public:
 
         rectangle_iterator & operator-=(difference_type offset)
         {
-            index -= offset;
+            m_index -= offset;
             update();
             return *this;
         }
@@ -640,7 +699,7 @@ public:
 
         difference_type operator-(const rectangle_iterator & rhs) const
         {
-            return index - rhs.index;
+            return m_index - rhs.m_index;
         }
 
         reference operator[](difference_type offset) const
@@ -648,45 +707,44 @@ public:
             return *(*this + offset);
         }
 
-        bool operator==(const rectangle_iterator & rhs) const {return coord == rhs.coord;}
+        bool operator==(const rectangle_iterator & rhs) const {return m_coord == rhs.m_coord;}
         bool operator!=(const rectangle_iterator & rhs) const {return !(*this == rhs);}
 
-        bool operator<(const rectangle_iterator & rhs) const {return index < rhs.index;}
-        bool operator>(const rectangle_iterator & rhs) const {return index > rhs.index;}
+        bool operator<(const rectangle_iterator & rhs) const {return m_index < rhs.m_index;}
+        bool operator>(const rectangle_iterator & rhs) const {return m_index > rhs.m_index;}
 
         bool operator<=(const rectangle_iterator & rhs) const {return !(*this > rhs);}
         bool operator>=(const rectangle_iterator & rhs) const {return !(*this < rhs);}
 
-        reference operator*() const {return coord;}
-        pointer operator->() const {return &coord;}
+        reference operator*() const {return m_coord;}
+        pointer operator->() const {return &m_coord;}
 
     private:
-        point_type coord, strides;
-        size_t index;
+        Point m_coord, m_strides;
+        size_t m_index;
 
 
-        rectangle_iterator(point_type st, size_t idx) : coord(st), strides(std::move(st)), index(idx)
+        rectangle_iterator(Point st, size_t idx) : m_coord(st), m_strides(std::move(st)), m_index(idx)
         {
             update();
         }
 
         void update()
         {
-            detail::unravel_index_impl(strides.begin(), strides.end(), index, coord.begin());
+            detail::unravel_index_unsafe(m_strides.begin(), m_strides.end(), 1, m_index, m_coord.begin());
         }
 
-        friend class rectangle_range_basic;
+        friend class rectangle_range;
     };
 
     using iterator = rectangle_iterator;
     using reverse_iterator = std::reverse_iterator<rectangle_iterator>;
 
-    rectangle_range_basic(point_type sh) : strides(sh), shape(std::move(sh)), size(1)
+    rectangle_range(Point sh) : strides(sh), shape(std::move(sh)), size(1)
     {
         for (auto length : shape) size *= length;
 
-        size_t stride = size;
-        for (size_t i = 0; i < shape.size(); i++)
+        for (size_t stride = size, i = 0; i < shape.size(); i++)
         {
             stride = (shape[i]) ? stride / shape[i] : stride;
             strides[i] = stride;
@@ -694,36 +752,15 @@ public:
     }
 
     iterator begin() const {return iterator(strides, 0);}
-
     iterator end() const {return iterator(strides, size);}
 
-    size_t index(const iterator & iter) const {return iter.index;}
+    reverse_iterator rbegin() const {return reverse_iterator(strides, 0);}
+    reverse_iterator rend() const {return reverse_iterator(strides, size);}
 
 private:
-    point_type strides, shape;
+    Point strides, shape;
     size_t size;
 };
-
-struct rectangle_range : rectangle_range_basic<std::vector<size_t>>
-{
-private:
-    using ShapeContainer = detail::any_container<size_t>;
-
-public:
-    rectangle_range(ShapeContainer sh) : rectangle_range_basic<std::vector<size_t>>(std::move(sh)) {};
-};
-
-/*----------------------------------------------------------------------------*/
-/*------------------------------ Median element ------------------------------*/
-/*----------------------------------------------------------------------------*/
-template <class RandomIt, class Compare>
-RandomIt median_element(RandomIt first, RandomIt last, Compare comp)
-{
-    auto n = std::distance(first, last);
-    auto kth = std::next(first, (n & 1) ? n / 2 : n / 2 - 1);
-    std::nth_element(first, kth, last, comp);
-    return kth;
-}
 
 /*----------------------------------------------------------------------------*/
 /*--------------------------- Extend line modes ------------------------------*/
@@ -756,13 +793,16 @@ static std::unordered_map<std::string, extend> const modes = {{"constant", exten
 /* All kernels defined with the support of [-1, 1]. */
 namespace detail {
 
+// 1 / sqrt(2 * pi)
+static constexpr double M_1_SQRT2PI = 0.3989422804014327;
+
 template <typename T>
 T rectangular(T x) {return (std::abs(x) <= T(1.0)) ? T(1.0) : T();}
 
 template <typename T>
 T gaussian(T x)
 {
-    if (std::abs(x) <= T(1.0)) return Constants::M_1_SQRT2PI * std::exp(-std::pow(3 * x, 2) / 2);
+    if (std::abs(x) <= T(1.0)) return M_1_SQRT2PI * std::exp(-std::pow(3 * x, 2) / 2);
     return T();
 }
 

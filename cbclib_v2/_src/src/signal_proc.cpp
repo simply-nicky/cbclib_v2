@@ -7,19 +7,19 @@ auto unique_indices(py::array_t<I> a)
 {
     array<I> arr {a.request()};
 
-    if (arr.size == 0) return std::make_tuple(py::array_t<I>{}, py::array_t<size_t>{},
+    if (arr.size() == 0) return std::make_tuple(py::array_t<I>{}, py::array_t<size_t>{},
                                               py::array_t<size_t>{});
-    if (arr[arr.size - 1] < arr[0])
+    if (arr[arr.size() - 1] < arr[0])
         throw std::invalid_argument("Input array must be sorted in ascending order");
 
-    std::vector<I> unq (arr[arr.size - 1] - arr[0] + 1, I());
-    std::vector<size_t> idxs (arr[arr.size - 1] - arr[0] + 2, size_t());
-    std::vector<size_t> inv (arr.size, size_t());
+    std::vector<I> unq (arr[arr.size() - 1] - arr[0] + 1, I());
+    std::vector<size_t> idxs (arr[arr.size() - 1] - arr[0] + 2, size_t());
+    std::vector<size_t> inv (arr.size(), size_t());
 
     py::gil_scoped_release release;
 
     size_t size = 0;
-    for (I i = arr[0]; i <= arr[arr.size - 1]; i++)
+    for (I i = arr[0]; i <= arr[arr.size() - 1]; i++)
     {
         idxs[size + 1] = std::distance(arr.begin(), std::lower_bound(arr.begin(), arr.end(), i));
 
@@ -31,9 +31,9 @@ auto unique_indices(py::array_t<I> a)
         }
     }
 
-    unq[size] = arr[arr.size - 1];
-    for (size_t j = idxs[size]; j < arr.size; j++) inv[j] = size;
-    idxs[size + 1] = arr.size - 1;
+    unq[size] = arr[arr.size() - 1];
+    for (size_t j = idxs[size]; j < arr.size(); j++) inv[j] = size;
+    idxs[size + 1] = arr.size() - 1;
 
     py::gil_scoped_acquire acquire;
 
@@ -51,20 +51,19 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
         throw std::invalid_argument("data number of dimensions (" + std::to_string(ibuf.ndim) + ")" +
                                     " isn't equal to the number of grid arrays (" + std::to_string(ndim) + ")");
 
-    auto cbuf = coords.request();
-    auto npts = cbuf.size / ndim;
-    check_dimensions("coords", cbuf.ndim - 1, cbuf.shape, ndim);
+    auto carr = array<U>(coords.request());
+    auto npts = carr.size() / ndim;
+    check_dimensions("coords", carr.ndim() - 1, carr.shape(), ndim);
 
     std::vector<array<U>> gvec;
     for (size_t n = 0; n < ndim; n++)
     {
         auto & arr = gvec.emplace_back(grid[n].request());
-        check_dimensions("grid coordinates", arr.ndim - 1, arr.shape, ibuf.shape[ndim - 1 - n]);
+        check_dimensions("grid coordinates", arr.ndim() - 1, arr.shape(), ibuf.shape[ndim - 1 - n]);
     }
 
-    auto carr = array<U>(cbuf);
     auto iarr = array<T>(ibuf);
-    auto out = py::array_t<T>(std::vector(cbuf.shape.begin(), std::prev(cbuf.shape.end())));
+    auto out = py::array_t<T>(std::vector(carr.shape().begin(), std::prev(carr.shape().end())));
     auto oarr = array<T>(out.request());
 
     thread_exception e;
@@ -78,7 +77,7 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
     {
         e.run([&]
         {
-            oarr[i] = bilinear(iarr, gvec, std::vector(carr.line_begin(cbuf.ndim - 1, i), carr.line_end(cbuf.ndim - 1, i)));
+            oarr[i] = bilinear(iarr, gvec, carr.slice(i, carr.ndim() - 1));
         });
     }
 
@@ -111,7 +110,7 @@ py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forceca
     auto warr = array<T>(w.value().request());
     auto xharr = array<T>(xhbuf);
 
-    auto out_shape = std::vector<py::ssize_t>(xharr.shape.begin(), std::prev(xharr.shape.end()));
+    auto out_shape = std::vector<py::ssize_t>(xharr.shape().begin(), std::prev(xharr.shape().end()));
     auto out = py::array_t<T>(out_shape);
 
     auto oarr = array<T>(out.request());
@@ -120,7 +119,7 @@ py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forceca
 
     py::gil_scoped_release release;
 
-    threads = (threads > oarr.size) ? oarr.size : threads;
+    threads = (threads > oarr.size()) ? oarr.size() : threads;
 
     #pragma omp parallel num_threads(threads)
     {
@@ -129,12 +128,11 @@ py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forceca
         std::sort(idxs.begin(), idxs.end(), [&xarr, ndim](size_t i1, size_t i2){return xarr[i1 * ndim] < xarr[i2 * ndim];});
 
         #pragma omp for
-        for (size_t i = 0; i < oarr.size; i++)
+        for (size_t i = 0; i < oarr.size(); i++)
         {
             e.run([&]
             {
-                auto xh_vec = std::vector<T>(xharr.line_begin(xharr.ndim - 1, i), xharr.line_end(xharr.ndim - 1, i));
-
+                auto xhline = xharr.slice(i, xharr.ndim() - 1);
                 auto window = idxs;
 
                 for (size_t axis = 0; axis < ndim; axis++)
@@ -143,11 +141,11 @@ py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forceca
                     auto comp_ub = [&xarr, axis, ndim](T val, size_t index){return val < xarr[index * ndim + axis];};
 
                     // begin is LESS OR EQUAL than val - sigma
-                    auto begin = std::upper_bound(window.begin(), window.end(), xh_vec[axis] - sigma, comp_ub);
+                    auto begin = std::upper_bound(window.begin(), window.end(), xhline[axis] - sigma, comp_ub);
                     if (begin != window.begin()) begin = std::prev(begin);
 
                     // end - 1 is GREATER OR EQUAL than val + sigma
-                    auto end = std::lower_bound(window.begin(), window.end(), xh_vec[axis] + sigma, comp_lb);
+                    auto end = std::lower_bound(window.begin(), window.end(), xhline[axis] + sigma, comp_lb);
                     if (end != window.end()) end = std::next(end);
 
                     if (begin >= end)
@@ -171,7 +169,7 @@ py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forceca
                     for (auto index : window)
                     {
                         T dist = T();
-                        for (size_t axis = 0; axis < ndim; axis++) dist += std::pow(xarr[index * ndim + axis] - xh_vec[axis], 2);
+                        for (size_t axis = 0; axis < ndim; axis++) dist += std::pow(xarr[index * ndim + axis] - xhline[axis], 2);
                         T rbf = krn(std::sqrt(dist) / sigma);
                         Y += yarr[index] * warr[index] * rbf;
                         W += warr[index] * warr[index] * rbf;
@@ -218,8 +216,9 @@ auto kr_grid(py::array_t<T, py::array::c_style | py::array::forcecast> y, py::ar
     size_t wsize = 1;
     for (size_t n = 0; n < ndim; ++n)
     {
+        auto xline = xarr.slice(ndim - 1 - n, 0);
         auto carr = grid_arrs[ndim - 1 - n];
-        auto [xmin, xmax] = std::minmax_element(xarr.line_begin(0, ndim - 1 - n), xarr.line_end(0, ndim - 1 - n));
+        auto [xmin, xmax] = std::minmax_element(xline.begin(), xline.end());
 
         auto begin = std::upper_bound(carr.begin(), carr.end(), *xmin);
         if (begin != carr.begin()) begin = std::prev(begin);
@@ -283,7 +282,7 @@ auto kr_grid(py::array_t<T, py::array::c_style | py::array::forcecast> y, py::ar
                     }
                     T rbf = krn(std::sqrt(dist) / sigma);
 
-                    size_t index = W.ravel_index(coord);
+                    size_t index = W.index_at(coord);
 
                     for (size_t j = 0; j < nf; j++) Y[index + j * wsize] += yarr[i + j * npts] * warr[i] * rbf;
                     W[index] += warr[i] * warr[i] * rbf;
@@ -314,20 +313,18 @@ auto kr_grid(py::array_t<T, py::array::c_style | py::array::forcecast> y, py::ar
 template <typename T, typename U>
 py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::forcecast> inp, U axis, unsigned threads)
 {
-    auto ibuf = inp.request();
+    array<T> iarr (inp.request());
 
-    sequence<long> seq (axis);
-    seq.unwrap(ibuf.ndim);
+    Sequence<long> seq (axis);
+    seq.unwrap(iarr.ndim());
 
     for (auto ax : seq)
     {
-        if (ibuf.shape[ax] < 3)
+        if (iarr.shape(ax) < 3)
             throw std::invalid_argument("The shape along axis " + std::to_string(ax) + "is below 3 (" +
-                                        std::to_string(ibuf.shape[ax]) + ")");
+                                        std::to_string(iarr.shape(ax)) + ")");
     }
-
-    auto iarr = array<T>(ibuf);
-    size_t repeats = iarr.size / iarr.shape[seq[0]];
+    size_t repeats = iarr.size() / iarr.shape(seq[0]);
 
     std::vector<size_t> peaks;
 
@@ -345,7 +342,8 @@ py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::
         {
             e.run([&]
             {
-                maxima_nd(iarr.line_begin(seq[0], i), iarr.line_end(seq[0], i), add_peak, iarr, seq, seq.size());
+                auto iline = iarr.slice(i, seq[0]);
+                maxima_nd(iline.begin(), iline.end(), add_peak, iarr, seq, seq.size());
             });
         }
 
@@ -361,10 +359,10 @@ py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::
 
     e.rethrow();
 
-    if (peaks.size() % iarr.ndim)
+    if (peaks.size() % iarr.ndim())
         throw std::runtime_error("peaks have invalid size of " + std::to_string(peaks.size()));
 
-    std::array<size_t, 2> out_shape = {peaks.size() / iarr.ndim, iarr.ndim};
+    std::array<size_t, 2> out_shape = {peaks.size() / iarr.ndim(), iarr.ndim()};
     return as_pyarray(std::move(peaks)).reshape(out_shape);
 }
 

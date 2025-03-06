@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, Union
-from ..annotations import CPPIntSequence, Line, NDBoolArray, NDIntArray, NDRealArray, Scalar, Streak
+from ..annotations import (CPPIntSequence, Line, NDBoolArray, NDIntArray, NDRealArray,
+                           RealSequence)
 from .label import Structure
 
 class Peaks:
@@ -21,7 +22,6 @@ class Peaks:
     """
     x : List[int]
     y : List[int]
-    size : int
 
     def __init__(self, x: CPPIntSequence, y: CPPIntSequence):
         ...
@@ -44,26 +44,6 @@ class Peaks:
         """
         ...
 
-    def find_nearest(self, x: Scalar, y: Scalar) -> Tuple[List[int], float]:
-        ...
-
-    def find_range(self, x: Scalar, y: Scalar, range: float) -> List[Tuple[List[int], float]]:
-        ...
-
-    def mask(self, mask: NDBoolArray) -> Peaks:
-        """Discard all peaks that are not True in masking array.
-
-        Args:
-            mask : Boolean 2D array.
-
-        Returns:
-            A new masked set of peaks.
-        """
-        ...
-
-    def sort(self, data: NDRealArray):
-        ...
-
 def detect_peaks(data: NDRealArray, mask: NDBoolArray, radius: int, vmin: float,
                  axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Peaks]:
     ...
@@ -73,38 +53,110 @@ def filter_peaks(peaks: List[Peaks], data: NDRealArray, mask: NDBoolArray,
                  num_threads: int=1) -> List[Peaks]:
     ...
 
-class StreakFinderResultDouble:
-    mask : NDIntArray
-    idxs : List[int]
-    streaks : Dict[int, Line]
+class StreakDouble:
+    centers : List[List[int]]
+    ends : List[List[float]]
+    x : List[int]
+    y : List[int]
+    value : List[float]
 
-    def __init__(self, data: NDRealArray, mask: NDBoolArray):
+    def __init__(self, x: int, y: int, structure: Structure, data: NDRealArray):
         ...
 
-    def get_streak(self, index: int) -> Streak:
+    def center(self) -> List[float]:
+        ...
+
+    def central_line(self) -> Line:
+        ...
+
+    def line(self) -> Line:
+        ...
+
+    def merge(self, source: StreakDouble) -> StreakDouble:
+        ...
+
+    def total_mass(self) -> float:
+        ...
+
+    def mean(self) -> List[float]:
+        ...
+
+    def center_of_mass(self) -> List[float]:
+        ...
+
+    def moment_of_inertia(self) -> List[float]:
+        ...
+
+    def covariance_matrix(self) -> List[float]:
+        ...
+
+class StreakFloat:
+    centers : List[List[int]]
+    ends : List[List[float]]
+    x : List[int]
+    y : List[int]
+    value : List[float]
+
+    def __init__(self, x: int, y: int, structure: Structure, data: NDRealArray):
+        ...
+
+    def center(self) -> List[float]:
+        ...
+
+    def central_line(self) -> Line:
+        ...
+
+    def line(self) -> Line:
+        ...
+
+    def merge(self, source: StreakFloat) -> StreakFloat:
+        ...
+
+    def total_mass(self) -> float:
+        ...
+
+    def mean(self) -> List[float]:
+        ...
+
+    def center_of_mass(self) -> List[float]:
+        ...
+
+    def moment_of_inertia(self) -> List[float]:
+        ...
+
+    def covariance_matrix(self) -> List[float]:
+        ...
+
+class StreakFinderResultDouble:
+    mask : NDIntArray
+    streaks : Dict[int, StreakDouble]
+
+    def __init__(self, data: NDRealArray, mask: NDBoolArray):
         ...
 
     def probability(self, data: NDRealArray, vmin: float) -> float:
         ...
 
     def p_value(self, index: int, xtol: float, vmin: float, probability: float) -> float:
+        ...
+
+    def to_lines(self, width: Optional[RealSequence]) -> NDRealArray:
         ...
 
 class StreakFinderResultFloat:
     mask : NDIntArray
-    idxs : List[int]
-    streaks : Dict[int, Line]
+    streaks : Dict[int, StreakFloat]
 
     def __init__(self, data: NDRealArray, mask: NDBoolArray):
-        ...
-
-    def get_streak(self, index: int) -> Streak:
         ...
 
     def probability(self, data: NDRealArray, vmin: float) -> float:
         ...
 
     def p_value(self, index: int, xtol: float, vmin: float, probability: float) -> float:
+        ...
+
+    def to_lines(self, width: Optional[RealSequence]) -> NDRealArray:
         ...
 
 StreakFinderResult = Union[StreakFinderResultDouble, StreakFinderResultFloat]

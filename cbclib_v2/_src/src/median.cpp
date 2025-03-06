@@ -11,7 +11,7 @@ py::array_t<double> median(py::array_t<T, py::array::c_style | py::array::forcec
 
     check_optional("mask", inp.shape(), inp.shape() + inp.ndim(), mask, true);
 
-    sequence<long> seq (axis);
+    Sequence<long> seq (axis);
     seq = seq.unwrap(inp.ndim());
     inp = seq.swap_axes(inp);
     mask = seq.swap_axes(mask.value());
@@ -23,11 +23,6 @@ py::array_t<double> median(py::array_t<T, py::array::c_style | py::array::forcec
 
     if (!out.size()) return out;
 
-    auto new_shape = out_shape;
-    new_shape.push_back(ibuf.size / out.size());
-    inp = inp.reshape(new_shape);
-    mask = mask.value().reshape(new_shape);
-
     auto oarr = array<double>(out.request());
     auto iarr = array<T>(inp.request());
     auto marr = array<bool>(mask.value().request());
@@ -36,24 +31,25 @@ py::array_t<double> median(py::array_t<T, py::array::c_style | py::array::forcec
 
     py::gil_scoped_release release;
 
-    threads = (threads > oarr.size) ? oarr.size : threads;
+    threads = (threads > oarr.size()) ? oarr.size() : threads;
 
     #pragma omp parallel num_threads(threads)
     {
         std::vector<T> buffer;
-        std::vector<size_t> idxs (iarr.shape[ax], 0);
-        std::iota(idxs.begin(), idxs.end(), 0);
 
         #pragma omp for
-        for (size_t i = 0; i < oarr.size; i++)
+        for (size_t i = 0; i < oarr.size(); i++)
         {
             e.run([&]
             {
-                buffer.clear();
-                auto miter = marr.line_begin(ax, i);
-                auto iiter = iarr.line_begin(ax, i);
+                auto mslice = marr.slice_back(i, seq.size());
+                auto islice = iarr.slice_back(i, seq.size());
 
-                for (auto idx : idxs) if (miter[idx]) buffer.push_back(iiter[idx]);
+                buffer.clear();
+                for (size_t index = 0; index < islice.size(); index++)
+                {
+                    if (mslice[index]) buffer.push_back(islice[index]);
+                }
 
                 if (buffer.size()) oarr[i] = median_1d(buffer.begin(), buffer.end(), std::less<T>());
                 else oarr[i] = T();
@@ -86,7 +82,7 @@ array<bool> get_footprint(py::array_t<T, py::array::c_style | py::array::forceca
     auto ibuf = inp.request();
     if (!fprint)
     {
-        fprint = py::array_t<bool>(sequence<size_t>(size.value(), ibuf.ndim));
+        fprint = py::array_t<bool>(Sequence<size_t>(size.value(), ibuf.ndim));
         PyArray_FILLWBYTE(reinterpret_cast<NPE_PY_ARRAY_OBJECT *>(fprint.value().ptr()), 1);
     }
     py::buffer_info fbuf = fprint.value().request();
@@ -100,7 +96,7 @@ array<bool> get_footprint(py::array_t<T, py::array::c_style | py::array::forceca
 template <typename T>
 py::array_t<T> filter_image(array<T> inp, size_t rank, array<bool> footprint, extend mode, const T & cval, unsigned threads)
 {
-    py::array_t<T> out {inp.shape};
+    py::array_t<T> out {inp.shape()};
     if (!out.size()) return out;
 
     auto oarr = array<T>(out.request());
@@ -112,10 +108,10 @@ py::array_t<T> filter_image(array<T> inp, size_t rank, array<bool> footprint, ex
     #pragma omp parallel num_threads(threads)
     {
         ImageFilter<T> filter (footprint);
-        std::vector<long> coord (inp.ndim);
+        std::vector<long> coord (inp.ndim());
 
         #pragma omp for schedule(guided)
-        for (size_t i = 0; i < inp.size; i++)
+        for (size_t i = 0; i < inp.size(); i++)
         {
             e.run([&]
             {
@@ -191,7 +187,7 @@ auto robust_mean(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
 
     check_optional("mask", inp.shape(), inp.shape() + inp.ndim(), mask, true);
 
-    sequence<long> seq (axis);
+    Sequence<long> seq (axis);
     seq = seq.unwrap(inp.ndim());
     inp = seq.swap_axes(inp);
     mask = seq.swap_axes(mask.value());
@@ -199,17 +195,13 @@ auto robust_mean(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
     auto ibuf = inp.request();
     auto ax = ibuf.ndim - seq.size();
     auto out_shape = std::vector<py::ssize_t>(ibuf.shape.begin(), std::next(ibuf.shape.begin(), ax));
-    auto new_shape = out_shape;
     size_t repeats = std::reduce(out_shape.begin(), out_shape.end(), 1, std::multiplies());
+    size_t size = ibuf.size / repeats;
 
     if (return_std) out_shape.insert(out_shape.begin(), 2);
     auto out = py::array_t<D>(out_shape);
 
     if (!repeats) return out;
-
-    new_shape.push_back(ibuf.size / repeats);
-    inp = inp.reshape(new_shape);
-    mask = mask.value().reshape(new_shape);
 
     auto oarr = array<D>(out.request());
     auto iarr = array<T>(inp.request());
@@ -224,10 +216,9 @@ auto robust_mean(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
     #pragma omp parallel num_threads(threads)
     {
         std::vector<T> buffer;
-        std::vector<D> err (iarr.shape[ax]);
-        std::vector<size_t> idxs (iarr.shape[ax]);
+        std::vector<std::pair<D, D>> errors (size);
 
-        size_t j0 = r0 * iarr.shape[ax], j1 = r1 * iarr.shape[ax];
+        size_t j0 = r0 * size, j1 = r1 * size;
         D mean;
 
         #pragma omp for
@@ -235,43 +226,51 @@ auto robust_mean(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
         {
             e.run([&]
             {
-                auto iiter = iarr.line_begin(ax, i);
-                auto miter = marr.line_begin(ax, i);
-
-                auto get_err = [=, &mean](size_t idx){return miter[idx] * (iiter[idx] - mean) * (iiter[idx] - mean);};
+                auto islice = iarr.slice_back(i, seq.size());
+                auto mslice = marr.slice_back(i, seq.size());
 
                 buffer.clear();
-                std::iota(idxs.begin(), idxs.end(), 0);
-                for (auto idx : idxs) if (miter[idx]) buffer.push_back(iiter[idx]);
+                for (size_t j = 0; j < islice.size(); j++)
+                {
+                    if (mslice[j]) buffer.push_back(islice[j]);
+                }
 
-                if (buffer.size()) mean = *median_element(buffer.begin(), buffer.end(), std::less<T>());
+                if (buffer.size()) mean = median_1d(buffer.begin(), buffer.end(), std::less<T>());
                 else mean = D();
-
 
                 for (int n = 0; n < n_iter; n++)
                 {
-                    std::iota(idxs.begin(), idxs.end(), 0);
-                    std::transform(idxs.begin(), idxs.end(), err.begin(), get_err);
-                    std::sort(idxs.begin(), idxs.end(), [&err](size_t i1, size_t i2){return err[i1] < err[i2];});
+                    for (size_t j = 0; j < islice.size(); j++)
+                    {
+                        errors[j] = {mslice[j] * (islice[j] - mean) * (islice[j] - mean), islice[j] * mslice[j]};
+                    }
+                    std::sort(errors.begin(), errors.end());
 
-                    mean = std::transform_reduce(idxs.begin() + j0, idxs.begin() + j1, D(), std::plus<D>(),
-                                                 [=](size_t idx){return miter[idx] * iiter[idx];}) / (j1 - j0);
+                    if (j0 != j1)
+                    {
+                        D sum = D();
+                        for (auto iter = errors.begin() + j0; iter != errors.begin() + j1; ++iter) sum += iter->second;
+                        mean = sum / (j1 - j0);
+                    }
+                    else mean = errors[j0].second;
                 }
 
-                std::iota(idxs.begin(), idxs.end(), 0);
-                std::transform(idxs.begin(), idxs.end(), err.begin(), get_err);
-                std::sort(idxs.begin(), idxs.end(), [&err](size_t i1, size_t i2){return err[i1] < err[i2];});
+                for (size_t j = 0; j < islice.size(); j++)
+                {
+                    errors[j] = {mslice[j] * (islice[j] - mean) * (islice[j] - mean), islice[j] * mslice[j]};
+                }
+                std::sort(errors.begin(), errors.end());
 
                 D cumsum = D(); D var = D(); mean = D(); int count = 0;
-                for (size_t j = 0; j < idxs.size(); j++)
+                for (size_t j = 0; auto [error, value] : errors)
                 {
-                    if (lm * cumsum > j * err[idxs[j]])
+                    if (lm * cumsum > j++ * error)
                     {
-                        mean += miter[idxs[j]] * iiter[idxs[j]];
-                        var += err[idxs[j]];
+                        mean += value;
+                        var += error;
                         count++;
                     }
-                    cumsum += err[idxs[j]];
+                    cumsum += error;
                 }
                 if (count)
                 {
@@ -305,7 +304,7 @@ auto robust_lsq(py::array_t<T, py::array::c_style | py::array::forcecast> W,
 
     check_optional("mask", y.shape(), y.shape() + y.ndim(), mask, true);
 
-    sequence<long> seq (axis);
+    Sequence<long> seq (axis);
     seq = seq.unwrap(y.ndim());
     y = seq.swap_axes(y);
     mask = seq.swap_axes(mask.value());
@@ -320,17 +319,13 @@ auto robust_lsq(py::array_t<T, py::array::c_style | py::array::forcecast> W,
     if (!ybuf.size || !Wbuf.size)
         throw std::invalid_argument("W and y must have a positive size");
 
-    auto new_shape = std::vector<py::ssize_t>(ybuf.shape.begin(), std::next(ybuf.shape.begin(), ax));
-    size_t repeats = std::reduce(new_shape.begin(), new_shape.end(), 1, std::multiplies());
-    new_shape.push_back(ybuf.size / repeats);
+    size_t repeats = std::reduce(ybuf.shape.begin(), std::next(ybuf.shape.begin(), ax), 1, std::multiplies());
+    size_t size = ybuf.size / repeats;
+    size_t nf = Wbuf.size / size;
 
-    y = y.reshape(new_shape);
-    mask = mask.value().reshape(new_shape);
+    W = W.reshape({nf, size});
 
-    auto nf = Wbuf.size / new_shape[ax];
-    W = W.reshape({nf, new_shape[ax]});
-
-    auto out_shape = std::vector<py::ssize_t>(new_shape.begin(), std::prev(new_shape.end()));
+    auto out_shape = std::vector<py::ssize_t>(ybuf.shape.begin(), std::next(ybuf.shape.begin(), ax));
     out_shape.push_back(nf);
     auto out = py::array_t<D>(out_shape);
 
@@ -345,82 +340,83 @@ auto robust_lsq(py::array_t<T, py::array::c_style | py::array::forcecast> W,
 
     threads = (threads > repeats) ? repeats : threads;
 
-    auto get_x = [](std::pair<T, T> p) -> D {return (p.second > T()) ? static_cast<D>(p.first) / p.second : D();};
-    auto sum_pairs = [](std::pair<T, T> p1, std::pair<T, T> p2){return std::make_pair(p1.first + p2.first, p1.second + p2.second);};
-
     #pragma omp parallel num_threads(threads)
     {
-        std::vector<std::pair<T, T>> sums (oarr.shape[ax]);
+        std::vector<D> fits (oarr.shape(ax));
+        std::vector<D> errors (yarr.shape(ax));
+        std::vector<size_t> idxs (yarr.shape(ax));
 
-        std::vector<D> err (yarr.shape[ax]);
-        std::vector<size_t> idxs (yarr.shape[ax]);
-
-        size_t j0 = r0 * yarr.shape[ax], j1 = r1 * yarr.shape[ax];
+        size_t j0 = r0 * yarr.shape(ax), j1 = r1 * yarr.shape(ax);
 
         #pragma omp for
         for (size_t i = 0; i < static_cast<size_t>(repeats); i++)
         {
             e.run([&]
             {
-                auto yiter = yarr.line_begin(ax, i);
-                auto miter = marr.line_begin(ax, i);
+                auto yslice = yarr.slice_back(i, seq.size());
+                auto mslice = marr.slice_back(i, seq.size());
+                auto oslice = oarr.slice_back(i, 1);
 
-                auto get_err = [=, &sums, &Warr](size_t idx) -> D
+                for (size_t k = 0; k < fits.size(); k++)
                 {
-                    D err = miter[idx] * yiter[idx];
-                    auto Witer = Warr.line_begin(0, idx);
-                    for (size_t k = 0; k < sums.size(); k++) err -= Witer[k] * get_x(sums[k]);
-                    return miter[idx] * err * err;
-                };
-                auto get_pair = [=, &Warr](size_t k)
-                {
-                    auto Witer = Warr.line_begin(Warr.ndim - 1, k);
-                    auto f = [=](size_t idx)
+                    D sum = D(), weight = D();
+                    for (size_t j = 0; j < yslice.size(); j++)
                     {
-                        return std::make_pair(miter[idx] * yiter[idx] * Witer[idx], Witer[idx] * Witer[idx]);
-                    };
-                    return f;
-                };
-
-                std::iota(idxs.begin(), idxs.end(), 0);
-                for (size_t k = 0; k < sums.size(); k++)
-                {
-                    sums[k] = std::transform_reduce(idxs.begin(), idxs.end(), std::pair<T, T>(), sum_pairs, get_pair(k));
+                        auto Wval = Warr.at(k, j);
+                        sum += mslice[j] * yslice[j] * Wval;
+                        weight += Wval * Wval;
+                    }
+                    fits[k] = (weight > D()) ? sum / weight : D();
                 }
 
                 for (int n = 0; n < n_iter; n++)
                 {
-                    std::iota(idxs.begin(), idxs.end(), 0);
-                    std::transform(idxs.begin(), idxs.end(), err.begin(), get_err);
-                    std::sort(idxs.begin(), idxs.end(), [&err](size_t i1, size_t i2){return err[i1] < err[i2];});
-
-                    for (size_t k = 0; k < sums.size(); k++)
+                    for (size_t j = 0; j < yslice.size(); j++)
                     {
-                        sums[k] = std::transform_reduce(idxs.begin() + j0, idxs.begin() + j1, std::pair<T, T>(), sum_pairs, get_pair(k));
+                        auto error = mslice[j] * yslice[j];
+                        for (size_t k = 0; k < fits.size(); k++) error -= Warr.at(k, j) * fits[k];
+                        errors[j] = mslice[j] * error * error;
+                        idxs[j] = j;
                     }
-                }
+                    std::sort(idxs.begin(), idxs.end(), [&errors](size_t i1, size_t i2){return errors[i1] < errors[i2];});
 
-                std::iota(idxs.begin(), idxs.end(), 0);
-                std::transform(idxs.begin(), idxs.end(), err.begin(), get_err);
-                std::sort(idxs.begin(), idxs.end(), [&err](size_t i1, size_t i2){return err[i1] < err[i2];});
-
-                D cumsum = D();
-                std::fill(sums.begin(), sums.end(), std::pair<T, T>());
-                for (size_t j = 0; j < idxs.size(); j++)
-                {
-                    if (lm * cumsum > j * err[idxs[j]])
+                    for (size_t k = 0; k < fits.size(); k++)
                     {
-                        auto Witer = Warr.line_begin(0, idxs[j]);
-                        for (size_t k = 0; k < sums.size(); k++)
+                        D sum = D(), weight = D();
+                        for (size_t j = j0; j < j1; j++)
                         {
-                            sums[k].first += miter[idxs[j]] * yiter[idxs[j]] * Witer[k];
-                            sums[k].second += Witer[k] * Witer[k];
+                            auto Wval = Warr.at(k, idxs[j]);
+                            sum += mslice[idxs[j]] * yslice[idxs[j]] * Wval;
+                            weight += Wval * Wval;
                         }
+                        fits[k] = (weight > D()) ? sum / weight : D();
                     }
-                    cumsum += err[idxs[j]];
                 }
 
-                std::transform(sums.begin(), sums.end(), oarr.line_begin(ax, i), get_x);
+                for (size_t j = 0; j < yslice.size(); j++)
+                {
+                    auto error = mslice[j] * yslice[j];
+                    for (size_t k = 0; k < fits.size(); k++) error -= Warr.at(k, j) * fits[k];
+                    errors[j] = mslice[j] * error * error;
+                    idxs[j] = j;
+                }
+                std::sort(idxs.begin(), idxs.end(), [&errors](size_t i1, size_t i2){return errors[i1] < errors[i2];});
+
+                for (size_t k = 0; k < fits.size(); k++)
+                {
+                    D sum = D(), weight = D(), cumsum = D();
+                    for (size_t j = 0; j < yslice.size(); j++)
+                    {
+                        if (lm * cumsum > j * errors[idxs[j]])
+                        {
+                            auto Wval = Warr.at(k, idxs[j]);
+                            sum += mslice[idxs[j]] * yslice[idxs[j]] * Wval;
+                            weight += Wval * Wval;
+                        }
+                        cumsum += errors[idxs[j]];
+                    }
+                    oslice[k] = (weight > D()) ? sum / weight : D();
+                }
             });
         }
     }
@@ -428,7 +424,6 @@ auto robust_lsq(py::array_t<T, py::array::c_style | py::array::forcecast> W,
     py::gil_scoped_acquire acquire;
 
     return out;
-
 }
 
 }

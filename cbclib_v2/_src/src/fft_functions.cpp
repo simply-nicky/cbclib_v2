@@ -75,8 +75,8 @@ auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> 
     using Out = std::complex<remove_complex_t<Inp>>;
     assert(PyArray_API);
 
-    sequence<long> seq;
-    sequence<size_t> shape_seq;
+    Sequence<long> seq;
+    Sequence<size_t> shape_seq;
 
     if (axis) seq = axis.value();
     if (shape) shape_seq = shape.value();
@@ -86,12 +86,12 @@ auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> 
         if (!shape)
         {
             seq->resize(inp.ndim());
-            std::iota(seq->begin(), seq->end(), 0);
+            std::iota(seq.begin(), seq.end(), 0);
         }
         else
         {
             seq->resize(shape_seq.size());
-            std::iota(seq->begin(), seq->end(), inp.ndim() - shape_seq.size());
+            std::iota(seq.begin(), seq.end(), inp.ndim() - shape_seq.size());
         }
     }
 
@@ -99,27 +99,25 @@ auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> 
     inp = seq.swap_axes(inp);
     auto iarr = array<Inp>(inp.request());
 
-    auto ax = iarr.ndim - seq.size();
+    auto ax = iarr.ndim() - seq.size();
 
     if (!shape)
     {
-        std::copy(std::next(iarr.shape.begin(), ax), iarr.shape.end(), std::back_inserter(*shape_seq));
+        std::copy(std::next(iarr.shape().begin(), ax), iarr.shape().end(), std::back_inserter(*shape_seq));
     }
-    if (shape_seq->size() != seq.size()) fail_container_check("wrong number of dimensions", *shape_seq);
+    if (shape_seq.size() != seq.size()) fail_container_check("wrong number of dimensions", *shape_seq);
 
-    std::vector<size_t> oshape (iarr.shape.begin(), std::next(iarr.shape.begin(), ax));
-    oshape.insert(oshape.end(), shape_seq->begin(), shape_seq->end());
+    std::vector<size_t> oshape (iarr.shape().begin(), std::next(iarr.shape().begin(), ax));
+    oshape.insert(oshape.end(), shape_seq.begin(), shape_seq.end());
 
     auto out = py::array_t<Out>(oshape);
     auto oarr = array<Out>(out.request());
 
-    std::vector<size_t> axes (seq.size());
-    std::iota(axes.begin(), axes.end(), ax);
-    size_t repeats = std::reduce(iarr.shape.begin(), std::next(iarr.shape.begin(), ax), 1, std::multiplies());
+    size_t repeats = std::reduce(iarr.shape().begin(), std::next(iarr.shape().begin(), ax), 1, std::multiplies());
     threads = (threads > repeats) ? repeats : threads;
 
     std::vector<size_t> fshape;
-    std::transform(shape_seq->begin(), shape_seq->end(), std::back_inserter(fshape),
+    std::transform(shape_seq.begin(), shape_seq.end(), std::back_inserter(fshape),
                    [](size_t n){return next_fast_len(n);});
     auto bshape = fftw_buffer_shape<Out>(fshape);
 
@@ -155,10 +153,10 @@ auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> 
         {
             e.run([&]
             {
-                write_buffer(ibuffer, iarr.slice(i, axes), fshape);
+                write_buffer(ibuffer, iarr.slice_back(i, seq.size()), fshape);
                 fftw_execute(fft_plan, ibuf_inp, ibuf_out);
-                for (size_t j = 0; j < ibuffer.size; j++) ibuf_out[j] *= factor;
-                read_buffer(ibuffer, oarr.slice(i, axes), fshape);
+                for (size_t j = 0; j < ibuffer.size(); j++) ibuf_out[j] *= factor;
+                read_buffer(ibuffer, oarr.slice_back(i, seq.size()), fshape);
             });
         }
     }
@@ -176,7 +174,7 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
     using Out = std::common_type_t<Inp, Krn>;
     assert(PyArray_API);
 
-    sequence<long> seq;
+    Sequence<long> seq;
     if (!axis)
     {
         if (inp.ndim() != kernel.ndim())
@@ -184,7 +182,7 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
                                         std::to_string(inp.ndim()) + " and " + std::to_string(kernel.ndim()));
 
         seq->resize(inp.ndim());
-        std::iota(seq->begin(), seq->end(), 0);
+        std::iota(seq.begin(), seq.end(), 0);
     }
     else seq = axis.value();
 
@@ -197,18 +195,16 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
 
     auto iarr = array<Inp>(inp.request());
     auto karr = array<Krn>(kernel.request());
-    auto out = py::array_t<Out>(iarr.shape);
+    auto out = py::array_t<Out>(iarr.shape());
     auto oarr = array<Out>(out.request());
 
-    auto ax = iarr.ndim - seq.size();
-    std::vector<size_t> ishape (std::next(iarr.shape.begin(), ax), iarr.shape.end());
-    std::vector<size_t> axes (seq.size());
-    std::iota(axes.begin(), axes.end(), ax);
-    size_t repeats = std::reduce(iarr.shape.begin(), std::next(iarr.shape.begin(), ax), 1, std::multiplies());
+    auto ax = iarr.ndim() - seq.size();
+    std::vector<size_t> ishape (std::next(iarr.shape().begin(), ax), iarr.shape().end());
+    size_t repeats = std::reduce(iarr.shape().begin(), std::next(iarr.shape().begin(), ax), 1, std::multiplies());
     threads = (threads > repeats) ? repeats : threads;
 
     std::vector<size_t> oshape, fshape;
-    std::transform(karr.shape.begin(), karr.shape.end(), ishape.begin(), std::back_inserter(oshape),
+    std::transform(karr.shape().begin(), karr.shape().end(), ishape.begin(), std::back_inserter(oshape),
                    [](size_t nk, size_t ni){return nk + ni - 1;});
     std::transform(oshape.begin(), oshape.end(), std::back_inserter(fshape), [](size_t n){return next_fast_len(n);});
     auto bshape = fftw_buffer_shape<Out>(fshape);
@@ -222,7 +218,7 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
     vector_array<Out> kbuffer (bshape);
     std::vector<long> w_origin;
 
-    write_origin(oshape.begin(), oshape.end(), karr.shape.begin(), std::back_inserter(w_origin));
+    write_origin(oshape.begin(), oshape.end(), karr.shape().begin(), std::back_inserter(w_origin));
     write_buffer(kbuffer, karr, fshape, w_origin);
 
     auto kbuf_inp = kbuffer.data();
@@ -243,18 +239,18 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
 
         auto ibuf_inp = ibuffer.data();
         auto ibuf_out = reinterpret_cast<std::complex<remove_complex_t<Out>> *>(ibuffer.data());
-        auto buf_size = is_complex_v<Out> ? ibuffer.size : ibuffer.size / 2;
+        auto buf_size = is_complex_v<Out> ? ibuffer.size() : ibuffer.size() / 2;
 
         #pragma omp for
         for (size_t i = 0; i < repeats; i++)
         {
             e.run([&]
             {
-                write_buffer(ibuffer, iarr.slice(i, axes), fshape, w_origin);
+                write_buffer(ibuffer, iarr.slice_back(i, seq.size()), fshape, w_origin);
                 fftw_execute(fwd_plan, ibuf_inp, ibuf_out);
                 for (size_t j = 0; j < buf_size; j++) ibuf_out[j] *= kbuf_out[j] * factor;
                 fftw_execute(bwd_plan, ibuf_out, ibuf_inp);
-                read_buffer(ibuffer, oarr.slice(i, axes), fshape, r_origin);
+                read_buffer(ibuffer, oarr.slice_back(i, seq.size()), fshape, r_origin);
             });
         }
     }
@@ -286,7 +282,7 @@ py::array_t<T> gaussian_kernel(T sigma, unsigned order, T truncate)
 template <typename T, typename U>
 py::array_t<T> gaussian_kernel_vec(std::vector<T> sigma, U order, T truncate)
 {
-    sequence<unsigned> orders (order, sigma.size());
+    Sequence<unsigned> orders (order, sigma.size());
 
     std::vector<std::vector<T>> gaussians;
     std::vector<py::ssize_t> shape;
@@ -301,13 +297,12 @@ py::array_t<T> gaussian_kernel_vec(std::vector<T> sigma, U order, T truncate)
 
     auto out = py::array_t<T>(shape);
     auto oarr = array<T>(out.request());
-    auto range = rectangle_range(oarr.shape);
 
-    for (auto iter = range.begin(); iter != range.end(); ++iter)
+    for (size_t index = 0; const auto & pt : rectangle_range(oarr.shape()))
     {
         T val = T(1.0);
-        for (size_t i = 0; i < oarr.ndim; i++) val *= gaussians[i][(*iter)[i]];
-        oarr[range.index(iter)] = val;
+        for (size_t i = 0; i < oarr.ndim(); i++) val *= gaussians[i][pt[i]];
+        oarr[index++] = val;
     }
 
     return out;
@@ -320,15 +315,15 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
 
     py::gil_scoped_release release;
 
-    for (size_t axis = 0; axis < input.ndim; axis++)
+    for (size_t axis = 0; axis < input.ndim(); axis++)
     {
         if (!isclose(sigma[axis], F()))
         {
-            auto repeats = input.size / input.shape[axis];
+            auto repeats = input.size() / input.shape(axis);
 
             auto radius = gauss_radius(sigma[axis], truncate);
             std::array<size_t, 1> gshape = {2 * radius + 1};
-            std::array<size_t, 1> oshape = {gshape[0] + input.shape[axis] - 1};
+            std::array<size_t, 1> oshape = {gshape[0] + input.shape(axis) - 1};
             std::array<size_t, 1> fshape = {next_fast_len(oshape[0])};
             size_t buf_size = fftw_buffer_shape<T>(fshape)[0];
             T factor = 1.0 / fshape[0];
@@ -351,8 +346,8 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
                 std::vector<T> ibuffer (buf_size, T());
                 std::array<long, 1> w_origin, r_origin;
 
-                write_origin(oshape.begin(), oshape.end(), std::next(input.shape.begin(), axis), w_origin.begin());
-                read_origin(oshape.begin(), oshape.end(), std::next(input.shape.begin(), axis), r_origin.begin());
+                write_origin(oshape.begin(), oshape.end(), std::next(input.shape().begin(), axis), w_origin.begin());
+                read_origin(oshape.begin(), oshape.end(), std::next(input.shape().begin(), axis), r_origin.begin());
 
                 auto ibuf_inp = ibuffer.data();
                 auto ibuf_out = reinterpret_cast<std::complex<F> *>(ibuffer.data());
@@ -363,11 +358,13 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
                 {
                     e.run([&]
                     {
-                        write_line(ibuffer, fshape[0], w_origin[0], input.line_begin(axis, i), input.line_end(axis, i), mode);
+                        auto iline = input.slice(i, axis);
+                        write_line(ibuffer, fshape[0], w_origin[0], iline.begin(), iline.end(), mode);
                         fftw_execute(fwd_plan, ibuf_inp, ibuf_out);
                         for (size_t j = 0; j < buf_size; j++) ibuf_out[j] *= kbuf_out[j] * factor;
                         fftw_execute(bwd_plan, ibuf_out, ibuf_inp);
-                        read_line(ibuffer, fshape[0], r_origin[0], out.line_begin(axis, i), out.line_end(axis, i));
+                        auto oline = out.slice(i, axis);
+                        read_line(ibuffer, fshape[0], r_origin[0], oline.begin(), oline.end());
                     });
                 }
             }
@@ -393,13 +390,13 @@ py::array_t<T> gaussian_filter(py::array_t<T> inp, U sigma, V order, remove_comp
     auto m = it->second;
 
     auto iarr = array<T>(inp.request());
-    auto out = py::array_t<T>(iarr.shape);
+    auto out = py::array_t<T>(iarr.shape());
     auto oarr = array<T>(out.request());
 
-    sequence<F> sigmas (sigma, iarr.ndim);
-    sequence<unsigned> orders (order, iarr.ndim);
+    Sequence<F> sigmas (sigma, iarr.ndim());
+    Sequence<unsigned> orders (order, iarr.ndim());
 
-    gauss_filter<T, F>(oarr, std::move(iarr), *sigmas, *orders, truncate, m, threads);
+    gauss_filter<T, F>(oarr, std::move(iarr), std::move(sigmas), std::move(orders), truncate, m, threads);
 
     return out;
 }
@@ -416,23 +413,23 @@ py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::str
     auto m = it->second;
 
     auto iarr = array<T>(inp.request());
-    auto out = py::array_t<T>(iarr.shape);
+    auto out = py::array_t<T>(iarr.shape());
     auto oarr = array<T>(out.request());
 
-    sequence<F> sigmas (sigma, iarr.ndim);
+    Sequence<F> sigmas (sigma, iarr.ndim());
 
-    std::vector<unsigned> orders (iarr.ndim, 0);
+    std::vector<unsigned> orders (iarr.ndim(), 0);
     orders[0] = 1;
     gauss_filter<T, F>(oarr, iarr, *sigmas, orders, truncate, m, threads);
 
-    if (iarr.ndim > 1)
+    if (iarr.ndim() > 1)
     {
         std::transform(oarr.begin(), oarr.end(), oarr.begin(), [](T out){return out * out;});
 
-        auto buffer = vector_array<T>(iarr.shape);
+        auto buffer = vector_array<T>(iarr.shape());
         auto add_buffer = [](T out, T buf){return out + std::pow(buf, 2);};
 
-        for (size_t axis = 1; axis < iarr.ndim; axis++)
+        for (size_t axis = 1; axis < iarr.ndim(); axis++)
         {
             orders[axis - 1] = 0; orders[axis] = 1;
             gauss_filter<T, F>(buffer, iarr, *sigmas, orders, truncate, m, threads);

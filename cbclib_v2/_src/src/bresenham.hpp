@@ -31,7 +31,7 @@ public:
     >
     void emplace_back(const Container & coord, Args &&... args)
     {
-        data.emplace_back(ravel_index(coord), std::forward<Args>(args)...);
+        data.emplace_back(index_at(coord), std::forward<Args>(args)...);
     }
 
 private:
@@ -56,7 +56,7 @@ public:
     void operator=(const UniquePairs &)     = delete;
 
     const std::array<std::pair<size_t, size_t>, NumPairs> & pairs() const {return m_pairs;}
-    const std::array<std::array<size_t, N - 1>, N> & lookup() const {return m_lookup;}
+    const std::array<size_t, N - 1> & indices(size_t axis) const {return m_lookup[axis];}
 
 private:
     std::array<std::pair<size_t, size_t>, NumPairs> m_pairs;
@@ -236,7 +236,7 @@ public:
             current[axis] += x;
 
             terror.increment(x, axis);
-            for (auto index : axes().lookup()[axis]) nerrors[index].increment(x, axis);
+            for (auto index : axes().indices(axis)) nerrors[index].increment(x, axis);
 
             return *this;
         }

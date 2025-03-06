@@ -20,7 +20,7 @@ struct PointND : public std::array<T, N>
     // In-place operators
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator+=(const std::array<V, N> & rhs) &
+    PointND & operator+=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x += rhs[std::addressof(x) - this->data()];
         return *this;
@@ -34,7 +34,7 @@ struct PointND : public std::array<T, N>
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator-=(const std::array<V, N> & rhs) &
+    PointND & operator-=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x -= rhs[std::addressof(x) - this->data()];
         return *this;
@@ -48,7 +48,7 @@ struct PointND : public std::array<T, N>
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator*=(const std::array<V, N> & rhs) &
+    PointND & operator*=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x *= rhs[std::addressof(x) - this->data()];
         return *this;
@@ -62,7 +62,7 @@ struct PointND : public std::array<T, N>
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator/=(const std::array<V, N> & rhs) &
+    PointND & operator/=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x /= rhs[std::addressof(x) - this->data()];
         return *this;
@@ -215,8 +215,8 @@ struct PointND : public std::array<T, N>
     const T & y() const requires(N >= 2) {return this->operator[](1);}
 };
 
-template <template <typename, size_t> class Array, typename T, size_t... sizes>
-auto concatenate(const Array<T, sizes> &... arrays)
+template <template <typename, size_t> class Array, typename T, size_t ... sizes>
+auto concatenate(const Array<T, sizes> & ... arrays)
 {
     Array<T, (sizes + ...)> result;
     size_t index {};
@@ -342,6 +342,8 @@ struct LineND
     }
 
     std::array<T, 2 * N> to_array() const {return concatenate(pt0.to_array(), pt1.to_array());}
+    std::pair<PointND<T, N>, PointND<T, N>> to_pair() const & {return std::make_pair(pt0, pt1);}
+    std::pair<PointND<T, N>, PointND<T, N>> to_pair() && {return std::make_pair(std::move(pt0), std::move(pt1));}
 };
 
 template <typename T>
@@ -349,14 +351,13 @@ using Line = LineND<T, 2>;
 
 namespace detail{
 
-template <typename T>
+template <typename T, size_t N = 2>
 struct PointHasher
 {
-    size_t operator()(const Point<T> & point) const
+    size_t operator()(const PointND<T, N> & point) const
     {
         size_t h = 0;
-        h = detail::hash_combine(h, point.x());
-        h = detail::hash_combine(h, point.y());
+        for (size_t i = 0; i < N; i++) h = detail::hash_combine(h, point[i]);
         return h;
     }
 };

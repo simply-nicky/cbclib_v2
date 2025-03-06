@@ -12,7 +12,6 @@ from ._src.data_processing import (CrystData, CrystDataFull, CrystDataPart, Stre
 from ._src.streaks import Streaks
 from . import fft
 from . import jax
-from . import kdtree
 from . import label
 from . import ndimage
 from . import streak_finder

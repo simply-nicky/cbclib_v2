@@ -7,7 +7,9 @@ from .annotations import Indices, NDBoolArray, NDRealArray, Shape
 from .src.label import Structure
 from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, StreakFinder,
                                 StreakFinderResultDouble, StreakFinderResultFloat, Peaks)
+from .src.streak_finder import StreakDouble, StreakFloat
 
+Streak = Union[StreakDouble, StreakFloat]
 StreakFinderResult = Union[StreakFinderResultDouble, StreakFinderResultFloat]
 
 class PatternStreakFinder:

@@ -22,8 +22,8 @@ from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
 from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray, NDRealArray,
                           RealSequence, ReferenceType, ROI, Shape)
-from .src.label import (label, center_of_mass, central_moments, gauss_fit, ellipse_fit, line_fit,
-                        moments, Regions, Structure)
+from .src.label import (label, total_mass, mean, center_of_mass, moment_of_inertia, covariance_matrix,
+                        Regions, Structure)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
@@ -687,20 +687,17 @@ class RegionDetector(MaskedDetector):
             x.extend(pattern.x)
         return self.export_coordinates(np.array(frames), np.array(y), np.array(x))
 
+    def total_mass(self, regions: List[Regions]) -> List[NDRealArray]:
+        return total_mass(regions, self.data)
+
+    def mean(self, regions: List[Regions]) -> List[NDRealArray]:
+        return mean(regions, self.data)
+
     def center_of_mass(self, regions: List[Regions]) -> List[NDRealArray]:
         return center_of_mass(regions, self.data)
 
-    def central_moments(self, regions: List[Regions]) -> List[NDRealArray]:
-        return central_moments(regions, self.data)
+    def moment_of_inertia(self, regions: List[Regions]) -> List[NDRealArray]:
+        return moment_of_inertia(regions, self.data)
 
-    def gauss_fit(self, regions: List[Regions]) -> List[NDRealArray]:
-        return gauss_fit(regions, self.data)
-
-    def ellipse_fit(self, regions: List[Regions]) -> List[NDRealArray]:
-        return ellipse_fit(regions, self.data)
-
-    def line_fit(self, regions: List[Regions]) -> List[NDRealArray]:
-        return line_fit(regions, self.data)
-
-    def moments(self, regions: List[Regions]) -> List[NDRealArray]:
-        return moments(regions, self.data)
+    def covariance_matrix(self, regions: List[Regions]) -> List[NDRealArray]:
+        return covariance_matrix(regions, self.data)

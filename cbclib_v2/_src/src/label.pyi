@@ -1,11 +1,10 @@
 from __future__ import annotations
 from typing import Iterator, List, Optional, Tuple, Union, overload
-from ..annotations import CPPIntSequence, NDRealArray, NDBoolArray
+from ..annotations import CPPIntSequence, CPPRealSequence, NDRealArray, NDBoolArray
 
 class PointsSet:
     x : List[int]
     y : List[int]
-    size : int
 
     def __init__(self, x: CPPIntSequence, y: CPPIntSequence):
         ...
@@ -30,7 +29,6 @@ class Structure:
     """
     radius : int
     rank : int
-    size : int
     x : List[int]
     y : List[int]
 
@@ -38,11 +36,10 @@ class Structure:
         ...
 
 class Regions:
-    x: List[int]
-    y: List[int]
-    shape : List[int]
+    x : List[int]
+    y : List[int]
 
-    def __init__(self, shape: CPPIntSequence, regions: List[PointsSet]=[]):
+    def __init__(self, regions: List[PointsSet]=[]):
         ...
 
     def __delitem__(self, idxs: Union[int, slice]):
@@ -79,14 +76,92 @@ class Regions:
     def append(self, value: PointsSet):
         ...
 
-    def filter(self, structure: Structure, npts: int) -> Regions:
+class PixelsFloat:
+    x : List[int]
+    y : List[int]
+    value : List[float]
+
+    def __init__(self, x: CPPRealSequence = [], y: CPPRealSequence = [],
+                 value: CPPRealSequence = []):
         ...
 
-    def mask(self) -> NDBoolArray:
+    def merge(self, source: PixelsFloat) -> PixelsFloat:
         ...
 
-def label(mask: NDBoolArray, structure: Structure, npts: int=1,
+    def line(self) -> List[float]:
+        ...
+
+    def total_mass(self) -> float:
+        ...
+
+    def mean(self) -> List[float]:
+        ...
+
+    def center_of_mass(self) -> List[float]:
+        ...
+
+    def moment_of_inertia(self) -> List[float]:
+        ...
+
+    def covariance_matrix(self) -> List[float]:
+        ...
+
+class PixelsDouble:
+    x : List[int]
+    y : List[int]
+    value : List[float]
+
+    def __init__(self, x: CPPRealSequence = [], y: CPPRealSequence = [],
+                 value: CPPRealSequence = []):
+        ...
+
+    def merge(self, source: PixelsDouble) -> PixelsDouble:
+        ...
+
+    def line(self) -> List[float]:
+        ...
+
+    def total_mass(self) -> float:
+        ...
+
+    def mean(self) -> List[float]:
+        ...
+
+    def center_of_mass(self) -> List[float]:
+        ...
+
+    def moment_of_inertia(self) -> List[float]:
+        ...
+
+    def covariance_matrix(self) -> List[float]:
+        ...
+
+def label(mask: NDBoolArray, structure: Structure, npts: int=1, seeds: Optional[List[PointsSet]]=None,
           axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Regions]:
+    ...
+
+@overload
+def total_mass(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def total_mass(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def total_mass(regions: Union[Regions, List[Regions]], data: NDRealArray
+               ) -> Tuple[NDRealArray, List[NDRealArray]]:
+    ...
+
+@overload
+def mean(regions: Regions, data: NDRealArray) -> NDRealArray:
+    ...
+
+@overload
+def mean(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+    ...
+
+def mean(regions: Union[Regions, List[Regions]], data: NDRealArray
+         ) -> Tuple[NDRealArray, List[NDRealArray]]:
     ...
 
 @overload
@@ -102,61 +177,25 @@ def center_of_mass(regions: Union[Regions, List[Regions]], data: NDRealArray
     ...
 
 @overload
-def central_moments(regions: Regions, data: NDRealArray) -> NDRealArray:
+def moment_of_inertia(regions: Regions, data: NDRealArray) -> NDRealArray:
     ...
 
 @overload
-def central_moments(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+def moment_of_inertia(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
     ...
 
-def central_moments(regions: Union[Regions, List[Regions]], data: NDRealArray
-                    ) -> Tuple[NDRealArray, List[NDRealArray]]:
-    ...
-
-@overload
-def gauss_fit(regions: Regions, data: NDRealArray) -> NDRealArray:
+def moment_of_inertia(regions: Union[Regions, List[Regions]], data: NDRealArray
+                      ) -> Tuple[NDRealArray, List[NDRealArray]]:
     ...
 
 @overload
-def gauss_fit(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
-    ...
-
-def gauss_fit(regions: Union[Regions, List[Regions]], data: NDRealArray
-              ) -> Tuple[NDRealArray, List[NDRealArray]]:
+def covariance_matrix(regions: Regions, data: NDRealArray) -> NDRealArray:
     ...
 
 @overload
-def ellipse_fit(regions: Regions, data: NDRealArray) -> NDRealArray:
+def covariance_matrix(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
     ...
 
-@overload
-def ellipse_fit(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
-    ...
-
-def ellipse_fit(regions: Union[Regions, List[Regions]], data: NDRealArray
-                ) -> Tuple[NDRealArray, List[NDRealArray]]:
-    ...
-
-@overload
-def line_fit(regions: Regions, data: NDRealArray) -> NDRealArray:
-    ...
-
-@overload
-def line_fit(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
-    ...
-
-def line_fit(regions: Union[Regions, List[Regions]], data: NDRealArray
-             ) -> Tuple[NDRealArray, List[NDRealArray]]:
-    ...
-
-@overload
-def moments(regions: Regions, data: NDRealArray) -> NDRealArray:
-    ...
-
-@overload
-def moments(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
-    ...
-
-def moments(regions: Union[Regions, List[Regions]], data: NDRealArray
-            ) -> Tuple[NDRealArray, List[NDRealArray]]:
+def covariance_matrix(regions: Union[Regions, List[Regions]], data: NDRealArray
+                      ) -> Tuple[NDRealArray, List[NDRealArray]]:
     ...
