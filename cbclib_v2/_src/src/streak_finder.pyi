@@ -140,7 +140,7 @@ class StreakFinderResultDouble:
     def p_value(self, index: int, xtol: float, vmin: float, probability: float) -> float:
         ...
 
-    def to_lines(self, width: Optional[RealSequence]) -> NDRealArray:
+    def to_lines(self, width: Optional[RealSequence]=None) -> NDRealArray:
         ...
 
 class StreakFinderResultFloat:

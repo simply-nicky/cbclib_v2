@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.9.4'
+version = '0.9.5'
 dependencies = [
     'extra_data',
     'extra_geom'

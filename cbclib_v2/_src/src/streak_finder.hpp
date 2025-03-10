@@ -351,7 +351,7 @@ protected:
         {
             if (m_mask.is_inbound(pt.coordinate()))
             {
-                if (m_mask.at(pt.coordinate()) == flag && line.distance(pt) < xtol)
+                if (val > T() && m_mask.at(pt.coordinate()) == flag && line.distance(pt) < xtol)
                 {
                     n++;
                     if (val > vmin) k++;
@@ -388,13 +388,7 @@ struct StreakFinder
         std::map<std::pair<size_t, int>, typename StreakFinderResult<T>::iterator> streaks;
         int streak_id = 0;
 
-        auto is_good = [&result](const Point<long> & point)
-        {
-            return result.is_free(point);
-        };
-
         auto indices = peaks.sort(data);
-
         while (indices.size())
         {
             auto piter = indices.front();
@@ -408,19 +402,16 @@ struct StreakFinder
 
                 if (is_added)
                 {
-                    // std::cout << "Removing peaks (" << peaks.size() << " points) belonging to the streak\n";
                     // Removing all the peaks that belong to the detected streak
                     for (auto iiter = indices.begin(); iiter != indices.end();)
                     {
                         if (!result.is_free(**iiter))
                         {
-                            // std::cout << "found a peak at " << **iiter << std::endl;
                             peaks->erase(*iiter);
                             iiter = indices.erase(iiter);
                         }
                         else ++iiter;
                     }
-                    // std::cout << "After deletion: " << peaks.size() << " points\n";
 
                     streaks.emplace(std::make_pair(riter->second.pixels().size(), streak_id), riter);
                     streak_id++;
@@ -441,14 +432,14 @@ struct StreakFinder
     {
         auto streak = result.new_streak(data, structure, seed);
 
-        size_t old_size = 0;
-        while (streak.ends().size() != old_size)
+        Line<long> old_line = Line<long>{}, line = streak.central_line();
+        while (old_line != line)
         {
-            old_size = streak.ends().size();
-            auto [pt0, pt1] = streak.central_line().to_pair();
+            old_line = line;
 
-            streak = grow_streak<T, false>(std::move(streak), result, data, pt0, peaks, xtol);
-            streak = grow_streak<T, true>(std::move(streak), result, data, pt1, peaks, xtol);
+            streak = grow_streak<T, false>(std::move(streak), result, data, old_line.pt0, peaks, xtol);
+            streak = grow_streak<T, true>(std::move(streak), result, data, old_line.pt1, peaks, xtol);
+            line = streak.central_line();
         }
 
         return streak;
@@ -485,12 +476,8 @@ private:
     template <typename T, bool IsForward>
     Point<long> find_next_step(const Streak<T> & streak, const Point<long> & point, int n_steps) const
     {
-        auto line = streak.line();
-
-        auto iter = BresenhamPlotter<T, 2, IsForward>{line}.begin(point);
-
+        auto iter = BresenhamPlotter<T, 2, IsForward>{streak.line()}.begin(point);
         for (int i = 0; i < n_steps; i++) iter++;
-
         return *iter;
     }
 
@@ -498,28 +485,22 @@ private:
     Streak<T> grow_streak(Streak<T> && streak, const StreakFinderResult<T> & result, const array<T> & data, Point<long> point, const Peaks & peaks, T xtol) const
     {
         unsigned tries = 0;
-
         while (tries <= lookahead)
         {
-            // std::cout << "Origin point = " << point << std::endl;
             Point<long> pt = find_next_step<T, IsForward>(streak, point, structure.rank);
-
-            // std::cout << "Next step candidate = " << pt << std::endl;
 
             // Find the closest peak in structure vicinity
             for (const auto & shift : structure)
             {
-                // std::cout << "shift = " << shift << std::endl;
                 auto iter = peaks->find(pt + shift);
                 // Check if the point is not used already
                 if (iter != peaks.end() && result.is_free(*iter) && *iter != point)
                 {
-                    // std::cout << "found a peak at " << *iter << std::endl;
                     pt = *iter; break;
                 }
             }
 
-            if (!result.is_bad(pt))
+            if (!result.is_bad(pt) && pt != point)
             {
                 auto [is_add, new_streak] = add_point_to_streak(std::move(streak), result, data, pt, xtol);
 

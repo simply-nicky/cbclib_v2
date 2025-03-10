@@ -80,6 +80,11 @@ public:
         return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
+    bool is_positive() const
+    {
+        return mu_xx[0] > T() && mu_xx[1] > T();
+    }
+
 private:
     Point<T> origin;
     Point<T> mu_x, mu_xx;
@@ -376,7 +381,8 @@ public:
 
     Line<T> line() const
     {
-        if (m_mnt.zeroth()) return m_mnt.central().line();
+        auto m_ctr = m_mnt.central();
+        if (m_ctr.is_positive()) return m_mnt.central().line();
         return {m_mnt.origin(), m_mnt.origin()};
     }
 

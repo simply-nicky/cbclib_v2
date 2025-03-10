@@ -40,53 +40,6 @@ private:
 
 }
 
-template <size_t N>
-class UniquePairs
-{
-public:
-    constexpr static size_t NumPairs = N * (N - 1) / 2;
-
-    static const UniquePairs & instance()
-    {
-        static UniquePairs axes;
-        return axes;
-    }
-
-    UniquePairs(const UniquePairs &)        = delete;
-    void operator=(const UniquePairs &)     = delete;
-
-    const std::array<std::pair<size_t, size_t>, NumPairs> & pairs() const {return m_pairs;}
-    const std::array<size_t, N - 1> & indices(size_t axis) const {return m_lookup[axis];}
-
-private:
-    std::array<std::pair<size_t, size_t>, NumPairs> m_pairs;
-    std::array<std::array<size_t, N - 1>, N> m_lookup;
-
-    UniquePairs()
-    {
-        std::pair<size_t, size_t> pair {};
-        for (size_t i = 0; i < NumPairs; i++)
-        {
-            ++pair.second;
-            if (pair.second == N)
-            {
-                ++pair.first;
-                pair.second = pair.first + 1;
-            }
-            m_pairs[i] = pair;
-        }
-
-        for (size_t i = 0; i < N; i++)
-        {
-            size_t index = 0;
-            for (size_t j = 0; j < NumPairs; j++)
-            {
-                if (m_pairs[j].first == i || m_pairs[j].second == i) m_lookup[i][index++] = j;
-            }
-        }
-    }
-};
-
 template <typename T, size_t N, bool IsForward>
 class BresenhamPlotter
 {
@@ -276,8 +229,6 @@ public:
         m_pt0 = (pt0() - std::abs(offset / tau[m_axis]) * tau).round();
         m_pt1 = (pt1() + std::abs(offset / tau[m_axis]) * tau).round();
         m_pt1 += step();
-
-        // std::cout << "m_axis = " << m_axis << ", m_pt0 = " << m_pt0 << ", m_pt1 = " << m_pt1 << std::endl;
     }
 
     iterator begin(PointND<long, N> point) const
@@ -382,13 +333,10 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_2d(const LineND<T, 2> & line, T width, Func && func)
 {
-    // std::cout << "line = " << line << std::endl;
     BresenhamPlotter<T, 2, true> p {line, long(std::ceil(width) + 1)};
 
     for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
-        // std::cout << "pt = " << *iter << std::endl;
-
         if (p.is_next(iter, p.axis()))
         {
             std::forward<Func>(func)(*iter, p.error(iter, width));
@@ -396,16 +344,12 @@ void draw_line_2d(const LineND<T, 2> & line, T width, Func && func)
             for (auto iter_x = std::next(p.collapse(iter, p.axis()));
                  p.normal_error(iter_x) < width * width; ++iter_x)
             {
-                // std::cout << "pt_x = " << *iter_x << std::endl;
-                // std::cout << "normal_error = " << p.normal_error(iter_x) << std::endl;
                 std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
             }
 
             for (auto iter_x = std::next(p.collapse(iter, p.axis()).flip(p.axis(1)));
                  p.normal_error(iter_x) < width * width; ++iter_x)
             {
-                // std::cout << "pt_x = " << *iter_x << std::endl;
-                // std::cout << "normal_error = " << p.normal_error(iter_x) << std::endl;
                 std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
             }
         }
@@ -421,14 +365,10 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
 {
-    // std::cout << "line = " << line << std::endl;
     BresenhamPlotter<T, 3, true> p {line, long(std::ceil(width))};
 
     for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
-        // std::cout << "pt = " << *iter << std::endl;
-        // std::cout << "normal_error = " << p.normal_error(iter) << std::endl;
-
         if (p.is_next(iter, p.axis()))
         {
             std::forward<Func>(func)(*iter, p.error(iter, width));
@@ -439,13 +379,9 @@ void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
                 flip[p.axis(1)] |= i & 1;
                 flip[p.axis(2)] |= i >> 1;
 
-                // std::cout << "i = " << i << std::endl;
-
                 for (auto iter_xy = p.collapse(iter, p.axis()).flip(flip).move(p.axis(1 + ((i & 1) ^ (i >> 1))));
                      p.normal_error(iter_xy) < width * width; ++iter_xy)
                 {
-                    // std::cout << "pt_xy = " << *iter_xy << std::endl;
-                    // std::cout << "normal_error = " << p.normal_error(iter_xy) << std::endl;
                     std::forward<Func>(func)(*iter_xy, p.error(iter_xy, width));
 
                     for (size_t j = 1; j < 3; j++) if (p.is_next(iter_xy, p.axis(j)))
@@ -453,8 +389,6 @@ void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
                         for (auto iter_x = std::next(p.collapse(iter_xy, p.axis(j)));
                              p.normal_error(iter_x) < width * width; ++iter_x)
                         {
-                            // std::cout << "pt_x = " << *iter_x << std::endl;
-                            // std::cout << "normal_error = " << p.normal_error(iter_x) << std::endl;
                             std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
                         }
                     }

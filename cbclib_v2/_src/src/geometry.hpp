@@ -375,6 +375,53 @@ std::array<I, N + 1> normalise_shape(const std::vector<I> & shape)
     return res;
 }
 
+template <size_t N>
+class UniquePairs
+{
+public:
+    constexpr static size_t NumPairs = N * (N - 1) / 2;
+
+    static const UniquePairs & instance()
+    {
+        static UniquePairs axes;
+        return axes;
+    }
+
+    UniquePairs(const UniquePairs &)        = delete;
+    void operator=(const UniquePairs &)     = delete;
+
+    const std::array<std::pair<size_t, size_t>, NumPairs> & pairs() const {return m_pairs;}
+    const std::array<size_t, N - 1> & indices(size_t axis) const {return m_lookup[axis];}
+
+private:
+    std::array<std::pair<size_t, size_t>, NumPairs> m_pairs;
+    std::array<std::array<size_t, N - 1>, N> m_lookup;
+
+    UniquePairs()
+    {
+        std::pair<size_t, size_t> pair {};
+        for (size_t i = 0; i < NumPairs; i++)
+        {
+            ++pair.second;
+            if (pair.second == N)
+            {
+                ++pair.first;
+                pair.second = pair.first + 1;
+            }
+            m_pairs[i] = pair;
+        }
+
+        for (size_t i = 0; i < N; i++)
+        {
+            size_t index = 0;
+            for (size_t j = 0; j < NumPairs; j++)
+            {
+                if (m_pairs[j].first == i || m_pairs[j].second == i) m_lookup[i][index++] = j;
+            }
+        }
+    }
+};
+
 }
 
 #endif

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterator, List, Optional, Tuple, Union, overload
+from typing import Iterator, List, Optional, Union, overload
 from ..annotations import CPPIntSequence, CPPRealSequence, NDRealArray, NDBoolArray
 
 class PointsSet:
@@ -137,31 +137,31 @@ class PixelsDouble:
         ...
 
 def label(mask: NDBoolArray, structure: Structure, npts: int=1, seeds: Optional[List[PointsSet]]=None,
-          axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Regions]:
+          axes: Optional[List[int]]=None, num_threads: int=1) -> List[Regions]:
     ...
 
 @overload
-def total_mass(regions: Regions, data: NDRealArray) -> NDRealArray:
+def total_mass(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None) -> NDRealArray:
     ...
 
 @overload
-def total_mass(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+def total_mass(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None) -> List[NDRealArray]:
     ...
 
-def total_mass(regions: Union[Regions, List[Regions]], data: NDRealArray
-               ) -> Tuple[NDRealArray, List[NDRealArray]]:
-    ...
-
-@overload
-def mean(regions: Regions, data: NDRealArray) -> NDRealArray:
+def total_mass(regions: Union[Regions, List[Regions]], data: NDRealArray,
+               axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
     ...
 
 @overload
-def mean(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+def mean(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None) -> NDRealArray:
+    ...
+
+@overload
+def mean(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None) -> List[NDRealArray]:
     ...
 
 def mean(regions: Union[Regions, List[Regions]], data: NDRealArray
-         ) -> Tuple[NDRealArray, List[NDRealArray]]:
+         ) -> Union[NDRealArray, List[NDRealArray]]:
     ...
 
 @overload
@@ -172,30 +172,34 @@ def center_of_mass(regions: Regions, data: NDRealArray) -> NDRealArray:
 def center_of_mass(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
     ...
 
-def center_of_mass(regions: Union[Regions, List[Regions]], data: NDRealArray
-                   ) -> Tuple[NDRealArray, List[NDRealArray]]:
+def center_of_mass(regions: Union[Regions, List[Regions]], data: NDRealArray,
+                   axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
     ...
 
 @overload
-def moment_of_inertia(regions: Regions, data: NDRealArray) -> NDRealArray:
+def moment_of_inertia(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None
+                      ) -> NDRealArray:
     ...
 
 @overload
-def moment_of_inertia(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+def moment_of_inertia(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None
+                      ) -> List[NDRealArray]:
     ...
 
-def moment_of_inertia(regions: Union[Regions, List[Regions]], data: NDRealArray
-                      ) -> Tuple[NDRealArray, List[NDRealArray]]:
-    ...
-
-@overload
-def covariance_matrix(regions: Regions, data: NDRealArray) -> NDRealArray:
+def moment_of_inertia(regions: Union[Regions, List[Regions]], data: NDRealArray,
+                      axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
     ...
 
 @overload
-def covariance_matrix(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+def covariance_matrix(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None
+                      ) -> NDRealArray:
     ...
 
-def covariance_matrix(regions: Union[Regions, List[Regions]], data: NDRealArray
-                      ) -> Tuple[NDRealArray, List[NDRealArray]]:
+@overload
+def covariance_matrix(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None
+                      ) -> List[NDRealArray]:
+    ...
+
+def covariance_matrix(regions: Union[Regions, List[Regions]], data: NDRealArray,
+                      axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
     ...

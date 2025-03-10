@@ -69,7 +69,7 @@ T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const Coord
         {
             std::ostringstream oss;
             oss << "Invalid index: {";
-            std::copy(point.begin(), point.end(), std::experimental::make_ostream_joiner(std::cout, ", "));
+            std::copy(point.begin(), point.end(), std::experimental::make_ostream_joiner(oss, ", "));
             oss << "}";
             throw std::runtime_error(oss.str());
         }

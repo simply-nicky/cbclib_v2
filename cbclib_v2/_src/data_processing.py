@@ -22,8 +22,8 @@ from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
 from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray, NDRealArray,
                           RealSequence, ReferenceType, ROI, Shape)
-from .src.label import (label, total_mass, mean, center_of_mass, moment_of_inertia, covariance_matrix,
-                        Regions, Structure)
+from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
+                    covariance_matrix, Regions, Structure)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
@@ -681,11 +681,14 @@ class RegionDetector(MaskedDetector):
     def export_table(self, regions: List[Regions]) -> pd.DataFrame:
         frames, y, x = [], [], []
         for frame, pattern in zip(self.indices, regions):
-            size = sum(region.size for region in pattern)
+            size = sum(len(region.x) for region in pattern)
             frames.extend(size * [frame,])
             y.extend(pattern.y)
             x.extend(pattern.x)
         return self.export_coordinates(np.array(frames), np.array(y), np.array(x))
+
+    def ellipse_fit(self, regions: List[Regions]) -> List[NDRealArray]:
+        return ellipse_fit(regions, self.data)
 
     def total_mass(self, regions: List[Regions]) -> List[NDRealArray]:
         return total_mass(regions, self.data)

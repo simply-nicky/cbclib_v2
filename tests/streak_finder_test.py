@@ -160,3 +160,9 @@ class TestStreakFinder():
         prods = np.sum((centers - center) * tau, axis=-1)
         central_line = np.concatenate((centers[np.argmin(prods)], centers[np.argmax(prods)]))
         assert np.all(central_line == np.asarray(streak.central_line()))
+
+    def test_negative_image(self, image: NDRealArray, mask: NDBoolArray, structure: Structure,
+                            min_size: int, peaks: Peaks, xtol: float):
+        finder = PatternStreakFinder(-image, mask, structure, min_size)
+        result = finder.detect_streaks(peaks, xtol, 0.0)
+        assert len(result.streaks) == 0
