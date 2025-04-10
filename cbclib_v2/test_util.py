@@ -1,11 +1,10 @@
 from typing import Any, Callable, Dict, Optional, Union
 import numpy as np
-import jax.numpy as jnp
 from jax import tree
 from jax.test_util import check_grads
 from .jax import (CBData, CBDModel, InternalState, FixedPupilState, XtalState, field, random_array,
                   random_state)
-from ._src.annotations import ComplexArray, RealArray
+from ._src.annotations import ArrayNamespace, ComplexArray, JaxNumPy, RealArray
 
 REL_TOL = 0.025
 
@@ -24,16 +23,16 @@ class TestSetup():
     y_pixel_size    = 7.5e-05
 
     @classmethod
-    def xtal(cls) -> XtalState:
-        return XtalState(jnp.array(cls.basis))
+    def xtal(cls, xp: ArrayNamespace=JaxNumPy) -> XtalState:
+        return XtalState(xp.array(cls.basis))
 
     @classmethod
-    def lens(cls) -> FixedPupilState:
-        return FixedPupilState(jnp.asarray(cls.foc_pos), cls.pupil_roi)
+    def lens(cls, xp: ArrayNamespace=JaxNumPy) -> FixedPupilState:
+        return FixedPupilState(xp.asarray(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
-    def z(cls) -> RealArray:
-        return jnp.full((len(cls.basis),), cls.smp_dist + cls.foc_pos[2])
+    def z(cls, xp: ArrayNamespace=JaxNumPy) -> RealArray:
+        return xp.full((len(cls.basis),), cls.smp_dist + cls.foc_pos[2])
 
 random_lens = random_state(TestSetup.lens(), tree.map(lambda val: REL_TOL * val, TestSetup.lens()))
 random_xtal = random_state(TestSetup.xtal(), tree.map(lambda val: REL_TOL * val, TestSetup.xtal()))

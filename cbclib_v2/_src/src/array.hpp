@@ -383,29 +383,29 @@ public:
 
     operator bool() const {return bool(ptr);}
 
-    bool operator==(const strided_iterator<T, IsConst> & rhs) const {return ptr == rhs.ptr;}
-    bool operator!=(const strided_iterator<T, IsConst> & rhs) const {return ptr != rhs.ptr;}
-    bool operator<=(const strided_iterator<T, IsConst> & rhs) const {return ptr <= rhs.ptr;}
-    bool operator>=(const strided_iterator<T, IsConst> & rhs) const {return ptr >= rhs.ptr;}
-    bool operator<(const strided_iterator<T, IsConst> & rhs) const {return ptr < rhs.ptr;}
-    bool operator>(const strided_iterator<T, IsConst> & rhs) const {return ptr > rhs.ptr;}
+    bool operator==(const strided_iterator & rhs) const {return ptr == rhs.ptr;}
+    bool operator!=(const strided_iterator & rhs) const {return ptr != rhs.ptr;}
+    bool operator<=(const strided_iterator & rhs) const {return ptr <= rhs.ptr;}
+    bool operator>=(const strided_iterator & rhs) const {return ptr >= rhs.ptr;}
+    bool operator<(const strided_iterator & rhs) const {return ptr < rhs.ptr;}
+    bool operator>(const strided_iterator & rhs) const {return ptr > rhs.ptr;}
 
-    strided_iterator<T, IsConst> & operator+=(const difference_type & step) {ptr += step * stride; return *this;}
-    strided_iterator<T, IsConst> & operator-=(const difference_type & step) {ptr -= step * stride; return *this;}
-    strided_iterator<T, IsConst> & operator++() {ptr += stride; return *this;}
-    strided_iterator<T, IsConst> & operator--() {ptr -= stride; return *this;}
-    strided_iterator<T, IsConst> operator++(int) {strided_iterator<T, IsConst> temp = *this; ++(*this); return temp;}
-    strided_iterator<T, IsConst> operator--(int) {strided_iterator<T, IsConst> temp = *this; --(*this); return temp;}
-    strided_iterator<T, IsConst> operator+(const difference_type & step) const
+    strided_iterator & operator+=(const difference_type & step) {ptr += step * stride; return *this;}
+    strided_iterator & operator-=(const difference_type & step) {ptr -= step * stride; return *this;}
+    strided_iterator & operator++() {ptr += stride; return *this;}
+    strided_iterator & operator--() {ptr -= stride; return *this;}
+    strided_iterator operator++(int) {strided_iterator temp = *this; ++(*this); return temp;}
+    strided_iterator operator--(int) {strided_iterator temp = *this; --(*this); return temp;}
+    strided_iterator operator+(const difference_type & step) const
     {
         return {ptr + step * stride, stride};
     }
-    strided_iterator<T, IsConst> operator-(const difference_type & step) const
+    strided_iterator operator-(const difference_type & step) const
     {
         return {ptr - step * stride, stride};
     }
 
-    difference_type operator-(const strided_iterator<T, IsConst> & rhs) const {return (ptr - rhs.ptr) / stride;}
+    difference_type operator-(const strided_iterator & rhs) const {return (ptr - rhs.ptr) / stride;}
 
     reference operator[] (size_t index) const {return *(ptr + index * stride);}
     reference operator*() const {return *ptr;}
@@ -628,7 +628,7 @@ public:
 /*--------------------------- Rectangular iterator ---------------------------*/
 /*----------------------------------------------------------------------------*/
 
-template <typename Point = std::vector<size_t>>
+template <typename Container = std::vector<size_t>, bool IsPoint = false>
 struct rectangle_range
 {
 public:
@@ -636,10 +636,10 @@ public:
     {
     public:
         using iterator_category = std::random_access_iterator_tag;
-        using value_type = Point;
+        using value_type = Container;
         using difference_type = std::ptrdiff_t;
-        using pointer = const Point *;
-        using reference = const Point &;
+        using pointer = const Container *;
+        using reference = const Container &;
 
         size_t index() const {return m_index;}
 
@@ -720,18 +720,25 @@ public:
         pointer operator->() const {return &m_coord;}
 
     private:
-        Point m_coord, m_strides;
+        Container m_coord, m_strides;
         size_t m_index;
 
 
-        rectangle_iterator(Point st, size_t idx) : m_coord(st), m_strides(std::move(st)), m_index(idx)
+        rectangle_iterator(Container st, size_t idx) : m_coord(st), m_strides(std::move(st)), m_index(idx)
         {
             update();
         }
 
         void update()
         {
-            detail::unravel_index_unsafe(m_strides.begin(), m_strides.end(), 1, m_index, m_coord.begin());
+            if constexpr(IsPoint)
+            {
+                detail::unravel_index_unsafe(m_strides.begin(), m_strides.end(), 1, m_index, m_coord.rbegin());
+            }
+            else
+            {
+                detail::unravel_index_unsafe(m_strides.begin(), m_strides.end(), 1, m_index, m_coord.begin());
+            }
         }
 
         friend class rectangle_range;
@@ -740,7 +747,7 @@ public:
     using iterator = rectangle_iterator;
     using reverse_iterator = std::reverse_iterator<rectangle_iterator>;
 
-    rectangle_range(Point sh) : strides(sh), shape(std::move(sh)), size(1)
+    rectangle_range(Container sh) : strides(sh), shape(std::move(sh)), size(1)
     {
         for (auto length : shape) size *= length;
 
@@ -758,9 +765,120 @@ public:
     reverse_iterator rend() const {return reverse_iterator(strides, size);}
 
 private:
-    Point strides, shape;
+    Container strides, shape;
     size_t size;
 };
+
+/* Iterator adapter for point containers for pybind11 */
+/* python_point_iterator dereferences to an std::array instead of PointND */
+
+template <typename Iterator, typename = decltype(std::declval<Iterator &>()->to_array())>
+class python_point_iterator
+{
+public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = typename std::remove_reference_t<decltype(std::declval<Iterator &>()->to_array())>;
+    using difference_type = typename std::iter_difference_t<Iterator>;
+    using reference = const value_type &;
+    using pointer = const value_type *;
+
+    python_point_iterator() = default;
+    python_point_iterator(Iterator && iter) : m_iter(std::move(iter)) {}
+    python_point_iterator(const Iterator & iter) : m_iter(iter) {}
+
+    python_point_iterator & operator++() requires (std::forward_iterator<Iterator>)
+    {
+        ++m_iter;
+        return *this;
+    }
+
+    python_point_iterator operator++(int) requires (std::forward_iterator<Iterator>)
+    {
+        return python_point_iterator(m_iter++);
+    }
+
+    python_point_iterator & operator--() requires (std::bidirectional_iterator<Iterator>)
+    {
+        --m_iter;
+        return *this;
+    }
+
+    python_point_iterator operator--(int) requires (std::bidirectional_iterator<Iterator>)
+    {
+        return python_point_iterator(m_iter--);
+    }
+
+    python_point_iterator & operator+=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    {
+        m_iter += offset;
+        return *this;
+    }
+
+    python_point_iterator operator+(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    {
+        return python_point_iterator(m_iter + offset);
+    }
+
+    python_point_iterator & operator-=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    {
+        m_iter -= offset;
+        return *this;
+    }
+
+    python_point_iterator operator-(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    {
+        return python_point_iterator(m_iter - offset);
+    }
+
+    difference_type operator-(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    {
+        return m_iter - rhs;
+    }
+
+    reference operator[](difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    {
+        return (m_iter + offset)->to_array();
+    }
+
+    bool operator==(const python_point_iterator & rhs) const requires (std::forward_iterator<Iterator>)
+    {
+        return m_iter == rhs.m_iter;
+    }
+    bool operator!=(const python_point_iterator & rhs) const requires (std::forward_iterator<Iterator>)
+    {
+        return !(*this == rhs);
+    }
+
+    bool operator<(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    {
+        return m_iter < rhs.m_iter;
+    }
+    bool operator>(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    {
+        return m_iter > rhs.m_iter;
+    }
+
+    bool operator<=(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    {
+        return !(*this > rhs);
+    }
+    bool operator>=(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    {
+        return !(*this < rhs);
+    }
+
+    reference operator*() const {return m_iter->to_array();}
+    pointer operator->() const {return &(m_iter->to_array());}
+
+private:
+    Iterator m_iter;
+};
+
+template <typename Iterator, typename = decltype(std::declval<Iterator &>()->to_array())>
+python_point_iterator<Iterator> make_python_iterator(Iterator && iterator)
+{
+    return python_point_iterator(std::forward<Iterator>(iterator));
+}
 
 /*----------------------------------------------------------------------------*/
 /*--------------------------- Extend line modes ------------------------------*/

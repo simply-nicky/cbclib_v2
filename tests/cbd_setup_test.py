@@ -1,24 +1,34 @@
-import numpy as np
-import jax.numpy as jnp
 import pytest
 from jax import random
 import cbclib_v2 as cbc
-from cbclib_v2.annotations import KeyArray, RealArray
-from cbclib_v2.test_util import TestModel, check_close
+from cbclib_v2.annotations import ArrayNamespace, KeyArray, NumPy, RealArray
+from cbclib_v2.test_util import TestModel, TestSetup, TestState, check_close
 
 class TestCBDSetup():
-    def skew_symmetric(self, vec: RealArray) -> RealArray:
-        return jnp.cross(jnp.identity(vec.shape[-1]), vec[..., None, :])
+    @pytest.fixture
+    def xp(self) -> ArrayNamespace:
+        return NumPy
 
-    def rodriguez_formula(self, angles: RealArray) -> RealArray:
-        axis = jnp.stack([jnp.sin(angles[..., 1]) * jnp.cos(angles[..., 2]),
-                          jnp.sin(angles[..., 1]) * jnp.sin(angles[..., 2]),
-                          jnp.cos(angles[..., 1])], axis=-1)
-        skew = self.skew_symmetric(axis)
-        I = jnp.broadcast_to(jnp.identity(skew.shape[-1]), skew.shape)
-        S = jnp.sin(angles[..., 0])[..., None, None]
-        C = jnp.cos(angles[..., 0])[..., None, None]
-        return I + S * skew + (1 - C) * (skew @ skew)
+    @pytest.fixture
+    def state(self, xp: ArrayNamespace) -> TestState:
+        return TestState(TestSetup.lens(xp), TestSetup.xtal(xp), TestSetup.z(xp))
+
+    @pytest.fixture
+    def int_state(self, model: TestModel, state: TestState) -> cbc.jax.InternalState:
+        return model.to_internal(state)
+
+    def skew_symmetric(self, vec: RealArray, xp: ArrayNamespace) -> RealArray:
+        return xp.cross(xp.identity(vec.shape[-1]), vec[..., None, :])
+
+    def rodriguez_formula(self, angles: RealArray, xp: ArrayNamespace) -> RealArray:
+        axis = xp.stack([xp.sin(angles[..., 1]) * xp.cos(angles[..., 2]),
+                         xp.sin(angles[..., 1]) * xp.sin(angles[..., 2]),
+                         xp.cos(angles[..., 1])], axis=-1)
+        skew = self.skew_symmetric(axis, xp)
+        I = 1.0 * xp.broadcast_to(xp.identity(skew.shape[-1]), skew.shape)
+        S = xp.sin(angles[..., 0])[..., None, None]
+        C = xp.cos(angles[..., 0])[..., None, None]
+        return I + S * skew + (1.0 - C) * (skew @ skew)
 
     @pytest.fixture
     def xtal(self, int_state: cbc.jax.InternalState) -> cbc.jax.XtalState:
@@ -26,11 +36,11 @@ class TestCBDSetup():
 
     @pytest.fixture
     def ormatrix(self, xtal: cbc.jax.XtalState) -> cbc.jax.RotationState:
-        return xtal.orientation_matrix()
+        return xtal.orientation_matrix
 
     @pytest.fixture
     def cell(self, xtal: cbc.jax.XtalState) -> cbc.jax.XtalCell:
-        return xtal.lattice_constants()
+        return xtal.unit_cell
 
     @pytest.fixture(params=[0.3,])
     def q_abs(self, request: pytest.FixtureRequest) -> float:
@@ -44,7 +54,7 @@ class TestCBDSetup():
     def miller(self, key: KeyArray, q_abs: float, num_points: int, model: TestModel,
                int_state: cbc.jax.InternalState) -> cbc.jax.Miller:
         miller = model.hkl_in_aperture(q_abs, int_state)
-        return miller.filter(random.choice(key, miller.hkl.shape[0], (num_points,)))
+        return miller[random.choice(key, miller.hkl.shape[0], (num_points,))]
 
     @pytest.fixture
     def rlp(self, miller: cbc.jax.Miller, model: TestModel,
@@ -62,10 +72,10 @@ class TestCBDSetup():
         return model.kout_to_points(laue, int_state)
 
     def text_xtal_to_cell(self, xtal: cbc.jax.XtalState, ormatrix: cbc.jax.RotationState,
-                          cell: cbc.jax.XtalCell):
+                          cell: cbc.jax.XtalCell, xp: ArrayNamespace):
         basis = cell.to_basis()
-        check_close(jnp.linalg.det(ormatrix.matrix), jnp.array(1.0))
-        check_close(cbc.jax.Rotation().apply(basis, ormatrix).basis, xtal.basis)
+        check_close(xp.linalg.det(ormatrix.matrix), xp.array(1.0))
+        check_close(cbc.jax.Rotation()(basis.basis, ormatrix), xtal.basis)
 
     def test_xtal_to_spherical(self, xtal: cbc.jax.XtalState):
         r, theta, phi = xtal.to_spherical()
@@ -76,27 +86,28 @@ class TestCBDSetup():
         check_close(xtal.basis, xtal.reciprocate().reciprocate().basis)
 
     def test_cell_to_xtal(self, cell: cbc.jax.XtalCell):
-        new_cell = cell.to_basis().lattice_constants()
+        new_cell = cell.to_basis().unit_cell
         check_close(cell.angles, new_cell.angles)
         check_close(cell.lengths, new_cell.lengths)
 
     def test_hkl_and_q(self, miller: cbc.jax.Miller, rlp: cbc.jax.MillerWithRLP,
-                       model: TestModel, int_state: cbc.jax.InternalState):
+                       model: TestModel, int_state: cbc.jax.InternalState,
+                       xp: ArrayNamespace):
         rlp = model.xtal.q_to_hkl(rlp, int_state.xtal)
-        assert np.all(rlp.hkl_indices == miller.hkl_indices)
+        assert xp.all(rlp.hkl_indices == miller.hkl_indices)
 
     def test_laue(self, laue: cbc.jax.LaueVectors, model: TestModel,
-                  int_state: cbc.jax.InternalState):
-        check_close(jnp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
+                  int_state: cbc.jax.InternalState, xp: ArrayNamespace):
+        check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
         check_close(laue.kin, model.lens.project_to_pupil(laue.kin, int_state.lens))
 
     def test_points_and_kout(self, laue: cbc.jax.LaueVectors, points: cbc.jax.CBDPoints,
                              model: TestModel, int_state: cbc.jax.InternalState):
         check_close(model.points_to_kout(points, int_state).kout, laue.kout)
 
-    def test_rotation_to_tilt(self, ormatrix: cbc.jax.RotationState):
+    def test_rotation_to_tilt(self, ormatrix: cbc.jax.RotationState, xp: ArrayNamespace):
         tilt = ormatrix.to_tilt()
-        check_close(tilt.to_rotation().matrix, self.rodriguez_formula(tilt.angles))
+        check_close(tilt.to_rotation().matrix, self.rodriguez_formula(tilt.angles, xp))
         check_close(ormatrix.matrix, tilt.to_rotation().matrix)
 
     def test_rotation_to_tilt_over_axis(self, ormatrix: cbc.jax.RotationState):

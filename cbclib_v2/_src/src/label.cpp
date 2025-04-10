@@ -22,7 +22,6 @@ Regions labelise(InputIt first, InputIt last, array<bool> && mask, const Structu
     return Regions{std::move(regions)};
 }
 
-template <typename T>
 auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::optional<std::vector<PointsSet>> seeds,
            std::optional<std::array<long, 2>> ax, unsigned threads)
 {
@@ -71,7 +70,7 @@ auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::option
             #pragma omp for schedule(static) nowait
             for (size_t i = 0; i < repeats; i++)
             {
-                rectangle_range<Point<long>> range {Point<size_t>{marr.shape(axes[0]), marr.shape(axes[1])}};
+                rectangle_range<Point<long>, true> range {Point<size_t>{marr.shape(axes[0]), marr.shape(axes[1])}};
                 buffer.emplace_back(labelise(range.begin(), range.end(), marr.slice_back(i, axes.size()), structure, npts));
             }
         }
@@ -235,6 +234,15 @@ PYBIND11_MODULE(label, m)
         }), py::arg("x"), py::arg("y"))
         .def_property("x", [](const PointsSet & points){return detail::get_x(points);}, nullptr)
         .def_property("y", [](const PointsSet & points){return detail::get_y(points);}, nullptr)
+        .def("__contains__", [](const PointsSet & points, std::array<long, 2> point)
+        {
+            return points->contains(Point<long>{point});
+        })
+        .def("__iter__", [](const PointsSet & points)
+        {
+            return py::make_iterator(make_python_iterator(points.begin()), make_python_iterator(points.end()));
+        }, py::keep_alive<0, 1>())
+        .def("__len__", [](const PointsSet & points){return points.size();})
         .def("__repr__", &PointsSet::info);
 
     py::class_<Structure>(m, "Structure")
@@ -243,6 +251,11 @@ PYBIND11_MODULE(label, m)
         .def_readonly("rank", &Structure::rank)
         .def_property("x", [](const Structure & srt){return detail::get_x(srt);}, nullptr)
         .def_property("y", [](const Structure & srt){return detail::get_y(srt);}, nullptr)
+        .def("__iter__", [](const Structure & srt)
+        {
+            return py::make_iterator(make_python_iterator(srt.begin()), make_python_iterator(srt.end()));
+        }, py::keep_alive<0, 1>())
+        .def("__len__", [](const Structure & srt){return srt.size();})
         .def("__repr__", &Structure::info);
 
     py::class_<Regions>(m, "Regions")
@@ -331,8 +344,7 @@ PYBIND11_MODULE(label, m)
     declare_pixels<float>(m, "Float");
     declare_pixels<double>(m, "Double");
 
-    m.def("label", &label<float>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("seeds") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("label", &label<double>, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("seeds") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("label", &label, py::arg("mask"), py::arg("structure"), py::arg("npts") = 1, py::arg("seeds") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
 
     auto total_mass = []<typename T>(const Pixels<T> & region)
     {

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 from ..annotations import (CPPIntSequence, Line, NDBoolArray, NDIntArray, NDRealArray,
                            RealSequence)
 from .label import Structure
@@ -24,6 +24,12 @@ class Peaks:
     y : List[int]
 
     def __init__(self, x: CPPIntSequence, y: CPPIntSequence):
+        ...
+
+    def __iter__(self) -> Iterator[List[int]]:
+        ...
+
+    def __len__(self) -> int:
         ...
 
     def filter(self, data: NDRealArray, mask: NDBoolArray, structure: Structure,

@@ -75,6 +75,7 @@ private:
 
     struct TangentError : public BaseError
     {
+        using BaseError::error;
         T length;
 
         TangentError() = default;
@@ -84,24 +85,38 @@ private:
         TangentError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
             BaseError(std::move(derr), point, origin), length(amplitude(derr)) {}
 
-        T error_at() const {return std::max(std::max(-this->error, this->error - length * length), T());}
+        T error_at() const {return std::max(std::max(-error, error - length * length), T());}
     };
 
     struct NormalError : public BaseError
     {
+        using BaseError::derror;
+
         NormalError() = default;
 
         NormalError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
             BaseError(std::move(derr), point, origin) {}
 
-        //  Increment x if:
-        //      | e(x + sx, y + sy) | < | e(x, y + sy) | or | e(x + sx, y) | < | e(x, y + sy) |
-        bool is_next(const PointND<long, N> & step, size_t axis) const
+        using BaseError::error_at;
+
+        // We need to choose one out of three option:
+        //      1) increment only x, error e_x
+        //      2) increment only y, error e_y
+        //      3) increment both, error e_xy
+        // We need to choose an option with the minimal absolute error
+        std::pair<bool, bool> is_next(const PointND<long, N> & step, size_t axis1, size_t axis2) const
         {
-            auto e_xy = this->error_at(step);
-            auto e_y = e_xy - step[axis] * this->derror[axis];
-            auto e_x = this->error_at() + step[axis] * this->derror[axis];
-            return std::abs(e_xy) < std::abs(e_y) || std::abs(e_x) < std::abs(e_y);
+            auto e_x = error_at() + step[axis1] * derror[axis1];
+            auto e_y = error_at() + step[axis2] * derror[axis2];
+            auto e_xy = e_x + step[axis2] * derror[axis2];
+
+            if (std::abs(e_y) < std::abs(e_x))
+            {
+                if (std::abs(e_xy) < std::abs(e_y)) return std::make_pair(true, true);
+                return std::make_pair(false, true);
+            }
+            if (std::abs(e_xy) < std::abs(e_x)) return std::make_pair(true, true);
+            return std::make_pair(true, false);
         }
     };
 
@@ -200,10 +215,12 @@ public:
 
             for (size_t i = 0; i < NumPairs; i++)
             {
-                if (step[axes().pairs()[i].first] && step[axes().pairs()[i].second])
+                auto [axis1, axis2] = axes().pairs(i);
+                if (step[axis1] && step[axis2])
                 {
-                    next[axes().pairs()[i].first]  &= nerrors[i].is_next(step, axes().pairs()[i].first);
-                    next[axes().pairs()[i].second] &= nerrors[i].is_next(step, axes().pairs()[i].second);
+                    auto [first, second] = nerrors[i].is_next(step, axis1, axis2);
+                    next[axis1] &= first;
+                    next[axis2] &= second;
                 }
             }
         }
@@ -316,7 +333,7 @@ private:
     std::array<NormalError, NumPairs> normal_errors(const PointND<long, N> & point) const
     {
         std::array<NormalError, NumPairs> errors;
-        for (size_t i = 0; i < NumPairs; i++) errors[i] = NormalError(normal(iterator::axes().pairs()[i]), point, pt0());
+        for (size_t i = 0; i < NumPairs; i++) errors[i] = NormalError(normal(iterator::axes().pairs(i)), point, pt0());
         return errors;
     }
 
@@ -333,20 +350,25 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_2d(const LineND<T, 2> & line, T width, Func && func)
 {
+    // Initialize with a line and an offset from the start and end points
     BresenhamPlotter<T, 2, true> p {line, long(std::ceil(width) + 1)};
 
+    // Walking along the central line
     for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
+        // We fill the orthogonal plane if we stepped the longest axis
         if (p.is_next(iter, p.axis()))
         {
             std::forward<Func>(func)(*iter, p.error(iter, width));
 
+            // Filling the first half
             for (auto iter_x = std::next(p.collapse(iter, p.axis()));
                  p.normal_error(iter_x) < width * width; ++iter_x)
             {
                 std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
             }
 
+            // Filling the second half
             for (auto iter_x = std::next(p.collapse(iter, p.axis()).flip(p.axis(1)));
                  p.normal_error(iter_x) < width * width; ++iter_x)
             {
@@ -365,22 +387,28 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
 {
-    BresenhamPlotter<T, 3, true> p {line, long(std::ceil(width))};
+    // Initialize with a line and an offset from the start and end points
+    BresenhamPlotter<T, 3, true> p {line, long(std::ceil(width) + 1)};
 
+    // Walking along the central line
     for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
+        // We fill the orthogonal plane if we stepped the longest axis
         if (p.is_next(iter, p.axis()))
         {
             std::forward<Func>(func)(*iter, p.error(iter, width));
 
+            // The orthogonal plane is divided in four quadrants
             for (size_t i = 0; i < 4; i++)
             {
+                // The flipping mask of the size N
                 std::array<bool, 3> flip {};
                 flip[p.axis(1)] |= i & 1;
                 flip[p.axis(2)] |= i >> 1;
 
+                size_t counter = 0;
                 for (auto iter_xy = p.collapse(iter, p.axis()).flip(flip).move(p.axis(1 + ((i & 1) ^ (i >> 1))));
-                     p.normal_error(iter_xy) < width * width; ++iter_xy)
+                     p.normal_error(iter_xy) < width * width && counter < 100; ++iter_xy, ++counter)
                 {
                     std::forward<Func>(func)(*iter_xy, p.error(iter_xy, width));
 

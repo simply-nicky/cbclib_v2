@@ -79,7 +79,7 @@ template <template <typename ...> class R=std::vector, typename Top, typename Su
 R<typename Sub::value_type> flatten(const Top & all)
 {
     R<typename Sub::value_type> accum;
-    for(auto & sub : all) accum.insert(std::end(accum), std::begin(sub), std::end(sub));
+    for (auto & sub : all) accum.insert(std::end(accum), std::begin(sub), std::end(sub));
     return accum;
 }
 

@@ -1,10 +1,10 @@
 from typing import List, Optional, TypeVar, Union
 from dataclasses import fields
-import jax.numpy as jnp
-from .geometry import safe_divide
+from .cbc_setup import TiltOverAxisState
+from .geometry import safe_divide, kxy_to_k
 from .state import State
 from .._src.annotations import IntArray, RealArray, Shape
-from .._src.data_container import ArrayContainer
+from .._src.data_container import ArrayContainer, array_namespace
 from .._src.streaks import BaseLines
 
 D = TypeVar("D", bound="BaseData")
@@ -42,16 +42,18 @@ class Patterns(BaseData, BaseLines):
 
     @classmethod
     def from_points(cls, points: AnyPoints) -> 'Patterns':
-        lines = jnp.reshape(points.points, points.shape[:-1] + (4,))
-        index = jnp.reshape(points.index, lines.shape[:-1])
+        xp = array_namespace(points)
+        lines = xp.reshape(points.points, points.shape[:-1] + (4,))
+        index = xp.reshape(points.index, lines.shape[:-1])
         extra = {attr: getattr(points, attr) for attr in cls.extra_attributes()
                  if hasattr(points, attr)}
         return cls(index=index, lines=lines, **extra)
 
     @property
     def length(self) -> RealArray:
-        return jnp.sqrt((self.lines[..., 2] - self.lines[..., 0])**2 +
-                        (self.lines[..., 3] - self.lines[..., 1])**2)
+        xp = self.__array_namespace__()
+        return xp.sqrt((self.lines[..., 2] - self.lines[..., 0])**2 +
+                       (self.lines[..., 3] - self.lines[..., 1])**2)
 
     @property
     def pt0(self) -> 'Points':
@@ -66,7 +68,8 @@ class Patterns(BaseData, BaseLines):
         return Points(points=pts, index=self.index)
 
     def to_points(self) -> 'Points':
-        points = jnp.reshape(self.lines, self.shape + (2, 2))
+        xp = self.__array_namespace__()
+        points = xp.reshape(self.lines, self.shape + (2, 2))
         return Points(index=self.index[..., None], points=points)
 
 class Points(BaseData):
@@ -88,13 +91,86 @@ class Points(BaseData):
 class PointsWithK(Points):
     kout    : RealArray
 
+class UCA(BaseData):
+    index       : IntArray
+    streak_id   : IntArray
+    kout        : RealArray
+    kxy_min     : RealArray
+    kxy_max     : RealArray
+
+    @property
+    def min_resolution(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.min(xp.sum(self.q_corners**2, axis=-1), axis=0)
+
+    @property
+    def max_resolution(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.max(xp.sum(self.q_corners**2, axis=-1), axis=0)
+
+    @property
+    def q_min(self) -> RealArray:
+        return self.kout - kxy_to_k(self.kxy_min, self.__namespace__)
+
+    @property
+    def q_max(self) -> RealArray:
+        return self.kout - kxy_to_k(self.kxy_max, self.__namespace__)
+
+    @property
+    def q_corners(self) -> RealArray:
+        xp = self.__array_namespace__()
+        kxy = xp.stack((self.kxy_min, self.kxy_max))
+        kxy = xp.concatenate((kxy, xp.stack((kxy[..., 0], kxy[::-1, ..., 1]), axis=-1)))
+        return self.kout - kxy_to_k(kxy, xp)
+
+class CircleState(BaseData):
+    index   : IntArray
+    center  : RealArray
+    axis1   : RealArray
+    axis2   : RealArray
+    radius  : RealArray
+
+class Rotograms(BaseData):
+    index       : IntArray
+    streak_id   : IntArray
+    points      : RealArray
+
+    @classmethod
+    def from_tilts(cls, tilts: TiltOverAxisState, index: IntArray, streak_id: IntArray
+                   ) -> 'Rotograms':
+        return cls(index, streak_id, tilts.axis * tilts.angles[..., None])
+
+    @property
+    def angles(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.sqrt(xp.sum(self.points**2, axis=-1))
+
+    @property
+    def axis(self) -> RealArray:
+        return self.points / self.angles[..., None]
+
+    @property
+    def lines(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.concatenate((self.points[1:], self.points[:-1]), axis=-1)
+
+    @property
+    def num_streaks(self) -> int:
+        xp = self.__array_namespace__()
+        return int(xp.max(self.streak_id)) + 1
+
+    @property
+    def tilts(self) -> TiltOverAxisState:
+        return TiltOverAxisState(self.angles, self.axis)
+
 class Miller(BaseData):
     hkl     : Union[IntArray, RealArray]
     index   : IntArray
 
     @property
     def hkl_indices(self) -> IntArray:
-        return jnp.array(jnp.round(self.hkl), dtype=int)
+        xp = self.__array_namespace__()
+        return xp.array(xp.round(self.hkl), dtype=int)
 
     @property
     def h(self) -> IntArray:
@@ -109,27 +185,31 @@ class Miller(BaseData):
         return self.hkl_indices[..., 2]
 
     def collapse(self) -> 'Miller':
-        index = jnp.broadcast_to(self.index, self.hkl.shape[:-1])
-        idxs = jnp.concatenate((self.hkl, index[..., None]), axis=-1)
-        idxs = jnp.unique(jnp.reshape(idxs, (-1,) + idxs.shape[-1:]), axis=0)
+        xp = self.__array_namespace__()
+        index = xp.broadcast_to(self.index, self.hkl.shape[:-1])
+        idxs = xp.concatenate((self.hkl, index[..., None]), axis=-1)
+        idxs = xp.unique(xp.reshape(idxs, (-1,) + idxs.shape[-1:]), axis=0)
         return self.replace(hkl=idxs[..., :3], index=idxs[..., 3])
 
     def offset(self, offsets: IntArray) -> 'Miller':
+        xp = self.__array_namespace__()
         hkl = self.hkl
         shape = offsets.shape[:-1] + hkl.shape
-        hkl = jnp.reshape(jnp.reshape(hkl, (-1, 3)) + offsets[..., None, :], shape)
+        hkl = xp.reshape(xp.reshape(hkl, (-1, 3)) + offsets[..., None, :], shape)
         return self.replace(hkl=hkl)
 
 class RLP(BaseData):
     q       : RealArray
     index   : IntArray
 
+    @property
     def source_points(self) -> RealArray:
-        rec_abs = jnp.sqrt(jnp.sum(self.q**2, axis=-1))
-        theta = jnp.arccos(0.5 * rec_abs) - jnp.arccos(safe_divide(-self.q[..., 2], rec_abs))
-        phi = jnp.arctan2(self.q[..., 1], self.q[..., 0])
-        return jnp.stack((jnp.sin(theta) * jnp.cos(phi), jnp.sin(theta) * jnp.sin(phi),
-                          jnp.cos(theta)), axis=-1)
+        xp = self.__array_namespace__()
+        rec_abs = xp.sqrt(xp.sum(self.q**2, axis=-1))
+        theta = xp.arccos(0.5 * rec_abs) - xp.arccos(safe_divide(-self.q[..., 2], rec_abs, xp))
+        phi = xp.arctan2(self.q[..., 1], self.q[..., 0])
+        return xp.stack((xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi),
+                         xp.cos(theta)), axis=-1)
 
 class MillerWithRLP(Miller, RLP):
     pass
@@ -138,14 +218,16 @@ class LaueVectors(MillerWithRLP):
     kin     : RealArray
     kout    : RealArray
 
-    def kin_to_source_line(self) -> RealArray:
-        q_mag = jnp.sum(self.q**2, axis=-1)
-        t = safe_divide(jnp.sum(self.kin * self.q, axis=-1), q_mag) + 0.5
+    @property
+    def source_line(self) -> RealArray:
+        xp = self.__array_namespace__()
+        q_mag = xp.sum(self.q**2, axis=-1)
+        t = safe_divide(xp.sum(self.kin * self.q, axis=-1), q_mag, xp) + 0.5
         kin = self.kin - t[..., None] * self.q
         tau = kin + 0.5 * self.q
-        tau_mag = jnp.sum(tau**2, axis=-1)
-        s = safe_divide(jnp.sum(kin**2, axis=-1) - 1.0,
-                        jnp.sum(kin * tau, axis=-1) + jnp.sqrt(tau_mag))
+        tau_mag = xp.sum(tau**2, axis=-1)
+        s = safe_divide(xp.sum(kin**2, axis=-1) - 1.0,
+                        xp.sum(kin * tau, axis=-1) + xp.sqrt(tau_mag), xp)
         return kin - s[..., None] * tau
 
 class CBDPoints(LaueVectors, Points):

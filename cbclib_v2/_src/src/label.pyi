@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterator, List, Optional, Union, overload
+from typing import Iterable, Iterator, List, Optional, Union, overload
 from ..annotations import CPPIntSequence, CPPRealSequence, NDRealArray, NDBoolArray
 
 class PointsSet:
@@ -7,6 +7,15 @@ class PointsSet:
     y : List[int]
 
     def __init__(self, x: CPPIntSequence, y: CPPIntSequence):
+        ...
+
+    def __contains__(self, point: Iterable[int]) -> bool:
+        ...
+
+    def __iter__(self) -> Iterator[List[int]]:
+        ...
+
+    def __len__(self) -> int:
         ...
 
 class Structure:
@@ -33,6 +42,12 @@ class Structure:
     y : List[int]
 
     def __init__(self, radius: int, rank: int):
+        ...
+
+    def __iter__(self) -> Iterator[List[int]]:
+        ...
+
+    def __len__(self) -> int:
         ...
 
 class Regions:

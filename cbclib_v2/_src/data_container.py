@@ -12,8 +12,8 @@ from typing import (Any, Callable, ClassVar, Dict, Iterator, List, Tuple, Type, 
                     get_args, get_origin, overload)
 import numpy as np
 import jax.numpy as jnp
-from .annotations import (Array, BoolArray, DataclassInstance, ExpandedType, Indices, NDArray,
-                          JaxArray, NDIntArray)
+from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, ExpandedType,
+                          Indices, JaxArray, JaxNumPy, NDArray, NumPy, NDIntArray)
 
 D = TypeVar("D", bound="DataContainer")
 
@@ -21,6 +21,22 @@ class DataContainer(DataclassInstance):
     """Abstract data container class based on :class:`dataclass`. Has :class:`dict` interface,
     and :func:`DataContainer.replace` to create a new obj with a set of data attributes replaced.
     """
+    def __post_init__(self):
+        self.__namespace__ = array_namespace(*self.contents().values())
+
+    def __array_namespace__(self) -> ArrayNamespace:
+        return self.__namespace__
+
+    def asjax(self: D) -> D:
+        data = {attr: jnp.asarray(val) for attr, val in self.contents().items()
+                if isinstance(val, np.ndarray)}
+        return self.replace(**data)
+
+    def asnumpy(self: D) -> D:
+        data = {attr: np.asarray(val) for attr, val in self.contents().items()
+                if isinstance(val, JaxArray)}
+        return self.replace(**data)
+
     def contents(self) -> Dict[str, Any]:
         """Return a list of the attributes stored in the container that are initialised.
 
@@ -50,10 +66,15 @@ class DataContainer(DataclassInstance):
         return {field.name: getattr(self, field.name) for field in fields(self)}
 
 class ArrayContainer(DataContainer):
-    def filter(self: D, idxs: Union[Indices, BoolArray]) -> D:
+    def __getitem__(self: D, idxs: Union[Indices, BoolArray]) -> D:
         data = {attr: None for attr in self.to_dict()}
         data = data | {attr: val[idxs] for attr, val in self.contents().items()}
         return self.replace(**data)
+
+def array_namespace(*arrays: Array | DataContainer | Any) -> ArrayNamespace:
+    namespaces = set(array.__array_namespace__() for array in arrays
+                     if isinstance(array, (JaxArray, np.ndarray, DataContainer)))
+    return JaxNumPy if JaxNumPy in namespaces else NumPy
 
 class BaseFormatter:
     aliases : ClassVar[Tuple[Type, ...]]

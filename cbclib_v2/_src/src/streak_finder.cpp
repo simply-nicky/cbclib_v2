@@ -325,6 +325,11 @@ PYBIND11_MODULE(streak_finder, m)
         }), py::arg("x"), py::arg("y"))
         .def_property("x", [](const Peaks & peaks){return detail::get_x(peaks);}, nullptr)
         .def_property("y", [](const Peaks & peaks){return detail::get_y(peaks);}, nullptr)
+        .def("__iter__", [](const Peaks & peaks)
+        {
+            return py::make_iterator(make_python_iterator(peaks.begin()), make_python_iterator(peaks.end()));
+        }, py::keep_alive<0, 1>())
+        .def("__len__", [](const Peaks & peaks){return peaks.size();})
         .def("filter", [](Peaks & peaks, py::array_t<float> data, py::array_t<bool> mask, Structure s, float vmin, size_t npts)
         {
             array<float> darr {data.request()};

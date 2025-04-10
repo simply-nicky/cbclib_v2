@@ -26,7 +26,7 @@ class BaseLines(ArrayContainer):
 
     def get_frames(self: L, frames: IntSequence) -> L:
         mask = np.any(self.index[..., None] == np.atleast_1d(frames), axis=-1)
-        return self.filter(np.asarray(mask, dtype=bool))
+        return self[np.asarray(mask, dtype=bool)]
 
     def to_lines(self, frames: Optional[IntSequence]=None,
                  width: Optional[RealSequence]=None) -> RealArray:
@@ -66,7 +66,7 @@ class Streaks(BaseLines):
         prod = np.sum(norm * r, axis=-1)[..., None]
         proj = r - prod * norm / np.sum(norm**2, axis=-1)[..., None]
         mask = np.sqrt(np.sum(proj**2, axis=-1)) / np.sqrt(np.sum(r**2, axis=-1)) < threshold
-        return self.filter(mask)
+        return self[mask]
 
     def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
                      num_threads: int=1) -> pd.DataFrame:

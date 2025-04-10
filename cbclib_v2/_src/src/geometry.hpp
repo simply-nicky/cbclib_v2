@@ -390,7 +390,7 @@ public:
     UniquePairs(const UniquePairs &)        = delete;
     void operator=(const UniquePairs &)     = delete;
 
-    const std::array<std::pair<size_t, size_t>, NumPairs> & pairs() const {return m_pairs;}
+    const std::pair<size_t, size_t> & pairs(size_t index) const {return m_pairs[index];}
     const std::array<size_t, N - 1> & indices(size_t axis) const {return m_lookup[axis];}
 
 private:
