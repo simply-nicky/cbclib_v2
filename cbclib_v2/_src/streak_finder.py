@@ -4,7 +4,7 @@ from typing import List, Union
 import numpy as np
 from .data_container import DataContainer
 from .annotations import Indices, NDBoolArray, NDRealArray, Shape
-from .src.label import Structure
+from .src.label import Structure2D
 from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, StreakFinder,
                                 StreakFinderResultDouble, StreakFinderResultFloat, Peaks)
 from .src.streak_finder import StreakDouble, StreakFloat
@@ -13,17 +13,17 @@ Streak = Union[StreakDouble, StreakFloat]
 StreakFinderResult = Union[StreakFinderResultDouble, StreakFinderResultFloat]
 
 class PatternStreakFinder:
-    def __init__(self, data: NDRealArray, mask: NDBoolArray, structure: Structure,
+    def __init__(self, data: NDRealArray, mask: NDBoolArray, structure: Structure2D,
                  min_size: int, lookahead: int=0, nfa: int=0):
         self.finder = StreakFinder(structure, min_size, lookahead, nfa)
         self.mask, self.data = mask, data
 
     @property
-    def structure(self) -> Structure:
+    def structure(self) -> Structure2D:
         return self.finder.structure
 
     def detect_peaks(self, vmin: float, npts: int,
-                     connectivity: Structure=Structure(1, 1)) -> Peaks:
+                     connectivity: Structure2D=Structure2D(1, 1)) -> Peaks:
         peaks = detect_peaks(self.data, self.mask, self.finder.structure.rank, vmin)
         return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts)[0]
 
@@ -33,7 +33,7 @@ class PatternStreakFinder:
 @dataclass
 class PatternsStreakFinder(DataContainer):
     data        : NDRealArray
-    structure   : Structure
+    structure   : Structure2D
     mask        : NDBoolArray = field(default_factory=lambda: np.array([], dtype=bool))
     num_threads : int = field(default_factory=cpu_count)
 
@@ -43,7 +43,7 @@ class PatternsStreakFinder(DataContainer):
         if self.data.shape[-2:] != self.mask.shape:
             self.mask = np.ones(self.data.shape[-2:], dtype=bool)
 
-    def get_frames(self, idxs: Indices) -> 'PatternsStreakFinder':
+    def __getitem__(self, idxs: Indices) -> 'PatternsStreakFinder':
         return self.replace(data=self.data[idxs])
 
     @property
@@ -51,7 +51,7 @@ class PatternsStreakFinder(DataContainer):
         return self.data.shape
 
     def detect_peaks(self, vmin: float, npts: int,
-                     connectivity: Structure=Structure(1, 1)) -> List[Peaks]:
+                     connectivity: Structure2D=Structure2D(1, 1)) -> List[Peaks]:
         """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
         ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
         between peaks is ``2 * structure.radius``.

@@ -5,18 +5,15 @@
 
 namespace cbclib {
 
-template <typename T>
-using table_t = std::map<std::pair<long, long>, T>;
-
 namespace detail {
 
-template <typename T>
+template <class... Types>
 class ImageBuffer : public shape_handler
 {
 public:
-    using value_type = T;
-    using iterator = typename std::vector<T>::iterator;
-    using const_iterator = typename std::vector<T>::const_iterator;
+    using value_type = std::tuple<size_t, Types...>;
+    using iterator = typename std::vector<value_type>::iterator;
+    using const_iterator = typename std::vector<value_type>::const_iterator;
 
     ImageBuffer() : shape_handler(), data() {}
     ImageBuffer(ShapeContainer shape) : shape_handler(std::move(shape)), data() {}
@@ -26,16 +23,14 @@ public:
     iterator end() {return data.end();}
     const_iterator end() const {return data.begin();}
 
-    template <typename Container, class... Args, typename =
-        std::enable_if_t<std::is_integral_v<typename Container::value_type>>
-    >
-    void emplace_back(const Container & coord, Args &&... args)
+    template <typename I, size_t N, class... Args, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void emplace_back(const PointND<I, N> & pt, Args &&... args)
     {
-        data.emplace_back(index_at(coord), std::forward<Args>(args)...);
+        data.emplace_back(index_at(pt.rbegin(), pt.rend()), std::forward<Args>(args)...);
     }
 
 private:
-    std::vector<T> data;
+    std::vector<value_type> data;
 };
 
 }

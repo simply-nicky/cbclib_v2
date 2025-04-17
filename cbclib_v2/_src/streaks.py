@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple, TypeVar
+from typing import Iterator, Optional, Tuple, TypeVar
 import numpy as np
 import pandas as pd
 from .annotations import IntArray, IntSequence, RealArray, RealSequence, Shape
-from .data_container import ArrayContainer
-from .src.bresenham import draw_line_image, draw_line_mask, draw_line_table
+from .data_container import ArrayContainer, ArrayNamespace, NumPy, to_list
+from .src.bresenham import draw_lines, write_lines
 
 L = TypeVar("L", bound="BaseLines")
 
@@ -24,12 +24,24 @@ class BaseLines(ArrayContainer):
     def y(self) -> RealArray:
         return self.lines[..., 1::2]
 
-    def get_frames(self: L, frames: IntSequence) -> L:
-        mask = np.any(self.index[..., None] == np.atleast_1d(frames), axis=-1)
-        return self[np.asarray(mask, dtype=bool)]
+    def __iter__(self: L) -> Iterator[L]:
+        xp = self.__array_namespace__()
+        indices = xp.unique(self.index)
+        for index in indices:
+            yield self[self.index == index]
 
-    def to_lines(self, frames: Optional[IntSequence]=None,
-                 width: Optional[RealSequence]=None) -> RealArray:
+    def __len__(self) -> int:
+        xp = self.__array_namespace__()
+        return xp.unique(self.index).size
+
+    def select(self: L, indices: IntSequence) -> L:
+        xp = self.__array_namespace__()
+        patterns = list(iter(self))
+        result = [patterns[index].replace(index=xp.full(patterns[index].index.size, new_index))
+                  for new_index, index in enumerate(to_list(indices))]
+        return type(self).concatenate(*result)
+
+    def to_lines(self, width: Optional[RealSequence]=None) -> RealArray:
         """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
 
         * `[x0, y0]`, `[x1, y1]` : The coordinates of the line's ends.
@@ -38,14 +50,13 @@ class BaseLines(ArrayContainer):
         Returns:
             An array of line parameters.
         """
+        xp = self.__array_namespace__()
         if width is None:
             lines = self.lines
         else:
-            widths = np.broadcast_to(np.asarray(width), self.shape)
-            lines = np.concatenate((self.lines, widths[..., None]), axis=-1)
+            widths = xp.broadcast_to(xp.asarray(width), self.shape)
+            lines = xp.concatenate((self.lines, widths[..., None]), axis=-1)
 
-        if frames is not None:
-            lines = np.concat([lines[self.index == frame] for frame in np.atleast_1d(frames)])
         return lines
 
 @dataclass
@@ -54,18 +65,21 @@ class Streaks(BaseLines):
     lines       : RealArray
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame) -> 'Streaks':
-        lines = np.stack((df['x_0'], df['y_0'], df['x_1'], df['y_1']), axis=-1)
-        return cls(index=df['index'].to_numpy(), lines=lines)
+    def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=NumPy) -> 'Streaks':
+        lines = xp.stack((df['x_0'].to_numpy(), df['y_0'].to_numpy(),
+                          df['x_1'].to_numpy(), df['y_1'].to_numpy()), axis=-1)
+        return cls(index=xp.asarray(df['index'].to_numpy()),
+                   lines=xp.asarray(lines))
 
     def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float) -> 'Streaks':
-        centers = np.mean(self.lines.reshape(-1, 2, 2), axis=1)
-        norm = np.stack([self.lines[:, 3] - self.lines[:, 1],
+        xp = self.__array_namespace__()
+        centers = xp.mean(self.lines.reshape(-1, 2, 2), axis=1)
+        norm = xp.stack([self.lines[:, 3] - self.lines[:, 1],
                          self.lines[:, 0] - self.lines[:, 2]], axis=-1)
-        r = centers - np.asarray([x_ctr, y_ctr])
-        prod = np.sum(norm * r, axis=-1)[..., None]
-        proj = r - prod * norm / np.sum(norm**2, axis=-1)[..., None]
-        mask = np.sqrt(np.sum(proj**2, axis=-1)) / np.sqrt(np.sum(r**2, axis=-1)) < threshold
+        r = centers - xp.asarray([x_ctr, y_ctr])
+        prod = xp.sum(norm * r, axis=-1)[..., None]
+        proj = r - prod * norm / xp.sum(norm**2, axis=-1)[..., None]
+        mask = xp.sqrt(xp.sum(proj**2, axis=-1)) / xp.sqrt(xp.sum(r**2, axis=-1)) < threshold
         return self[mask]
 
     def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
@@ -87,16 +101,14 @@ class Streaks(BaseLines):
         Returns:
             A pattern in dictionary format.
         """
-        table = draw_line_table(lines=self.to_lines(width=width), shape=shape, idxs=self.index,
-                                kernel=kernel, num_threads=num_threads)
+        table = write_lines(lines=self.to_lines(width=width), shape=shape, idxs=self.index,
+                            kernel=kernel, num_threads=num_threads)
         ids, idxs = np.array(list(table)).T
         normalised_shape = (np.prod(shape[:-2], dtype=int),) + shape[-2:]
         frames, y, x = np.unravel_index(idxs, normalised_shape)
         vals = np.array(list(table.values()))
 
         data = {'index': ids, 'frames': frames, 'y': y, 'x': x, 'value': vals}
-        # data = data | {attr: getattr(self, attr)[ids] for attr in self.extra_attributes()}
-
         return pd.DataFrame(data)
 
     def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian',
@@ -118,31 +130,8 @@ class Streaks(BaseLines):
         Returns:
             A pattern in :class:`numpy.ndarray` format.
         """
-        return draw_line_image(self.to_lines(width=width), shape=shape, idxs=self.index,
-                               kernel=kernel, num_threads=num_threads)
-
-    def pattern_mask(self, width: float, shape: Tuple[int, int], max_val: int=1,
-                     kernel: str='rectangular', num_threads: int=1) -> IntArray:
-        """Draw a pattern mask.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            max_val : Mask maximal value.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern mask.
-        """
-        return draw_line_mask(self.to_lines(width=width), shape=shape, idxs=self.index,
-                              max_val=max_val, kernel=kernel, num_threads=num_threads)
+        return draw_lines(self.to_lines(width=width), shape=shape, idxs=self.index,
+                          kernel=kernel, num_threads=num_threads)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Export a streaks container into :class:`pandas.DataFrame`.

@@ -1,6 +1,6 @@
 from dataclasses import Field
-from typing import (Any, Callable, ClassVar, Dict, Generic, List, Literal, NamedTuple, Optional,
-                    Protocol, Sequence, Set, Tuple, Type, TypeVar, Union, cast, overload, runtime_checkable)
+from typing import (Any, Callable, ClassVar, Dict, Generic, List, Literal, NamedTuple, Optional, Protocol,
+                    Sequence, Set, Tuple, Type, TypeVar, Union, cast, overload, runtime_checkable)
 import numpy as np
 import numpy.typing as npt
 from jax import Array as JaxArray, Device
@@ -35,6 +35,11 @@ DTypeLike = Union[
     SupportsDType,  # like xp.float32, xp.int32
 ]
 
+Attribute = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
+NoData = Literal['frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
+NoSNR = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'std', 'whitefield']
+NoWF = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'std']
+
 Axis = Union[int, Sequence[int], None]
 Scalar = Union[int, float, np.bool_, np.number, bool, complex]
 DimSize = Union[int, Any]
@@ -56,7 +61,7 @@ NDComplexArray = npt.NDArray[Union[np.floating[Any], np.complexfloating[Any, Any
 NDIntArray = npt.NDArray[np.integer[Any]]
 NDRealArray = npt.NDArray[np.floating[Any]]
 
-ArrayLike = Union[JaxArray, NDArray, Scalar]
+ArrayLike = Union[JaxArray, NDArray, Scalar, Sequence]
 Array = Union[JaxArray, NDArray]
 BoolArray = Union[JaxBoolArray, NDBoolArray]
 ComplexArray = Union[JaxComplexArray, NDComplexArray]
@@ -70,13 +75,10 @@ Indices = Union[int, slice, IntArray, Sequence[int], Tuple[IntArray, ...]]
 AnyFloat = Union[float, np.floating[Any], RealArray]
 
 IntSequence = Union[int, np.integer[Any], Sequence[int], IntArray]
-CPPIntSequence = Union[Sequence[int], IntArray]
 RealSequence = Union[float, np.floating[Any], Sequence[float], RealArray]
-CPPRealSequence = Union[Sequence[float], RealArray]
 ROI = Union[List[int], Tuple[int, int, int, int], IntArray]
 
 PyTree = Any
-Table = Dict[Tuple[int, int], float]
 ExpandedType = Union[Type, Tuple[Type, List]]
 
 Norm = Literal['backward', 'forward', 'ortho']
@@ -222,8 +224,10 @@ class ArrayNamespace(Protocol):
     complex64 = csingle = float
     complex128 = cdouble = float
 
+    inf     : float
     nan     : float
     pi      : float
+
     linalg  : LinalgNamespace
 
     def abs(self, x: ArrayLike, /) -> Array:
@@ -860,6 +864,45 @@ class ArrayNamespace(Protocol):
             >>> xp.argmin(x, axis=1, keepdims=True)
             Array([[0],
                    [2]], dtype=int32)
+        """
+        ...
+
+    def atleast_1d(self, *arys: ArrayLike) -> Array | list[Array]:
+        """Convert inputs to arrays with at least 1 dimension.
+
+        Array API implementation of :func:`numpy.atleast_1d`.
+
+        Args:
+            zero or more arraylike arguments.
+
+        Returns:
+            an array or list of arrays corresponding to the input values. Arrays
+            of shape ``()`` are converted to shape ``(1,)``, and arrays with other
+            shapes are returned unchanged.
+
+        See also:
+            - :func:`asarray`
+            - :func:`atleast_2d`
+            - :func:`atleast_3d`
+
+        Examples:
+            Scalar arguments are converted to 1D, length-1 arrays:
+
+            >>> x = xp.float32(1.0)
+            >>> xp.atleast_1d(x)
+            Array([1.], dtype=float32)
+
+            Higher dimensional inputs are returned unchanged:
+
+            >>> y = xp.arange(4)
+            >>> xp.atleast_1d(y)
+            Array([0, 1, 2, 3], dtype=int32)
+
+            Multiple arguments can be passed to the function at once, in which
+            case a list of results is returned:
+
+            >>> xp.atleast_1d(x, y)
+            [Array([1.], dtype=float32), Array([0, 1, 2, 3], dtype=int32)]
         """
         ...
 
@@ -2645,8 +2688,8 @@ class ArrayNamespace(Protocol):
                         ) -> Array:
         """Take elements from an array.
 
-        Array API implementation of :func:`numpy.take_along_axis`. Array API's behavior differs from NumPy
-        in the case of out-of-bound indices; see the ``mode`` parameter below.
+        Array API implementation of :func:`numpy.take_along_axis`. Array API's behavior differs
+        from NumPy in the case of out-of-bound indices; see the ``mode`` parameter below.
 
         Args:
             a: array from which to take values.

@@ -71,12 +71,12 @@ def field(*, default: Any=MISSING, default_factory: Any=MISSING, random: Any=MIS
                    static=static, init=init, repr=repr, hash=hash, compare=compare,
                    metadata=metadata, kw_only=kw_only)
 
+S = TypeVar('S', bound='BaseState')
+
 @dataclass_transform(field_specifiers=(field,))
 class BaseState(DataContainer):
     __dynamic_fields__      : ClassVar[Dict[str, DynamicField]]
     __static_fields__       : ClassVar[Dict[str, Field]]
-
-S = TypeVar('S', bound='State')
 
 def dynamic_fields(class_or_instance: Type[BaseState] | BaseState) -> Tuple[DynamicField, ...]:
     return tuple(class_or_instance.__dynamic_fields__.values())
@@ -90,6 +90,8 @@ class State(BaseState):
                           frozen: bool=False, match_args: bool=True, kw_only: bool=False,
                           slots: bool=False):
         super().__init_subclass__()
+
+        cls._process_properties()
 
         dataclasses.dataclass(
             init=init, repr=repr, eq=eq, order=order, unsafe_hash=unsafe_hash,
@@ -106,6 +108,12 @@ class State(BaseState):
             generators, defaults = cls._process_fields()
             cls._create_random(generators, defaults)
 
+    @classmethod
+    def _process_properties(cls):
+        for attribute in cls.__annotations__:
+            default = getattr(cls, attribute, MISSING)
+            if isinstance(default, property):
+                setattr(cls, attribute, MISSING)
 
     @classmethod
     def _create_random(cls, generators: Dict[str, Generator], defaults: Dict[str, Any]):

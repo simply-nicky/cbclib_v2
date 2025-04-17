@@ -2,18 +2,18 @@ from typing import List, Tuple
 import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
-from cbclib_v2.label import PointsSet, PixelsDouble, Structure, label
+from cbclib_v2.label import PointSet2D, Pixels2DDouble, Structure2D, label
 from cbclib_v2.streak_finder import Peaks, detect_peaks
 from cbclib_v2.test_util import check_close
 
 class TestPeaksAndMoments():
-    def to_tuple(self, pixels: PixelsDouble) -> Tuple[List[int], List[int], List[float]]:
+    def to_tuple(self, pixels: Pixels2DDouble) -> Tuple[List[int], List[int], List[float]]:
         return (pixels.x, pixels.y, pixels.value)
 
-    def moments(self, pixels: PixelsDouble) -> NDRealArray:
+    def moments(self, pixels: Pixels2DDouble) -> NDRealArray:
         return np.concatenate(([pixels.total_mass(),], pixels.mean(), pixels.moment_of_inertia()))
 
-    def central_moments(self, pixels: PixelsDouble) -> NDRealArray:
+    def central_moments(self, pixels: Pixels2DDouble) -> NDRealArray:
         return np.concatenate((pixels.center_of_mass(), pixels.covariance_matrix()))
 
     def center_of_mass(self, x: NDIntArray, y: NDIntArray, val: NDRealArray) -> NDRealArray:
@@ -72,22 +72,21 @@ class TestPeaksAndMoments():
         assert np.all((x_indices == 1) | (y_indices == 1))
 
     @pytest.fixture(params=[(3, 3), ])
-    def connectivity(self, request: pytest.FixtureRequest) -> Structure:
-        return Structure(request.param[0], request.param[1])
+    def connectivity(self, request: pytest.FixtureRequest) -> Structure2D:
+        return Structure2D(request.param[0], request.param[1])
 
     @pytest.fixture(params=[8,])
     def npts(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
     @pytest.fixture
-    def filtered(self, peaks: Peaks, image: NDRealArray, mask: NDBoolArray, connectivity: Structure,
+    def filtered(self, peaks: Peaks, image: NDRealArray, mask: NDBoolArray, connectivity: Structure2D,
                  threshold: float, npts: int) -> Peaks:
         return peaks.filter(image, mask, connectivity, threshold, npts)
 
     def test_filtered(self, peaks: Peaks, filtered: Peaks, image: NDRealArray, mask: NDBoolArray,
-                      connectivity: Structure, threshold: float, npts: int):
-        regions = label((image > threshold) & mask, connectivity, npts,
-                        [PointsSet(peaks.x, peaks.y)])
+                      connectivity: Structure2D, threshold: float, npts: int):
+        regions = label((image > threshold) & mask, connectivity, PointSet2D(peaks.x, peaks.y), npts)
         peak_pts = np.stack((peaks.x, peaks.y), axis=-1)
         pts = np.concatenate([np.stack((region.x, region.y), axis=-1) for region in regions])
         peak_pts = peak_pts[np.any(np.all(peak_pts[:, None, :] == pts[None], axis=-1), axis=-1)]
@@ -103,23 +102,23 @@ class TestPeaksAndMoments():
         return request.param
 
     @pytest.fixture
-    def structure(self, rank: int) -> Structure:
-        return Structure(rank, rank)
+    def structure(self, rank: int) -> Structure2D:
+        return Structure2D(rank, rank)
 
     @pytest.fixture
     def seeds(self, rng: np.random.Generator, n_pts: int, rank: int, shape: Shape) -> NDIntArray:
         return rng.integers((rank, rank), (shape[1] - rank, shape[0] - rank), size=(n_pts, 2))
 
     @pytest.fixture
-    def points(self, seeds: NDIntArray, structure: Structure) -> NDIntArray:
+    def points(self, seeds: NDIntArray, structure: Structure2D) -> NDIntArray:
         return np.stack((structure.x + seeds[:, None, 1], structure.y + seeds[:, None, 0]), axis=-1)
 
     @pytest.fixture
-    def regions(self, image: NDRealArray, points: NDIntArray) -> List[PixelsDouble]:
-        return [PixelsDouble(pts[:, 0], pts[:, 1], image[pts[:, 1], pts[:, 0]]) for pts in points]
+    def regions(self, image: NDRealArray, points: NDIntArray) -> List[Pixels2DDouble]:
+        return [Pixels2DDouble(pts[:, 0], pts[:, 1], image[pts[:, 1], pts[:, 0]]) for pts in points]
 
-    def test_pixels_merge(self, regions: List[PixelsDouble]):
-        rsum = PixelsDouble().merge(regions[0])
+    def test_pixels_merge(self, regions: List[Pixels2DDouble]):
+        rsum = Pixels2DDouble().merge(regions[0])
         assert self.to_tuple(rsum) == self.to_tuple(regions[0])
         check_close(self.moments(rsum), self.moments(regions[0]))
         check_close(self.central_moments(rsum), self.central_moments(regions[0]))
@@ -129,8 +128,8 @@ class TestPeaksAndMoments():
         check_close(self.moments(rsum), self.moments(regions[0]))
         check_close(self.central_moments(rsum), self.central_moments(regions[0]))
 
-    def test_pixels(self, image: NDRealArray, points: NDIntArray, regions: List[PixelsDouble]):
-        all_pixels = PixelsDouble()
+    def test_pixels(self, image: NDRealArray, points: NDIntArray, regions: List[Pixels2DDouble]):
+        all_pixels = Pixels2DDouble()
         for region in regions:
             all_pixels.merge(region)
         pts = np.unique(points.reshape((-1, 2)), axis=0)

@@ -11,32 +11,69 @@ Examples:
     >>> data = data.load()
 """
 from multiprocessing import cpu_count
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union, cast, overload
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
 from .cxi_protocol import CrystProtocol, FileStore, Kinds
-from .data_container import StringFormatting, DataContainer, Transform
+from .data_container import DataContainer, Transform
 from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
-from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray, NDRealArray,
-                          RealSequence, ReferenceType, ROI, Shape)
+from .annotations import (Attribute, Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray,
+                          NDRealArray, NoData, NoSNR, NoWF, RealSequence, ReferenceType, ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
-                    covariance_matrix, Regions, Structure)
+                    covariance_matrix, Regions2D, Structure2D)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
 AnyCryst = Union['CrystData', 'CrystDataPart', 'CrystDataFull']
 
-def from_dict(**data: Any) -> AnyCryst:
-    if 'data' in data:
-        if 'whitefield' in data and 'snr' in data:
-            return CrystDataFull(**data)
-        return CrystDataPart(**data)
-    return CrystData(**data)
+@overload
+def from_dict(*, data: None, whitefield: Any | None=None, snr: Any | None=None,
+              **extra: Any) -> 'CrystData': ...
 
-def read_hdf(input_file: FileStore, attributes: Optional[Union[str, List[str]]]=None,
+@overload
+def from_dict(*, data: Any, whitefield: Any | None=None, snr: Any | None=None,
+              **extra: Any) -> 'CrystDataPart': ...
+
+@overload
+def from_dict(*, data: Any, whitefield: Any, snr: Any, **extra: Any) -> 'CrystDataFull': ...
+
+def from_dict(*, data: Any | None=None, whitefield: Any | None=None,
+              snr: Any | None=None, **extra: Any) -> AnyCryst:
+    if data is not None:
+        if whitefield is not None and snr is not None:
+            return CrystDataFull(data=data, whitefield=whitefield, snr=snr, **extra)
+        return CrystDataPart(data=data, whitefield=whitefield, snr=snr, **extra)
+    return CrystData(whitefield=whitefield, snr=snr, **extra)
+
+@overload
+def read_hdf(input_file: FileStore, *, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> AnyCryst: ...
+
+@overload
+def read_hdf(input_file: FileStore, *attributes: NoData, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> 'CrystData': ...
+
+@overload
+def read_hdf(input_file: FileStore, *attributes: NoSNR, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> 'CrystDataPart': ...
+
+@overload
+def read_hdf(input_file: FileStore, *attributes: NoWF, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> 'CrystDataPart': ...
+
+@overload
+def read_hdf(input_file: FileStore, *attributes: Attribute, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> 'CrystDataFull': ...
+
+def read_hdf(input_file: FileStore, *attributes: Attribute,
              idxs: Optional[IntSequence]=None, transform: Optional[Transform]=None,
              processes: int=1, verbose: bool=True) -> AnyCryst:
     """Load data attributes from the input files in `files` file handler object.
@@ -59,15 +96,14 @@ def read_hdf(input_file: FileStore, attributes: Optional[Union[str, List[str]]]=
         input_file.update()
     shape = input_file.read_frame_shape()
 
-    if attributes is None:
-        attributes = input_file.attributes()
-    attributes = StringFormatting.str_to_list(attributes)
+    if not attributes:
+        attributes = tuple(input_file.attributes())
 
     if idxs is None:
-        idxs = np.arange(input_file.size)
+        idxs = list(range(input_file.size))
     idxs = np.atleast_1d(idxs)
 
-    if CrystProtocol.has_kind(attributes, Kinds.STACK):
+    if CrystProtocol.has_kind(*attributes, kind=Kinds.STACK):
         data_dict: Dict[str, Any] = {'frames': idxs}
     else:
         data_dict: Dict[str, Any] = {}
@@ -90,10 +126,10 @@ def read_hdf(input_file: FileStore, attributes: Optional[Union[str, List[str]]]=
 
     return from_dict(**data_dict)
 
-def write_hdf(container: AnyCryst, output_file: FileStore,
-              attributes: Union[str, List[str], None]=None, good_frames: Optional[Indices]=None,
-              transform: Optional[Transform] = None, input_file: Optional[FileStore]=None,
-              mode: str='overwrite', idxs: Optional[Indices]=None):
+def write_hdf(container: AnyCryst, output_file: FileStore, *attributes: str,
+              good_frames: Optional[Indices]=None, transform: Optional[Transform]=None,
+              input_file: Optional[FileStore]=None, mode: str='overwrite',
+              idxs: Optional[Indices]=None):
     """Save data arrays of the data attributes contained in the container to an output file.
 
     Args:
@@ -117,13 +153,13 @@ def write_hdf(container: AnyCryst, output_file: FileStore,
 
         shape = input_file.read_frame_shape()
 
-    if attributes is None:
-        attributes = list(container.contents())
+    if not attributes:
+        attributes = tuple(container.contents())
 
     if good_frames is None:
         good_frames = np.arange(container.shape[0])
 
-    for attr in StringFormatting.str_to_list(attributes):
+    for attr in attributes:
         data = np.asarray(getattr(container, attr))
         if data is not None:
             kind = container.get_kind(attr)
@@ -140,8 +176,8 @@ def write_hdf(container: AnyCryst, output_file: FileStore,
 
 @dataclass
 class CrystDataBase(CrystProtocol, DataContainer):
-    """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.CXIStore` file
-    handler. Provides an interface to work with the detector images and detect the diffraction
+    """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.CXIStore`
+    file handler. Provides an interface to work with the detector images and detect the diffraction
     streaks. Also provides an interface to load from a file and save to a file any of the data
     attributes. The data frames can be tranformed using any of the :class:`cbclib_v2.Transform`
     classes.
@@ -437,7 +473,7 @@ class CrystDataPartBase(CrystDataBase):
 
         whitefields = self.scales[:, None, None] * self.whitefield
         snr = np.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
-        return CrystDataFull(**dict(self.to_dict(), snr=snr))
+        return CrystDataFull(**self.replace(snr=snr).to_dict())
 
     def scale_whitefield(self: Cryst, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
                          n_iter: int=12, lm: float=9.0) -> Cryst:
@@ -507,7 +543,7 @@ class CrystDataFull(CrystDataPartBase):
     snr         : NDRealArray
     whitefield  : NDRealArray
 
-    def streak_detector(self, structure: Structure) -> 'StreakDetector':
+    def streak_detector(self, structure: Structure2D) -> 'StreakDetector':
         """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR frames.
 
         Raises:
@@ -524,38 +560,12 @@ class CrystDataFull(CrystDataPartBase):
                               structure=structure, transform=ScaleTransform(),
                               num_threads=self.num_threads)
 
-    def region_detector(self, structure: Structure):
+    def region_detector(self, structure: Structure2D):
         parent = cast(ReferenceType[CrystDataFull], ref(self))
         idxs = np.arange(self.shape[0])
         return RegionDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
                               structure=structure, transform=ScaleTransform(),
                               num_threads=self.num_threads)
-
-DetBase = TypeVar("DetBase", bound="DetectorBase")
-
-@dataclass
-class DetectorBase(DataContainer):
-    indices         : NDIntArray
-    data            : NDRealArray
-    parent          : ReferenceType[CrystDataFull]
-
-    @property
-    def shape(self) -> Shape:
-        return self.data.shape
-
-    def get_frames(self: DetBase, idxs: Indices) -> DetBase:
-        raise NotImplementedError
-
-    def clip(self: DetBase, vmin: NDArrayLike, vmax: NDArrayLike) -> DetBase:
-        return self.replace(data=np.clip(self.data, vmin, vmax))
-
-    def export_coordinates(self, indices: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
-        table = {'bgd': self.parent().scales[indices] * self.parent().whitefield[y, x],
-                 'frames': self.parent().frames[indices], 'snr': self.parent().snr[indices, y, x],
-                 'I_raw': self.parent().data[indices, y, x], 'x': x, 'y': y}
-        return pd.DataFrame(table)
-
-MDet = TypeVar("MDet", bound="MaskedDetector")
 
 @dataclass
 class ScaleTransform():
@@ -584,28 +594,46 @@ class ScaleTransform():
     def to_scaled(self, x: RealSequence, y: RealSequence) -> Tuple[NDRealArray, NDRealArray]:
         return np.asarray(x) / self.scale, np.asarray(y) / self.scale
 
-@dataclass
-class MaskedDetector(DetectorBase):
-    mask            : NDBoolArray
-    num_threads     : int
-    transform       : ScaleTransform
+DetBase = TypeVar("DetBase", bound="DetectorBase")
 
-    def downscale(self: MDet, scale: float, sigma: float) -> MDet:
+@dataclass
+class DetectorBase(DataContainer):
+    indices         : NDIntArray
+    data            : NDRealArray
+    mask            : NDBoolArray
+    transform       : ScaleTransform
+    num_threads     : int
+    parent          : ReferenceType[CrystDataFull]
+
+    @property
+    def shape(self) -> Shape:
+        return self.data.shape
+
+    def __getitem__(self: DetBase, idxs: Indices) -> DetBase:
+        return self.replace(data=self.data[idxs], mask=self.mask[idxs], indices=self.indices[idxs])
+
+    def clip(self: DetBase, vmin: NDArrayLike, vmax: NDArrayLike) -> DetBase:
+        return self.replace(data=np.clip(self.data, vmin, vmax))
+
+    def export_coordinates(self, indices: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
+        table = {'bgd': self.parent().scales[indices] * self.parent().whitefield[y, x],
+                 'frames': self.parent().frames[indices], 'snr': self.parent().snr[indices, y, x],
+                 'I_raw': self.parent().data[indices, y, x], 'x': x, 'y': y}
+        return pd.DataFrame(table)
+
+    def downscale(self: DetBase, scale: float, sigma: float) -> DetBase:
         transform = ScaleTransform(scale)
         data = transform.kernel_regression(self.data, sigma, self.num_threads)
         mask = transform.interpolate(np.asarray(self.mask, dtype=float))
         return self.replace(data=data, mask=np.asarray(mask, dtype=bool),
                             transform=transform)
 
-    def get_frames(self: MDet, idxs: Indices) -> MDet:
-        return self.replace(data=self.data[idxs], mask=self.mask[idxs], indices=self.indices[idxs])
-
     def to_detector(self, streaks: Streaks) -> Streaks:
         pts = np.stack(self.transform.to_detector(streaks.x, streaks.y), axis=-1)
         return Streaks(streaks.index, np.reshape(pts, pts.shape[:-2] + (4,)))
 
 @dataclass
-class StreakDetector(MaskedDetector, PatternsStreakFinder):
+class StreakDetector(DetectorBase, PatternsStreakFinder):
     def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
                        lookahead: int=0, nfa: int=0) -> Streaks:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
@@ -671,14 +699,17 @@ class StreakDetector(MaskedDetector, PatternsStreakFinder):
         return table2.assign(**{key: table[key] for key in columns})
 
 @dataclass
-class RegionDetector(MaskedDetector):
-    structure   : Structure
+class RegionDetector(DetectorBase):
+    structure   : Structure2D
 
-    def detect_regions(self, vmin: float, npts: int) -> List[Regions]:
-        return label((self.data > vmin) & self.mask, self.structure, npts,
-                     num_threads=self.num_threads)
+    def detect_regions(self, vmin: float, npts: int) -> List[Regions2D]:
+        regions = label((self.data > vmin) & self.mask, self.structure, npts=npts,
+                        num_threads=self.num_threads)
+        if isinstance(regions, Regions2D):
+            return [regions,]
+        return regions
 
-    def export_table(self, regions: List[Regions]) -> pd.DataFrame:
+    def export_table(self, regions: List[Regions2D]) -> pd.DataFrame:
         frames, y, x = [], [], []
         for frame, pattern in zip(self.indices, regions):
             size = sum(len(region.x) for region in pattern)
@@ -687,20 +718,20 @@ class RegionDetector(MaskedDetector):
             x.extend(pattern.x)
         return self.export_coordinates(np.array(frames), np.array(y), np.array(x))
 
-    def ellipse_fit(self, regions: List[Regions]) -> List[NDRealArray]:
+    def ellipse_fit(self, regions: List[Regions2D]) -> List[NDRealArray]:
         return ellipse_fit(regions, self.data)
 
-    def total_mass(self, regions: List[Regions]) -> List[NDRealArray]:
+    def total_mass(self, regions: List[Regions2D]) -> List[NDRealArray]:
         return total_mass(regions, self.data)
 
-    def mean(self, regions: List[Regions]) -> List[NDRealArray]:
+    def mean(self, regions: List[Regions2D]) -> List[NDRealArray]:
         return mean(regions, self.data)
 
-    def center_of_mass(self, regions: List[Regions]) -> List[NDRealArray]:
+    def center_of_mass(self, regions: List[Regions2D]) -> List[NDRealArray]:
         return center_of_mass(regions, self.data)
 
-    def moment_of_inertia(self, regions: List[Regions]) -> List[NDRealArray]:
+    def moment_of_inertia(self, regions: List[Regions2D]) -> List[NDRealArray]:
         return moment_of_inertia(regions, self.data)
 
-    def covariance_matrix(self, regions: List[Regions]) -> List[NDRealArray]:
+    def covariance_matrix(self, regions: List[Regions2D]) -> List[NDRealArray]:
         return covariance_matrix(regions, self.data)

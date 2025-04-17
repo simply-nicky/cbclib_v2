@@ -3,19 +3,40 @@
 container :class:`cbclib_v2.CrystData`. All transform classes are inherited from the abstract
 :class:`cbclib_v2.Transform` class.
 """
+from collections import defaultdict
 from configparser import ConfigParser
 from dataclasses import dataclass, fields
 import json
 import os
 import re
-from typing import (Any, Callable, ClassVar, Dict, Iterator, List, Tuple, Type, Union, TypeVar,
-                    get_args, get_origin, overload)
+from typing import (Any, Callable, ClassVar, DefaultDict, Dict, Iterable, Iterator, List, Tuple,
+                    Type, TypeVar, get_args, get_origin, overload)
 import numpy as np
 import jax.numpy as jnp
 from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, ExpandedType,
-                          Indices, JaxArray, JaxNumPy, NDArray, NumPy, NDIntArray)
+                          Indices, IntSequence, JaxArray, JaxNumPy, NDArray, NumPy, NDIntArray,
+                          RealSequence)
 
 D = TypeVar("D", bound="DataContainer")
+
+@overload
+def to_list(sequence: IntSequence) -> List[int]: ...
+
+@overload
+def to_list(sequence: RealSequence) -> List[float]: ...
+
+@overload
+def to_list(sequence: Iterable[str] | str) -> List[str]: ...
+
+def to_list(sequence: IntSequence |  RealSequence | Iterable[str] | str
+            ) -> List[int] | List[float] | List[str]:
+    if isinstance(sequence, str):
+        return [sequence,]
+    if isinstance(sequence, Iterable):
+        return list(sequence)
+    if isinstance(sequence, (int, np.integer)):
+        return [int(sequence),]
+    return [float(sequence),]
 
 class DataContainer(DataclassInstance):
     """Abstract data container class based on :class:`dataclass`. Has :class:`dict` interface,
@@ -58,17 +79,26 @@ class DataContainer(DataclassInstance):
         return type(self)(**(self.to_dict() | kwargs))
 
     def to_dict(self) -> Dict[str, Any]:
-        """Export the :class:`Sample` object to a :class:`dict`.
+        """Export the :class:`DataContainer` object to a :class:`dict`.
 
         Returns:
-            A dictionary of :class:`Sample` object's attributes.
+            A dictionary of :class:`DataContainer` object's attributes.
         """
         return {field.name: getattr(self, field.name) for field in fields(self)}
 
 class ArrayContainer(DataContainer):
-    def __getitem__(self: D, idxs: Union[Indices, BoolArray]) -> D:
+    @classmethod
+    def concatenate(cls: Type[D], *containers: D) -> D:
+        xp = array_namespace(*containers)
+        result : DefaultDict[str, List] = defaultdict(list)
+        for container in containers:
+            for key, val in container.contents().items():
+                result[key].append(val)
+        return cls(**{key: xp.concatenate(val) for key, val in result.items()})
+
+    def __getitem__(self: D, indices: Indices | BoolArray) -> D:
         data = {attr: None for attr in self.to_dict()}
-        data = data | {attr: val[idxs] for attr, val in self.contents().items()}
+        data = data | {attr: val[indices] for attr, val in self.contents().items()}
         return self.replace(**data)
 
 def array_namespace(*arrays: Array | DataContainer | Any) -> ArrayNamespace:
@@ -151,7 +181,7 @@ class JaxArrayFormatter(Formatter):
         raise ValueError(f"Invalid string: '{string}'")
 
 class StringFormatting:
-    FormatterDict = Dict[str, Union[Type[SimpleFormatter], Type[Formatter]]]
+    FormatterDict = Dict[str, Type[SimpleFormatter] | Type[Formatter]]
     formatters : FormatterDict = {'ndarray': NDArrayFormatter,
                                   'list': ListFormatter,
                                   'tuple': TupleFormatter,
@@ -233,22 +263,19 @@ class StringFormatting:
 
     @overload
     @classmethod
-    def to_string(cls, node: Dict[str, Any]) -> Dict[str, str]:
-        ...
+    def to_string(cls, node: Dict[str, Any]) -> Dict[str, str]: ...
 
     @overload
     @classmethod
-    def to_string(cls, node: List[Any]) -> List[str]:
-        ...
+    def to_string(cls, node: List) -> List[str]: ...
 
     @overload
     @classmethod
-    def to_string(cls, node: Union[Any, Array]) -> str:
-        ...
+    def to_string(cls, node: Array | Any) -> str: ...
 
     @classmethod
-    def to_string(cls, node: Union[Any, Dict[str, Any], List[Any], Array]
-                  ) -> Union[str, List[str], Dict[str, str]]:
+    def to_string(cls, node: Any | Dict[str, Any] | List | Array
+                  ) -> str | List[str] | Dict[str, str]:
         if isinstance(node, dict):
             return {k: cls.to_string(v) for k, v in node.items()}
         if isinstance(node, list):
@@ -257,22 +284,8 @@ class StringFormatting:
             return np.array2string(np.array(node), separator=',')
         return str(node)
 
-    @staticmethod
-    def str_to_list(strings: Union[str, List[str]]) -> List[str]:
-        """Convert `strings` to a list of strings.
-
-        Args:
-            strings : String or a list of strings
-
-        Returns:
-            List of strings.
-        """
-        if isinstance(strings, str):
-            return [strings,]
-        return list(str(string) for string in strings)
-
 class Parser():
-    fields : Dict[str, Union[str, List[str], Dict[str, str]]]
+    fields : Dict[str, str | List[str] | Dict[str, str]]
 
     def read_all(self, file: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -322,7 +335,7 @@ class INIParser(Parser, DataContainer):
     """Abstract data container class based on :class:`dataclass` with an interface to read from
     and write to INI files.
     """
-    fields : Dict[str, Union[str, Tuple[str, ...]]]
+    fields : Dict[str, str | Tuple[str, ...]]
     types : Dict[str, Type]
 
     def read_all(self, file: str) -> Dict[str, Any]:
@@ -356,7 +369,7 @@ class INIParser(Parser, DataContainer):
 
 @dataclass
 class JSONParser(Parser, DataContainer):
-    fields: Dict[str, Union[str, Tuple[str, ...]]]
+    fields: Dict[str, str | Tuple[str, ...]]
 
     def read_all(self, file: str) -> Dict[str, Any]:
         with open(file, 'r') as f:
@@ -407,7 +420,7 @@ class Crop(Transform):
     Args:
         roi : Region of interest. Comprised of four elements ``[y_min, y_max, x_min, x_max]``.
     """
-    roi : Union[List[int], Tuple[int, int, int, int], NDIntArray]
+    roi : List[int] | Tuple[int, int, int, int] | NDIntArray
 
     def __eq__(self, obj: object) -> bool:
         if isinstance(obj, Crop):
@@ -580,8 +593,14 @@ class ComposeTransforms(Transform):
     def __iter__(self) -> Iterator[Transform]:
         return self.transforms.__iter__()
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[Transform, List[Transform]]:
-        return self.transforms[idx]
+    @overload
+    def __getitem__(self, index: int) -> Transform: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> List[Transform]: ...
+
+    def __getitem__(self, index: int | slice) -> Transform | List[Transform]:
+        return self.transforms[index]
 
     def index_array(self, ss_idxs: NDIntArray,
                     fs_idxs: NDIntArray) -> Tuple[NDIntArray, NDIntArray]:

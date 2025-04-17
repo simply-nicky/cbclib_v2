@@ -2,9 +2,10 @@ from typing import Tuple
 import numpy as np
 import jax.numpy as jnp
 from .._src.annotations import (Array, ArrayNamespace, BoolArray, IntArray, JaxNumPy, RealArray,
-                                Shape)
+                                Scalar, Shape)
 
-def add_at(a: Array, indices: IntArray, b: Array, xp: ArrayNamespace = JaxNumPy) -> Array:
+def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
+           xp: ArrayNamespace = JaxNumPy) -> Array:
     if xp is jnp:
         return jnp.asarray(a).at[indices].add(b)
     np.add.at(np.asarray(a), indices, b)
@@ -185,8 +186,8 @@ def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray,
                     xp: ArrayNamespace = JaxNumPy) -> RealArray:
     return xp.clip(point, vmin, vmax)
 
-def project_to_streak(point: RealArray, pt0: RealArray, pt1: RealArray, xp: ArrayNamespace = JaxNumPy
-                      ) -> Array:
+def project_to_streak(point: RealArray, pt0: RealArray, pt1: RealArray,
+                      xp: ArrayNamespace = JaxNumPy) -> Array:
     tau = xp.asarray(pt1 - pt0)
     center = 0.5 * (pt0 + pt1)
     r = point - center

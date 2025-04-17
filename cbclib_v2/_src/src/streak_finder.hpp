@@ -35,16 +35,16 @@ T logbinom(I n, I k, T p)
 
 // Sparse 2D peaks
 
-struct Peaks : public PointsSet
+struct Peaks : public PointSet
 {
 protected:
-    using PointsSet::m_ctr;
+    using PointSet::m_ctr;
 
 public:
     Peaks() = default;
 
     template <typename Pts, typename = std::enable_if_t<std::is_same_v<container_type, std::remove_cvref_t<Pts>>>>
-    Peaks(Pts && pts) : PointsSet(std::forward<Pts>(pts))
+    Peaks(Pts && pts) : PointSet(std::forward<Pts>(pts))
     {
         std::vector<std::pair<Point<long>, std::nullptr_t>> items;
         std::transform(m_ctr.begin(), m_ctr.end(), std::back_inserter(items), [](Point<long> pt){return std::make_pair(pt, nullptr);});
@@ -90,7 +90,7 @@ public:
     template <typename T>
     void filter(const array<T> & data, const array<bool> & mask, const Structure & srt, T vmin, size_t npts)
     {
-        auto func = [&data, &mask, vmin](Point<long> pt)
+        auto func = [&data, &mask, vmin](const Point<long> & pt)
         {
             if (data.is_inbound(pt.coordinate()))
             {
@@ -105,7 +105,9 @@ public:
         {
             if (!is_good[is_good.index_at(iter->coordinate())])
             {
-                PointsSet support {*iter, func, srt};
+                PointSet support;
+                support->insert(*iter);
+                support.dilate(func, srt);
 
                 if (support.size() < npts) iter = m_ctr.erase(iter);
                 else

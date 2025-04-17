@@ -2,8 +2,8 @@ from typing import Tuple
 import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
-from cbclib_v2.label import Structure
-from cbclib_v2.ndimage import draw_line_image
+from cbclib_v2.label import Structure2D
+from cbclib_v2.ndimage import draw_lines
 from cbclib_v2.streak_finder import PatternStreakFinder, Peaks, Streak, StreakFinderResult
 from cbclib_v2.test_util import check_close
 
@@ -75,7 +75,7 @@ class TestStreakFinder():
     def image(self, lines: NDRealArray, shape: Shape, vmin: float,
               rng: np.random.Generator) -> NDRealArray:
         noise = 0.25 * vmin * rng.random(shape)
-        return draw_line_image(lines, shape, kernel='biweight') + noise
+        return draw_lines(lines, shape, kernel='biweight') + noise
 
     @pytest.fixture(params=[0.05])
     def num_bad(self, request: pytest.FixtureRequest, shape: Shape) -> int:
@@ -89,16 +89,16 @@ class TestStreakFinder():
         return mask
 
     @pytest.fixture(params=[(3, 2)])
-    def structure(self, request: pytest.FixtureRequest) -> Structure:
+    def structure(self, request: pytest.FixtureRequest) -> Structure2D:
         radius, rank = request.param
-        return Structure(radius, rank)
+        return Structure2D(radius, rank)
 
     @pytest.fixture(params=[3])
     def min_size(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
     @pytest.fixture
-    def finder(self, image: NDRealArray, mask: NDBoolArray, structure: Structure,
+    def finder(self, image: NDRealArray, mask: NDBoolArray, structure: Structure2D,
                min_size: int) -> PatternStreakFinder:
         return PatternStreakFinder(image, mask, structure, min_size)
 
@@ -161,7 +161,7 @@ class TestStreakFinder():
         central_line = np.concatenate((centers[np.argmin(prods)], centers[np.argmax(prods)]))
         assert np.all(central_line == np.asarray(streak.central_line()))
 
-    def test_negative_image(self, image: NDRealArray, mask: NDBoolArray, structure: Structure,
+    def test_negative_image(self, image: NDRealArray, mask: NDBoolArray, structure: Structure2D,
                             min_size: int, peaks: Peaks, xtol: float):
         finder = PatternStreakFinder(-image, mask, structure, min_size)
         result = finder.detect_streaks(peaks, xtol, 0.0)

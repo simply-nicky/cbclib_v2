@@ -4,7 +4,7 @@ from setuptools import setup, find_namespace_packages
 from pybind11.setup_helpers import Pybind11Extension
 import numpy
 
-__version__ = '0.9.6'
+__version__ = '0.9.7'
 
 extension_args = {'extra_compile_args': ['-fopenmp', '-std=c++20'],
                   'extra_link_args': ['-lgomp'],
@@ -26,10 +26,6 @@ extensions = [
                         **extension_args),
       Pybind11Extension("cbclib_v2._src.src.label",
                         sources=["cbclib_v2/_src/src/label.cpp"],
-                        define_macros = [('VERSION_INFO', __version__)],
-                        **extension_args),
-      Pybind11Extension("cbclib_v2._src.src.new_label",
-                        sources=["cbclib_v2/_src/src/new_label.cpp"],
                         define_macros = [('VERSION_INFO', __version__)],
                         **extension_args),
       Pybind11Extension("cbclib_v2._src.src.median",

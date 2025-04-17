@@ -1,9 +1,11 @@
-from typing import Callable, ClassVar, Dict, Iterator, Tuple, Type, TypeVar, cast, get_type_hints
+from typing import (Callable, ClassVar, Dict, Iterator, Sequence, Tuple, Type, TypeVar, Union, cast,
+                    get_type_hints)
 import pandas as pd
 from jax import random
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .state import State, dynamic_fields, field, static_fields
-from .._src.annotations import ArrayNamespace, JaxNumPy, KeyArray, RealArray, RealSequence, Shape
+from .._src.annotations import (ArrayNamespace, BoolArray, Indices, JaxNumPy, KeyArray, RealArray,
+                                RealSequence, Shape)
 from .._src.data_container import Parser, INIParser, JSONParser, array_namespace
 
 S = TypeVar('S', bound=State)
@@ -34,7 +36,8 @@ def random_state(state: S, span: S) -> Callable[[KeyArray], S]:
 
     return rnd
 
-def random_rotation(shape: Shape=(), xp: ArrayNamespace = JaxNumPy) -> Callable[[KeyArray], 'RotationState']:
+def random_rotation(shape: Shape=(), xp: ArrayNamespace = JaxNumPy
+                    ) -> Callable[[KeyArray], 'RotationState']:
     def rnd(key: KeyArray):
         """Creates a random rotation matrix.
         """
@@ -101,6 +104,9 @@ class XtalState(State):
     @property
     def c(self) -> RealArray:
         return self.basis[..., 2, :]
+
+    def __getitem__(self, indices: Union[Indices, BoolArray]) -> 'XtalState':
+        return XtalState(self.basis[indices].reshape((-1, 3, 3)))
 
     def __len__(self) -> int:
         return self.basis.size // 9
@@ -185,32 +191,38 @@ class XtalState(State):
                 xp.arctan2(self.basis[..., 1], self.basis[..., 0]))
 
 class LensState(State):
-    foc_pos     : RealArray
+    foc_pos     : Sequence[float]
 
     @property
-    def pupil_min(self) -> RealArray:
+    def pupil_min(self) -> Sequence[float]:
         raise NotImplementedError
 
     @property
-    def pupil_max(self) -> RealArray:
+    def pupil_max(self) -> Sequence[float]:
         raise NotImplementedError
 
-class FixedPupilState(LensState):
+    @property
+    def pupil_center(self) -> Sequence[float]:
+        raise NotImplementedError
+
+L = TypeVar("L", bound='FixedLensState')
+
+class FixedLensState(LensState, eq=True, unsafe_hash=True):
+    foc_pos     : Tuple[float, float, float] = field(static=True)
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
     @property
-    def pupil_min(self) -> RealArray:
-        xp = self.__array_namespace__()
-        return xp.array([self.pupil_roi[2], self.pupil_roi[0]])
+    def pupil_min(self) -> Tuple[float, float]:
+        return (self.pupil_roi[2], self.pupil_roi[0])
 
     @property
-    def pupil_max(self) -> RealArray:
-        xp = self.__array_namespace__()
-        return xp.array([self.pupil_roi[3], self.pupil_roi[1]])
+    def pupil_max(self) -> Tuple[float, float]:
+        return (self.pupil_roi[3], self.pupil_roi[1])
 
     @property
-    def pupil_center(self) -> RealArray:
-        return 0.5 * (self.pupil_min + self.pupil_max)
+    def pupil_center(self) -> Tuple[float, float]:
+        return (0.5 * (self.pupil_min[0] + self.pupil_max[0]),
+                0.5 * (self.pupil_min[1] + self.pupil_max[1]))
 
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
@@ -223,10 +235,30 @@ class FixedPupilState(LensState):
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
-    def read(cls, file: str, ext: str='ini') -> 'FixedPupilState':
+    def read(cls: Type[L], file: str, ext: str='ini') -> L:
         return cls(**cls.parser(ext).read(file))
 
+class FixedPupilState(FixedLensState):
+    foc_pos     : RealArray
+    pupil_roi   : Tuple[float, float, float, float] = field(static=True)
+
+    @property
+    def pupil_min(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.array(super().pupil_min)
+
+    @property
+    def pupil_max(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.array(super().pupil_max)
+
+    @property
+    def pupil_center(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.array(super().pupil_center)
+
 class FixedApertureState(LensState):
+    foc_pos         : RealArray
     pupil_center    : RealArray
     aperture        : Tuple[float, float] = field(static=True)
 
@@ -339,4 +371,4 @@ class TiltOverAxisState(State):
 class InternalState(State):
     lens    : LensState
     xtal    : XtalState
-    z       : RealArray
+    z       : Sequence[float] | RealArray

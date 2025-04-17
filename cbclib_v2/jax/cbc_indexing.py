@@ -11,7 +11,8 @@ from .geometry import (add_at, arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, p
 from .state import State
 from .._src.annotations import ArrayNamespace, KeyArray, IntArray, JaxNumPy, NumPy, RealArray
 from .._src.data_container import array_namespace
-from .._src.src.bresenham import draw_line_image
+from .._src.src.bresenham import accumulate_lines
+from .._src.src.label import PointSet3D, Structure3D, binary_dilation, center_of_mass, label
 from .._src.streaks import Streaks
 
 def key_combine(key: KeyArray, hkl: IntArray, xp: ArrayNamespace = JaxNumPy) -> IntArray:
@@ -108,9 +109,8 @@ class Circle(Transform):
              + (state.radius * xp.sin(argument))[..., None] * state.axis2 + state.center
 
 class Xtal():
-    def hkl_in_aperture(self, theta: Union[float, RealArray], hkl: IntArray, state: XtalState
-                        ) -> Miller:
-        xp = state.__array_namespace__()
+    def hkl_in_aperture(self, theta: Union[float, RealArray], hkl: IntArray, state: XtalState,
+                        xp: ArrayNamespace) -> Miller:
         index = xp.broadcast_to(xp.expand_dims(xp.arange(len(state)),
                                                axis=tuple(range(1, hkl.ndim))),
                                 (len(state),) + hkl.shape[:-1])
@@ -123,8 +123,8 @@ class Xtal():
         src_th = rec_th - xp.arccos(0.5 * rec_abs)
         return miller[xp.where((xp.abs(src_th) < theta))]
 
-    def hkl_in_ball(self, q_abs: Union[float, RealArray], state: XtalState) -> IntArray:
-        xp = state.__array_namespace__()
+    def hkl_in_ball(self, q_abs: Union[float, RealArray], state: XtalState, xp: ArrayNamespace
+                    ) -> IntArray:
         lat_size = xp.asarray(xp.rint(q_abs / state.unit_cell.lengths), dtype=int)
         lat_size = xp.max(xp.reshape(lat_size, (-1, 3)), axis=0)
         h_idxs = xp.arange(-lat_size[0], lat_size[0] + 1)
@@ -140,17 +140,17 @@ class Xtal():
         return hkl[xp.any(rec_abs < q_abs, axis=-1)]
 
     def hkl_to_q(self, miller: Miller, state: XtalState) -> MillerWithRLP:
-        xp = state.__array_namespace__()
+        xp = array_namespace(miller)
         q = xp.sum(state.basis[miller.index] * miller.hkl_indices[..., None], axis=-2)
         return MillerWithRLP(index=miller.index, hkl=miller.hkl, q=q)
 
     def q_to_hkl(self, rlp: RLP, state: XtalState) -> MillerWithRLP:
-        xp = state.__array_namespace__()
+        xp = array_namespace(rlp)
         hkl = xp.sum(xp.linalg.inv(state.basis)[rlp.index] * rlp.q[..., None], axis=-2)
         return MillerWithRLP(q=rlp.q, index=rlp.index, hkl=hkl)
 
     def hkl_bounds(self, rlp1: RLP, rlp2: RLP, state: XtalState) -> Tuple[Miller, Miller]:
-        xp = state.__array_namespace__()
+        xp = array_namespace(rlp1, rlp2)
         miller1, miller2 = self.q_to_hkl(rlp1, state), self.q_to_hkl(rlp2, state)
         hkl_min, hkl_max = xp.sort(xp.stack((miller1.hkl, miller2.hkl)), axis=0)
         hkl_min, hkl_max = xp.floor(hkl_min), xp.ceil(hkl_max)
@@ -164,32 +164,27 @@ class Xtal():
                               xp.arange(-dhkl[2] // 2 + 1, dhkl[2] // 2 + 1))
         return xp.reshape(xp.stack(offsets, axis=-1), (-1, 3))
 
-    def miller_in_ball(self, q_abs: Union[float, RealArray], state: XtalState) -> Miller:
-        xp = state.__array_namespace__()
+    def miller_in_ball(self, q_abs: Union[float, RealArray], state: XtalState, xp: ArrayNamespace
+                       ) -> Miller:
         indices, hkls = [], []
-        for index, xt in enumerate(state):
-            hkl = self.hkl_in_ball(q_abs, xt)
+        for index, xtal in enumerate(state):
+            hkl = self.hkl_in_ball(q_abs, xtal, xp)
             hkls.append(hkl)
             indices.append(xp.full(hkl.shape[0], index))
         return Miller(xp.concatenate(hkls), xp.concatenate(indices))
 
 class Lens():
-    def kin_center(self, state: LensState) -> RealArray:
-        xp = state.__array_namespace__()
-        point = 0.5 * (state.pupil_min + state.pupil_max)
-        return det_to_k(point, state.foc_pos, xp.array(0), xp)
+    def kin_center(self, state: LensState, xp: ArrayNamespace) -> RealArray:
+        return det_to_k(xp.asarray(state.pupil_center), xp.asarray(state.foc_pos), xp.array(0), xp)
 
-    def kin_max(self, state: LensState) -> RealArray:
-        xp = state.__array_namespace__()
-        return det_to_k(state.pupil_max, state.foc_pos, xp.array(0), xp)
+    def kin_max(self, state: LensState, xp: ArrayNamespace) -> RealArray:
+        return det_to_k(xp.asarray(state.pupil_max), xp.asarray(state.foc_pos), xp.array(0), xp)
 
-    def kin_min(self, state: LensState) -> RealArray:
-        xp = state.__array_namespace__()
-        return det_to_k(state.pupil_min, state.foc_pos, xp.array(0), xp)
+    def kin_min(self, state: LensState, xp: ArrayNamespace) -> RealArray:
+        return det_to_k(xp.asarray(state.pupil_min), xp.asarray(state.foc_pos), xp.array(0), xp)
 
-    def kin_edges(self, state: LensState) -> RealArray:
-        xp = state.__array_namespace__()
-        kmin, kmax = self.kin_min(state), self.kin_max(state)
+    def kin_edges(self, state: LensState, xp: ArrayNamespace) -> RealArray:
+        kmin, kmax = self.kin_min(state, xp), self.kin_max(state, xp)
         return xp.array([[[kmin[0], kmax[1]], [kmax[0], kmax[1]]],
                          [[kmax[0], kmax[1]], [kmax[0], kmin[1]]],
                          [[kmax[0], kmin[1]], [kmin[0], kmin[1]]],
@@ -207,26 +202,26 @@ class Lens():
         Returns:
             Array of sample coordinates.
         """
-        xp = state.__array_namespace__()
-        return k_to_smp(kin, z, state.foc_pos, idxs, xp)
+        xp = array_namespace(kin, z, idxs)
+        return k_to_smp(kin, z, xp.asarray(state.foc_pos), idxs, xp)
 
     def source_lines(self, miller: MillerWithRLP, state: LensState) -> LaueVectors:
-        xp = state.__array_namespace__()
-        kin, is_good = source_lines(miller.q, self.kin_edges(state), xp=xp)
+        xp = array_namespace(miller)
+        kin, is_good = source_lines(miller.q, self.kin_edges(state, xp), xp=xp)
         index = xp.broadcast_to(miller.index, miller.q.shape[:-1])
         laue = LaueVectors(index=index[..., None], q=miller.q[..., None, :], hkl=miller.hkl,
                            kin=kin, kout=kin + miller.q[..., None, :])
         return laue[is_good]
 
     def project_to_pupil(self, kin: RealArray, state: LensState) -> RealArray:
-        xp = state.__array_namespace__()
+        xp = array_namespace(kin)
         kin = safe_divide(kin, xp.sqrt(xp.sum(kin**2, axis=-1))[..., None], xp)
-        kxy = project_to_rect(kin[..., :2], self.kin_min(state)[:2], self.kin_max(state)[:2], xp)
+        kxy = project_to_rect(kin[..., :2], self.kin_min(state, xp)[:2],
+                              self.kin_max(state, xp)[:2], xp)
         return kxy_to_k(kxy, xp)
 
-    def zero_order(self, state: LensState):
-        xp = state.__array_namespace__()
-        return k_to_det(self.kin_center(state), state.foc_pos, xp.array(0), xp)
+    def zero_order(self, state: LensState, xp: ArrayNamespace):
+        return k_to_det(self.kin_center(state, xp), xp.asarray(state.foc_pos), xp.array(0), xp)
 
     def line_projector(self, laue: LaueVectors, state: LensState) -> RealArray:
         return self.project_to_pupil(laue.source_line, state)
@@ -273,21 +268,22 @@ class CBDSetup():
         Returns:
             Array of sample coordinates.
         """
-        return self.lens.kin_to_sample(kin, state.z, idxs, state.lens)
+        xp = state.__array_namespace__()
+        return self.lens.kin_to_sample(kin, xp.asarray(state.z), idxs, state.lens)
 
     def hkl_in_aperture(self, q_abs: float, state: InternalState) -> Miller:
         xp = state.__array_namespace__()
-        hkl = self.xtal.hkl_in_ball(q_abs, state.xtal)
-        kz = xp.asarray([self.lens.kin_min(state.lens)[..., 2],
-                         self.lens.kin_max(state.lens)[..., 2]])
-        return self.xtal.hkl_in_aperture(xp.arccos(xp.min(kz)), hkl, state.xtal)
+        hkl = self.xtal.hkl_in_ball(q_abs, state.xtal, xp)
+        kz = xp.asarray([self.lens.kin_min(state.lens, xp)[..., 2],
+                         self.lens.kin_max(state.lens, xp)[..., 2]])
+        return self.xtal.hkl_in_aperture(xp.arccos(xp.min(kz)), hkl, state.xtal, xp)
 
     def points_to_kout(self, points: AnyPoints, state: InternalState) -> PointsWithK:
         xp = state.__array_namespace__()
         if isinstance(points, CBDPoints):
             kin = points.kin
         else:
-            kin = self.lens.kin_center(state.lens)
+            kin = self.lens.kin_center(state.lens, xp)
         smp_pos = self.kin_to_sample(kin, points.index, state)
         kout = det_to_k(points.points, smp_pos, arange(smp_pos.shape[:-1]), xp)
         return PointsWithK(index=points.index, points=points.points, kout=kout)
@@ -306,7 +302,7 @@ class CBDSetup():
 
     def patterns_to_q(self, patterns: Patterns, state: InternalState) -> Tuple[RLP, RLP]:
         xp = state.__array_namespace__()
-        kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
+        kmin, kmax = self.lens.kin_min(state.lens, xp), self.lens.kin_max(state.lens, xp)
         kout_min, kout_max = self.patterns_to_kout(patterns, state)
         q1 = kxy_to_k(kout_min, xp) - kmin
         q2 = kxy_to_k(kout_max, xp) - kmax
@@ -322,7 +318,7 @@ class CBDIndexer(CBDSetup):
     def patterns_to_uca(self, patterns: Patterns, points: PointsWithK, state: InternalState
                         ) -> UCA:
         xp = state.__array_namespace__()
-        kmin, kmax = self.lens.kin_min(state.lens), self.lens.kin_max(state.lens)
+        kmin, kmax = self.lens.kin_min(state.lens, xp), self.lens.kin_max(state.lens, xp)
         kout_min, kout_max = self.patterns_to_kout(patterns, state)
         xy = xp.stack((kout_min - kmin[:2], kout_max - kmax[:2]))
         xy_min, xy_max = xp.min(xy, axis=0), xp.max(xy, axis=0)
@@ -395,18 +391,6 @@ class CBDIndexer(CBDSetup):
         tilts = self.rotations(phi, rlp, midpoints, xp)
         return Rotograms.from_tilts(tilts, uca.index, uca.streak_id)
 
-    def rotomap(self, shape: Tuple[int, int, int], rotograms: Rotograms,
-                width: float, num_threads: int=1) -> RealArray:
-        xp = rotograms.__array_namespace__()
-        step = 2.0 * self.rho_map(xp) / (xp.asarray(shape) - 1)
-        lines = xp.concatenate(((rotograms.lines + self.rho_map(xp)) / xp.tile(step, 2),
-                                xp.full(rotograms.lines.shape[:-1] + (1,), width)),
-                               axis=-1)
-        rmap = draw_line_image(lines, (rotograms.num_streaks,) + shape,
-                               xp.broadcast_to(rotograms.streak_id, lines.shape[:-1]),
-                               kernel='gaussian', overlap='max', num_threads=num_threads)
-        return xp.asarray(xp.sum(rmap, axis=0))
-
     def rotogrid(self, shape: Tuple[int, int, int], return_step: bool=False,
                  xp: ArrayNamespace=NumPy) -> RealArray | Tuple[RealArray, RealArray]:
         step = 2.0 * self.rho_map(xp) / (xp.asarray(shape) - 1)
@@ -416,6 +400,30 @@ class CBDIndexer(CBDSetup):
         if return_step:
             return coords, step
         return coords
+
+    def rotomap(self, shape: Tuple[int, int, int], rotograms: Rotograms,
+                width: float, num_threads: int=1) -> RealArray:
+        xp = rotograms.__array_namespace__()
+        step = 2.0 * self.rho_map(xp) / (xp.asarray(shape) - 1)
+        lines = xp.concatenate(((rotograms.lines + self.rho_map(xp)) / xp.tile(step, 2),
+                                xp.full(rotograms.lines.shape[:-1] + (1,), width)),
+                               axis=-1)
+        in_idxs = xp.broadcast_to(rotograms.streak_id, lines.shape[:-1])
+        out_idxs = xp.broadcast_to(rotograms.index, lines.shape[:-1])
+        rmap = accumulate_lines(lines, (rotograms.num_frames,) + shape, in_idxs, out_idxs,
+                               kernel='gaussian', in_overlap='max', out_overlap='sum',
+                               num_threads=num_threads)
+        return xp.asarray(rmap)
+
+    def refine_peaks(self, x: IntArray, y: IntArray, z: IntArray, rotomap: RealArray,
+                     vicinity: Structure3D, connectivity: Structure3D = Structure3D(1, 1)
+                     ) -> RealArray:
+        xp = array_namespace(rotomap, x, y, z)
+        mask = xp.zeros(rotomap.shape, dtype=int)
+        mask = add_at(mask, (z, y, x), 1, xp)
+        mask = binary_dilation(mask, vicinity)
+        regions = label(mask, connectivity, seeds=PointSet3D(x.ravel(), y.ravel(), z.ravel()))
+        return center_of_mass(regions, rotomap)
 
 class CBDModel(CBDSetup):
     def to_internal(self, state: State) -> InternalState:

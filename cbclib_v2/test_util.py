@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads
@@ -70,7 +70,7 @@ def gradient_tolerance(dtype: np.dtype, tol: Optional[float]=None) -> float:
         return default_gradient_tolerance()[dtype]
     return default_gradient_tolerance().get(dtype, tol)
 
-def check_close(a: Union[RealArray, ComplexArray], b: Union[RealArray, ComplexArray],
+def check_close(a: RealArray | ComplexArray, b: RealArray | ComplexArray,
                 rtol: Optional[float]=None, atol: Optional[float]=None):
     if rtol is None:
         rtol = max(gradient_tolerance(a.dtype, rtol),

@@ -1,7 +1,9 @@
 from typing import List, Optional, Union, overload
 import numpy as np
-from .src.label import PixelsDouble, PixelsFloat, PointsSet, Regions, Structure
-from .src.label import label, total_mass, mean, center_of_mass, moment_of_inertia, covariance_matrix
+from .src.label import (Pixels2DDouble, Pixels2DFloat, PointSet2D, PointSet3D, Regions2D, Regions3D,
+                        Structure2D, Structure3D)
+from .src.label import (binary_dilation, label, total_mass, mean, center_of_mass, moment_of_inertia,
+                        covariance_matrix)
 from .annotations import NDRealArray
 
 def to_ellipse(matrix: NDRealArray) -> NDRealArray:
@@ -13,16 +15,16 @@ def to_ellipse(matrix: NDRealArray) -> NDRealArray:
     return np.stack((a, b, theta), axis=-1)
 
 @overload
-def ellipse_fit(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None
+def ellipse_fit(regions: Regions2D, data: NDRealArray, axes: Optional[List[int]]=None
                 ) -> NDRealArray:
     ...
 
 @overload
-def ellipse_fit(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None
+def ellipse_fit(regions: List[Regions2D], data: NDRealArray, axes: Optional[List[int]]=None
                 ) -> List[NDRealArray]:
     ...
 
-def ellipse_fit(regions: Union[Regions, List[Regions]], data: NDRealArray,
+def ellipse_fit(regions: Union[Regions2D, List[Regions2D]], data: NDRealArray,
                 axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
     covmat = covariance_matrix(regions, data, axes)
     if isinstance(covmat, list):

@@ -2,7 +2,7 @@ from typing import Set, Tuple, Union
 import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, Shape
-from cbclib_v2.new_label import Regions2D, Regions3D, Structure2D, Structure3D, label
+from cbclib_v2.label import Regions2D, Regions3D, Structure2D, Structure3D, label
 
 Regions = Union[Regions2D, Regions3D]
 Structure = Union[Structure2D, Structure3D]

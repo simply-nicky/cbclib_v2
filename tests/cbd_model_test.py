@@ -24,7 +24,7 @@ class TestCBDModel():
     def patterns(self, key: KeyArray, model: TestModel, int_state: cbc.jax.InternalState,
                  num_lines: int, xp: ArrayNamespace) -> cbc.jax.Patterns:
         keys = xp.asarray(random.split(key, 4))
-        center = model.lens.zero_order(int_state.lens)
+        center = model.lens.zero_order(int_state.lens, xp)
 
         length = xp.asarray(random.uniform(keys[0], (num_lines,), xp.float32, 1.5e-3, 1.5e-2))
         x = xp.asarray(random.uniform(keys[2], (num_lines,), jnp.float32,
@@ -51,12 +51,12 @@ class TestCBDModel():
         return model.init_data(key, patterns, num_points, int_state)
 
     @pytest.fixture
-    def pupil_loss(self, model: TestModel, num_lines: int) -> Criterion:
-        return jit(model.pupil_loss(num_lines))
+    def pupil_loss(self, model: TestModel, num_lines: int, xp: ArrayNamespace) -> Criterion:
+        return jit(model.pupil_loss(num_lines, xp=xp))
 
     @pytest.fixture
-    def line_loss(self, model: TestModel, num_lines: int) -> Criterion:
-        return jit(model.line_loss(num_lines))
+    def line_loss(self, model: TestModel, num_lines: int, xp: ArrayNamespace) -> Criterion:
+        return jit(model.line_loss(num_lines, xp=xp))
 
     def check_loss(self, f: Criterion, data: cbc.jax.CBData, state: TestState):
         def loss(state):

@@ -1,6 +1,7 @@
-"""CXI protocol (:class:`cbclib_v2.CXIProtocol`) is a helper class for a :class:`cbclib_v2.CrystData`
-data container, which tells it where to look for the necessary data fields in a CXI file. The
-class is fully customizable so you can tailor it to your particular data structure of CXI file.
+"""CXI protocol (:class:`cbclib_v2.CXIProtocol`) is a helper class for a
+:class:`cbclib_v2.CrystData` data container, which tells it where to look for the necessary data
+fields in a CXI file. The class is fully customizable so you can tailor it to your particular data
+structure of CXI file.
 
 Examples:
     Generate the default built-in CXI protocol as follows:
@@ -18,15 +19,16 @@ import os
 import fnmatch
 import re
 from types import TracebackType
-from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Protocol, Tuple, Union,
-                    cast, get_type_hints)
+from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Protocol, Tuple, cast,
+                    get_type_hints)
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
 from extra_data import open_run, stack_detector_data, DataCollection
 from extra_geom import JUNGFRAUGeometry
-from .data_container import DataContainer, Parser, INIParser, JSONParser, StringFormatting
-from .annotations import Indices, IntTuple, NDArray, NDIntArray, Processor, Shape
+from .data_container import DataContainer, Parser, INIParser, JSONParser, to_list
+from .annotations import (Attribute, Indices, IntSequence, IntTuple, NDArray, NDIntArray, Processor,
+                          Shape)
 
 EXP_ROOT_DIR = '/gpfs/exfel/exp'
 CXI_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cxi_protocol.ini')
@@ -42,17 +44,17 @@ class Kinds(Enum):
     NO_KIND = auto()
 
 class CrystProtocol():
-    kinds       : ClassVar[Dict[str, Kinds]] = {'data': Kinds.STACK, 'good_frames': Kinds.SEQUENCE,
-                                                'mask': Kinds.FRAME, 'frames': Kinds.SEQUENCE,
-                                                'whitefield': Kinds.FRAME, 'snr': Kinds.STACK,
-                                                'std': Kinds.FRAME, 'scales': Kinds.SEQUENCE}
+    kinds : ClassVar[Dict[str, Kinds]] = {'data': Kinds.STACK, 'frames': Kinds.SEQUENCE,
+                                          'good_frames': Kinds.SEQUENCE, 'mask': Kinds.FRAME,
+                                          'scales': Kinds.SEQUENCE, 'snr': Kinds.STACK,
+                                          'std': Kinds.FRAME, 'whitefield': Kinds.FRAME}
 
     @classmethod
     def get_kind(cls, attr: str) -> Kinds:
         return cls.kinds.get(attr, Kinds.NO_KIND)
 
     @classmethod
-    def has_kind(cls, attributes: List[str], kind: Kinds) -> bool:
+    def has_kind(cls, *attributes: str, kind: Kinds=Kinds.STACK) -> bool:
         for attr in attributes:
             if cls.get_kind(attr) is kind:
                 return True
@@ -68,9 +70,9 @@ class CXIProtocol(DataContainer):
         load_paths : Dictionary with attributes' CXI default file paths.
     """
     load_paths  : Dict[str, List[str]]
-    known_ndims: ClassVar[Dict[Kinds, IntTuple]] = {Kinds.STACK: (3,), Kinds.FRAME: (2, 3),
-                                                    Kinds.SEQUENCE: (1, 2, 3),
-                                                    Kinds.SCALAR: (0, 1, 2)}
+    known_ndims : ClassVar[Dict[Kinds, IntTuple]] = {Kinds.STACK: (3,), Kinds.FRAME: (2, 3),
+                                                     Kinds.SEQUENCE: (1, 2, 3),
+                                                     Kinds.SCALAR: (0, 1, 2)}
 
     def __post_init__(self):
         self.load_paths = {attr: paths for attr, paths in self.load_paths.items()
@@ -125,7 +127,7 @@ class CXIProtocol(DataContainer):
         Returns:
             A new protocol with the new attribute included.
         """
-        return self.replace(load_paths = {**self.load_paths, **{attr: load_paths}})
+        return self.replace(load_paths=self.load_paths | {attr: load_paths})
 
     def find_path(self, attr: str, cxi_file: h5py.File) -> str:
         """Find attribute's path in a CXI file `cxi_file`.
@@ -252,7 +254,7 @@ class CXIReader():
 
     @staticmethod
     def read_frame(index: NDArray, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> Union[NDArray, int, float]:
+                   proc: Optional[Processor]) -> NDArray | int | float:
         dset : h5py.Dataset = cast(h5py.Dataset, h5py.File(index[0])[index[1]])
         data = dset[index[2]][..., ss_idxs, fs_idxs]
         if proc is not None:
@@ -263,7 +265,7 @@ class CXIReader():
     def read_worker(index: NDArray) -> NDArray:
         return read_worker(index)
 
-    def load_stack(self, attr: str, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
+    def load_stack(self, attr: Attribute, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
                    proc: Optional[Processor], processes: int, verbose: bool) -> NDArray:
         stack = []
 
@@ -276,7 +278,7 @@ class CXIReader():
         return np.stack(stack, axis=0)
 
     def load_frame(self, index: NDArray, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> Union[NDArray, int, float]:
+                   proc: Optional[Processor]) -> NDArray | int | float:
         return self.read_frame(index, ss_idxs, fs_idxs, proc)
 
     def load_sequence(self, idxs: NDArray) -> NDArray:
@@ -328,8 +330,7 @@ class CXIWriter():
                         idxs = [idxs,]
                     if len(idxs) != data.shape[0]:
                         raise ValueError('Incompatible indices')
-                    dset.resize(max(dset.shape[0], max(idxs) + 1),
-                                            axis=0)
+                    dset.resize(max(dset.shape[0], max(idxs) + 1), axis=0)
                     dset[idxs] = data
 
         else:
@@ -359,10 +360,10 @@ class CXIWriter():
 class FileStore():
     size : int
 
-    def attributes(self) -> List[str]:
+    def attributes(self) -> List[Attribute]:
         raise NotImplementedError
 
-    def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
+    def load(self, attr: Attribute, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
              verbose: bool=True) -> NDArray:
         raise NotImplementedError
@@ -404,7 +405,7 @@ class CXIStore(FileStore):
     """
     Mode = Literal['r', 'r+', 'w', 'w-', 'x', 'a']
 
-    names       : Union[str, List[str]]
+    names       : str | List[str]
     mode        : Mode = 'r'
     protocol    : CXIProtocol = CXIProtocol.read()
     files       : Dict[str, Optional[h5py.File]] = field(default_factory=dict)
@@ -413,9 +414,9 @@ class CXIStore(FileStore):
     def __post_init__(self):
         if self.mode not in ['r', 'r+', 'w', 'w-', 'x', 'a']:
             raise ValueError(f'Wrong file mode: {self.mode}')
-        if len(self.files) != len(StringFormatting.str_to_list(self.names)):
+        if len(self.files) != len(to_list(self.names)):
             self.files = {fname: h5py.File(fname, mode=self.mode)
-                          for fname in StringFormatting.str_to_list(self.names)}
+                          for fname in to_list(self.names)}
 
     @property
     def size(self) -> int:
@@ -451,7 +452,7 @@ class CXIStore(FileStore):
                     cxi_file.close()
                 self.files[fname] = None
 
-    def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
+    def load(self, attr: Attribute, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
              verbose: bool=True) -> NDArray:
         """Load a data attribute from the files.
@@ -612,9 +613,9 @@ class ExtraProtocol(DataContainer):
 
         raise ValueError(f"Couldn't find proposal dir for {self.proposal:!r}")
 
-    def find_files(self, prop_dir: str, run: Union[int, List[int]], include: str='*') -> List[str]:
+    def find_files(self, prop_dir: str, run: IntSequence, include: str='*') -> List[str]:
         files = []
-        for current in np.atleast_1d(run):
+        for current in to_list(run):
             path = os.path.join(prop_dir, self.folder, f'r{current:04d}')
             new_files = [f for f in os.listdir(path)
                          if f.endswith('.h5') and (f.lower() != 'overview.h5')]
@@ -622,7 +623,7 @@ class ExtraProtocol(DataContainer):
             files.extend(new_files)
         return files
 
-    def train_ids(self, run: Union[int, List[int]], include: str='*',
+    def train_ids(self, run: int | List[int], include: str='*',
                   processes: int=1) -> NDIntArray:
         files = self.find_files(self.find_proposal(), run, include)
 
@@ -641,7 +642,7 @@ class ExtraProtocol(DataContainer):
     def read_frame_shape(self) -> Shape:
         return self.detector_geometry().output_array_for_position().shape
 
-    def read_indices(self, run: Union[int, List[int]], include: str='*') -> NDIntArray:
+    def read_indices(self, run: int | List[int], include: str='*') -> NDIntArray:
         files = self.find_files(self.find_proposal(), run, include)
 
         tids = [self.get_index_and_run(file) for file in files]
@@ -653,18 +654,18 @@ class ExtraReader():
     geom : JUNGFRAUGeometry
 
     @staticmethod
-    def initializer(protocol: ExtraProtocol, attr: str, ss_idxs: NDIntArray, fs_idxs: NDIntArray,
+    def initializer(protocol: ExtraProtocol, attr: Attribute, ss_idxs: NDIntArray, fs_idxs: NDIntArray,
                     proc: Optional[Processor]):
         global worker
         worker = partial(ExtraReader(protocol, protocol.detector_geometry()).read_frame,
                          attr=attr, ss_idxs=ss_idxs, fs_idxs=fs_idxs, proc=proc)
 
     @staticmethod
-    def read_worker(index: NDArray) -> Union[NDArray, int, float]:
+    def read_worker(index: NDArray) -> NDArray | int | float:
         return worker(index)
 
-    def read_frame(self, index: NDArray, attr: str, ss_idxs: Indices,
-                   fs_idxs: Indices, proc: Optional[Processor]) -> Union[NDArray, int, float]:
+    def read_frame(self, index: NDArray, attr: Attribute, ss_idxs: Indices,
+                   fs_idxs: Indices, proc: Optional[Processor]) -> NDArray | int | float:
         run = self.protocol.open_run(index[0])
         _, train_data = run.train_from_id(index[1])
         data = self.protocol.detector_data(attr, train_data)
@@ -674,7 +675,7 @@ class ExtraReader():
             data = proc(data)
         return data
 
-    def load(self, attr: str, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
+    def load(self, attr: Attribute, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
              processes: int, proc: Optional[Processor], verbose: bool) -> NDArray:
         stack = []
         with Pool(processes=processes, initializer=type(self).initializer,
@@ -687,7 +688,7 @@ class ExtraReader():
 
 @dataclass
 class ExtraStore(FileStore):
-    runs : Union[int, List[int]]
+    runs : int | List[int]
     protocol : ExtraProtocol
     indices : NDIntArray = field(default_factory=lambda: np.array([], dtype=int))
 
@@ -698,7 +699,7 @@ class ExtraStore(FileStore):
     def attributes(self) -> List[str]:
         return list(self.protocol.data_paths)
 
-    def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
+    def load(self, attr: Attribute, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
              verbose: bool=True) -> NDArray:
         if idxs is None:

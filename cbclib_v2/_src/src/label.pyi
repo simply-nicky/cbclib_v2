@@ -1,12 +1,12 @@
 from __future__ import annotations
 from typing import Iterable, Iterator, List, Optional, Union, overload
-from ..annotations import CPPIntSequence, CPPRealSequence, NDRealArray, NDBoolArray
+from ..annotations import Array, IntSequence, RealSequence, NDRealArray
 
-class PointsSet:
+class PointSet2D:
     x : List[int]
     y : List[int]
 
-    def __init__(self, x: CPPIntSequence, y: CPPIntSequence):
+    def __init__(self, x: IntSequence, y: IntSequence):
         ...
 
     def __contains__(self, point: Iterable[int]) -> bool:
@@ -18,7 +18,24 @@ class PointsSet:
     def __len__(self) -> int:
         ...
 
-class Structure:
+class PointSet3D:
+    x : List[int]
+    y : List[int]
+    z : List[int]
+
+    def __init__(self, x: IntSequence, y: IntSequence, z: IntSequence):
+        ...
+
+    def __contains__(self, point: Iterable[int]) -> bool:
+        ...
+
+    def __iter__(self) -> Iterator[List[int]]:
+        ...
+
+    def __len__(self) -> int:
+        ...
+
+class Structure2D:
     """Pixel connectivity structure class. Defines a two-dimensional connectivity kernel.
     Used in peaks and streaks detection algorithms.
 
@@ -50,57 +67,133 @@ class Structure:
     def __len__(self) -> int:
         ...
 
-class Regions:
+class Structure3D:
+    """Pixel connectivity structure class. Defines a three-dimensional connectivity kernel.
+    Used in peaks and streaks detection algorithms.
+
+    Args:
+        radius : Radius of connectivity kernel. The size of the kernel is (2 * radius + 1,
+            2 * radius + 1, 2 * radius + 1).
+        rank : Rank determines which elements belong to the connectivity kernel, i.e. are
+            considered as neighbors of the central element. Elements up to a squared distance
+            of raml from the center are considered neighbors. Rank may range from 1 (no adjacent
+            elements are neighbours) to radius (all elements in (2 * radius + 1, 2 * radius + 1,
+            2 * radius + 1) square are neighbours).
+
+    Attributes:
+        size : Number of elements in the connectivity kernel.
+        x : x indices of the connectivity kernel.
+        y : y indices of the connectivity kernel.
+        z : z indices of the connectivity kernel.
+    """
+    radius : int
+    rank : int
+    x : List[int]
+    y : List[int]
+    z : List[int]
+
+    def __init__(self, radius: int, rank: int):
+        ...
+
+    def __iter__(self) -> Iterator[List[int]]:
+        ...
+
+    def __len__(self) -> int:
+        ...
+
+class Regions2D:
     x : List[int]
     y : List[int]
 
-    def __init__(self, regions: List[PointsSet]=[]):
+    def __init__(self, regions: List[PointSet2D]=[]):
         ...
 
     def __delitem__(self, idxs: Union[int, slice]):
         ...
 
     @overload
-    def __getitem__(self, idxs: int) -> PointsSet:
+    def __getitem__(self, idxs: int) -> PointSet2D:
         ...
 
     @overload
-    def __getitem__(self, idxs: slice) -> Regions:
+    def __getitem__(self, idxs: slice) -> Regions2D:
         ...
 
-    def __getitem__(self, idxs: Union[int, slice]) -> Union[PointsSet, Regions]:
+    def __getitem__(self, idxs: Union[int, slice]) -> Union[PointSet2D, Regions2D]:
         ...
 
-    def __iter__(self) -> Iterator[PointsSet]:
+    def __iter__(self) -> Iterator[PointSet2D]:
         ...
 
     def __len__(self) -> int:
         ...
 
     @overload
-    def __setitem__(self, idxs: int, value: PointsSet):
+    def __setitem__(self, idxs: int, value: PointSet2D):
         ...
 
     @overload
-    def __setitem__(self, idxs: slice, value: Regions):
+    def __setitem__(self, idxs: slice, value: Regions2D):
         ...
 
-    def __setitem__(self, idxs: Union[int, slice], value: Union[PointsSet, Regions]):
+    def __setitem__(self, idxs: Union[int, slice], value: Union[PointSet2D, Regions2D]):
         ...
 
-    def append(self, value: PointsSet):
+    def append(self, value: PointSet2D):
         ...
 
-class PixelsFloat:
+class Regions3D:
+    x : List[int]
+    y : List[int]
+    z : List[int]
+
+    def __init__(self, regions: List[PointSet3D]=[]):
+        ...
+
+    def __delitem__(self, idxs: Union[int, slice]):
+        ...
+
+    @overload
+    def __getitem__(self, idxs: int) -> PointSet3D:
+        ...
+
+    @overload
+    def __getitem__(self, idxs: slice) -> Regions3D:
+        ...
+
+    def __getitem__(self, idxs: Union[int, slice]) -> Union[PointSet3D, Regions3D]:
+        ...
+
+    def __iter__(self) -> Iterator[PointSet3D]:
+        ...
+
+    def __len__(self) -> int:
+        ...
+
+    @overload
+    def __setitem__(self, idxs: int, value: PointSet3D):
+        ...
+
+    @overload
+    def __setitem__(self, idxs: slice, value: Regions3D):
+        ...
+
+    def __setitem__(self, idxs: Union[int, slice], value: Union[PointSet3D, Regions3D]):
+        ...
+
+    def append(self, value: PointSet3D):
+        ...
+
+class Pixels2DFloat:
     x : List[int]
     y : List[int]
     value : List[float]
 
-    def __init__(self, x: CPPRealSequence = [], y: CPPRealSequence = [],
-                 value: CPPRealSequence = []):
+    def __init__(self, x: RealSequence = [], y: RealSequence = [],
+                 value: RealSequence = []):
         ...
 
-    def merge(self, source: PixelsFloat) -> PixelsFloat:
+    def merge(self, source: Pixels2DFloat) -> Pixels2DFloat:
         ...
 
     def line(self) -> List[float]:
@@ -121,16 +214,16 @@ class PixelsFloat:
     def covariance_matrix(self) -> List[float]:
         ...
 
-class PixelsDouble:
+class Pixels2DDouble:
     x : List[int]
     y : List[int]
     value : List[float]
 
-    def __init__(self, x: CPPRealSequence = [], y: CPPRealSequence = [],
-                 value: CPPRealSequence = []):
+    def __init__(self, x: RealSequence = [], y: RealSequence = [],
+                 value: RealSequence = []):
         ...
 
-    def merge(self, source: PixelsDouble) -> PixelsDouble:
+    def merge(self, source: Pixels2DDouble) -> Pixels2DDouble:
         ...
 
     def line(self) -> List[float]:
@@ -151,70 +244,113 @@ class PixelsDouble:
     def covariance_matrix(self) -> List[float]:
         ...
 
-def label(mask: NDBoolArray, structure: Structure, npts: int=1, seeds: Optional[List[PointsSet]]=None,
-          axes: Optional[List[int]]=None, num_threads: int=1) -> List[Regions]:
+Structure = Structure2D | Structure3D
+PointSet = PointSet2D | PointSet3D
+Regions = Regions2D | Regions3D
+ListRegions = List[Regions2D] | List[Regions3D]
+
+def binary_dilation(input: Array, structure: Structure, iterations: int=1, mask: Optional[Array]=None,
+                    axes: Optional[List[int]]=None, num_threads: int=1) -> Array:
     ...
 
 @overload
-def total_mass(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None) -> NDRealArray:
+def label(mask: Array, structure: Structure2D, seeds: None=None, npts: int=1,
+          axes: List[int] | None=None, num_threads: int=1) -> List[Regions2D] | Regions2D:
     ...
 
 @overload
-def total_mass(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None) -> List[NDRealArray]:
-    ...
-
-def total_mass(regions: Union[Regions, List[Regions]], data: NDRealArray,
-               axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
+def label(mask: Array, structure: Structure3D, seeds: None=None, npts: int=1,
+          axes: List[int] | None=None, num_threads: int=1) -> List[Regions3D] | Regions3D:
     ...
 
 @overload
-def mean(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None) -> NDRealArray:
+def label(mask: Array, structure: Structure2D, seeds: List[PointSet2D], npts: int=1,
+          axes: List[int] | None=None, num_threads: int=1) -> List[Regions2D]:
     ...
 
 @overload
-def mean(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None) -> List[NDRealArray]:
-    ...
-
-def mean(regions: Union[Regions, List[Regions]], data: NDRealArray
-         ) -> Union[NDRealArray, List[NDRealArray]]:
+def label(mask: Array, structure: Structure3D, seeds: List[PointSet3D], npts: int=1,
+          axes: List[int] | None=None, num_threads: int=1) -> List[Regions3D]:
     ...
 
 @overload
-def center_of_mass(regions: Regions, data: NDRealArray) -> NDRealArray:
+def label(mask: Array, structure: Structure2D, seeds: PointSet2D, npts: int=1,
+          axes: None=None, num_threads: int=1) -> Regions2D:
     ...
 
 @overload
-def center_of_mass(regions: List[Regions], data: NDRealArray) -> List[NDRealArray]:
+def label(mask: Array, structure: Structure3D, seeds: PointSet3D, npts: int=1,
+          axes: None=None, num_threads: int=1) -> Regions3D:
     ...
 
-def center_of_mass(regions: Union[Regions, List[Regions]], data: NDRealArray,
-                   axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
+def label(mask: Array, structure: Structure, seeds: List[PointSet] | PointSet | None=None,
+          npts: int=1, axes: List[int] | None=None, num_threads: int=1) -> ListRegions | Regions:
     ...
 
 @overload
-def moment_of_inertia(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None
+def total_mass(regions: Regions, data: Array, axes: Optional[List[int]]=None) -> NDRealArray:
+    ...
+
+@overload
+def total_mass(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+               ) -> List[NDRealArray]:
+    ...
+
+def total_mass(regions: Union[Regions, ListRegions], data: Array,
+               axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+    ...
+
+@overload
+def mean(regions: Regions, data: Array, axes: Optional[List[int]]=None) -> NDRealArray:
+    ...
+
+@overload
+def mean(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+         ) -> List[NDRealArray]:
+    ...
+
+def mean(regions: Union[Regions, ListRegions], data: Array,
+         axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+    ...
+
+@overload
+def center_of_mass(regions: Regions, data: Array, axes: Optional[List[int]]=None
+                   ) -> NDRealArray:
+    ...
+
+@overload
+def center_of_mass(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+                   ) -> List[NDRealArray]:
+    ...
+
+def center_of_mass(regions: Union[Regions, ListRegions], data: Array,
+                   axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+    ...
+
+@overload
+def moment_of_inertia(regions: Regions, data: Array, axes: Optional[List[int]]=None
                       ) -> NDRealArray:
     ...
 
 @overload
-def moment_of_inertia(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None
+def moment_of_inertia(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
                       ) -> List[NDRealArray]:
     ...
 
-def moment_of_inertia(regions: Union[Regions, List[Regions]], data: NDRealArray,
-                      axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
+def moment_of_inertia(regions: Union[Regions, ListRegions], data: Array,
+                      axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
-def covariance_matrix(regions: Regions, data: NDRealArray, axes: Optional[List[int]]=None
+def covariance_matrix(regions: Regions, data: Array, axes: Optional[List[int]]=None
                       ) -> NDRealArray:
     ...
 
 @overload
-def covariance_matrix(regions: List[Regions], data: NDRealArray, axes: Optional[List[int]]=None
+def covariance_matrix(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
                       ) -> List[NDRealArray]:
     ...
 
-def covariance_matrix(regions: Union[Regions, List[Regions]], data: NDRealArray,
-                      axes: Optional[List[int]]=None) -> Union[NDRealArray, List[NDRealArray]]:
+def covariance_matrix(regions: Union[Regions, ListRegions], data: Array,
+                      axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
     ...

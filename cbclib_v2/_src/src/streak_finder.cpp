@@ -323,8 +323,8 @@ PYBIND11_MODULE(streak_finder, m)
             for (auto [x, y] : zip::zip(xvec, yvec)) points.emplace(Point<long>{x, y});
             return Peaks(std::move(points));
         }), py::arg("x"), py::arg("y"))
-        .def_property("x", [](const Peaks & peaks){return detail::get_x(peaks);}, nullptr)
-        .def_property("y", [](const Peaks & peaks){return detail::get_y(peaks);}, nullptr)
+        .def_property("x", [](const Peaks & peaks){return detail::get_x(peaks, 0);}, nullptr)
+        .def_property("y", [](const Peaks & peaks){return detail::get_x(peaks, 1);}, nullptr)
         .def("__iter__", [](const Peaks & peaks)
         {
             return py::make_iterator(make_python_iterator(peaks.begin()), make_python_iterator(peaks.end()));

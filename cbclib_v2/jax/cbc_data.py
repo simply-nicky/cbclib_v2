@@ -155,6 +155,11 @@ class Rotograms(BaseData):
         return xp.concatenate((self.points[1:], self.points[:-1]), axis=-1)
 
     @property
+    def num_frames(self) -> int:
+        xp = self.__array_namespace__()
+        return int(xp.max(self.index)) + 1
+
+    @property
     def num_streaks(self) -> int:
         xp = self.__array_namespace__()
         return int(xp.max(self.streak_id)) + 1

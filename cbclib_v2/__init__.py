@@ -4,7 +4,6 @@
 
 (c) Nikolay Ivanov, 2024
 """
-from ._src.cbc_table import CBCTable
 from ._src.cxi_protocol import CXIProtocol, CXIStore, ExtraProtocol, ExtraStore
 from ._src.data_container import Transform, Crop, Downscale, Mirror, ComposeTransforms, array_namespace
 from ._src.data_processing import (CrystData, CrystDataFull, CrystDataPart, StreakDetector,
@@ -13,6 +12,5 @@ from ._src.streaks import Streaks
 from . import fft
 from . import jax
 from . import label
-from . import new_label
 from . import ndimage
 from . import streak_finder

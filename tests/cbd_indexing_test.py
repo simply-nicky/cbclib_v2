@@ -36,7 +36,7 @@ class TestCBDIndexer():
     def patterns(self, key: KeyArray, model: TestModel, int_state: cbc.jax.InternalState,
                  num_lines: int, xp: ArrayNamespace) -> cbc.jax.Patterns:
         keys = xp.asarray(random.split(key, 4))
-        center = model.lens.zero_order(int_state.lens)
+        center = model.lens.zero_order(int_state.lens, xp)
 
         length = xp.asarray(random.uniform(keys[0], (num_lines,), xp.float32, 1.5e-3, 1.5e-2))
         x = xp.asarray(random.uniform(keys[2], (num_lines,), jnp.float32,
@@ -66,9 +66,9 @@ class TestCBDIndexer():
         return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)), int_state)
 
     @pytest.fixture
-    def all_rlp(self, indexer: cbc.jax.CBDIndexer, q_abs: float, int_state: cbc.jax.InternalState
-                ) -> cbc.jax.MillerWithRLP:
-        rlp = indexer.xtal.miller_in_ball(q_abs, int_state.xtal)
+    def all_rlp(self, indexer: cbc.jax.CBDIndexer, q_abs: float, int_state: cbc.jax.InternalState,
+                xp: ArrayNamespace) -> cbc.jax.MillerWithRLP:
+        rlp = indexer.xtal.miller_in_ball(q_abs, int_state.xtal, xp)
         return indexer.xtal.hkl_to_q(rlp, int_state.xtal)
 
     @pytest.fixture
