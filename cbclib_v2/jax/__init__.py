@@ -1,6 +1,7 @@
-from .cbc_setup import (XtalCell, XtalState, FixedApertureState, FixedLensState, FixedPupilState,
-                        LensState, RotationState, EulerState, TiltState, TiltOverAxisState,
-                        InternalState, random_array, random_state, random_rotation)
+from .cbc_setup import (BaseState, FixedApertureState, FixedLensState, FixedPupilState,
+                        FixedSetupState, LensState, RotationState, EulerState, SetupState, TiltState,
+                        TiltOverAxisState, XtalCell, XtalState, random_array, random_state,
+                        random_rotation)
 from .cbc_data import (CBData, CBDPoints, CircleState, LaueVectors, Miller, MillerWithRLP, Patterns,
                        Points, PointsWithK, RLP, Rotograms, UCA)
 from .cbc_indexing import (Detector, Rotation, EulerRotation, Tilt, TiltOverAxis, ChainRotations,

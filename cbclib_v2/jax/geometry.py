@@ -162,8 +162,7 @@ def k_to_det(k: RealArray, src: RealArray, idxs: IntArray, xp: ArrayNamespace = 
                              src[..., 1] - k[..., 1] / kz * src[..., 2]), axis=-1))
     return pos
 
-def k_to_smp(k: RealArray, z: RealArray, src: RealArray, idxs: IntArray,
-             xp: ArrayNamespace = JaxNumPy) -> RealArray:
+def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: ArrayNamespace = JaxNumPy) -> RealArray:
     """Convert wave-vectors originating from the source point ``src`` to sample
     planes at the z coordinate ``z``.
 
@@ -176,7 +175,6 @@ def k_to_smp(k: RealArray, z: RealArray, src: RealArray, idxs: IntArray,
     Returns:
         An array of points belonging to the ``z`` planes.
     """
-    z = xp.reshape(xp.ravel(z)[xp.ravel(idxs)], idxs.shape)
     kz = xp.where(k[..., 2, None], k[..., 2, None], 1.0)
     theta = xp.where(k[..., 2, None], k[..., :2] / kz, 0)
     xy = src[:2] + theta * (z - src[2])[..., None]

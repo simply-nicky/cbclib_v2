@@ -10,13 +10,14 @@ import json
 import os
 import re
 from typing import (Any, Callable, ClassVar, DefaultDict, Dict, Iterable, Iterator, List, Tuple,
-                    Type, TypeVar, get_args, get_origin, overload)
+                    Type, TypeVar, get_args, get_origin, get_type_hints, overload)
 import numpy as np
 import jax.numpy as jnp
 from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, ExpandedType,
                           Indices, IntSequence, JaxArray, JaxNumPy, NDArray, NumPy, NDIntArray,
                           RealSequence)
 
+C = TypeVar("C", bound="Container")
 D = TypeVar("D", bound="DataContainer")
 
 @overload
@@ -38,7 +39,57 @@ def to_list(sequence: IntSequence |  RealSequence | Iterable[str] | str
         return [int(sequence),]
     return [float(sequence),]
 
-class DataContainer(DataclassInstance):
+class Container(DataclassInstance):
+    @classmethod
+    def from_dict(cls: Type[C], **values: Any) -> C:
+        kwargs = {}
+        types = get_type_hints(cls)
+        for field in fields(cls):
+            attr_type = types[field.name]
+            if get_origin(attr_type) is not None:
+                attr_type = get_origin(attr_type)
+            if issubclass(attr_type, Container):
+                kwargs[field.name] = attr_type.from_dict(**values[field.name])
+            else:
+                kwargs[field.name] = attr_type(values[field.name])
+        return cls(**kwargs)
+
+    def contents(self) -> Dict[str, Any]:
+        """Return a list of the attributes stored in the container that are initialised.
+
+        Returns:
+            List of the attributes stored in the container.
+        """
+        return {field.name: getattr(self, field.name) for field in fields(self)
+                if getattr(self, field.name) is not None}
+
+    def replace(self: C, **kwargs: Any) -> C:
+        """Return a new container object with a set of attributes replaced.
+
+        Args:
+            kwargs : A set of attributes and the values to to replace.
+
+        Returns:
+            A new container object with updated attributes.
+        """
+        return type(self)(**(self.to_dict() | kwargs))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export the :class:`DataContainer` object to a :class:`dict`.
+
+        Returns:
+            A dictionary of :class:`DataContainer` object's attributes.
+        """
+        result = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, Container):
+                result[field.name] = value.to_dict()
+            else:
+                result[field.name] = value
+        return result
+
+class DataContainer(Container):
     """Abstract data container class based on :class:`dataclass`. Has :class:`dict` interface,
     and :func:`DataContainer.replace` to create a new obj with a set of data attributes replaced.
     """
@@ -57,34 +108,6 @@ class DataContainer(DataclassInstance):
         data = {attr: np.asarray(val) for attr, val in self.contents().items()
                 if isinstance(val, JaxArray)}
         return self.replace(**data)
-
-    def contents(self) -> Dict[str, Any]:
-        """Return a list of the attributes stored in the container that are initialised.
-
-        Returns:
-            List of the attributes stored in the container.
-        """
-        return {field.name: getattr(self, field.name) for field in fields(self)
-                if getattr(self, field.name) is not None}
-
-    def replace(self: D, **kwargs: Any) -> D:
-        """Return a new container object with a set of attributes replaced.
-
-        Args:
-            kwargs : A set of attributes and the values to to replace.
-
-        Returns:
-            A new container object with updated attributes.
-        """
-        return type(self)(**(self.to_dict() | kwargs))
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Export the :class:`DataContainer` object to a :class:`dict`.
-
-        Returns:
-            A dictionary of :class:`DataContainer` object's attributes.
-        """
-        return {field.name: getattr(self, field.name) for field in fields(self)}
 
 class ArrayContainer(DataContainer):
     @classmethod
@@ -377,6 +400,20 @@ class JSONParser(Parser, DataContainer):
 
         return json_dict
 
+    def to_dict(self, obj: Any) -> Dict[str, Any]:
+        def array_to_list(**values: Any) -> Dict[str, Any]:
+            result = {}
+            for key, val in values.items():
+                if isinstance(val, dict):
+                    result[key] = array_to_list(**val)
+                elif isinstance(val, (np.ndarray, JaxArray)):
+                    result[key] = val.tolist()
+                else:
+                    result[key] = val
+            return result
+
+        return array_to_list(**super().to_dict(obj))
+
     def write(self, file: str, obj: Any):
         with open(file, 'w') as out_file:
             json.dump(self.to_dict(obj), out_file, sort_keys=True, ensure_ascii=False, indent=4)
@@ -585,6 +622,7 @@ class ComposeTransforms(Transform):
     transforms : List[Transform]
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if len(self.transforms) < 2:
             raise ValueError('Two or more transforms are needed to compose')
 

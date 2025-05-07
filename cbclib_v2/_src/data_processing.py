@@ -10,8 +10,7 @@ Examples:
     >>> data = cbc.CrystData(inp_file)
     >>> data = data.load()
 """
-from multiprocessing import cpu_count
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union, cast, overload
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypeVar, Union, cast, overload
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
@@ -21,32 +20,54 @@ from .data_container import DataContainer, Transform
 from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
 from .annotations import (Attribute, Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray,
-                          NDRealArray, NoData, NoSNR, NoWF, RealSequence, ReferenceType, ROI, Shape)
+                          NDRealArray, RealSequence, ReferenceType, ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
                     covariance_matrix, Regions2D, Structure2D)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
-AnyCryst = Union['CrystData', 'CrystDataPart', 'CrystDataFull']
+AnyCryst = Union['CrystNoData', 'Cryst', 'CrystWithWF', 'CrystWithWFAndSTD', 'CrystFull']
+
+NoData = Literal['frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
+NoSNR = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'std', 'whitefield']
+NoSTD = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'whitefield']
+NoWF = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'std', 'snr']
+
+WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
+MedianOrRMean = Literal['median', 'robust-mean']
+RMeanScale = Literal['robust-mean-scale']
 
 @overload
-def from_dict(*, data: None, whitefield: Any | None=None, snr: Any | None=None,
-              **extra: Any) -> 'CrystData': ...
+def from_dict(*, data: None=None, whitefield: Any | None=None, std: Any | None=None,
+              snr: Any | None=None, **extra: Any) -> 'CrystNoData': ...
 
 @overload
-def from_dict(*, data: Any, whitefield: Any | None=None, snr: Any | None=None,
-              **extra: Any) -> 'CrystDataPart': ...
+def from_dict(*, data: Any, whitefield: None=None, std: Any | None=None,
+              snr: Any | None=None, **extra: Any) -> 'Cryst': ...
 
 @overload
-def from_dict(*, data: Any, whitefield: Any, snr: Any, **extra: Any) -> 'CrystDataFull': ...
+def from_dict(*, data: Any, whitefield: Any, std: None=None, snr: Any | None=None,
+              **extra: Any) -> 'CrystWithWF': ...
 
-def from_dict(*, data: Any | None=None, whitefield: Any | None=None,
+@overload
+def from_dict(*, data: Any, whitefield: Any, std: Any, snr: None=None,
+              **extra: Any) -> 'CrystWithWFAndSTD': ...
+
+@overload
+def from_dict(*, data: Any, whitefield: Any, std: Any, snr: Any, **extra: Any) -> 'CrystFull': ...
+
+def from_dict(*, data: Any | None=None, whitefield: Any | None=None, std: Any | None=None,
               snr: Any | None=None, **extra: Any) -> AnyCryst:
     if data is not None:
-        if whitefield is not None and snr is not None:
-            return CrystDataFull(data=data, whitefield=whitefield, snr=snr, **extra)
-        return CrystDataPart(data=data, whitefield=whitefield, snr=snr, **extra)
-    return CrystData(whitefield=whitefield, snr=snr, **extra)
+        if whitefield is not None:
+            if std is not None:
+                if snr is not None:
+                    return CrystFull(data=data, whitefield=whitefield, std=std, snr=snr, **extra)
+                return CrystWithWFAndSTD(data=data, whitefield=whitefield, std=std, snr=snr,
+                                         **extra)
+            return CrystWithWF(data=data, whitefield=whitefield, std=std, snr=snr, **extra)
+        return Cryst(data=data, whitefield=whitefield, std=std, snr=snr, **extra)
+    return CrystNoData(whitefield=whitefield, std=std, snr=snr, **extra)
 
 @overload
 def read_hdf(input_file: FileStore, *, idxs: Optional[IntSequence]=None,
@@ -56,22 +77,27 @@ def read_hdf(input_file: FileStore, *, idxs: Optional[IntSequence]=None,
 @overload
 def read_hdf(input_file: FileStore, *attributes: NoData, idxs: Optional[IntSequence]=None,
              transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystData': ...
-
-@overload
-def read_hdf(input_file: FileStore, *attributes: NoSNR, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystDataPart': ...
+             ) -> 'CrystNoData': ...
 
 @overload
 def read_hdf(input_file: FileStore, *attributes: NoWF, idxs: Optional[IntSequence]=None,
              transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystDataPart': ...
+             ) -> 'Cryst': ...
+
+@overload
+def read_hdf(input_file: FileStore, *attributes: NoSTD, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> 'CrystWithWF': ...
+
+@overload
+def read_hdf(input_file: FileStore, *attributes: NoSNR, idxs: Optional[IntSequence]=None,
+             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
+             ) -> 'CrystWithWFAndSTD': ...
 
 @overload
 def read_hdf(input_file: FileStore, *attributes: Attribute, idxs: Optional[IntSequence]=None,
              transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystDataFull': ...
+             ) -> 'CrystFull': ...
 
 def read_hdf(input_file: FileStore, *attributes: Attribute,
              idxs: Optional[IntSequence]=None, transform: Optional[Transform]=None,
@@ -175,7 +201,7 @@ def write_hdf(container: AnyCryst, output_file: FileStore, *attributes: str,
             output_file.save(attr, data, mode=mode, idxs=idxs)
 
 @dataclass
-class CrystDataBase(CrystProtocol, DataContainer):
+class CrystNoDataBase(CrystProtocol, DataContainer):
     """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.CXIStore`
     file handler. Provides an interface to work with the detector images and detect the diffraction
     streaks. Also provides an interface to load from a file and save to a file any of the data
@@ -185,7 +211,6 @@ class CrystDataBase(CrystProtocol, DataContainer):
     Args:
         input_file : Input file :class:`cbclib_v2.CXIStore` file handler.
         transform : An image transform object.
-        num_threads : Number of threads used in the calculations.
         output_file : On output file :class:`cbclib_v2.CXIStore` file handler.
         data : Detector raw data.
         mask : Bad pixels mask.
@@ -197,13 +222,12 @@ class CrystDataBase(CrystProtocol, DataContainer):
     data        : Optional[NDRealArray]
 
     whitefield  : Optional[NDRealArray]
+    std         : Optional[NDRealArray]
     snr         : Optional[NDRealArray]
 
     frames      : Optional[NDIntArray] = field(default=None)
     mask        : Optional[NDBoolArray] = field(default=None)
-    std         : Optional[NDRealArray] = field(default=None)
     scales      : Optional[NDRealArray] = field(default=None)
-    num_threads : int = field(default=cpu_count())
 
     @property
     def shape(self) -> Shape:
@@ -226,7 +250,7 @@ class CrystDataBase(CrystProtocol, DataContainer):
 
         return tuple(shape)
 
-    def select_frames(self, idxs: Optional[Indices]=None):
+    def select(self, idxs: Optional[Indices]=None):
         """Return a new :class:`CrystData` object with the new mask.
 
         Args:
@@ -249,16 +273,17 @@ class CrystDataBase(CrystProtocol, DataContainer):
                 data_dict[attr] = getattr(self, attr)
         return self.replace(**data_dict)
 
-Cryst = TypeVar("Cryst", bound="CrystDataPartBase")
+C = TypeVar("C", bound="CrystBase")
 
 @dataclass
-class CrystDataPartBase(CrystDataBase):
+class CrystBase(CrystNoDataBase):
     data        : NDRealArray
     frames      : NDIntArray = field(default_factory=lambda: np.array([], dtype=int))
     mask        : NDBoolArray = field(default_factory=lambda: np.array([], dtype=bool))
     scales      : NDRealArray = field(default_factory=lambda: np.array([]))
 
     def __post_init__(self):
+        super().__post_init__()
         if self.frames.size != self.shape[0]:
             self.frames = np.arange(self.shape[0])
         if self.mask.shape != self.shape[1:]:
@@ -266,7 +291,7 @@ class CrystDataPartBase(CrystDataBase):
         if self.scales.shape != (self.shape[0],):
             self.scales = np.ones(self.shape[0])
 
-    def mask_data(self: Cryst) -> Cryst:
+    def mask_data(self: C) -> C:
         attributes = {}
         if self.whitefield is not None:
             attributes['whitefield'] = self.whitefield * self.mask
@@ -276,7 +301,7 @@ class CrystDataPartBase(CrystDataBase):
             attributes['snr'] = self.snr * self.mask
         return self.replace(**attributes)
 
-    def mask_region(self: Cryst, roi: ROI) -> Cryst:
+    def mask_region(self: C, roi: ROI) -> C:
         """Return a new :class:`CrystData` object with the updated mask. The region
         defined by the `[y_min, y_max, x_min, x_max]` will be masked out.
 
@@ -294,7 +319,7 @@ class CrystDataPartBase(CrystDataBase):
         mask[roi[0]:roi[1], roi[2]:roi[3]] = False
         return self.replace(mask=mask).mask_data()
 
-    def import_mask(self: Cryst, mask: NDBoolArray, update: str='reset') -> Cryst:
+    def import_mask(self: C, mask: NDBoolArray, update: str='reset') -> C:
         """Return a new :class:`CrystData` object with the new mask.
 
         Args:
@@ -320,7 +345,7 @@ class CrystDataPartBase(CrystDataBase):
 
         raise ValueError(f'Invalid update keyword: {update:s}')
 
-    def reset_mask(self: Cryst) -> Cryst:
+    def reset_mask(self: C) -> C:
         """Reset bad pixel mask. Every pixel is assumed to be good by default.
 
         Raises:
@@ -331,8 +356,8 @@ class CrystDataPartBase(CrystDataBase):
         """
         return self.replace(mask=np.array([], dtype=bool))
 
-    def update_mask(self: Cryst, method: str='no-bad', vmin: int=0, vmax: int=65535,
-                    snr_max: float=3.0, roi: Optional[ROI]=None) -> Cryst:
+    def update_mask(self: C, method: str='no-bad', vmin: int=0, vmax: int=65535,
+                    snr_max: float=3.0, roi: Optional[ROI]=None) -> C:
         """Return a new :class:`CrystData` object with the updated bad pixels mask.
 
         Args:
@@ -388,9 +413,19 @@ class CrystDataPartBase(CrystDataBase):
         new_mask[roi[0]:roi[1], roi[2]:roi[3]] &= mask
         return self.replace(mask=new_mask)
 
-    def update_whitefield(self: Cryst, method: str='median', frames: Optional[Indices]=None,
-                          r0: float=0.0, r1: float=0.5, n_iter: int=12,
-                          lm: float=9.0) -> Cryst:
+    @overload
+    def update_whitefield(self, method: MedianOrRMean, frames: Optional[Indices]=None,
+                          r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                          num_threads: int=1) -> 'CrystWithWF': ...
+
+    @overload
+    def update_whitefield(self, method: RMeanScale, frames: Optional[Indices]=None,
+                          r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                          num_threads: int=1) -> 'CrystWithWFAndSTD': ...
+
+    def update_whitefield(self, method: WFMethod='median', frames: Optional[Indices]=None,
+                          r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                          num_threads: int=1) -> 'CrystWithWF | CrystWithWFAndSTD':
         """Return a new :class:`CrystData` object with new whitefield.
 
         Args:
@@ -420,43 +455,52 @@ class CrystDataPartBase(CrystDataBase):
         """
         if frames is None:
             frames = np.arange(self.shape[0])
-        std = self.std
 
         if method == 'median':
             whitefield = median(inp=self.data[frames] * self.mask, axis=0,
-                                num_threads=self.num_threads)
-        elif method == 'robust-mean':
+                                num_threads=num_threads)
+            return CrystWithWF(**self.replace(whitefield=whitefield).to_dict())
+        if method == 'robust-mean':
             whitefield = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0,
                                      r1=r1, n_iter=n_iter, lm=lm,
-                                     num_threads=self.num_threads)
-        elif method == 'robust-mean-scale':
+                                     num_threads=num_threads)
+            return CrystWithWF(**self.replace(whitefield=whitefield).to_dict())
+        if method == 'robust-mean-scale':
             whitefield, std = robust_mean(inp=self.data[frames] * self.mask, axis=0,
                                           r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                                          return_std=True, num_threads=self.num_threads)
-        else:
-            raise ValueError('Invalid method argument')
+                                          return_std=True, num_threads=num_threads)
+            return CrystWithWFAndSTD(**self.replace(whitefield=whitefield, std=std).to_dict())
 
-        return self.replace(whitefield=whitefield, std=std)
+        raise ValueError('Invalid method argument')
 
-    def update_std(self: Cryst, method="robust-scale", frames: Optional[Indices]=None,
-                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0) -> Cryst:
+@dataclass
+class CrystWithWFBase(CrystBase):
+    whitefield  : NDRealArray
+
+    def update_std(self, method="robust-scale", frames: Optional[Indices]=None,
+                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                   num_threads: int=1) -> 'CrystWithWFAndSTD':
         if frames is None:
             frames = np.arange(self.shape[0])
-        if self.whitefield is None:
-            raise ValueError("No whitefield in the container")
 
         if method == "robust-scale":
             _, std = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0, r1=r1,
                                  n_iter=n_iter, lm=lm, return_std=True,
-                                 num_threads=self.num_threads)
+                                 num_threads=num_threads)
         elif method == "poisson":
             std = np.sqrt(self.whitefield)
         else:
             raise ValueError(f"Invalid method argument: {method}")
 
-        return self.replace(std=std)
+        return CrystWithWFAndSTD(**self.replace(std=std).to_dict())
 
-    def update_snr(self) -> 'CrystDataFull':
+CSTD = TypeVar("CSTD", bound="CrystWithWFAndSTDBase")
+
+@dataclass
+class CrystWithWFAndSTDBase(CrystWithWFBase):
+    std         : NDRealArray
+
+    def update_snr(self) -> 'CrystFull':
         """Return a new :class:`CrystData` object with new background corrected detector
         images.
 
@@ -466,17 +510,12 @@ class CrystDataPartBase(CrystDataBase):
         Returns:
             New :class:`CrystData` object with the updated ``cor_data``.
         """
-        if self.whitefield is None:
-            raise ValueError("No whitefield in the container")
-        if self.std is None:
-            raise ValueError("No std in the container")
-
         whitefields = self.scales[:, None, None] * self.whitefield
         snr = np.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
-        return CrystDataFull(**self.replace(snr=snr).to_dict())
+        return CrystFull(**self.replace(snr=snr).to_dict())
 
-    def scale_whitefield(self: Cryst, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
-                         n_iter: int=12, lm: float=9.0) -> Cryst:
+    def scale_whitefield(self: CSTD, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
+                         n_iter: int=12, lm: float=9.0, num_threads: int=1) -> CSTD:
         """Return a new :class:`CrystData` object with a new set of whitefields. A set of
         backgrounds is generated by robustly fitting a design matrix `W` to the measured
         patterns.
@@ -505,41 +544,47 @@ class CrystDataPartBase(CrystDataBase):
         Returns:
             An array of scale factors for each frame in the container.
         """
-        if self.std is None:
-            raise ValueError("No std in the container")
-        if self.whitefield is None:
-            raise ValueError("No whitefield in the container")
-
         mask = self.mask & (self.std > 0.0)
         y: NDRealArray = np.where(mask, self.data / self.std, 0.0)[:, mask]
         W: NDRealArray = np.where(mask, self.whitefield / self.std, 0.0)[None, mask]
 
         if method == "robust-lsq":
             scales = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                                num_threads=self.num_threads)
+                                num_threads=num_threads)
             return self.replace(scales=scales.ravel())
 
         if method == "median":
-            scales = median(y * W, axis=1, num_threads=self.num_threads)[:, None] / \
-                     median(W * W, axis=1, num_threads=self.num_threads)[:, None]
+            scales = median(y * W, axis=1, num_threads=num_threads)[:, None] / \
+                     median(W * W, axis=1, num_threads=num_threads)[:, None]
             return self.replace(scales=scales.ravel())
 
         raise ValueError(f"Invalid method argument: {method}")
 
 @dataclass
-class CrystData(CrystDataBase):
+class CrystNoData(CrystNoDataBase):
     data        : Optional[NDRealArray] = field(default=None)
     frames      : Optional[NDIntArray] = field(default=None)
     snr         : Optional[NDRealArray] = field(default=None)
+    std         : Optional[NDRealArray] = field(default=None)
     whitefield  : Optional[NDRealArray] = field(default=None)
 
 @dataclass
-class CrystDataPart(CrystDataPartBase):
+class Cryst(CrystBase):
     snr         : Optional[NDRealArray] = field(default=None)
+    std         : Optional[NDRealArray] = field(default=None)
     whitefield  : Optional[NDRealArray] = field(default=None)
 
 @dataclass
-class CrystDataFull(CrystDataPartBase):
+class CrystWithWF(CrystWithWFBase):
+    snr         : Optional[NDRealArray] = field(default=None)
+    std         : Optional[NDRealArray] = field(default=None)
+
+@dataclass
+class CrystWithWFAndSTD(CrystWithWFAndSTDBase):
+    snr         : Optional[NDRealArray] = field(default=None)
+
+@dataclass
+class CrystFull(CrystBase):
     snr         : NDRealArray
     whitefield  : NDRealArray
 
@@ -554,18 +599,16 @@ class CrystDataFull(CrystDataPartBase):
             A CBC pattern detector based on :class:`cbclib_v2.bin.LSD` Line Segment Detection [LSD]_
             algorithm.
         """
-        parent = cast(ReferenceType[CrystDataFull], ref(self))
+        parent = cast(ReferenceType[CrystFull], ref(self))
         idxs = np.arange(self.shape[0])
         return StreakDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
-                              structure=structure, transform=ScaleTransform(),
-                              num_threads=self.num_threads)
+                              structure=structure, transform=ScaleTransform())
 
     def region_detector(self, structure: Structure2D):
-        parent = cast(ReferenceType[CrystDataFull], ref(self))
+        parent = cast(ReferenceType[CrystFull], ref(self))
         idxs = np.arange(self.shape[0])
         return RegionDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
-                              structure=structure, transform=ScaleTransform(),
-                              num_threads=self.num_threads)
+                              structure=structure, transform=ScaleTransform())
 
 @dataclass
 class ScaleTransform():
@@ -602,8 +645,7 @@ class DetectorBase(DataContainer):
     data            : NDRealArray
     mask            : NDBoolArray
     transform       : ScaleTransform
-    num_threads     : int
-    parent          : ReferenceType[CrystDataFull]
+    parent          : ReferenceType[CrystFull]
 
     @property
     def shape(self) -> Shape:
@@ -621,9 +663,9 @@ class DetectorBase(DataContainer):
                  'I_raw': self.parent().data[indices, y, x], 'x': x, 'y': y}
         return pd.DataFrame(table)
 
-    def downscale(self: DetBase, scale: float, sigma: float) -> DetBase:
+    def downscale(self: DetBase, scale: float, sigma: float, num_threads: int=1) -> DetBase:
         transform = ScaleTransform(scale)
-        data = transform.kernel_regression(self.data, sigma, self.num_threads)
+        data = transform.kernel_regression(self.data, sigma, num_threads)
         mask = transform.interpolate(np.asarray(self.mask, dtype=float))
         return self.replace(data=data, mask=np.asarray(mask, dtype=bool),
                             transform=transform)
@@ -635,7 +677,7 @@ class DetectorBase(DataContainer):
 @dataclass
 class StreakDetector(DetectorBase, PatternsStreakFinder):
     def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0) -> Streaks:
+                       lookahead: int=0, nfa: int=0, num_threads: int=1) -> Streaks:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -652,7 +694,7 @@ class StreakDetector(DetectorBase, PatternsStreakFinder):
         Returns:
             A list of detected streaks.
         """
-        streaks = super().detect_streaks(peaks, xtol, vmin, min_size, lookahead, nfa)
+        streaks = super().detect_streaks(peaks, xtol, vmin, min_size, lookahead, nfa, num_threads)
         idxs = np.concatenate([np.full((len(pattern),), idx)
                                for idx, pattern in zip(self.indices, streaks)])
         lines = np.concatenate(streaks)
@@ -702,9 +744,9 @@ class StreakDetector(DetectorBase, PatternsStreakFinder):
 class RegionDetector(DetectorBase):
     structure   : Structure2D
 
-    def detect_regions(self, vmin: float, npts: int) -> List[Regions2D]:
-        regions = label((self.data > vmin) & self.mask, self.structure, npts=npts,
-                        num_threads=self.num_threads)
+    def detect_regions(self, vmin: float, npts: int, num_threads: int=1) -> List[Regions2D]:
+        regions = label((self.data > vmin) & self.mask, structure=self.structure, npts=npts,
+                        num_threads=num_threads)
         if isinstance(regions, Regions2D):
             return [regions,]
         return regions

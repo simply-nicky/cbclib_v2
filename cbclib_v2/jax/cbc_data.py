@@ -169,7 +169,7 @@ class Rotograms(BaseData):
         return TiltOverAxisState(self.angles, self.axis)
 
 class Miller(BaseData):
-    hkl     : Union[IntArray, RealArray]
+    hkl     : IntArray | RealArray
     index   : IntArray
 
     @property

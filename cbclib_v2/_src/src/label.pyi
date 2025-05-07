@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterable, Iterator, List, Optional, Union, overload
+from typing import Iterable, Iterator, List, Optional, overload
 from ..annotations import Array, IntSequence, RealSequence, NDRealArray
 
 class PointSet2D:
@@ -108,7 +108,7 @@ class Regions2D:
     def __init__(self, regions: List[PointSet2D]=[]):
         ...
 
-    def __delitem__(self, idxs: Union[int, slice]):
+    def __delitem__(self, idxs: int | slice):
         ...
 
     @overload
@@ -119,7 +119,7 @@ class Regions2D:
     def __getitem__(self, idxs: slice) -> Regions2D:
         ...
 
-    def __getitem__(self, idxs: Union[int, slice]) -> Union[PointSet2D, Regions2D]:
+    def __getitem__(self, idxs: int | slice) -> PointSet2D | Regions2D:
         ...
 
     def __iter__(self) -> Iterator[PointSet2D]:
@@ -136,7 +136,7 @@ class Regions2D:
     def __setitem__(self, idxs: slice, value: Regions2D):
         ...
 
-    def __setitem__(self, idxs: Union[int, slice], value: Union[PointSet2D, Regions2D]):
+    def __setitem__(self, idxs: int | slice, value: PointSet2D | Regions2D):
         ...
 
     def append(self, value: PointSet2D):
@@ -150,7 +150,7 @@ class Regions3D:
     def __init__(self, regions: List[PointSet3D]=[]):
         ...
 
-    def __delitem__(self, idxs: Union[int, slice]):
+    def __delitem__(self, idxs: int | slice):
         ...
 
     @overload
@@ -161,7 +161,7 @@ class Regions3D:
     def __getitem__(self, idxs: slice) -> Regions3D:
         ...
 
-    def __getitem__(self, idxs: Union[int, slice]) -> Union[PointSet3D, Regions3D]:
+    def __getitem__(self, idxs: int | slice) -> PointSet3D | Regions3D:
         ...
 
     def __iter__(self) -> Iterator[PointSet3D]:
@@ -178,7 +178,7 @@ class Regions3D:
     def __setitem__(self, idxs: slice, value: Regions3D):
         ...
 
-    def __setitem__(self, idxs: Union[int, slice], value: Union[PointSet3D, Regions3D]):
+    def __setitem__(self, idxs: int | slice, value: PointSet3D | Regions3D):
         ...
 
     def append(self, value: PointSet3D):
@@ -249,8 +249,9 @@ PointSet = PointSet2D | PointSet3D
 Regions = Regions2D | Regions3D
 ListRegions = List[Regions2D] | List[Regions3D]
 
-def binary_dilation(input: Array, structure: Structure, iterations: int=1, mask: Optional[Array]=None,
-                    axes: Optional[List[int]]=None, num_threads: int=1) -> Array:
+def binary_dilation(input: Array, structure: Structure, iterations: int=1,
+                    mask: Optional[Array]=None, axes: Optional[List[int]]=None, num_threads: int=1
+                    ) -> Array:
     ...
 
 @overload
@@ -296,8 +297,8 @@ def total_mass(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
                ) -> List[NDRealArray]:
     ...
 
-def total_mass(regions: Union[Regions, ListRegions], data: Array,
-               axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+def total_mass(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+               ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
@@ -309,8 +310,8 @@ def mean(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
          ) -> List[NDRealArray]:
     ...
 
-def mean(regions: Union[Regions, ListRegions], data: Array,
-         axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+def mean(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+         ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
@@ -323,8 +324,8 @@ def center_of_mass(regions: ListRegions, data: Array, axes: Optional[List[int]]=
                    ) -> List[NDRealArray]:
     ...
 
-def center_of_mass(regions: Union[Regions, ListRegions], data: Array,
-                   axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+def center_of_mass(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+                   ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
@@ -337,8 +338,8 @@ def moment_of_inertia(regions: ListRegions, data: Array, axes: Optional[List[int
                       ) -> List[NDRealArray]:
     ...
 
-def moment_of_inertia(regions: Union[Regions, ListRegions], data: Array,
-                      axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+def moment_of_inertia(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+                      ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
@@ -351,6 +352,6 @@ def covariance_matrix(regions: ListRegions, data: Array, axes: Optional[List[int
                       ) -> List[NDRealArray]:
     ...
 
-def covariance_matrix(regions: Union[Regions, ListRegions], data: Array,
-                      axes: Optional[List[int]]=None) -> NDRealArray | List[NDRealArray]:
+def covariance_matrix(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+                      ) -> NDRealArray | List[NDRealArray]:
     ...

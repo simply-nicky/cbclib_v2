@@ -19,22 +19,22 @@ import os
 import fnmatch
 import re
 from types import TracebackType
-from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Protocol, Tuple, cast,
-                    get_type_hints)
+from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Protocol, Sequence,
+                    Tuple, cast, get_type_hints)
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
 from extra_data import open_run, stack_detector_data, DataCollection
 from extra_geom import JUNGFRAUGeometry
 from .data_container import DataContainer, Parser, INIParser, JSONParser, to_list
-from .annotations import (Attribute, Indices, IntSequence, IntTuple, NDArray, NDIntArray, Processor,
-                          Shape)
+from .annotations import (Attribute, Array, Indices, IntSequence, IntTuple, NDArray, NDIntArray,
+                          Processor, Shape)
 
 EXP_ROOT_DIR = '/gpfs/exfel/exp'
 CXI_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cxi_protocol.ini')
 
 cxi_worker : Callable[[str], Tuple[Any, ...]]
-read_worker : Callable[[NDArray], NDArray]
+read_worker : Callable[[Array], NDArray]
 
 class Kinds(Enum):
     SCALAR = auto()
@@ -75,6 +75,7 @@ class CXIProtocol(DataContainer):
                                                      Kinds.SCALAR: (0, 1, 2)}
 
     def __post_init__(self):
+        super().__post_init__()
         self.load_paths = {attr: paths for attr, paths in self.load_paths.items()
                            if CrystProtocol.get_kind(attr) != Kinds.NO_KIND}
 
@@ -234,7 +235,7 @@ class CXIProtocol(DataContainer):
         raise ValueError(f"Invalid attribute {attr}")
 
 class ReadWorker(Protocol):
-    def __call__(self, index: NDArray, ss_idxs: Indices, fs_idxs: Indices) -> NDArray:
+    def __call__(self, index: Array, ss_idxs: Indices, fs_idxs: Indices) -> NDArray:
         ...
 
 @dataclass
@@ -248,13 +249,13 @@ class CXIReader():
         read_worker = partial(reader, ss_idxs=ss_idxs, fs_idxs=fs_idxs, proc=proc)
 
     @staticmethod
-    def read_item(index: NDArray) -> NDArray:
+    def read_item(index: Array) -> NDArray:
         dset : h5py.Dataset = cast(h5py.Dataset, h5py.File(index[0])[index[1]])
         return dset[index[2]]
 
     @staticmethod
-    def read_frame(index: NDArray, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> NDArray | int | float:
+    def read_frame(index: Array, ss_idxs: Indices, fs_idxs: Indices, proc: Optional[Processor]
+                   ) -> NDArray | int | float | Sequence[int] | Sequence[float]:
         dset : h5py.Dataset = cast(h5py.Dataset, h5py.File(index[0])[index[1]])
         data = dset[index[2]][..., ss_idxs, fs_idxs]
         if proc is not None:
@@ -262,10 +263,10 @@ class CXIReader():
         return data
 
     @staticmethod
-    def read_worker(index: NDArray) -> NDArray:
+    def read_worker(index: Array) -> NDArray:
         return read_worker(index)
 
-    def load_stack(self, attr: Attribute, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
+    def load_stack(self, attr: Attribute, idxs: Array, ss_idxs: Indices, fs_idxs: Indices,
                    proc: Optional[Processor], processes: int, verbose: bool) -> NDArray:
         stack = []
 
@@ -277,11 +278,11 @@ class CXIReader():
 
         return np.stack(stack, axis=0)
 
-    def load_frame(self, index: NDArray, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> NDArray | int | float:
+    def load_frame(self, index: Array, ss_idxs: Indices, fs_idxs: Indices, proc: Optional[Processor]
+                   ) -> NDArray | int | float | Sequence[int] | Sequence[float]:
         return self.read_frame(index, ss_idxs, fs_idxs, proc)
 
-    def load_sequence(self, idxs: NDArray) -> NDArray:
+    def load_sequence(self, idxs: Array) -> NDArray:
         return np.array([self.read_item(index) for index in idxs])
 
 @dataclass
@@ -307,7 +308,7 @@ class CXIWriter():
 
         return None, self.protocol.get_load_paths(attr)[0]
 
-    def save_stack(self, attr: str, data: NDArray, mode: str='overwrite',
+    def save_stack(self, attr: str, data: Array, mode: str='overwrite',
                     idxs: Optional[Indices]=None) -> None:
         file, cxi_path = self.find_dataset(attr)
 
@@ -342,7 +343,7 @@ class CXIWriter():
                                 chunks=(1,) + data.shape[1:],
                                 maxshape=(None,) + data.shape[1:])
 
-    def save_data(self, attr: str, data: NDArray) -> None:
+    def save_data(self, attr: str, data: Array) -> None:
         file, cxi_path = self.find_dataset(attr)
 
         if file is not None and cxi_path in file:
@@ -371,7 +372,7 @@ class FileStore():
     def read_frame_shape(self) -> Tuple[int, int]:
         raise NotImplementedError
 
-    def save(self, attr: str, data: NDArray, mode: str='overwrite',
+    def save(self, attr: str, data: Array, mode: str='overwrite',
              idxs: Optional[Indices]=None):
         raise NotImplementedError
 
@@ -510,7 +511,7 @@ class CXIStore(FileStore):
             return self.protocol.read_frame_shape(cast(h5py.File, cxi_file))
         return (0, 0)
 
-    def save(self, attr: str, data: NDArray, mode: str='overwrite',
+    def save(self, attr: str, data: Array, mode: str='overwrite',
              idxs: Optional[Indices]=None):
         """Save a data array pertained to the data attribute into the first file.
 
@@ -661,12 +662,13 @@ class ExtraReader():
                          attr=attr, ss_idxs=ss_idxs, fs_idxs=fs_idxs, proc=proc)
 
     @staticmethod
-    def read_worker(index: NDArray) -> NDArray | int | float:
+    def read_worker(index: Array) -> NDArray | int | float | Sequence[int] | Sequence[float]:
         return worker(index)
 
-    def read_frame(self, index: NDArray, attr: Attribute, ss_idxs: Indices,
-                   fs_idxs: Indices, proc: Optional[Processor]) -> NDArray | int | float:
-        run = self.protocol.open_run(index[0])
+    def read_frame(self, index: Array, attr: Attribute, ss_idxs: Indices,
+                   fs_idxs: Indices, proc: Optional[Processor]
+                   ) -> NDArray | int | float | Sequence[int] | Sequence[float]:
+        run = self.protocol.open_run(int(index[0]))
         _, train_data = run.train_from_id(index[1])
         data = self.protocol.detector_data(attr, train_data)
         data = np.nan_to_num(data, nan=0, posinf=0, neginf=0)
@@ -675,7 +677,7 @@ class ExtraReader():
             data = proc(data)
         return data
 
-    def load(self, attr: Attribute, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
+    def load(self, attr: Attribute, idxs: Array, ss_idxs: Indices, fs_idxs: Indices,
              processes: int, proc: Optional[Processor], verbose: bool) -> NDArray:
         stack = []
         with Pool(processes=processes, initializer=type(self).initializer,

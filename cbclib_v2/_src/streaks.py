@@ -83,7 +83,7 @@ class Streaks(BaseLines):
         return self[mask]
 
     def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                     num_threads: int=1) -> pd.DataFrame:
+                          num_threads: int=1) -> pd.DataFrame:
         """Draw a pattern in the :class:`dict` format.
 
         Args:
@@ -101,14 +101,12 @@ class Streaks(BaseLines):
         Returns:
             A pattern in dictionary format.
         """
-        table = write_lines(lines=self.to_lines(width=width), shape=shape, idxs=self.index,
-                            kernel=kernel, num_threads=num_threads)
-        ids, idxs = np.array(list(table)).T
+        idxs, ids, values = write_lines(lines=self.to_lines(width=width), shape=shape,
+                                        idxs=self.index, kernel=kernel, num_threads=num_threads)
         normalised_shape = (np.prod(shape[:-2], dtype=int),) + shape[-2:]
         frames, y, x = np.unravel_index(idxs, normalised_shape)
-        vals = np.array(list(table.values()))
 
-        data = {'index': ids, 'frames': frames, 'y': y, 'x': x, 'value': vals}
+        data = {'index': ids, 'frames': frames, 'y': y, 'x': x, 'value': values}
         return pd.DataFrame(data)
 
     def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian',

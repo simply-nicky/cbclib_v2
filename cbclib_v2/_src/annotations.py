@@ -36,13 +36,10 @@ DTypeLike = Union[
 ]
 
 Attribute = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
-NoData = Literal['frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
-NoSNR = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'std', 'whitefield']
-NoWF = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'std']
 
-Axis = Union[int, Sequence[int], None]
-Scalar = Union[int, float, np.bool_, np.number, bool, complex]
-DimSize = Union[int, Any]
+Axis = int | Sequence[int] | None
+Scalar = int | float | np.bool_ | np.number | bool | complex
+DimSize = int | Any
 ShapeLike = Sequence[DimSize]
 Shape = Tuple[int, ...]
 
@@ -57,29 +54,29 @@ JaxRealArray = JaxArray
 NDArray = npt.NDArray[Any]
 NDArrayLike = npt.ArrayLike
 NDBoolArray = npt.NDArray[np.bool_]
-NDComplexArray = npt.NDArray[Union[np.floating[Any], np.complexfloating[Any, Any]]]
+NDComplexArray = npt.NDArray[np.floating[Any] | np.complexfloating[Any, Any]]
 NDIntArray = npt.NDArray[np.integer[Any]]
 NDRealArray = npt.NDArray[np.floating[Any]]
 
-ArrayLike = Union[JaxArray, NDArray, Scalar, Sequence]
-Array = Union[JaxArray, NDArray]
-BoolArray = Union[JaxBoolArray, NDBoolArray]
-ComplexArray = Union[JaxComplexArray, NDComplexArray]
-IntArray = Union[JaxIntArray, NDIntArray]
-RealArray = Union[JaxRealArray, NDRealArray]
+ArrayLike = JaxArray | NDArray | Scalar | Sequence
+Array = JaxArray | NDArray
+BoolArray = JaxBoolArray | NDBoolArray
+ComplexArray = JaxComplexArray | NDComplexArray
+IntArray = JaxIntArray | NDIntArray
+RealArray = JaxRealArray | NDRealArray
 
 KeyArray = JaxArray
 
-Indices = Union[int, slice, IntArray, Sequence[int], Tuple[IntArray, ...]]
+Indices = int | slice | IntArray | Sequence[int] | Tuple[IntArray, ...]
 
-AnyFloat = Union[float, np.floating[Any], RealArray]
+AnyFloat = float | np.floating[Any] | RealArray
 
-IntSequence = Union[int, np.integer[Any], Sequence[int], IntArray]
-RealSequence = Union[float, np.floating[Any], Sequence[float], RealArray]
-ROI = Union[List[int], Tuple[int, int, int, int], IntArray]
+IntSequence = int | np.integer[Any] | Sequence[int] | IntArray
+RealSequence = float | np.floating[Any] | Sequence[float] | RealArray
+ROI = List[int] | Tuple[int, int, int, int] | IntArray
 
 PyTree = Any
-ExpandedType = Union[Type, Tuple[Type, List]]
+ExpandedType = Type | Tuple[Type, List]
 
 Norm = Literal['backward', 'forward', 'ortho']
 Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
@@ -88,7 +85,7 @@ Line = List[float]
 Streak = Tuple[Set[Tuple[int, int, float]], Dict[float, List[float]],
                Dict[float, List[int]], Line]
 
-Processor = Callable[[NDArray], Union[NDArray, int, float]]
+Processor = Callable[[NDArray], NDArray | int | float | Sequence[int] | Sequence[float]]
 
 class EighResult(NamedTuple):
     eigenvalues : Array

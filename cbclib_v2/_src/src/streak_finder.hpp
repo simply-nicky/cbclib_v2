@@ -391,8 +391,11 @@ struct StreakFinder
         int streak_id = 0;
 
         auto indices = peaks.sort(data);
+        size_t old_size;
         while (indices.size())
         {
+            old_size = indices.size();
+
             auto piter = indices.front();
             auto seed = *piter;
             indices.pop_front(); peaks->erase(piter);
@@ -419,6 +422,9 @@ struct StreakFinder
                     streak_id++;
                 }
             }
+
+            if (indices.size() == old_size)
+                throw std::runtime_error("indices.size() (" + std::to_string(old_size) + ") hasn't changed in a cycle");
         }
 
         for (auto [_, siter] : streaks)

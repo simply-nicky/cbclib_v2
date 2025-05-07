@@ -1,12 +1,11 @@
-from typing import (Callable, ClassVar, Dict, Iterator, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    get_type_hints)
+from typing import Callable, ClassVar, Iterator, Sequence, Tuple, Type, TypeVar, get_type_hints
 import pandas as pd
 from jax import random
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .state import State, dynamic_fields, field, static_fields
-from .._src.annotations import (ArrayNamespace, BoolArray, Indices, JaxNumPy, KeyArray, RealArray,
-                                RealSequence, Shape)
-from .._src.data_container import Parser, INIParser, JSONParser, array_namespace
+from .._src.annotations import (ArrayNamespace, BoolArray, Indices, JaxNumPy, KeyArray, NDRealArray,
+                                RealArray, RealSequence, Shape)
+from .._src.data_container import DataContainer, Parser, INIParser, JSONParser, array_namespace
 
 S = TypeVar('S', bound=State)
 
@@ -24,11 +23,16 @@ def random_state(state: S, span: S) -> Callable[[KeyArray], S]:
     def rnd(key: KeyArray):
         dynamic = {}
         for fld in dynamic_fields(state):
-            center = xp.asarray(getattr(state, fld.name))
-            bound = xp.abs(xp.asarray(getattr(span, fld.name)))
-            rnd = xp.asarray(random.uniform(key, center.shape, center.dtype,
-                                            -0.5 * bound, 0.5 * bound))
-            dynamic[fld.name] = center + rnd
+            attr = getattr(state, fld.name)
+
+            if isinstance(attr, State):
+                dynamic[fld.name] = random_state(attr, getattr(span, fld.name))(key)
+            else:
+                center = xp.asarray(attr)
+                bound = xp.abs(xp.asarray(getattr(span, fld.name)))
+                rnd = xp.asarray(random.uniform(key, center.shape, center.dtype,
+                                                -0.5 * bound, 0.5 * bound))
+                dynamic[fld.name] = center + rnd
 
         static = {fld.name: getattr(state, fld.name) for fld in static_fields(state)}
 
@@ -78,6 +82,21 @@ class XtalCell(State):
     def gamma(self) -> RealArray:
         return self.angles[..., 2]
 
+    @classmethod
+    def parser(cls, ext: str='ini') -> Parser:
+        if ext == 'ini':
+            return INIParser({'unit_cell': ('lengths', 'angles')},
+                             types={'lengths': NDRealArray, 'angles': NDRealArray})
+        if ext == 'json':
+            return JSONParser({'unit_cell': ('lengths', 'angles')})
+
+        raise ValueError(f"Invalid format: {ext}")
+
+    @classmethod
+    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace = JaxNumPy) -> 'XtalCell':
+        data = cls.parser(ext).read(file)
+        return cls(xp.asarray(data['angles']), xp.asarray(data['lengths']))
+
     def to_basis(self) -> 'XtalState':
         xp = self.__array_namespace__()
         cos = xp.cos(self.angles)
@@ -105,8 +124,8 @@ class XtalState(State):
     def c(self) -> RealArray:
         return self.basis[..., 2, :]
 
-    def __getitem__(self, indices: Union[Indices, BoolArray]) -> 'XtalState':
-        return XtalState(self.basis[indices].reshape((-1, 3, 3)))
+    def __getitem__(self, indices: Indices | BoolArray) -> 'XtalState':
+        return XtalState(self.basis.reshape((-1, 3, 3))[indices])
 
     def __len__(self) -> int:
         return self.basis.size // 9
@@ -118,18 +137,18 @@ class XtalState(State):
 
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
-        types = {'a_vec': RealArray, 'b_vec': RealArray, 'c_vec': RealArray}
         if ext == 'ini':
-            return INIParser({'basis': ('a_vec', 'b_vec', 'c_vec')},
-                             types=cast(Dict[str, Type], types))
+            return INIParser({'basis': ('a', 'b', 'c')},
+                             types={'a': NDRealArray, 'b': NDRealArray, 'c': NDRealArray})
         if ext == 'json':
-            return JSONParser({'basis': ('a_vec', 'b_vec', 'c_vec')})
+            return JSONParser({'basis': ('a', 'b', 'c')})
 
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
     def read(cls, file: str, ext: str='ini', xp: ArrayNamespace = JaxNumPy) -> 'XtalState':
-        return cls(xp.stack(list(cls.parser(ext).read(file).values())))
+        data = cls.parser(ext).read(file)
+        return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @classmethod
     def import_spherical(cls, r: RealArray, theta: RealArray, phi: RealArray,
@@ -190,7 +209,7 @@ class XtalState(State):
         return (lengths, xp.arccos(self.basis[..., 2] / lengths),
                 xp.arctan2(self.basis[..., 1], self.basis[..., 0]))
 
-class LensState(State):
+class LensState(DataContainer):
     foc_pos     : Sequence[float]
 
     @property
@@ -207,7 +226,7 @@ class LensState(State):
 
 L = TypeVar("L", bound='FixedLensState')
 
-class FixedLensState(LensState, eq=True, unsafe_hash=True):
+class FixedLensState(LensState, State, eq=True, unsafe_hash=True):
     foc_pos     : Tuple[float, float, float] = field(static=True)
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
@@ -257,7 +276,7 @@ class FixedPupilState(FixedLensState):
         xp = self.__array_namespace__()
         return xp.array(super().pupil_center)
 
-class FixedApertureState(LensState):
+class FixedApertureState(LensState, State):
     foc_pos         : RealArray
     pupil_center    : RealArray
     aperture        : Tuple[float, float] = field(static=True)
@@ -354,6 +373,12 @@ class TiltOverAxisState(State):
     angles : RealArray
     axis : RealArray
 
+    @classmethod
+    def from_point(cls, points: RealArray) -> 'TiltOverAxisState':
+        xp = array_namespace(points)
+        angles = xp.sqrt(xp.sum(points**2, axis=-1))
+        return cls(angles, points / angles[..., None])
+
     def alpha(self) -> RealArray:
         xp = self.__array_namespace__()
         r = xp.sqrt(xp.sum(self.axis**2, axis=-1))
@@ -364,11 +389,29 @@ class TiltOverAxisState(State):
         return xp.broadcast_to(xp.arctan2(self.axis[..., 1], self.axis[..., 0]),
                                self.angles.shape)
 
+    def to_point(self) -> RealArray:
+        return self.angles[..., None] * self.axis
+
     def to_tilt(self) -> TiltState:
         xp = self.__array_namespace__()
         return TiltState(xp.stack((self.angles, self.alpha(), self.beta()), axis=-1))
 
-class InternalState(State):
+class SetupState(State):
     lens    : LensState
+    z       : Tuple[float, ...] | RealArray
+
+class FixedSetupState(SetupState, eq=True, unsafe_hash=True):
+    lens    : FixedLensState = field(static=True)
+    z       : Tuple[float, ...] = field(static=True)
+
+class BaseState(DataContainer):
     xtal    : XtalState
-    z       : Sequence[float] | RealArray
+    setup   : SetupState
+
+    @property
+    def lens(self) -> LensState:
+        return self.setup.lens
+
+    @property
+    def z(self) -> Tuple[float, ...] | RealArray:
+        return self.setup.z

@@ -1,4 +1,4 @@
-from typing import List, Optional, Sequence, Tuple, Union, overload
+from typing import List, Optional, Sequence, Tuple, overload
 from ..annotations import NDIntArray, NDRealArray, IntSequence
 
 def unique_indices(array: NDIntArray) -> Tuple[NDIntArray, NDIntArray, NDIntArray]:
@@ -20,8 +20,8 @@ def unique_indices(array: NDIntArray) -> Tuple[NDIntArray, NDIntArray, NDIntArra
     """
     ...
 
-def binterpolate(inp: NDRealArray, grid: Sequence[Union[NDRealArray, NDIntArray]],
-                 coords: Union[NDRealArray, NDIntArray], num_threads: int=1) -> NDRealArray:
+def binterpolate(inp: NDRealArray, grid: Sequence[NDRealArray | NDIntArray],
+                 coords: NDRealArray | NDIntArray, num_threads: int=1) -> NDRealArray:
     """Perform bilinear multidimensional interpolation on regular grids. The integer grid starting
     from ``(0, 0, ...)`` to ``(inp.shape[0] - 1, inp.shape[1] - 1, ...)`` is implied.
 
@@ -104,8 +104,8 @@ def local_maxima(inp: NDIntArray, axis: IntSequence,
                  num_threads: int=1) -> NDIntArray:
     ...
 
-def local_maxima(inp: Union[NDRealArray, NDIntArray], axis: IntSequence,
-                 num_threads: int=1) -> Union[NDRealArray, NDIntArray]:
+def local_maxima(inp: NDRealArray | NDIntArray, axis: IntSequence, num_threads: int=1
+                 ) -> NDRealArray | NDIntArray:
     """
     Find local maxima in a multidimensional array along a set of axes. This function returns
     the indices of the maxima.

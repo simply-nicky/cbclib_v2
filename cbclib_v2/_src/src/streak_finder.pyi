@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, overload
 from ..annotations import IntSequence, Line, NDBoolArray, NDIntArray, NDRealArray, RealSequence
 from .label import Structure2D
 
@@ -48,15 +48,6 @@ class Peaks:
             A new filtered set of peaks.
         """
         ...
-
-def detect_peaks(data: NDRealArray, mask: NDBoolArray, radius: int, vmin: float,
-                 axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Peaks]:
-    ...
-
-def filter_peaks(peaks: List[Peaks], data: NDRealArray, mask: NDBoolArray,
-                 structure: Structure2D, vmin: float, npts: int, axes: Optional[Tuple[int, int]]=None,
-                 num_threads: int=1) -> List[Peaks]:
-    ...
 
 class StreakDouble:
     centers : List[List[int]]
@@ -164,7 +155,7 @@ class StreakFinderResultFloat:
     def to_lines(self, width: Optional[RealSequence]) -> NDRealArray:
         ...
 
-StreakFinderResult = Union[StreakFinderResultDouble, StreakFinderResultFloat]
+StreakFinderResult = StreakFinderResultDouble | StreakFinderResultFloat
 
 class StreakFinder:
     structure   : Structure2D
@@ -179,10 +170,41 @@ class StreakFinder:
                        xtol: float, vmin: float) -> StreakFinderResult:
         ...
 
-def detect_streaks(peaks: List[Peaks], data: NDRealArray, mask: NDBoolArray,
+def detect_peaks(data: NDRealArray, mask: NDBoolArray, radius: int, vmin: float,
+                 axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Peaks]:
+    ...
+
+@overload
+def filter_peaks(peaks: Peaks, data: NDRealArray, mask: NDBoolArray,
+                 structure: Structure2D, vmin: float, npts: int,
+                 axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> Peaks: ...
+
+@overload
+def filter_peaks(peaks: List[Peaks], data: NDRealArray, mask: NDBoolArray,
+                 structure: Structure2D, vmin: float, npts: int,
+                 axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> List[Peaks]: ...
+
+def filter_peaks(peaks: Peaks | List[Peaks], data: NDRealArray, mask: NDBoolArray,
+                 structure: Structure2D, vmin: float, npts: int,
+                 axes: Optional[Tuple[int, int]]=None, num_threads: int=1) -> Peaks | List[Peaks]:
+    ...
+
+@overload
+def detect_steraks(peaks: Peaks, data: NDRealArray, mask: NDBoolArray,
                    structure: Structure2D, xtol: float, vmin: float, min_size: int,
                    lookahead: int=0, nfa: int=0, axes: Optional[Tuple[int, int]]=None,
-                   num_threads: int=1) -> List[StreakFinderResult]:
+                   num_threads: int=1) -> StreakFinderResult: ...
+
+@overload
+def detect_steraks(peaks: List[Peaks], data: NDRealArray, mask: NDBoolArray,
+                   structure: Structure2D, xtol: float, vmin: float, min_size: int,
+                   lookahead: int=0, nfa: int=0, axes: Optional[Tuple[int, int]]=None,
+                   num_threads: int=1) -> List[StreakFinderResult]: ...
+
+def detect_streaks(peaks: Peaks | List[Peaks], data: NDRealArray, mask: NDBoolArray,
+                   structure: Structure2D, xtol: float, vmin: float, min_size: int,
+                   lookahead: int=0, nfa: int=0, axes: Optional[Tuple[int, int]]=None,
+                   num_threads: int=1) -> StreakFinderResult | List[StreakFinderResult]:
     """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
     extended with a connectivity structure.
 

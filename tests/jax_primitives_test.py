@@ -63,5 +63,6 @@ class TestJaxPrimitives():
 
     def test_k_to_smp(self, generate_coords: GenFunc, generate_vecs: GenFunc, src: RealArray,
                       idxs: IntArray, xp: ArrayNamespace):
-        self.check_gradient(k_to_smp, (generate_vecs(), generate_coords(), src),
-                            idxs=idxs, xp=xp)
+        z = generate_coords()
+        z = xp.reshape(xp.ravel(z)[xp.ravel(idxs)], idxs.shape)
+        self.check_gradient(k_to_smp, (generate_vecs(), z, src), xp=xp)

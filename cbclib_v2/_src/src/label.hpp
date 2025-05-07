@@ -145,6 +145,8 @@ public:
     void insert(const PointND<V, N> & point, T val)
     {
         auto r = point - org;
+
+        val = std::max(val, T());
         mu += val;
         mu_x += r * val;
         mu_xx += r * r * val;

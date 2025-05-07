@@ -1,8 +1,9 @@
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple, overload
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads
-from .jax import (CBData, CBDModel, InternalState, FixedPupilState, XtalState, field, random_array,
+from .jax import (BaseState, CBData, Detector, FixedLensState, FixedPupilState,
+                  FixedSetupState, SetupState, State, XtalState, field,
                   random_state)
 from ._src.annotations import ArrayNamespace, ComplexArray, JaxNumPy, RealArray
 
@@ -15,7 +16,7 @@ class TestSetup():
                        [[-0.0008358 , -0.00893367, -0.00065555],
                         [ 0.00777905, -0.00039116, -0.00445575],
                         [ 0.00913779, -0.00199602,  0.01613559]]]
-    foc_pos         = [ 0.14292289,  0.16409828, -0.39722229]
+    foc_pos         = ( 0.14292289,  0.16409828, -0.39722229)
     roi             = (1100, 3260, 1040, 3108)
     pupil_roi       = (0.16583517, 0.17700936, 0.14640569, 0.15699476)
     smp_dist        = 0.006571637911728528
@@ -23,31 +24,57 @@ class TestSetup():
     y_pixel_size    = 7.5e-05
 
     @classmethod
-    def xtal(cls, xp: ArrayNamespace=JaxNumPy) -> XtalState:
+    def xtal(cls, xp: ArrayNamespace) -> XtalState:
         return XtalState(xp.array(cls.basis))
 
     @classmethod
-    def lens(cls, xp: ArrayNamespace=JaxNumPy) -> FixedPupilState:
+    def detector(cls) -> Detector:
+        return Detector(cls.x_pixel_size, cls.y_pixel_size)
+
+    @classmethod
+    def fixed_lens(cls) -> FixedLensState:
+        return FixedLensState(cls.foc_pos, cls.pupil_roi)
+
+    @classmethod
+    def fixed_pupil_lens(cls, xp: ArrayNamespace) -> FixedPupilState:
         return FixedPupilState(xp.asarray(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
-    def z(cls, xp: ArrayNamespace=JaxNumPy) -> RealArray:
-        return xp.full((len(cls.basis),), cls.smp_dist + cls.foc_pos[2])
+    def fixed_setup(cls, size: int=1) -> FixedSetupState:
+        return FixedSetupState(cls.fixed_lens(), cls.z(size=size))
 
-random_lens = random_state(TestSetup.lens(), tree.map(lambda val: REL_TOL * val, TestSetup.lens()))
-random_xtal = random_state(TestSetup.xtal(), tree.map(lambda val: REL_TOL * val, TestSetup.xtal()))
-random_z = random_array(TestSetup.z(), REL_TOL)
+    @classmethod
+    def fixed_pupil_setup(cls, xp: ArrayNamespace, size: int=1) -> SetupState:
+        return SetupState(cls.fixed_pupil_lens(xp), cls.z(xp, size))
 
-class TestState(InternalState, random=True):
-    lens    : FixedPupilState = field(random=random_lens)
+    @overload
+    @classmethod
+    def z(cls, xp: None=None, size: int=1) -> Tuple[float, ...]: ...
+
+    @overload
+    @classmethod
+    def z(cls, xp: ArrayNamespace, size: int=1) -> RealArray: ...
+
+    @classmethod
+    def z(cls, xp: ArrayNamespace | None=None, size: int=1) -> Tuple[float, ...] | RealArray:
+        if xp is None:
+            return tuple([cls.smp_dist + cls.foc_pos[2],] * size)
+        return xp.array([cls.smp_dist + cls.foc_pos[2],] * size)
+
+class FixedState(BaseState, State):
+    xtal    : XtalState
+    setup   : SetupState = field(default=TestSetup.fixed_setup(), static=True)
+
+random_xtal = random_state(TestSetup.xtal(JaxNumPy),
+                           tree.map(lambda val: REL_TOL * val, TestSetup.xtal(JaxNumPy)))
+random_setup = random_state(TestSetup.fixed_pupil_setup(JaxNumPy),
+                            tree.map(lambda val: REL_TOL * val, TestSetup.fixed_pupil_setup(JaxNumPy)))
+
+class FullState(BaseState, State, random=True):
     xtal    : XtalState = field(random=random_xtal)
-    z       : RealArray = field(random=random_z)
+    setup   : SetupState = field(random=random_setup)
 
-Criterion = Callable[[CBData, TestState,], RealArray]
-
-class TestModel(CBDModel):
-    def to_internal(self, state: TestState) -> InternalState:
-        return state
+Criterion = Callable[[CBData, BaseState,], RealArray]
 
 _atol = {np.dtype(np.float32): 1e-4, np.dtype(np.float64): 1e-5,
          np.dtype(np.complex64): 1e-4, np.dtype(np.complex128): 1e-5}

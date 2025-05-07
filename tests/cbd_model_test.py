@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jax import random, jit
 import cbclib_v2 as cbc
 from cbclib_v2.annotations import ArrayNamespace, JaxNumPy, KeyArray
-from cbclib_v2.test_util import check_gradient, Criterion, TestSetup, TestState, TestModel
+from cbclib_v2.test_util import check_gradient, Criterion, FullState, TestSetup
 
 class TestCBDModel():
     EPS: float = 5e-7
@@ -13,18 +13,14 @@ class TestCBDModel():
         return JaxNumPy
 
     @pytest.fixture
-    def state(self, xp: ArrayNamespace) -> TestState:
-        return TestState(TestSetup.lens(xp), TestSetup.xtal(xp), TestSetup.z(xp))
+    def state(self, xp: ArrayNamespace) -> FullState:
+        return FullState(TestSetup.xtal(xp), TestSetup.fixed_pupil_setup(xp))
 
     @pytest.fixture
-    def int_state(self, model: TestModel, state: TestState) -> cbc.jax.InternalState:
-        return model.to_internal(state)
-
-    @pytest.fixture
-    def patterns(self, key: KeyArray, model: TestModel, int_state: cbc.jax.InternalState,
+    def patterns(self, key: KeyArray, model: cbc.jax.CBDModel, state: FullState,
                  num_lines: int, xp: ArrayNamespace) -> cbc.jax.Patterns:
         keys = xp.asarray(random.split(key, 4))
-        center = model.lens.zero_order(int_state.lens, xp)
+        center = model.lens.zero_order(state.lens, xp)
 
         length = xp.asarray(random.uniform(keys[0], (num_lines,), xp.float32, 1.5e-3, 1.5e-2))
         x = xp.asarray(random.uniform(keys[2], (num_lines,), jnp.float32,
@@ -45,20 +41,19 @@ class TestCBDModel():
         return cbc.jax.Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def data(self, key: KeyArray, patterns: cbc.jax.Patterns, model: TestModel,
-             int_state: cbc.jax.InternalState, num_points: int
-             ) -> cbc.jax.CBData:
-        return model.init_data(key, patterns, num_points, int_state)
+    def data(self, key: KeyArray, patterns: cbc.jax.Patterns, model: cbc.jax.CBDModel,
+             state: FullState, num_points: int) -> cbc.jax.CBData:
+        return model.init_data(key, patterns, num_points, state)
 
     @pytest.fixture
-    def pupil_loss(self, model: TestModel, num_lines: int, xp: ArrayNamespace) -> Criterion:
+    def pupil_loss(self, model: cbc.jax.CBDModel, num_lines: int, xp: ArrayNamespace) -> Criterion:
         return jit(model.pupil_loss(num_lines, xp=xp))
 
     @pytest.fixture
-    def line_loss(self, model: TestModel, num_lines: int, xp: ArrayNamespace) -> Criterion:
+    def line_loss(self, model: cbc.jax.CBDModel, num_lines: int, xp: ArrayNamespace) -> Criterion:
         return jit(model.line_loss(num_lines, xp=xp))
 
-    def check_loss(self, f: Criterion, data: cbc.jax.CBData, state: TestState):
+    def check_loss(self, f: Criterion, data: cbc.jax.CBData, state: FullState):
         def loss(state):
             return f(data, state)
 
@@ -68,5 +63,5 @@ class TestCBDModel():
     @pytest.mark.parametrize('num_lines,num_points', [(10, 4)])
     def test_model_gradients(self, key: KeyArray, data: cbc.jax.CBData,
                              pupil_loss: Criterion, line_loss: Criterion):
-        self.check_loss(line_loss, data, TestState.random(key))
-        self.check_loss(pupil_loss, data, TestState.random(key))
+        self.check_loss(line_loss, data, FullState.random(key))
+        self.check_loss(pupil_loss, data, FullState.random(key))

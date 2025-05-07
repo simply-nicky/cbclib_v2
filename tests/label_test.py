@@ -1,11 +1,11 @@
-from typing import Set, Tuple, Union
+from typing import Set, Tuple
 import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, Shape
 from cbclib_v2.label import Regions2D, Regions3D, Structure2D, Structure3D, label
 
-Regions = Union[Regions2D, Regions3D]
-Structure = Union[Structure2D, Structure3D]
+Regions = Regions2D | Regions3D
+Structure = Structure2D | Structure3D
 
 @pytest.mark.parametrize('shape,structure', [((10, 10), Structure2D(1, 1)),
                                              ((10, 10, 10), Structure3D(1, 1))])

@@ -60,8 +60,30 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
 }
 
 template <typename T>
-auto filter_peaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T vmin, size_t npts,
-                  std::optional<std::tuple<size_t, size_t>> ax, unsigned threads)
+auto filter_peaks(Peaks peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T vmin, size_t npts,
+                  py::none ax, unsigned threads)
+{
+    array<T> darr {data.request()};
+    array<bool> marr {mask.request()};
+
+    check_equal("data and mask have incompatible shapes",
+                std::prev(darr.shape().end(), 2), darr.shape().end(), marr.shape().begin(), marr.shape().end());
+    if (darr.ndim() != 2)
+        fail_container_check("wrong number of dimensions (" + std::to_string(darr.ndim()) + " != 2)", darr.shape());
+
+    py::gil_scoped_release release;
+
+    Peaks result = peaks;
+    result.filter(darr, marr, structure, vmin, npts);
+
+    py::gil_scoped_acquire acquire;
+
+    return result;
+}
+
+template <typename T>
+auto filter_peaks_vec(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T vmin, size_t npts,
+                      std::optional<std::tuple<size_t, size_t>> ax, unsigned threads)
 {
     Sequence<size_t> axes;
     if (ax)
@@ -78,7 +100,7 @@ auto filter_peaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<boo
     check_equal("data and mask have incompatible shapes",
                 std::prev(darr.shape().end(), 2), darr.shape().end(), marr.shape().begin(), marr.shape().end());
     if (darr.ndim() < 2)
-        fail_container_check("wrong number of dimensions (" + std::to_string(darr.ndim()) + " < 3)", darr.shape());
+        fail_container_check("wrong number of dimensions (" + std::to_string(darr.ndim()) + " < 2)", darr.shape());
 
     size_t repeats = std::reduce(darr.shape().begin(), std::prev(darr.shape().end(), 2), 1, std::multiplies());
     if (repeats != peaks.size())
@@ -107,9 +129,33 @@ auto filter_peaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<boo
 }
 
 template <typename T>
-auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin,
-                    unsigned min_size, unsigned lookahead, unsigned nfa, std::optional<std::tuple<size_t, size_t>> ax,
-                    unsigned threads)
+auto detect_streaks(Peaks peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin,
+                    unsigned min_size, unsigned lookahead, unsigned nfa, py::none ax, unsigned threads)
+{
+    if (xtol >= structure.rank + 0.5)
+        throw std::invalid_argument("xtol (" + std::to_string(xtol) + ") must be lower than the rank of the structure (" +
+                                    std::to_string(structure.rank) + ")");
+
+    array<T> darr {data.request()};
+    array<bool> marr {mask.request()};
+
+    if (darr.ndim() != 2)
+        fail_container_check("wrong number of dimensions (" + std::to_string(darr.ndim()) + " != 2)", darr.shape());
+
+    py::gil_scoped_release release;
+
+    StreakFinder finder {structure, min_size, lookahead, nfa};
+    StreakFinderResult<T> result = finder.detect_streaks(StreakFinderResult(darr, marr), darr, peaks, xtol, vmin);
+
+    py::gil_scoped_acquire acquire;
+
+    return result;
+}
+
+template <typename T>
+auto detect_streaks_vec(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin,
+                        unsigned min_size, unsigned lookahead, unsigned nfa, std::optional<std::tuple<size_t, size_t>> ax,
+                        unsigned threads)
 {
     if (xtol >= structure.rank + 0.5)
         throw std::invalid_argument("xtol (" + std::to_string(xtol) + ") must be lower than the rank of the structure (" +
@@ -380,8 +426,12 @@ PYBIND11_MODULE(streak_finder, m)
     m.def("detect_peaks", &detect_peaks<float>, py::arg("data"), py::arg("mask"), py::arg("radius"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
 
     m.def("filter_peaks", &filter_peaks<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
+    m.def("filter_peaks", &filter_peaks_vec<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
     m.def("filter_peaks", &filter_peaks<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
+    m.def("filter_peaks", &filter_peaks_vec<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
 
     m.def("detect_streaks", &detect_streaks<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
+    m.def("detect_streaks", &detect_streaks_vec<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
     m.def("detect_streaks", &detect_streaks<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
+    m.def("detect_streaks", &detect_streaks_vec<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
 }

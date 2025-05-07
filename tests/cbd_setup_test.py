@@ -2,7 +2,7 @@ import pytest
 from jax import random
 import cbclib_v2 as cbc
 from cbclib_v2.annotations import ArrayNamespace, KeyArray, NumPy, RealArray
-from cbclib_v2.test_util import TestModel, TestSetup, TestState, check_close
+from cbclib_v2.test_util import FixedState, TestSetup, check_close
 
 class TestCBDSetup():
     @pytest.fixture
@@ -10,12 +10,8 @@ class TestCBDSetup():
         return NumPy
 
     @pytest.fixture
-    def state(self, xp: ArrayNamespace) -> TestState:
-        return TestState(TestSetup.lens(xp), TestSetup.xtal(xp), TestSetup.z(xp))
-
-    @pytest.fixture
-    def int_state(self, model: TestModel, state: TestState) -> cbc.jax.InternalState:
-        return model.to_internal(state)
+    def state(self, xp: ArrayNamespace) -> FixedState:
+        return FixedState(TestSetup.xtal(xp))
 
     def skew_symmetric(self, vec: RealArray, xp: ArrayNamespace) -> RealArray:
         return xp.cross(xp.identity(vec.shape[-1]), vec[..., None, :])
@@ -31,8 +27,8 @@ class TestCBDSetup():
         return I + S * skew + (1.0 - C) * (skew @ skew)
 
     @pytest.fixture
-    def xtal(self, int_state: cbc.jax.InternalState) -> cbc.jax.XtalState:
-        return int_state.xtal
+    def xtal(self, state: FixedState) -> cbc.jax.XtalState:
+        return state.xtal
 
     @pytest.fixture
     def ormatrix(self, xtal: cbc.jax.XtalState) -> cbc.jax.RotationState:
@@ -51,25 +47,25 @@ class TestCBDSetup():
         return request.param
 
     @pytest.fixture
-    def miller(self, key: KeyArray, q_abs: float, num_points: int, model: TestModel,
-               int_state: cbc.jax.InternalState) -> cbc.jax.Miller:
-        miller = model.hkl_in_aperture(q_abs, int_state)
+    def miller(self, key: KeyArray, q_abs: float, num_points: int, model: cbc.jax.CBDModel,
+               state: FixedState) -> cbc.jax.Miller:
+        miller = model.hkl_in_aperture(q_abs, state)
         return miller[random.choice(key, miller.hkl.shape[0], (num_points,))]
 
     @pytest.fixture
-    def rlp(self, miller: cbc.jax.Miller, model: TestModel,
-            int_state: cbc.jax.InternalState) -> cbc.jax.MillerWithRLP:
-        return model.xtal.hkl_to_q(miller, int_state.xtal)
+    def rlp(self, miller: cbc.jax.Miller, model: cbc.jax.CBDModel,
+            state: FixedState, xp: ArrayNamespace) -> cbc.jax.MillerWithRLP:
+        return model.xtal.hkl_to_q(miller, state.xtal, xp)
 
     @pytest.fixture
-    def laue(self, rlp: cbc.jax.MillerWithRLP, model: TestModel,
-             int_state: cbc.jax.InternalState) -> cbc.jax.LaueVectors:
-        return model.lens.source_lines(rlp, int_state.lens)
+    def laue(self, rlp: cbc.jax.MillerWithRLP, model: cbc.jax.CBDModel,
+             state: FixedState, xp: ArrayNamespace) -> cbc.jax.LaueVectors:
+        return model.lens.source_lines(rlp, state.lens, xp)
 
     @pytest.fixture
-    def points(self, laue: cbc.jax.LaueVectors, model: TestModel,
-               int_state: cbc.jax.InternalState) -> cbc.jax.CBDPoints:
-        return model.kout_to_points(laue, int_state)
+    def points(self, laue: cbc.jax.LaueVectors, model: cbc.jax.CBDModel,
+               state: FixedState) -> cbc.jax.CBDPoints:
+        return model.kout_to_points(laue, state)
 
     def text_xtal_to_cell(self, xtal: cbc.jax.XtalState, ormatrix: cbc.jax.RotationState,
                           cell: cbc.jax.XtalCell, xp: ArrayNamespace):
@@ -91,19 +87,18 @@ class TestCBDSetup():
         check_close(cell.lengths, new_cell.lengths)
 
     def test_hkl_and_q(self, miller: cbc.jax.Miller, rlp: cbc.jax.MillerWithRLP,
-                       model: TestModel, int_state: cbc.jax.InternalState,
-                       xp: ArrayNamespace):
-        rlp = model.xtal.q_to_hkl(rlp, int_state.xtal)
+                       model: cbc.jax.CBDModel, state: FixedState, xp: ArrayNamespace):
+        rlp = model.xtal.q_to_hkl(rlp, state.xtal, xp)
         assert xp.all(rlp.hkl_indices == miller.hkl_indices)
 
-    def test_laue(self, laue: cbc.jax.LaueVectors, model: TestModel,
-                  int_state: cbc.jax.InternalState, xp: ArrayNamespace):
+    def test_laue(self, laue: cbc.jax.LaueVectors, model: cbc.jax.CBDModel,
+                  state: FixedState, xp: ArrayNamespace):
         check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
-        check_close(laue.kin, model.lens.project_to_pupil(laue.kin, int_state.lens))
+        check_close(laue.kin, model.lens.project_to_pupil(laue.kin, state.lens, xp))
 
     def test_points_and_kout(self, laue: cbc.jax.LaueVectors, points: cbc.jax.CBDPoints,
-                             model: TestModel, int_state: cbc.jax.InternalState):
-        check_close(model.points_to_kout(points, int_state).kout, laue.kout)
+                             model: cbc.jax.CBDModel, state: FixedState):
+        check_close(model.points_to_kout(points, state).kout, laue.kout)
 
     def test_rotation_to_tilt(self, ormatrix: cbc.jax.RotationState, xp: ArrayNamespace):
         tilt = ormatrix.to_tilt()
