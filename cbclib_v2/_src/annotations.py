@@ -1,6 +1,6 @@
 from dataclasses import Field
 from typing import (Any, Callable, ClassVar, Dict, Generic, List, Literal, NamedTuple, Optional, Protocol,
-                    Sequence, Set, Tuple, Type, TypeVar, Union, cast, overload, runtime_checkable)
+                    Sequence, Tuple, Type, TypeVar, Union, cast, overload, runtime_checkable)
 import numpy as np
 import numpy.typing as npt
 from jax import Array as JaxArray, Device
@@ -34,8 +34,6 @@ DTypeLike = Union[
     np.dtype,       # like np.dtype('float32'), np.dtype('int32')
     SupportsDType,  # like xp.float32, xp.int32
 ]
-
-Attribute = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
 
 Axis = int | Sequence[int] | None
 Scalar = int | float | np.bool_ | np.number | bool | complex
@@ -81,15 +79,16 @@ ExpandedType = Type | Tuple[Type, List]
 Norm = Literal['backward', 'forward', 'ortho']
 Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
 
-Line = List[float]
-Streak = Tuple[Set[Tuple[int, int, float]], Dict[float, List[float]],
-               Dict[float, List[int]], Line]
-
 Processor = Callable[[NDArray], NDArray | int | float | Sequence[int] | Sequence[float]]
 
 class EighResult(NamedTuple):
     eigenvalues : Array
     eigenvectors: Array
+
+class UniqueInverseResult(NamedTuple):
+    """Struct returned by :func:`jax.numpy.unique_inverse`."""
+    values: Array
+    inverse_indices: Array
 
 class LinalgNamespace(Protocol):
     def det(self, a: ArrayLike) -> RealArray:
@@ -1250,6 +1249,55 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def delete(self, arr: ArrayLike, obj: ArrayLike | slice, axis: int | None = None) -> Array:
+        """Delete entry or entries from an array.
+
+        Array API implementation of :func:`numpy.delete`.
+
+        Args:
+            arr: array from which entries will be deleted.
+            obj: index, indices, or slice to be deleted.
+            axis: axis along which entries will be deleted.
+
+        Returns:
+            Copy of ``arr`` with specified indices deleted.
+
+        Note:
+            ``delete()`` usually requires the index specification to be static. If the
+            index is an integer array that is guaranteed to contain unique entries, you
+            may specify ``assume_unique_indices=True`` to perform the operation in a
+            manner that does not require static indices.
+
+        See also:
+            - :func:`insert`: insert entries into an array.
+
+        Examples:
+            Delete entries from a 1D array:
+
+            >>> a = xp.array([4, 5, 6, 7, 8, 9])
+            >>> xp.delete(a, 2)
+            Array([4, 5, 7, 8, 9], dtype=int32)
+            >>> xp.delete(a, slice(1, 4))  # delete a[1:4]
+            Array([4, 8, 9], dtype=int32)
+            >>> xp.delete(a, slice(None, None, 2))  # delete a[::2]
+            Array([5, 7, 9], dtype=int32)
+
+            Delete entries from a 2D array along a specified axis:
+
+            >>> a2 = xp.array([[4, 5, 6],
+            ...                [7, 8, 9]])
+            >>> xp.delete(a2, 1, axis=1)
+            Array([[4, 6],
+                   [7, 9]], dtype=int32)
+
+            Delete multiple entries via a sequence of indices:
+
+            >>> indices = xp.array([0, 1, 3])
+            >>> xp.delete(a, indices)
+            Array([6, 8, 9], dtype=int32)
+        """
+        ...
+
     def dot(self, a: ArrayLike, b: ArrayLike) -> Array:
         """Compute the dot product of two arrays.
 
@@ -1648,38 +1696,65 @@ class ArrayNamespace(Protocol):
         """
         ...
 
-    def log(self, x: ArrayLike, /) -> RealArray:
-        """Calculate element-wise natural logarithm of the input.
+    def lexsort(self, keys: Array | Sequence[ArrayLike], axis: int = -1) -> Array:
+        """Sort a sequence of keys in lexicographic order.
 
-        Array API implementation of :obj:`numpy.log`.
+        Array API implementation of :func:`numpy.lexsort`.
 
         Args:
-            x: input array or scalar.
+            keys: a sequence of arrays to sort; all arrays must have the same shape.
+                The last key in the sequence is used as the primary key.
+            axis: the axis along which to sort (default: -1).
 
         Returns:
-            An array containing the logarithm of each element in ``x``, promotes to inexact
-            dtype.
+            An array of integers of shape ``keys[0].shape`` giving the indices of the
+            entries in lexicographically-sorted order.
 
         See also:
-            - :func:`exp`: Calculates element-wise exponential of the input.
-            - :func:`log2`: Calculates base-2 logarithm of each element of input.
-            - :func:`log1p`: Calculates element-wise logarithm of one plus input.
+            - :func:`argsort`: sort a single entry by index.
 
         Examples:
-            ``xp.log`` and ``xp.exp`` are inverse functions of each other. Applying
-            ``xp.log`` on the result of ``xp.exp(x)`` yields the original input ``x``.
+        :func:`lexsort` with a single key is equivalent to :func:`argsort`:
 
-            >>> x = xp.array([2, 3, 4, 5])
-            >>> xp.log(xp.exp(x))
-            Array([2., 3., 4., 5.], dtype=float32)
+        >>> key1 = xp.array([4, 2, 3, 2, 5])
+        >>> xp.lexsort([key1])
+        Array([1, 3, 2, 0, 4], dtype=int32)
+        >>> xp.argsort(key1)
+        Array([1, 3, 2, 0, 4], dtype=int32)
 
-            Using ``xp.log`` we can demonstrate well-known properties of logarithms, such
-            as :math:`log(a*b) = log(a)+log(b)`.
+        With multiple keys, :func:`lexsort` uses the last key as the primary key:
 
-            >>> x1 = xp.array([2, 1, 3, 1])
-            >>> x2 = xp.array([1, 3, 2, 4])
-            >>> xp.allclose(xp.log(x1*x2), xp.log(x1)+xp.log(x2))
-            Array(True, dtype=bool)
+        >>> key2 = xp.array([2, 1, 1, 2, 2])
+        >>> xp.lexsort([key1, key2])
+        Array([1, 2, 3, 0, 4], dtype=int32)
+
+        The meaning of the indices become more clear when printing the sorted keys:
+
+        >>> indices = xp.lexsort([key1, key2])
+        >>> print(f"{key1[indices]}\\n{key2[indices]}")
+        [2 3 2 4 5]
+        [1 1 2 2 2]
+
+        Notice that the elements of ``key2`` appear in order, and within the sequences
+        of duplicated values the corresponding elements of ```key1`` appear in order.
+
+        For multi-dimensional inputs, :func:`lexsort` defaults to sorting along the
+        last axis:
+
+        >>> key1 = xp.array([[2, 4, 2, 3],
+        ...                  [3, 1, 2, 2]])
+        >>> key2 = xp.array([[1, 2, 1, 3],
+        ...                  [2, 1, 2, 1]])
+        >>> xp.lexsort([key1, key2])
+        Array([[0, 2, 1, 3],
+               [1, 3, 2, 0]], dtype=int32)
+
+        A different sort axis can be chosen using the ``axis`` keyword; here we sort
+        along the leading axis:
+
+        >>> xp.lexsort([key1, key2], axis=0)
+        Array([[0, 1, 0, 1],
+               [1, 0, 1, 0]], dtype=int32)
         """
         ...
 
@@ -1772,6 +1847,41 @@ class ArrayNamespace(Protocol):
                    [ 2.5 ,  7.5 ],
                    [ 3.75,  8.75],
                    [ 5.  , 10.  ]], dtype=float32)
+        """
+        ...
+
+    def log(self, x: ArrayLike, /) -> RealArray:
+        """Calculate element-wise natural logarithm of the input.
+
+        Array API implementation of :obj:`numpy.log`.
+
+        Args:
+            x: input array or scalar.
+
+        Returns:
+            An array containing the logarithm of each element in ``x``, promotes to inexact
+            dtype.
+
+        See also:
+            - :func:`exp`: Calculates element-wise exponential of the input.
+            - :func:`log2`: Calculates base-2 logarithm of each element of input.
+            - :func:`log1p`: Calculates element-wise logarithm of one plus input.
+
+        Examples:
+            ``xp.log`` and ``xp.exp`` are inverse functions of each other. Applying
+            ``xp.log`` on the result of ``xp.exp(x)`` yields the original input ``x``.
+
+            >>> x = xp.array([2, 3, 4, 5])
+            >>> xp.log(xp.exp(x))
+            Array([2., 3., 4., 5.], dtype=float32)
+
+            Using ``xp.log`` we can demonstrate well-known properties of logarithms, such
+            as :math:`log(a*b) = log(a)+log(b)`.
+
+            >>> x1 = xp.array([2, 1, 3, 1])
+            >>> x2 = xp.array([1, 3, 2, 4])
+            >>> xp.allclose(xp.log(x1*x2), xp.log(x1)+xp.log(x2))
+            Array(True, dtype=bool)
         """
         ...
 
@@ -2455,6 +2565,52 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def squeeze(self, a: ArrayLike, axis: int | Sequence[int] | None = None) -> Array:
+        """Remove one or more length-1 axes from array
+
+        Array API implementation of :func:`numpy.sqeeze`.
+
+        Args:
+            a: input array
+            axis: integer or sequence of integers specifying axes to remove. If any specified
+                axis does not have a length of 1, an error is raised. If not specified, squeeze
+                all length-1 axes in ``a``.
+
+        Returns:
+            copy of ``a`` with length-1 axes removed.
+
+        See Also:
+            - :func:`expand_dims`: the inverse of ``squeeze``: add dimensions of length 1.
+            - :func:`ravel`: flatten an array into a 1D shape.
+            - :func:`reshape`: general array reshape.
+
+        Examples:
+            >>> x = xp.array([[[0]], [[1]], [[2]]])
+            >>> x.shape
+            (3, 1, 1)
+
+            Squeeze all length-1 dimensions:
+
+            >>> xp.squeeze(x)
+            Array([0, 1, 2], dtype=int32)
+            >>> _.shape
+            (3,)
+
+            Equivalent while specifying the axes explicitly:
+
+            >>> xp.squeeze(x, axis=(1, 2))
+            Array([0, 1, 2], dtype=int32)
+
+            Attempting to squeeze a non-unit axis results in an error:
+
+            >>> xp.squeeze(x, axis=0)  # doctest: +IGNORE_EXCEPTION_DETAIL
+            Traceback (most recent call last):
+                ...
+            ValueError: cannot select an axis to squeeze out which has size not equal to one,
+                got shape=(3, 1, 1) and dimensions=(0,)
+        """
+        ...
+
     def stack(self, array: Array | Sequence[ArrayLike], axis: int = 0,
               dtype: DTypeLike | None = None) -> Array:
         """Join arrays along a new axis.
@@ -2755,6 +2911,84 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def tan(self, x: ArrayLike, /) -> Array:
+        """Compute a trigonometric tangent of each element of input.
+
+        Array API implementation of :obj:`numpy.tan`.
+
+        Args:
+            x: scalar or array. Angle in radians.
+
+        Returns:
+            An array containing the tangent of each element in ``x``, promotes to inexact
+            dtype.
+
+        See also:
+            - :func:`sin`: Computes a trigonometric sine of each element of input.
+            - :func:`cos`: Computes a trigonometric cosine of each element of
+                input.
+            - :func:`arctan` and :func:`atan`: Computes the inverse of
+                trigonometric tangent of each element of input.
+
+        Examples:
+        >>> pi = xp.pi
+        >>> x = xp.array([0, pi/6, pi/4, 3*pi/4, 5*pi/6])
+        >>> with xp.printoptions(precision=3, suppress=True):
+        ...   print(xp.tan(x))
+        [ 0.     0.577  1.    -1.    -0.577]
+        """
+        ...
+
+    def tanh(self, x: ArrayLike, /) -> Array:
+        r"""Calculate element-wise hyperbolic tangent of input.
+
+        Array API implementation of :obj:`numpy.tanh`.
+
+        The hyperbolic tangent is defined by:
+
+        .. math::
+
+            tanh(x) = \frac{sinh(x)}{cosh(x)} = \frac{e^x - e^{-x}}{e^x + e^{-x}}
+
+        Args:
+            x: input array or scalar.
+
+        Returns:
+            An array containing the hyperbolic tangent of each element of ``x``, promoting
+            to inexact dtype.
+
+        Note:
+        ``xp.tanh`` is equivalent to computing ``-1j * xp.tan(1j * x)``.
+
+        See also:
+            - :func:`sinh`: Computes the element-wise hyperbolic sine of the input.
+            - :func:`cosh`: Computes the element-wise hyperbolic cosine of the input.
+            - :func:`arctanh`:  Computes the element-wise inverse of hyperbolic
+                tangent of the input.
+
+        Examples:
+        >>> x = xp.array([[-1, 0, 1],
+        ...               [3, -2, 5]])
+        >>> with xp.printoptions(precision=3, suppress=True):
+        ...   xp.tanh(x)
+        Array([[-0.762,  0.   ,  0.762],
+               [ 0.995, -0.964,  1.   ]], dtype=float32)
+        >>> with xp.printoptions(precision=3, suppress=True):
+        ...   -1j * xp.tan(1j * x)
+        Array([[-0.762+0.j,  0.   -0.j,  0.762-0.j],
+               [ 0.995-0.j, -0.964+0.j,  1.   -0.j]], dtype=complex64, weak_type=True)
+
+        For complex-valued input:
+
+        >>> with xp.printoptions(precision=3, suppress=True):
+        ...   xp.tanh(2-5j)
+        Array(1.031+0.021j, dtype=complex64, weak_type=True)
+        >>> with xp.printoptions(precision=3, suppress=True):
+        ...   -1j * xp.tan(1j * (2-5j))
+        Array(1.031+0.021j, dtype=complex64, weak_type=True)
+        """
+        ...
+
     def tile(self, a: ArrayLike, reps: DimSize | Sequence[DimSize]) -> Array:
         """Construct an array by repeating ``A`` along specified dimensions.
 
@@ -2836,9 +3070,49 @@ class ArrayNamespace(Protocol):
         """
         ...
 
-    def unique(self, ar: ArrayLike, return_index: bool = False, return_inverse: bool = False,
-               return_counts: bool = False, axis: int | None = None, *, equal_nan: bool = True,
-               fill_value: ArrayLike | None = None) -> Any:
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[False] = False,
+               return_inverse: Literal[False] = False, return_counts: Literal[False] = False,
+               axis: int | None = None, equal_nan: bool = True) -> Array: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[True],
+               return_inverse: Literal[False] = False, return_counts: Literal[False] = False,
+               axis: int | None = None, equal_nan: bool = True) -> Tuple[Array, Array]: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[False] = False,
+               return_inverse: Literal[True], return_counts: Literal[False] = False,
+               axis: int | None = None, equal_nan: bool = True) -> Tuple[Array, Array]: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[True], return_inverse: Literal[True],
+               return_counts: Literal[False] = False, axis: int | None = None,
+               equal_nan: bool = True) -> Tuple[Array, Array, Array]: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[False] = False,
+               return_inverse: Literal[False] = False, return_counts: Literal[True],
+               axis: int | None = None, equal_nan: bool = True) -> Tuple[Array, Array]: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[True],
+               return_inverse: Literal[False] = False, return_counts: Literal[True],
+               axis: int | None = None, equal_nan: bool = True) -> Tuple[Array, Array, Array]: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[False] = False,
+               return_inverse: Literal[True], return_counts: Literal[True], axis: int | None = None,
+               equal_nan: bool = True) -> Tuple[Array, Array, Array]: ...
+
+    @overload
+    def unique(self, ar: ArrayLike, *, return_index: Literal[True], return_inverse: Literal[True],
+               return_counts: Literal[True], axis: int | None = None, equal_nan: bool = True
+               ) -> Tuple[Array, Array, Array, Array]: ...
+
+    def unique(self, ar: ArrayLike, *, return_index: bool = False, return_inverse: bool = False,
+               return_counts: bool = False, axis: int | None = None, equal_nan: bool = True
+               ) -> Array | Tuple[Array, ...]:
         """Return the unique values from an array.
 
         Array API implementation of :func:`numpy.unique`.
@@ -2967,6 +3241,54 @@ class ArrayNamespace(Protocol):
              [2 3]]
             >>> print(counts)
             [2 1]
+        """
+        ...
+
+    def unique_inverse(self, x: ArrayLike, /) -> UniqueInverseResult:
+        """Return unique values from x, along with indices, inverse indices, and counts.
+
+        Array API implementation of :func:`numpy.unique_inverse`; this is equivalent to calling
+        :func:`unique` with `return_inverse` and `equal_nan` set to True.
+
+        Args:
+        x: N-dimensional array from which unique values will be extracted.
+
+        Returns:
+        A tuple ``(values, indices, inverse_indices, counts)``, with the following properties:
+
+        - ``values``:
+            an array of shape ``(n_unique,)`` containing the unique values from ``x``.
+        - ``inverse_indices``:
+            An array of shape ``x.shape``. Contains the indices within ``values`` of each value
+            in ``x``. For 1D inputs, ``values[inverse_indices]`` is equivalent to ``x``.
+
+        See also:
+        - :func:`unique`: general function for computing unique values.
+        - :func:`unique_values`: compute only ``values``.
+        - :func:`unique_counts`: compute only ``values`` and ``counts``.
+        - :func:`unique_all`: compute ``values``, ``indices``, ``inverse_indices``, and ``counts``.
+
+        Examples:
+        Here we compute the unique values in a 1D array:
+
+        >>> x = xp.array([3, 4, 1, 3, 1])
+        >>> result = xp.unique_inverse(x)
+
+        The result is a :class:`~typing.NamedTuple` with two named attributes.
+        The ``values`` attribute contains the unique values from the array:
+
+        >>> result.values
+        Array([1, 3, 4], dtype=int32)
+
+        The ``indices`` attribute contains the indices of the unique ``values`` within
+        the input array:
+
+        The ``inverse_indices`` attribute contains the indices of the input within ``values``:
+
+        >>> result.inverse_indices
+        Array([1, 2, 0, 1, 0], dtype=int32)
+        >>> xp.all(x == result.values[result.inverse_indices])
+        Array(True, dtype=bool)
         """
         ...
 

@@ -90,4 +90,6 @@ class PatternsStreakFinder(DataContainer):
         """
         result = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
                                 lookahead, nfa, num_threads=num_threads)
-        return [pattern.to_lines() for pattern in result]
+        if isinstance(result, list):
+            return [pattern.to_lines() for pattern in result]
+        return [result.to_lines(),]

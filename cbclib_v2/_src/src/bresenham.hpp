@@ -35,200 +35,210 @@ private:
 
 }
 
+template <typename T, size_t N>
+struct BaseError
+{
+    PointND<T, N> derror;
+    T error;
+
+    BaseError() = default;
+
+    BaseError(PointND<T, N> derr, T err) : derror(std::move(derr)), error(err) {}
+
+    BaseError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
+        derror(std::move(derr)), error(dot(derror, point - origin)) {}
+
+    T error_at() const {return error;}
+
+    // Return e(x + sx, y + sy)
+    T error_at(const PointND<T, N> & step) const
+    {
+        return error_at() + dot(step, derror);
+    }
+
+    BaseError & increment(long x, size_t axis)
+    {
+        error += x * derror[axis];
+        return *this;
+    }
+};
+
+template <typename T, size_t N>
+struct TangentError : public BaseError<T, N>
+{
+    using BaseError<T, N>::error;
+    T length;
+
+    TangentError() = default;
+
+    TangentError(PointND<T, N> derr, T err) : BaseError<T, N>(std::move(derr), err), length(amplitude(derr)) {}
+
+    TangentError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
+        BaseError<T, N>(std::move(derr), point, origin), length(amplitude(derr)) {}
+
+    T error_at() const {return std::max(std::max(-error, error - length * length), T());}
+};
+
+template <typename T, size_t N>
+struct NormalError : public BaseError<T, N>
+{
+    using BaseError<T, N>::derror;
+
+    NormalError() = default;
+
+    NormalError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
+        BaseError<T, N>(std::move(derr), point, origin) {}
+
+    using BaseError<T, N>::error_at;
+
+    // We need to choose one out of three option:
+    //      1) increment only x, error e_x
+    //      2) increment only y, error e_y
+    //      3) increment both, error e_xy
+    // We need to choose an option with the minimal absolute error
+    std::pair<bool, bool> is_next(const PointND<long, N> & step, size_t axis1, size_t axis2) const
+    {
+        auto e_x = error_at() + step[axis1] * derror[axis1];
+        auto e_y = error_at() + step[axis2] * derror[axis2];
+        auto e_xy = e_x + step[axis2] * derror[axis2];
+
+        if (std::abs(e_y) < std::abs(e_x))
+        {
+            if (std::abs(e_xy) < std::abs(e_y)) return std::make_pair(true, true);
+            return std::make_pair(false, true);
+        }
+        if (std::abs(e_xy) < std::abs(e_x)) return std::make_pair(true, true);
+        return std::make_pair(true, false);
+    }
+};
+
+template <typename T, size_t N, bool IsForward>
+class BresenhamPlotter;
+
+template <typename T, size_t N>
+class LineIterator
+{
+public:
+    using iterator_category = std::forward_iterator_tag;
+    using difference_type = std::ptrdiff_t;
+    using value_type = PointND<long, N>;
+    using pointer = PointND<long, N> *;
+    using reference = const PointND<long, N> &;
+
+    LineIterator & flip(size_t axis)
+    {
+        step[axis] *= -1;
+        update();
+        return *this;
+    }
+
+    LineIterator & flip(const std::array<bool, N> & to_flip)
+    {
+        for (size_t i = 0; i < N; i++) if (to_flip[i]) step[i] *= -1;
+        update();
+        return *this;
+    }
+
+    LineIterator & move(size_t axis)
+    {
+        increment(step[axis], axis);
+        update();
+        return *this;
+    }
+
+    LineIterator & operator++()
+    {
+        for (size_t i = 0; i < N; i++) if (next[i]) increment(step[i], i);
+        update();
+        return *this;
+    }
+
+    LineIterator operator++(int)
+    {
+        auto saved = *this;
+        operator++();
+        return saved;
+    }
+
+    bool operator==(const LineIterator & rhs) const
+    {
+        bool is_equal = false;
+        for (size_t i = 0; i < N; i++) is_equal |= current[i] == rhs.current[i];
+        return is_equal;
+    }
+    bool operator!=(const LineIterator & rhs) const {return !operator==(rhs);}
+
+    reference operator*() const {return current;}
+    pointer operator->() const {return &current;}
+
+private:
+    constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
+
+    PointND<long, N> step, current;
+    PointND<bool, N> next;
+    TangentError<T, N> terror;
+    std::array<NormalError<T, N>, NumPairs> nerrors;
+
+    LineIterator(PointND<long, N> current) :
+        step(), current(std::move(current)), next(), terror(), nerrors() {}
+
+    LineIterator(PointND<long, N> step, PointND<long, N> current, TangentError<T, N> terror, std::array<NormalError<T, N>, NumPairs> nerrors) :
+        step(std::move(step)), current(std::move(current)), next(), terror(std::move(terror)), nerrors(std::move(nerrors))
+    {
+        update();
+    }
+
+    template <typename ... Ix> requires is_all_integral<Ix ...>
+    LineIterator(const LineIterator & p, Ix ... axes) :
+        step(p.step), current(p.current), next(), terror(p.terror), nerrors(p.nerrors)
+    {
+        (step[axes] = ... = 0);
+        update();
+    }
+
+    LineIterator & increment(long x, size_t axis)
+    {
+        current[axis] += x;
+
+        terror.increment(x, axis);
+        for (auto index : axes().indices(axis)) nerrors[index].increment(x, axis);
+
+        return *this;
+    }
+
+    void update()
+    {
+        for (size_t i = 0; i < N; i++) next[i] = step[i];
+
+        for (size_t i = 0; i < NumPairs; i++)
+        {
+            auto [axis1, axis2] = axes().pairs(i);
+            if (step[axis1] && step[axis2])
+            {
+                auto [first, second] = nerrors[i].is_next(step, axis1, axis2);
+                next[axis1] &= first;
+                next[axis2] &= second;
+            }
+        }
+    }
+
+    static const UniquePairs<N> & axes()
+    {
+        return UniquePairs<N>::instance();
+    }
+
+    friend class BresenhamPlotter<T, N, true>;
+    friend class BresenhamPlotter<T, N, false>;
+};
+
 template <typename T, size_t N, bool IsForward>
 class BresenhamPlotter
 {
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
 
-    struct BaseError
-    {
-        PointND<T, N> derror;
-        T error;
-
-        BaseError() = default;
-
-        BaseError(PointND<T, N> derr, T err) : derror(std::move(derr)), error(err) {}
-
-        BaseError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
-            derror(std::move(derr)), error(dot(derror, point - origin)) {}
-
-        T error_at() const {return error;}
-
-        // Return e(x + sx, y + sy)
-        T error_at(const PointND<T, N> & step) const
-        {
-            return error_at() + dot(step, derror);
-        }
-
-        BaseError & increment(long x, size_t axis)
-        {
-            error += x * derror[axis];
-            return *this;
-        }
-    };
-
-    struct TangentError : public BaseError
-    {
-        using BaseError::error;
-        T length;
-
-        TangentError() = default;
-
-        TangentError(PointND<T, N> derr, T err) : BaseError(std::move(derr), err), length(amplitude(derr)) {}
-
-        TangentError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
-            BaseError(std::move(derr), point, origin), length(amplitude(derr)) {}
-
-        T error_at() const {return std::max(std::max(-error, error - length * length), T());}
-    };
-
-    struct NormalError : public BaseError
-    {
-        using BaseError::derror;
-
-        NormalError() = default;
-
-        NormalError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
-            BaseError(std::move(derr), point, origin) {}
-
-        using BaseError::error_at;
-
-        // We need to choose one out of three option:
-        //      1) increment only x, error e_x
-        //      2) increment only y, error e_y
-        //      3) increment both, error e_xy
-        // We need to choose an option with the minimal absolute error
-        std::pair<bool, bool> is_next(const PointND<long, N> & step, size_t axis1, size_t axis2) const
-        {
-            auto e_x = error_at() + step[axis1] * derror[axis1];
-            auto e_y = error_at() + step[axis2] * derror[axis2];
-            auto e_xy = e_x + step[axis2] * derror[axis2];
-
-            if (std::abs(e_y) < std::abs(e_x))
-            {
-                if (std::abs(e_xy) < std::abs(e_y)) return std::make_pair(true, true);
-                return std::make_pair(false, true);
-            }
-            if (std::abs(e_xy) < std::abs(e_x)) return std::make_pair(true, true);
-            return std::make_pair(true, false);
-        }
-    };
-
 public:
-    class LineIterator
-    {
-    public:
-        using iterator_category = std::forward_iterator_tag;
-        using difference_type = std::ptrdiff_t;
-        using value_type = PointND<long, N>;
-        using pointer = PointND<long, N> *;
-        using reference = const PointND<long, N> &;
-
-        LineIterator & flip(size_t axis)
-        {
-            step[axis] *= -1;
-            update();
-            return *this;
-        }
-
-        LineIterator & flip(const std::array<bool, N> & to_flip)
-        {
-            for (size_t i = 0; i < N; i++) if (to_flip[i]) step[i] *= -1;
-            update();
-            return *this;
-        }
-
-        LineIterator & move(size_t axis)
-        {
-            increment(step[axis], axis);
-            update();
-            return *this;
-        }
-
-        LineIterator & operator++()
-        {
-            for (size_t i = 0; i < N; i++) if (next[i]) increment(step[i], i);
-            update();
-            return *this;
-        }
-
-        LineIterator operator++(int)
-        {
-            auto saved = *this;
-            operator++();
-            return saved;
-        }
-
-        bool operator==(const LineIterator & rhs) const
-        {
-            bool is_equal = false;
-            for (size_t i = 0; i < N; i++) is_equal |= current[i] == rhs.current[i];
-            return is_equal;
-        }
-        bool operator!=(const LineIterator & rhs) const {return !operator==(rhs);}
-
-        reference operator*() const {return current;}
-        pointer operator->() const {return &current;}
-
-    private:
-        PointND<long, N> step, current;
-        PointND<bool, N> next;
-        TangentError terror;
-        std::array<NormalError, NumPairs> nerrors;
-
-        LineIterator(PointND<long, N> current) :
-            step(), current(std::move(current)), next(), terror(), nerrors() {}
-
-        LineIterator(PointND<long, N> step, PointND<long, N> current, TangentError terror, std::array<NormalError, NumPairs> nerrors) :
-            step(std::move(step)), current(std::move(current)), next(), terror(std::move(terror)), nerrors(std::move(nerrors))
-        {
-            update();
-        }
-
-        template <typename ... Ix> requires is_all_integral<Ix ...>
-        LineIterator(const LineIterator & p, Ix ... axes) :
-            step(p.step), current(p.current), next(), terror(p.terror), nerrors(p.nerrors)
-        {
-            (step[axes] = ... = 0);
-            update();
-        }
-
-        LineIterator & increment(long x, size_t axis)
-        {
-            current[axis] += x;
-
-            terror.increment(x, axis);
-            for (auto index : axes().indices(axis)) nerrors[index].increment(x, axis);
-
-            return *this;
-        }
-
-        void update()
-        {
-            for (size_t i = 0; i < N; i++) next[i] = step[i];
-
-            for (size_t i = 0; i < NumPairs; i++)
-            {
-                auto [axis1, axis2] = axes().pairs(i);
-                if (step[axis1] && step[axis2])
-                {
-                    auto [first, second] = nerrors[i].is_next(step, axis1, axis2);
-                    next[axis1] &= first;
-                    next[axis2] &= second;
-                }
-            }
-        }
-
-        static const UniquePairs<N> & axes()
-        {
-            return UniquePairs<N>::instance();
-        }
-
-        friend class BresenhamPlotter;
-    };
-
-    using const_iterator = LineIterator;
+    using const_iterator = LineIterator<T, N>;
     using iterator = const_iterator;
 
     BresenhamPlotter(LineND<T, N> l) :
@@ -325,16 +335,16 @@ private:
         return point;
     }
 
-    std::array<NormalError, NumPairs> normal_errors(const PointND<long, N> & point) const
+    std::array<NormalError<T, N>, NumPairs> normal_errors(const PointND<long, N> & point) const
     {
-        std::array<NormalError, NumPairs> errors;
-        for (size_t i = 0; i < NumPairs; i++) errors[i] = NormalError(normal(iterator::axes().pairs(i)), point, pt0());
+        std::array<NormalError<T, N>, NumPairs> errors;
+        for (size_t i = 0; i < NumPairs; i++) errors[i] = NormalError<T, N>(normal(iterator::axes().pairs(i)), point, pt0());
         return errors;
     }
 
-    TangentError tangent_error(const PointND<long, N> & point) const
+    TangentError<T, N> tangent_error(const PointND<long, N> & point) const
     {
-        return TangentError(line.tangent(), point, pt0());
+        return TangentError<T, N>(line.tangent(), point, pt0());
     }
 };
 
@@ -401,9 +411,8 @@ void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
                 flip[p.axis(1)] |= i & 1;
                 flip[p.axis(2)] |= i >> 1;
 
-                size_t counter = 0;
                 for (auto iter_xy = p.collapse(iter, p.axis()).flip(flip).move(p.axis(1 + ((i & 1) ^ (i >> 1))));
-                     p.normal_error(iter_xy) < width * width && counter < 100; ++iter_xy, ++counter)
+                     p.normal_error(iter_xy) < width * width; ++iter_xy)
                 {
                     std::forward<Func>(func)(*iter_xy, p.error(iter_xy, width));
 

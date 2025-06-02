@@ -1,19 +1,14 @@
-from typing import List, Optional, TypeVar, Union
-from dataclasses import fields
+from typing import Union
 from .cbc_setup import TiltOverAxisState
 from .geometry import safe_divide, kxy_to_k
-from .state import State
-from .._src.annotations import IntArray, RealArray, Shape
-from .._src.data_container import ArrayContainer, array_namespace
+from .._src.annotations import ArrayNamespace, BoolArray, IntArray, RealArray, Shape
+from .._src.data_container import ArrayContainer, IndexedContainer, array_namespace
+from .._src.state import State
 from .._src.streaks import BaseLines
 
-D = TypeVar("D", bound="BaseData")
 AnyPoints = Union['Points', 'PointsWithK', 'CBDPoints']
 
-class BaseData(State, ArrayContainer):
-    ...
-
-class Patterns(BaseData, BaseLines):
+class Patterns(State, IndexedContainer, BaseLines):
     """Detector streak lines container. Provides an interface to draw a pattern for a set of
     lines.
 
@@ -30,49 +25,31 @@ class Patterns(BaseData, BaseLines):
     """
     index       : IntArray
     lines       : RealArray
-    kout        : Optional[RealArray] = None
-    hkl         : Optional[IntArray] = None
-    q           : Optional[RealArray] = None
-    kin         : Optional[RealArray] = None
-
-    @classmethod
-    def extra_attributes(cls) -> List[str]:
-        return [field.name for field in fields(cls)
-                if field.name not in ['index', 'lines']]
 
     @classmethod
     def from_points(cls, points: AnyPoints) -> 'Patterns':
         xp = array_namespace(points)
         lines = xp.reshape(points.points, points.shape[:-1] + (4,))
         index = xp.reshape(points.index, lines.shape[:-1])
-        extra = {attr: getattr(points, attr) for attr in cls.extra_attributes()
-                 if hasattr(points, attr)}
-        return cls(index=index, lines=lines, **extra)
+        return cls(index=index, lines=lines)
 
     @property
-    def length(self) -> RealArray:
-        xp = self.__array_namespace__()
-        return xp.sqrt((self.lines[..., 2] - self.lines[..., 0])**2 +
-                       (self.lines[..., 3] - self.lines[..., 1])**2)
+    def points(self) -> 'Points':
+        return Points(index=self.index[..., None], points=super().points)
 
     @property
     def pt0(self) -> 'Points':
-        return Points(points=self.lines[..., :2], index=self.index)
+        return Points(index=self.index, points=super().pt0)
 
     @property
     def pt1(self) -> 'Points':
-        return Points(points=self.lines[..., 2:], index=self.index)
+        return Points(index=self.index, points=super().pt1)
 
     def sample(self, x: RealArray) -> 'Points':
-        pts = self.pt0.points + x[..., None] * (self.pt1.points - self.pt0.points)
+        pts = super().pt0 + x[..., None] * (super().pt1 - super().pt0)
         return Points(points=pts, index=self.index)
 
-    def to_points(self) -> 'Points':
-        xp = self.__array_namespace__()
-        points = xp.reshape(self.lines, self.shape + (2, 2))
-        return Points(index=self.index[..., None], points=points)
-
-class Points(BaseData):
+class Points(State, ArrayContainer):
     index   : IntArray
     points  : RealArray
 
@@ -91,7 +68,7 @@ class Points(BaseData):
 class PointsWithK(Points):
     kout    : RealArray
 
-class UCA(BaseData):
+class UCA(State, ArrayContainer):
     index       : IntArray
     streak_id   : IntArray
     kout        : RealArray
@@ -123,22 +100,24 @@ class UCA(BaseData):
         kxy = xp.concatenate((kxy, xp.stack((kxy[..., 0], kxy[::-1, ..., 1]), axis=-1)))
         return self.kout - kxy_to_k(kxy, xp)
 
-class CircleState(BaseData):
+class CircleState(State, ArrayContainer):
     index   : IntArray
     center  : RealArray
     axis1   : RealArray
     axis2   : RealArray
     radius  : RealArray
 
-class Rotograms(BaseData):
+class Rotograms(State, IndexedContainer, BaseLines):
     index       : IntArray
     streak_id   : IntArray
-    points      : RealArray
+    lines       : RealArray
 
     @classmethod
-    def from_tilts(cls, tilts: TiltOverAxisState, index: IntArray, streak_id: IntArray
-                   ) -> 'Rotograms':
-        return cls(index, streak_id, tilts.axis * tilts.angles[..., None])
+    def from_tilts(cls, tilts: TiltOverAxisState, index: IntArray, streak_id: IntArray,
+                   xp: ArrayNamespace) -> 'Rotograms':
+        points = tilts.axis * xp.arctan(0.25 * tilts.angles[..., None])
+        lines = xp.concatenate((points[..., 1:, :], points[..., :-1, :]), axis=-1)
+        return cls(xp.asarray(index), xp.asarray(streak_id), lines)
 
     @property
     def angles(self) -> RealArray:
@@ -149,28 +128,9 @@ class Rotograms(BaseData):
     def axis(self) -> RealArray:
         return self.points / self.angles[..., None]
 
-    @property
-    def lines(self) -> RealArray:
-        xp = self.__array_namespace__()
-        return xp.concatenate((self.points[1:], self.points[:-1]), axis=-1)
-
-    @property
-    def num_frames(self) -> int:
-        xp = self.__array_namespace__()
-        return int(xp.max(self.index)) + 1
-
-    @property
-    def num_streaks(self) -> int:
-        xp = self.__array_namespace__()
-        return int(xp.max(self.streak_id)) + 1
-
-    @property
-    def tilts(self) -> TiltOverAxisState:
-        return TiltOverAxisState(self.angles, self.axis)
-
-class Miller(BaseData):
-    hkl     : IntArray | RealArray
+class Miller(State, ArrayContainer):
     index   : IntArray
+    hkl     : IntArray | RealArray
 
     @property
     def hkl_indices(self) -> IntArray:
@@ -203,9 +163,9 @@ class Miller(BaseData):
         hkl = xp.reshape(xp.reshape(hkl, (-1, 3)) + offsets[..., None, :], shape)
         return self.replace(hkl=hkl)
 
-class RLP(BaseData):
-    q       : RealArray
+class RLP(State, ArrayContainer):
     index   : IntArray
+    q       : RealArray
 
     @property
     def source_points(self) -> RealArray:
@@ -238,6 +198,7 @@ class LaueVectors(MillerWithRLP):
 class CBDPoints(LaueVectors, Points):
     pass
 
-class CBData(BaseData):
+class CBData(State, ArrayContainer):
     miller  : Miller
     points  : Points
+    mask    : BoolArray

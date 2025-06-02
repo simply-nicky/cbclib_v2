@@ -3,6 +3,9 @@ import jax.numpy as jnp
 from jax import random
 import cbclib_v2 as cbc
 from cbclib_v2.annotations import ArrayNamespace, KeyArray, RealArray, NumPy
+from cbclib_v2.indexer import (CBData, CBDIndexer, CBDLoss, CBDModel, CircleState, MillerWithRLP,
+                               Patterns, PointsWithK, TiltOverAxis, TiltOverAxisState, UCA,
+                               project_to_rect)
 from cbclib_v2.test_util import FixedState, TestSetup, check_close
 
 class TestCBDIndexer():
@@ -29,8 +32,8 @@ class TestCBDIndexer():
         return request.param
 
     @pytest.fixture
-    def patterns(self, key: KeyArray, indexer: cbc.jax.CBDIndexer, state: FixedState,
-                 num_lines: int, xp: ArrayNamespace) -> cbc.jax.Patterns:
+    def patterns(self, key: KeyArray, indexer: CBDIndexer, state: FixedState, num_lines: int,
+                 xp: ArrayNamespace) -> Patterns:
         keys = xp.asarray(random.split(key, 4))
         center = indexer.lens.zero_order(state.lens, xp)
 
@@ -50,52 +53,51 @@ class TestCBDIndexer():
                          axis=-1)
         index = xp.concatenate((xp.full((num_lines // 2), 0),
                                 xp.full((num_lines - num_lines // 2), 1)))
-        return cbc.jax.Patterns(lines=lines, index=index)
+        return Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def points(self, indexer: cbc.jax.CBDIndexer, patterns: cbc.jax.Patterns,
-               state: FixedState, xp: ArrayNamespace) -> cbc.jax.PointsWithK:
+    def points(self, indexer: CBDIndexer, patterns: Patterns, state: FixedState,
+               xp: ArrayNamespace) -> PointsWithK:
         return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)), state)
 
     @pytest.fixture
-    def all_rlp(self, indexer: cbc.jax.CBDIndexer, q_abs: float, state: FixedState,
-                xp: ArrayNamespace) -> cbc.jax.MillerWithRLP:
-        rlp = indexer.xtal.miller_in_ball(q_abs, state.xtal, xp)
-        return indexer.xtal.hkl_to_q(rlp, state.xtal, xp)
+    def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, state: FixedState,
+                xp: ArrayNamespace) -> MillerWithRLP:
+        hkl = indexer.xtal.hkl_in_ball(q_abs, state.xtal, xp)
+        iterator = indexer.xtal.hkl_range(patterns.indices(), hkl, state.xtal, xp)
+        return MillerWithRLP.concatenate(list(iterator))
 
     @pytest.fixture
-    def patterns_uca(self, indexer: cbc.jax.CBDIndexer, patterns: cbc.jax.Patterns,
-                     points: cbc.jax.PointsWithK, state: FixedState) -> cbc.jax.UCA:
+    def patterns_uca(self, indexer: CBDIndexer, patterns: Patterns, points: PointsWithK,
+                     state: FixedState) -> UCA:
         return indexer.patterns_to_uca(patterns, points, state)
 
     @pytest.fixture
-    def candidates(self, indexer: cbc.jax.CBDIndexer, all_rlp: cbc.jax.MillerWithRLP,
-                   patterns_uca: cbc.jax.UCA) -> cbc.jax.MillerWithRLP:
+    def candidates(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA
+                   ) -> MillerWithRLP:
         return indexer.candidates(all_rlp, patterns_uca)[0]
 
     @pytest.fixture
-    def uca(self, indexer: cbc.jax.CBDIndexer, all_rlp: cbc.jax.MillerWithRLP,
-            patterns_uca: cbc.jax.UCA) -> cbc.jax.UCA:
+    def uca(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA) -> UCA:
         return indexer.candidates(all_rlp, patterns_uca)[1]
 
     @pytest.fixture
-    def data(self, key: KeyArray, patterns: cbc.jax.Patterns, model: cbc.jax.CBDModel,
-             state: FixedState, num_points: int) -> cbc.jax.CBData:
+    def data(self, key: KeyArray, patterns: Patterns, model: CBDModel, state: FixedState,
+             num_points: int) -> CBData:
         return model.init_data(key, patterns, num_points, state)
 
     @pytest.fixture
-    def pupil_loss(self, model: cbc.jax.CBDModel, num_lines: int) -> cbc.jax.CBDLoss:
-        return model.pupil_loss(num_lines)
+    def pupil_loss(self, model: CBDModel, xp: ArrayNamespace) -> CBDLoss:
+        return model.pupil_loss(xp=xp)
 
     @pytest.fixture
-    def solution(self, model: cbc.jax.CBDModel, pupil_loss: cbc.jax.CBDLoss, data: cbc.jax.CBData,
-                 state: FixedState, xp: ArrayNamespace) -> cbc.jax.MillerWithRLP:
+    def solution(self, model: CBDModel, pupil_loss: CBDLoss, data: CBData, state: FixedState,
+                 xp: ArrayNamespace) -> MillerWithRLP:
         miller = pupil_loss.index(data, state)
         return model.xtal.hkl_to_q(miller, state.xtal, xp)
 
-    def test_indexing_candidates(self, patterns_uca: cbc.jax.UCA, solution: cbc.jax.MillerWithRLP,
-                                 points: cbc.jax.PointsWithK, candidates: cbc.jax.MillerWithRLP,
-                                 uca: cbc.jax.UCA, xp: ArrayNamespace):
+    def test_candidates(self, patterns_uca: UCA, solution: MillerWithRLP, points: PointsWithK,
+                        candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):
         xp = cbc.array_namespace(patterns_uca, solution, points, candidates, uca)
         resolution = xp.sum(solution.q**2, axis=-1)
         idxs = xp.where((patterns_uca.min_resolution < resolution) &
@@ -107,12 +109,11 @@ class TestCBDIndexer():
                                                           uca[uca_idxs].to_dict().values()))
 
     @pytest.fixture
-    def circles(self, indexer: cbc.jax.CBDIndexer, candidates: cbc.jax.MillerWithRLP,
-                uca: cbc.jax.UCA) -> cbc.jax.CircleState:
+    def circles(self, indexer: CBDIndexer, candidates: MillerWithRLP, uca: UCA) -> CircleState:
         return indexer.intersection(candidates, uca)
 
-    def test_intersection(self, indexer: cbc.jax.CBDIndexer, circles: cbc.jax.CircleState,
-                          candidates: cbc.jax.MillerWithRLP, uca: cbc.jax.UCA, xp: ArrayNamespace):
+    def test_intersection(self, indexer: CBDIndexer, circles: CircleState,
+                          candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):
         theta = xp.linspace(0, 2 * xp.pi)[:, None]
         pts = indexer.circle(theta, circles)
         resolution = xp.broadcast_to(xp.sum(candidates.q**2, axis=-1), pts.shape[:-1])
@@ -120,31 +121,29 @@ class TestCBDIndexer():
         check_close(xp.sum((pts - uca.kout)**2, axis=-1), xp.ones(pts.shape[:-1]))
 
     @pytest.fixture
-    def endpoints(self, indexer: cbc.jax.CBDIndexer, circles: cbc.jax.CircleState, uca: cbc.jax.UCA
-                  ) -> RealArray:
+    def endpoints(self, indexer: CBDIndexer, circles: CircleState, uca: UCA) -> RealArray:
         return indexer.uca_endpoints(circles, uca)
 
-    def test_endpoints(self, indexer: cbc.jax.CBDIndexer, circles: cbc.jax.CircleState,
-                       endpoints: RealArray, candidates: cbc.jax.MillerWithRLP, uca: cbc.jax.UCA,
-                       xp: ArrayNamespace):
+    def test_endpoints(self, indexer: CBDIndexer, circles: CircleState, endpoints: RealArray,
+                       candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):
         pts = indexer.circle(endpoints, circles)
         check_close(xp.sum(pts**2, axis=-1),
                     xp.broadcast_to(xp.sum(candidates.q**2, axis=-1), pts.shape[:-1]))
         check_close(xp.sum((pts - uca.kout)**2, axis=-1), xp.ones(pts.shape[:-1]))
-        proj = cbc.jax.project_to_rect(pts[..., :2], uca.q_min[..., :2], uca.q_max[..., :2])
+        proj = project_to_rect(pts[..., :2], uca.q_min[..., :2], uca.q_max[..., :2])
         check_close(pts[..., :2], proj)
 
     @pytest.fixture
-    def midpoints(self, indexer: cbc.jax.CBDIndexer, circles: cbc.jax.CircleState,
-                  endpoints: RealArray, xp: ArrayNamespace) -> RealArray:
+    def midpoints(self, indexer: CBDIndexer, circles: CircleState, endpoints: RealArray,
+                  xp: ArrayNamespace) -> RealArray:
         return indexer.circle(xp.mean(endpoints, axis=0), circles)
 
     @pytest.fixture
-    def tilts(self, indexer: cbc.jax.CBDIndexer, candidates: cbc.jax.MillerWithRLP,
-              midpoints: RealArray, xp: ArrayNamespace):
+    def tilts(self, indexer: CBDIndexer, candidates: MillerWithRLP, midpoints: RealArray,
+              xp: ArrayNamespace):
         return indexer.rotations(candidates, midpoints, xp)
 
-    def test_rotations(self, tilts: cbc.jax.TiltOverAxisState, candidates: cbc.jax.MillerWithRLP,
+    def test_rotations(self, tilts: TiltOverAxisState, candidates: MillerWithRLP,
                        midpoints: RealArray, xp: ArrayNamespace):
-        pts = cbc.jax.TiltOverAxis()(candidates.q[..., None, :], tilts)[..., 0, :]
-        check_close(xp.broadcast_to(midpoints, pts.shape), pts)
+        pts = TiltOverAxis()(candidates.q[..., None, None, :], tilts)[..., 0, :]
+        check_close(xp.broadcast_to(midpoints[..., None, :], pts.shape), pts)

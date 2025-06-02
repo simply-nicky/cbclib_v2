@@ -78,21 +78,6 @@ T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const Coord
     return out;
 }
 
-template <typename T>
-py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
-                            std::vector<py::array_t<T, py::array::c_style | py::array::forcecast>> grid,
-                            py::array_t<T, py::array::c_style | py::array::forcecast> coords, unsigned threads);
-
-/*----------------------------------------------------------------------------*/
-/*---------------------------- Kernel regression -----------------------------*/
-/*----------------------------------------------------------------------------*/
-
-template <typename T>
-py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forcecast> y,
-                          py::array_t<T, py::array::c_style | py::array::forcecast> x,
-                          py::array_t<T, py::array::c_style | py::array::forcecast> x_hat, T sigma, std::string kernel,
-                          std::optional<py::array_t<T, py::array::c_style | py::array::forcecast>> w, unsigned threads);
-
 template <typename InputIt, typename T, typename Axes, class UnaryFunction, typename = std::enable_if_t<
     (std::is_base_of_v<typename array<T>::iterator, InputIt> || std::is_base_of_v<typename array<T>::const_iterator, InputIt>) &&
     std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t> && std::is_integral_v<typename Axes::value_type>
@@ -144,9 +129,6 @@ UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction && unary_op, 
 
     return std::forward<UnaryFunction>(unary_op);
 }
-
-template <typename T, typename U>
-py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::forcecast> inp, U axis, unsigned threads);
 
 }
 

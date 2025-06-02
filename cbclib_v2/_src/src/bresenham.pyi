@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 from ..annotations import IntArray, NDIntArray, NDRealArray, RealArray, Shape
 
-def accumulate_lines(lines: RealArray, shape: Shape, in_idxs: IntArray, out_idxs: IntArray,
+def accumulate_lines(lines: RealArray, shape: Shape, counts: IntArray, frames: IntArray,
                      max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
                      out_overlap: str='sum', num_threads: int=1) -> NDRealArray:
     ...

@@ -88,6 +88,10 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
     return out;
 }
 
+/*----------------------------------------------------------------------------*/
+/*---------------------------- Kernel regression -----------------------------*/
+/*----------------------------------------------------------------------------*/
+
 template <typename T>
 py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forcecast> y,
                           py::array_t<T, py::array::c_style | py::array::forcecast> x,

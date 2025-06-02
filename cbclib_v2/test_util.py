@@ -2,10 +2,10 @@ from typing import Any, Callable, Dict, Optional, Tuple, overload
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads
-from .jax import (BaseState, CBData, Detector, FixedLensState, FixedPupilState,
-                  FixedSetupState, SetupState, State, XtalState, field,
-                  random_state)
+from .indexer import (BaseState, CBData, Detector, FixedLens, FixedPupilLens,
+                      FixedPupilSetup, FixedSetup, XtalState, random_state)
 from ._src.annotations import ArrayNamespace, ComplexArray, JaxNumPy, RealArray
+from ._src.state import State, field
 
 REL_TOL = 0.025
 
@@ -32,20 +32,20 @@ class TestSetup():
         return Detector(cls.x_pixel_size, cls.y_pixel_size)
 
     @classmethod
-    def fixed_lens(cls) -> FixedLensState:
-        return FixedLensState(cls.foc_pos, cls.pupil_roi)
+    def fixed_lens(cls) -> FixedLens:
+        return FixedLens(cls.foc_pos, cls.pupil_roi)
 
     @classmethod
-    def fixed_pupil_lens(cls, xp: ArrayNamespace) -> FixedPupilState:
-        return FixedPupilState(xp.asarray(cls.foc_pos), cls.pupil_roi)
+    def fixed_pupil_lens(cls, xp: ArrayNamespace) -> FixedPupilLens:
+        return FixedPupilLens(xp.asarray(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
-    def fixed_setup(cls, size: int=1) -> FixedSetupState:
-        return FixedSetupState(cls.fixed_lens(), cls.z(size=size))
+    def fixed_setup(cls, size: int=1) -> FixedSetup:
+        return FixedSetup(cls.fixed_lens(), cls.z(size=size))
 
     @classmethod
-    def fixed_pupil_setup(cls, xp: ArrayNamespace, size: int=1) -> SetupState:
-        return SetupState(cls.fixed_pupil_lens(xp), cls.z(xp, size))
+    def fixed_pupil_setup(cls, xp: ArrayNamespace, size: int=1) -> FixedPupilSetup:
+        return FixedPupilSetup(cls.fixed_pupil_lens(xp), cls.z(xp, size))
 
     @overload
     @classmethod
@@ -63,7 +63,7 @@ class TestSetup():
 
 class FixedState(BaseState, State):
     xtal    : XtalState
-    setup   : SetupState = field(default=TestSetup.fixed_setup(), static=True)
+    setup   : FixedSetup = field(default=TestSetup.fixed_setup(), static=True)
 
 random_xtal = random_state(TestSetup.xtal(JaxNumPy),
                            tree.map(lambda val: REL_TOL * val, TestSetup.xtal(JaxNumPy)))
@@ -72,7 +72,7 @@ random_setup = random_state(TestSetup.fixed_pupil_setup(JaxNumPy),
 
 class FullState(BaseState, State, random=True):
     xtal    : XtalState = field(random=random_xtal)
-    setup   : SetupState = field(random=random_setup)
+    setup   : FixedPupilSetup = field(random=random_setup)
 
 Criterion = Callable[[CBData, BaseState,], RealArray]
 

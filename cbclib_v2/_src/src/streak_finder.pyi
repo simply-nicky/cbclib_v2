@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Iterator, List, Optional, Tuple, overload
-from ..annotations import IntSequence, Line, NDBoolArray, NDIntArray, NDRealArray, RealSequence
+from ..annotations import IntSequence, NDBoolArray, NDIntArray, NDRealArray, RealSequence
 from .label import Structure2D
 
 class Peaks:
@@ -62,10 +62,10 @@ class StreakDouble:
     def center(self) -> List[float]:
         ...
 
-    def central_line(self) -> Line:
+    def central_line(self) -> List[float]:
         ...
 
-    def line(self) -> Line:
+    def line(self) -> List[float]:
         ...
 
     def merge(self, source: StreakDouble) -> StreakDouble:
@@ -99,10 +99,10 @@ class StreakFloat:
     def center(self) -> List[float]:
         ...
 
-    def central_line(self) -> Line:
+    def central_line(self) -> List[float]:
         ...
 
-    def line(self) -> Line:
+    def line(self) -> List[float]:
         ...
 
     def merge(self, source: StreakFloat) -> StreakFloat:

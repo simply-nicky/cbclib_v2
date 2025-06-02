@@ -4,8 +4,8 @@
 namespace cbclib {
 
 template <size_t N>
-auto binary_dilation(py::array_t<bool> input, StructureND<N> structure, size_t iterations,
-                     std::optional<py::array_t<bool>> m, std::optional<std::array<long, N>> ax, unsigned threads)
+auto dilate(py::array_t<bool> input, StructureND<N> structure, py::none seeds, size_t iterations,
+            std::optional<py::array_t<bool>> m, std::optional<std::array<long, N>> ax, unsigned threads)
 {
     // Deep copy of input array
     auto output = py::array_t<bool>{input.request()};
@@ -61,6 +61,99 @@ auto binary_dilation(py::array_t<bool> input, StructureND<N> structure, size_t i
         };
         pixels.dilate(func, structure, iterations);
         pixels.mask(frame, true);
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    return axes.swap_axes_back(output);
+}
+
+template <size_t N>
+auto dilate_seeded(py::array_t<bool> input, StructureND<N> structure, PointSetND<N> seeds, size_t iterations,
+                   std::optional<py::array_t<bool>> m, py::none ax, unsigned threads)
+{
+    // Deep copy of input array
+    auto output = py::array_t<bool>{input.request()};
+
+    py::array_t<bool> mask;
+    if (m) mask = m.value();
+    else
+    {
+        mask.resize(std::vector<py::ssize_t>(output.shape(), output.shape() + output.ndim()), false);
+        fill_array(mask, true);
+    }
+
+    array<bool> out {output.request()};
+    array<bool> marr {mask.request()};
+
+    if (marr.ndim() != N)
+        throw std::invalid_argument("mask array has wrong number of dimensions (" + std::to_string(marr.ndim()) + " < " + std::to_string(N) + ")");
+
+    py::gil_scoped_release release;
+
+    auto func = [&marr](const PointND<long, N> & pt)
+    {
+        return marr.is_inbound(pt.coordinate()) && marr.at(pt.coordinate());
+    };
+    seeds.dilate(func, structure, iterations);
+    seeds.mask(out, true);
+
+    py::gil_scoped_acquire acquire;
+
+    return output;
+}
+
+template <size_t N>
+auto dilate_seeded_vec(py::array_t<bool> input, StructureND<N> structure, std::vector<PointSetND<N>> seeds, size_t iterations,
+                       std::optional<py::array_t<bool>> m, std::optional<std::array<long, N>> ax, unsigned threads)
+{
+    // Deep copy of input array
+    auto output = py::array_t<bool>{input.request()};
+    Sequence<long> axes;
+    if (ax)
+    {
+        axes = ax.value();
+        axes = axes.unwrap(output.ndim());
+    }
+    else for (long n = N; n > 0; n--) axes->push_back(output.ndim() - n);
+
+    py::array_t<bool> mask;
+    if (m) mask = m.value();
+    else
+    {
+        mask.resize(std::vector<py::ssize_t>(output.shape(), output.shape() + output.ndim()), false);
+        fill_array(mask, true);
+    }
+
+    output = axes.swap_axes(output);
+    mask = axes.swap_axes(mask);
+    array<bool> out {output.request()};
+    array<bool> marr {mask.request()};
+
+    if (marr.ndim() < N)
+        throw std::invalid_argument("mask array has wrong number of dimensions (" + std::to_string(marr.ndim()) + " < " + std::to_string(N) + ")");
+
+    size_t repeats = std::reduce(marr.shape().begin(), std::next(marr.shape().begin(), marr.ndim() - N), 1, std::multiplies());
+    if (seeds.size() != repeats)
+        throw std::invalid_argument("seeds length (" + std::to_string(seeds.size()) + ") is incompatible with mask shape");
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    threads = (threads > repeats) ? repeats : threads;
+
+    #pragma omp parallel for num_threads(threads)
+    for (size_t i = 0; i < repeats; i++)
+    {
+        auto func = [mask = marr.slice_back(i, N)](const PointND<long, N> & pt)
+        {
+            return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());
+        };
+        seeds[i].dilate(func, structure, iterations);
+        seeds[i].mask(out.slice_back(i, N), true);
     }
 
     py::gil_scoped_acquire acquire;
@@ -145,7 +238,7 @@ auto label(py::array_t<bool> mask, StructureND<N> structure, py::none seeds, siz
 }
 
 template <size_t N>
-auto label_with_seeds(py::array_t<bool> mask, StructureND<N> structure, PointSetND<N> seeds, size_t npts, py::none ax, unsigned threads)
+auto label_seeded(py::array_t<bool> mask, StructureND<N> structure, PointSetND<N> seeds, size_t npts, py::none ax, unsigned threads)
 {
     // Deep copy of mask array
     mask = py::array_t<bool>{mask.request()};
@@ -182,8 +275,8 @@ auto label_with_seeds(py::array_t<bool> mask, StructureND<N> structure, PointSet
 }
 
 template <size_t N>
-auto label_with_seeds_vec(py::array_t<bool> mask, StructureND<N> structure, std::vector<PointSetND<N>> seeds, size_t npts,
-                          std::optional<std::array<long, N>> ax, unsigned threads)
+auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vector<PointSetND<N>> seeds, size_t npts,
+                      std::optional<std::array<long, N>> ax, unsigned threads)
 {
     // Deep copy of mask array
     mask = py::array_t<bool>{mask.request()};
@@ -387,6 +480,12 @@ PYBIND11_MODULE(label, m)
     }
 
     py::class_<PointSetND<2>>(m, "PointSet2D")
+        .def(py::init([](long x, long y)
+        {
+            std::set<PointND<long, 2>> points;
+            points.insert(PointND<long, 2>{x, y});
+            return PointSetND<2>(std::move(points));
+        }), py::arg("x"), py::arg("y"))
         .def(py::init([](std::vector<long> xvec, std::vector<long> yvec)
         {
             std::set<PointND<long, 2>> points;
@@ -407,6 +506,12 @@ PYBIND11_MODULE(label, m)
         .def("__repr__", &PointSetND<2>::info);
 
     py::class_<PointSetND<3>>(m, "PointSet3D")
+        .def(py::init([](long x, long y, long z)
+        {
+            std::set<PointND<long, 3>> points;
+            points.insert(PointND<long, 3>{x, y, z});
+            return PointSetND<3>(std::move(points));
+        }), py::arg("x"), py::arg("y"), py::arg("z"))
         .def(py::init([](std::vector<long> xvec, std::vector<long> yvec, std::vector<long> zvec)
         {
             std::set<PointND<long, 3>> points;
@@ -634,17 +739,21 @@ PYBIND11_MODULE(label, m)
         .def("append", [](RegionsND<3> & regions, PointSetND<3> region)
         {
             regions->emplace_back(std::move(region));
-        }, py::keep_alive<1, 2>(), py::arg("region"), py::keep_alive<1, 2>());
+        }, py::arg("region"), py::keep_alive<1, 2>());
 
-    m.def("binary_dilation", &binary_dilation<2>, py::arg("input"), py::arg("structure") = StructureND<2>{1, 1}, py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("binary_dilation", &binary_dilation<3>, py::arg("input"), py::arg("structure") = StructureND<3>{1, 1}, py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("binary_dilation", &dilate<2>, py::arg("input"), py::arg("structure"), py::arg("seeds") = std::nullopt, py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("binary_dilation", &dilate_seeded<2>, py::arg("input"), py::arg("structure"), py::arg("seeds"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("binary_dilation", &dilate_seeded_vec<2>, py::arg("input"), py::arg("structure"), py::arg("seeds"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("binary_dilation", &dilate<3>, py::arg("input"), py::arg("structure"), py::arg("seeds") = std::nullopt, py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("binary_dilation", &dilate_seeded<3>, py::arg("input"), py::arg("structure"), py::arg("seeds"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("binary_dilation", &dilate_seeded_vec<3>, py::arg("input"), py::arg("structure"), py::arg("seeds"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
 
     m.def("label", &label<2>, py::arg("mask"), py::arg("structure"), py::arg("seeds") = std::nullopt, py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("label", &label_with_seeds<2>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("threads") = 1);
-    m.def("label", &label_with_seeds_vec<2>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("label", &label_seeded<2>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("label", &label_seeded_vec<2>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
     m.def("label", &label<3>, py::arg("mask"), py::arg("structure"), py::arg("seeds") = std::nullopt, py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("label", &label_with_seeds<3>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("threads") = 1);
-    m.def("label", &label_with_seeds_vec<3>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("threads") = 1);
+    m.def("label", &label_seeded<3>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("label", &label_seeded_vec<3>, py::arg("mask"), py::arg("structure"), py::arg("seeds"), py::arg("npts") = 1, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
 
     declare_pixels<float>(m, "Float");
     declare_pixels<double>(m, "Double");

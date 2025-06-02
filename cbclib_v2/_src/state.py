@@ -4,8 +4,8 @@ import dataclasses
 from dataclasses import MISSING, Field, fields
 from typing_extensions import dataclass_transform
 from jax.tree_util import register_pytree_with_keys
-from .._src.data_container import DataContainer
-from .._src.annotations import KeyArray, PyTree
+from .data_container import DataContainer
+from .annotations import KeyArray, PyTree
 
 Generator = Callable[[KeyArray], Any]
 
@@ -52,7 +52,7 @@ def add_dynamic_field(func: Callable):
                 metadata: Optional[Mapping[str, Any]]=None, **kwargs):
         if metadata is None:
             metadata = {}
-        metadata = metadata=dict(metadata) | {'static': static, 'random': random}
+        metadata = dict(metadata) | {'static': static, 'random': random}
         return Field(*args, metadata=metadata, **kwargs)
 
     return wrapper

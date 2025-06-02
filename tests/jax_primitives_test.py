@@ -2,8 +2,8 @@ from typing import Callable
 import numpy as np
 from numpy.random import Generator
 import pytest
-from cbclib_v2.jax import (euler_angles, euler_matrix, tilt_angles, tilt_matrix, det_to_k,
-                           k_to_det, k_to_smp)
+from cbclib_v2.indexer import (euler_angles, euler_matrix, tilt_angles, tilt_matrix, det_to_k,
+                               k_to_det, k_to_smp)
 from cbclib_v2.annotations import ArrayNamespace, IntArray, JaxNumPy, RealArray, Shape
 from cbclib_v2.test_util import check_gradient
 

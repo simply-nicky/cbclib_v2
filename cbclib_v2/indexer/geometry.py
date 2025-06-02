@@ -1,15 +1,7 @@
 from typing import Tuple
 import numpy as np
-import jax.numpy as jnp
 from .._src.annotations import (Array, ArrayNamespace, BoolArray, IntArray, JaxNumPy, RealArray,
-                                Scalar, Shape)
-
-def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace = JaxNumPy) -> Array:
-    if xp is jnp:
-        return jnp.asarray(a).at[indices].add(b)
-    np.add.at(np.asarray(a), indices, b)
-    return np.asarray(a)
+                                Shape)
 
 def arange(shape: Shape, xp: ArrayNamespace = JaxNumPy) -> IntArray:
     return xp.reshape(xp.arange(np.prod(shape), dtype=int), shape)
@@ -183,34 +175,6 @@ def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: ArrayNamespace = Ja
 def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray,
                     xp: ArrayNamespace = JaxNumPy) -> RealArray:
     return xp.clip(point, vmin, vmax)
-
-def project_to_streak(point: RealArray, pt0: RealArray, pt1: RealArray,
-                      xp: ArrayNamespace = JaxNumPy) -> Array:
-    tau = xp.asarray(pt1 - pt0)
-    center = 0.5 * (pt0 + pt1)
-    r = point - center
-    r_tau = safe_divide(xp.sum(tau * r, axis=-1), xp.sum(tau**2, axis=-1), xp)
-    r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
-    return tau * r_tau + center
-
-def vector_dot(a: Array, b: Array) -> Array:
-    return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
-
-def line_intersection(pt0: RealArray, pt1: RealArray, pt2: RealArray, pt3: RealArray,
-                      xp: ArrayNamespace = JaxNumPy) -> RealArray:
-    tau_first = pt1 - pt0
-    tau_second = pt3 - pt2
-
-    t = safe_divide(vector_dot(pt2 - pt0, tau_second), vector_dot(tau_first, tau_second), xp)
-    return pt0 + t[..., None] * tau_first
-
-def normal_distance(point: RealArray, pt0: RealArray, pt1: RealArray,
-                    xp: ArrayNamespace = JaxNumPy) -> RealArray:
-    tau = pt1 - pt0
-    center = 0.5 * (pt0 + pt1)
-    r = point - center
-    r_tau = safe_divide(xp.sum(tau * r, axis=-1), xp.sum(tau**2, axis=-1), xp)
-    return xp.sqrt(xp.sum((r - r_tau * tau)**2, axis=-1))
 
 def circle(r: RealArray, center: RealArray, vec1: RealArray, vec2: RealArray, theta: RealArray,
            xp: ArrayNamespace = JaxNumPy) -> RealArray:

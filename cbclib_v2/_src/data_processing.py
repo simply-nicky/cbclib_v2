@@ -10,98 +10,27 @@ Examples:
     >>> data = cbc.CrystData(inp_file)
     >>> data = data.load()
 """
-from typing import Any, Dict, List, Literal, Optional, Tuple, TypeVar, Union, cast, overload
-from dataclasses import dataclass, field
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, TypeVar, cast
+from dataclasses import dataclass
 from weakref import ref
 import numpy as np
 import pandas as pd
-from .cxi_protocol import CrystProtocol, FileStore, Kinds
+from .cxi_protocol import CXIProtocol, FileStore, Kinds
 from .data_container import DataContainer, Transform
 from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
-from .annotations import (Attribute, Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray,
+from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray,
                           NDRealArray, RealSequence, ReferenceType, ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
                     covariance_matrix, Regions2D, Structure2D)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
-AnyCryst = Union['CrystNoData', 'Cryst', 'CrystWithWF', 'CrystWithWFAndSTD', 'CrystFull']
-
-NoData = Literal['frames', 'good_frames', 'mask', 'scales', 'snr', 'std', 'whitefield']
-NoSNR = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'std', 'whitefield']
-NoSTD = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'snr', 'whitefield']
-NoWF = Literal['data', 'frames', 'good_frames', 'mask', 'scales', 'std', 'snr']
-
 WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
-MedianOrRMean = Literal['median', 'robust-mean']
-RMeanScale = Literal['robust-mean-scale']
 
-@overload
-def from_dict(*, data: None=None, whitefield: Any | None=None, std: Any | None=None,
-              snr: Any | None=None, **extra: Any) -> 'CrystNoData': ...
-
-@overload
-def from_dict(*, data: Any, whitefield: None=None, std: Any | None=None,
-              snr: Any | None=None, **extra: Any) -> 'Cryst': ...
-
-@overload
-def from_dict(*, data: Any, whitefield: Any, std: None=None, snr: Any | None=None,
-              **extra: Any) -> 'CrystWithWF': ...
-
-@overload
-def from_dict(*, data: Any, whitefield: Any, std: Any, snr: None=None,
-              **extra: Any) -> 'CrystWithWFAndSTD': ...
-
-@overload
-def from_dict(*, data: Any, whitefield: Any, std: Any, snr: Any, **extra: Any) -> 'CrystFull': ...
-
-def from_dict(*, data: Any | None=None, whitefield: Any | None=None, std: Any | None=None,
-              snr: Any | None=None, **extra: Any) -> AnyCryst:
-    if data is not None:
-        if whitefield is not None:
-            if std is not None:
-                if snr is not None:
-                    return CrystFull(data=data, whitefield=whitefield, std=std, snr=snr, **extra)
-                return CrystWithWFAndSTD(data=data, whitefield=whitefield, std=std, snr=snr,
-                                         **extra)
-            return CrystWithWF(data=data, whitefield=whitefield, std=std, snr=snr, **extra)
-        return Cryst(data=data, whitefield=whitefield, std=std, snr=snr, **extra)
-    return CrystNoData(whitefield=whitefield, std=std, snr=snr, **extra)
-
-@overload
-def read_hdf(input_file: FileStore, *, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> AnyCryst: ...
-
-@overload
-def read_hdf(input_file: FileStore, *attributes: NoData, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystNoData': ...
-
-@overload
-def read_hdf(input_file: FileStore, *attributes: NoWF, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'Cryst': ...
-
-@overload
-def read_hdf(input_file: FileStore, *attributes: NoSTD, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystWithWF': ...
-
-@overload
-def read_hdf(input_file: FileStore, *attributes: NoSNR, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystWithWFAndSTD': ...
-
-@overload
-def read_hdf(input_file: FileStore, *attributes: Attribute, idxs: Optional[IntSequence]=None,
-             transform: Optional[Transform]=None, processes: int=1, verbose: bool=True
-             ) -> 'CrystFull': ...
-
-def read_hdf(input_file: FileStore, *attributes: Attribute,
+def read_hdf(input_file: FileStore, *attributes: str,
              idxs: Optional[IntSequence]=None, transform: Optional[Transform]=None,
-             processes: int=1, verbose: bool=True) -> AnyCryst:
+             processes: int=1, verbose: bool=True) -> 'CrystData':
     """Load data attributes from the input files in `files` file handler object.
 
     Args:
@@ -118,8 +47,6 @@ def read_hdf(input_file: FileStore, *attributes: Attribute,
     Returns:
         New :class:`CrystData` object with the attributes loaded.
     """
-    if input_file.is_empty():
-        input_file.update()
     shape = input_file.read_frame_shape()
 
     if not attributes:
@@ -129,7 +56,7 @@ def read_hdf(input_file: FileStore, *attributes: Attribute,
         idxs = list(range(input_file.size))
     idxs = np.atleast_1d(idxs)
 
-    if CrystProtocol.has_kind(*attributes, kind=Kinds.STACK):
+    if input_file.protocol.has_kind(*attributes, kind=Kinds.stack):
         data_dict: Dict[str, Any] = {'frames': idxs}
     else:
         data_dict: Dict[str, Any] = {}
@@ -150,9 +77,9 @@ def read_hdf(input_file: FileStore, *attributes: Attribute,
 
         data_dict[attr] = data
 
-    return from_dict(**data_dict)
+    return CrystData(**data_dict)
 
-def write_hdf(container: AnyCryst, output_file: FileStore, *attributes: str,
+def write_hdf(container: 'CrystData', output_file: FileStore, *attributes: str,
               good_frames: Optional[Indices]=None, transform: Optional[Transform]=None,
               input_file: Optional[FileStore]=None, mode: str='overwrite',
               idxs: Optional[Indices]=None):
@@ -173,12 +100,6 @@ def write_hdf(container: AnyCryst, output_file: FileStore, *attributes: str,
     Raises:
         ValueError : If the ``output_file`` is not defined inside the container.
     """
-    if transform:
-        if input_file is None:
-            raise ValueError("'input_file' is not defined inside the container")
-
-        shape = input_file.read_frame_shape()
-
     if not attributes:
         attributes = tuple(container.contents())
 
@@ -188,20 +109,15 @@ def write_hdf(container: AnyCryst, output_file: FileStore, *attributes: str,
     for attr in attributes:
         data = np.asarray(getattr(container, attr))
         if data is not None:
-            kind = container.get_kind(attr)
+            kind = output_file.protocol.get_kind(attr)
 
-            if kind in (Kinds.STACK, Kinds.SEQUENCE):
+            if kind in (Kinds.stack, Kinds.sequence):
                 data = data[good_frames]
-
-            if transform:
-                if kind in (Kinds.STACK, Kinds.FRAME):
-                    out = np.zeros(data.shape[:-2] + shape, dtype=data.dtype)
-                    data = transform.backward(data, out)
 
             output_file.save(attr, data, mode=mode, idxs=idxs)
 
 @dataclass
-class CrystNoDataBase(CrystProtocol, DataContainer):
+class CrystData(DataContainer):
     """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.CXIStore`
     file handler. Provides an interface to work with the detector images and detect the diffraction
     streaks. Also provides an interface to load from a file and save to a file any of the data
@@ -219,36 +135,182 @@ class CrystNoDataBase(CrystProtocol, DataContainer):
         snr : Signal-to-noise ratio.
         whitefields : A set of white-fields generated for each pattern separately.
     """
-    data        : Optional[NDRealArray]
+    data        : NDRealArray = np.array([])
 
-    whitefield  : Optional[NDRealArray]
-    std         : Optional[NDRealArray]
-    snr         : Optional[NDRealArray]
+    whitefield  : NDRealArray = np.array([])
+    std         : NDRealArray = np.array([])
+    snr         : NDRealArray = np.array([])
 
-    frames      : Optional[NDIntArray] = field(default=None)
-    mask        : Optional[NDBoolArray] = field(default=None)
-    scales      : Optional[NDRealArray] = field(default=None)
+    frames      : NDIntArray = np.array([], dtype=int)
+    mask        : NDBoolArray = np.array([], dtype=bool)
+    scales      : NDRealArray = np.array([])
+
+    protocol    : ClassVar[CXIProtocol] = CXIProtocol.read()
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.frames.size != self.shape[0]:
+            self.frames = np.arange(self.shape[0])
+        if self.mask.shape != self.shape[1:]:
+            self.mask = np.ones(self.shape[1:], dtype=bool)
+        if self.scales.shape != (self.shape[0],):
+            self.scales = np.ones(self.shape[0])
 
     @property
     def shape(self) -> Shape:
         shape = [0, 0, 0]
         for attr, data in self.contents().items():
-            if data is not None and self.get_kind(attr) == Kinds.SEQUENCE:
+            if data is not None and self.protocol.get_kind(attr) == Kinds.sequence:
                 shape[0] = data.shape[0]
                 break
 
         for attr, data in self.contents().items():
-            if data is not None and self.get_kind(attr) == Kinds.FRAME:
+            if data is not None and self.protocol.get_kind(attr) == Kinds.frame:
                 shape[1:] = data.shape
                 break
 
         for attr, data in self.contents().items():
-            if data is not None and self.get_kind(attr) == Kinds.STACK:
+            if data is not None and self.protocol.get_kind(attr) == Kinds.stack:
                 shape[0] = np.prod(data.shape[:-2])
                 shape[1:] = data.shape[-2:]
                 break
 
         return tuple(shape)
+
+    def apply_mask(self) -> 'CrystData':
+        attributes = {}
+        if len(self.whitefield):
+            attributes['whitefield'] = self.whitefield * self.mask
+        if len(self.std):
+            attributes['std'] = self.std * self.mask
+        if len(self.snr):
+            attributes['snr'] = self.snr * self.mask
+        return self.replace(**attributes)
+
+    def import_mask(self, mask: NDBoolArray, update: str='reset') -> 'CrystData':
+        """Return a new :class:`CrystData` object with the new mask.
+
+        Args:
+            mask : New mask array.
+            update : Multiply the new mask and the old one if 'multiply', use the
+                new one if 'reset'.
+
+        Raises:
+            ValueError : If the mask shape is incompatible with the data.
+            ValueError : If there is no ``data`` inside the container.
+
+        Returns:
+            New :class:`CrystData` object with the updated ``mask``.
+        """
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+        if mask.shape != self.shape[1:]:
+            raise ValueError('mask and data have incompatible shapes: '\
+                             f'{mask.shape:s} != {self.shape[1:]:s}')
+
+        if update == 'reset':
+            return self.replace(mask=mask)
+        if update == 'multiply':
+            return self.replace(mask=mask * self.mask)
+        raise ValueError(f'Invalid update keyword: {update:s}')
+
+    def mask_region(self, roi: ROI) -> 'CrystData':
+        """Return a new :class:`CrystData` object with the updated mask. The region
+        defined by the `[y_min, y_max, x_min, x_max]` will be masked out.
+
+        Args:
+            roi : Bad region of interest in the detector plane. A set of four
+                coordinates `[y_min, y_max, x_min, x_max]`.
+
+        Raises:
+            ValueError : If there is no ``data`` inside the container.
+
+        Returns:
+            New :class:`CrystData` object with the updated ``mask``.
+        """
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+
+        mask = np.copy(self.mask)
+        mask[roi[0]:roi[1], roi[2]:roi[3]] = False
+        return self.replace(mask=mask).apply_mask()
+
+    def region_detector(self, structure: Structure2D):
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+        if len(self.snr) == 0:
+            raise ValueError('no snr in the container')
+
+        parent = cast(ReferenceType[CrystData], ref(self))
+        idxs = np.arange(self.shape[0])
+        return RegionDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
+                              structure=structure, transform=ScaleTransform())
+
+    def reset_mask(self) -> 'CrystData':
+        """Reset bad pixel mask. Every pixel is assumed to be good by default.
+
+        Raises:
+            ValueError : If there is no ``data`` inside the container.
+
+        Returns:
+            New :class:`CrystData` object with the default ``mask``.
+        """
+        return self.replace(mask=np.array([], dtype=bool))
+
+    def scale_whitefield(self, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
+                         n_iter: int=12, lm: float=9.0, num_threads: int=1) -> 'CrystData':
+        """Return a new :class:`CrystData` object with a new set of whitefields. A set of
+        backgrounds is generated by robustly fitting a design matrix `W` to the measured
+        patterns.
+
+        Args:
+            method : Choose one of the following methods to scale the white-field:
+
+                * "median" : By taking a median of data and whitefield.
+                * "robust-lsq" : By solving a least-squares problem with truncated
+                  with the fast least k-th order statistics (FLkOS) estimator.
+
+            r0 : A lower bound guess of ratio of inliers. We'd like to make a sample
+                out of worst inliers from data points that are between `r0` and `r1`
+                of sorted residuals.
+            r1 : An upper bound guess of ratio of inliers. Choose the `r0` to be as
+                high as you are sure the ratio of data is inlier.
+            n_iter : Number of iterations of fitting a gaussian with the FLkOS
+                algorithm.
+            lm : How far (normalized by STD of the Gaussian) from the mean of the
+                Gaussian, data is considered inlier.
+
+        Raises:
+            ValueError : If there is no ``data`` inside the container.
+            ValueError : If there is no ``whitefield`` inside the container.
+
+        Returns:
+            An array of scale factors for each frame in the container.
+        """
+        if len(self.data) == 0:
+            raise ValueError('no data in the container')
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+        if len(self.std) == 0:
+            raise ValueError('no std in the container')
+        if len(self.whitefield) == 0:
+            raise ValueError('no whitefield in the container')
+
+        mask = self.mask & (self.std > 0.0)
+        y: NDRealArray = np.where(mask, self.data / self.std, 0.0)[:, mask]
+        W: NDRealArray = np.where(mask, self.whitefield / self.std, 0.0)[None, mask]
+
+        if method == "robust-lsq":
+            scales = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
+                                num_threads=num_threads)
+            return self.replace(scales=scales.ravel())
+
+        if method == "median":
+            scales = median(y * W, axis=1, num_threads=num_threads)[:, None] / \
+                     median(W * W, axis=1, num_threads=num_threads)[:, None]
+            return self.replace(scales=scales.ravel())
+
+        raise ValueError(f"Invalid method argument: {method}")
 
     def select(self, idxs: Optional[Indices]=None):
         """Return a new :class:`CrystData` object with the new mask.
@@ -267,97 +329,35 @@ class CrystNoDataBase(CrystProtocol, DataContainer):
         """
         data_dict = {}
         for attr in self.contents():
-            if self.get_kind(attr) in (Kinds.SEQUENCE, Kinds.STACK):
+            if self.protocol.get_kind(attr) in (Kinds.sequence, Kinds.stack):
                 data_dict[attr] = getattr(self, attr)[idxs]
             else:
                 data_dict[attr] = getattr(self, attr)
         return self.replace(**data_dict)
 
-C = TypeVar("C", bound="CrystBase")
-
-@dataclass
-class CrystBase(CrystNoDataBase):
-    data        : NDRealArray
-    frames      : NDIntArray = field(default_factory=lambda: np.array([], dtype=int))
-    mask        : NDBoolArray = field(default_factory=lambda: np.array([], dtype=bool))
-    scales      : NDRealArray = field(default_factory=lambda: np.array([]))
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.frames.size != self.shape[0]:
-            self.frames = np.arange(self.shape[0])
-        if self.mask.shape != self.shape[1:]:
-            self.mask = np.ones(self.shape[1:], dtype=bool)
-        if self.scales.shape != (self.shape[0],):
-            self.scales = np.ones(self.shape[0])
-
-    def mask_data(self: C) -> C:
-        attributes = {}
-        if self.whitefield is not None:
-            attributes['whitefield'] = self.whitefield * self.mask
-        if self.std is not None:
-            attributes['std'] = self.std * self.mask
-        if self.snr is not None:
-            attributes['snr'] = self.snr * self.mask
-        return self.replace(**attributes)
-
-    def mask_region(self: C, roi: ROI) -> C:
-        """Return a new :class:`CrystData` object with the updated mask. The region
-        defined by the `[y_min, y_max, x_min, x_max]` will be masked out.
-
-        Args:
-            roi : Bad region of interest in the detector plane. A set of four
-                coordinates `[y_min, y_max, x_min, x_max]`.
+    def streak_detector(self, structure: Structure2D) -> 'StreakDetector':
+        """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR frames.
 
         Raises:
-            ValueError : If there is no ``data`` inside the container.
+            ValueError : If there is no ``whitefield`` inside the container.
+            ValueError : If there is no ``snr`` inside the container.
 
         Returns:
-            New :class:`CrystData` object with the updated ``mask``.
+            A CBC pattern detector based on :class:`cbclib_v2.bin.LSD` Line Segment Detection [LSD]_
+            algorithm.
         """
-        mask = np.copy(self.mask)
-        mask[roi[0]:roi[1], roi[2]:roi[3]] = False
-        return self.replace(mask=mask).mask_data()
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+        if len(self.snr) == 0:
+            raise ValueError('no snr in the container')
 
-    def import_mask(self: C, mask: NDBoolArray, update: str='reset') -> C:
-        """Return a new :class:`CrystData` object with the new mask.
+        parent = cast(ReferenceType[CrystData], ref(self))
+        idxs = np.arange(self.shape[0])
+        return StreakDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
+                              structure=structure, transform=ScaleTransform())
 
-        Args:
-            mask : New mask array.
-            update : Multiply the new mask and the old one if 'multiply', use the
-                new one if 'reset'.
-
-        Raises:
-            ValueError : If the mask shape is incompatible with the data.
-            ValueError : If there is no ``data`` inside the container.
-
-        Returns:
-            New :class:`CrystData` object with the updated ``mask``.
-        """
-        if mask.shape != self.shape[1:]:
-            raise ValueError('mask and data have incompatible shapes: '\
-                             f'{mask.shape:s} != {self.shape[1:]:s}')
-
-        if update == 'reset':
-            return self.replace(mask=mask)
-        if update == 'multiply':
-            return self.replace(mask=mask * self.mask)
-
-        raise ValueError(f'Invalid update keyword: {update:s}')
-
-    def reset_mask(self: C) -> C:
-        """Reset bad pixel mask. Every pixel is assumed to be good by default.
-
-        Raises:
-            ValueError : If there is no ``data`` inside the container.
-
-        Returns:
-            New :class:`CrystData` object with the default ``mask``.
-        """
-        return self.replace(mask=np.array([], dtype=bool))
-
-    def update_mask(self: C, method: str='no-bad', vmin: int=0, vmax: int=65535,
-                    snr_max: float=3.0, roi: Optional[ROI]=None) -> C:
+    def update_mask(self, method: str='no-bad', vmin: int=0, vmax: int=65535,
+                    snr_max: float=3.0, roi: Optional[ROI]=None) -> 'CrystData':
         """Return a new :class:`CrystData` object with the updated bad pixels mask.
 
         Args:
@@ -387,8 +387,13 @@ class CrystBase(CrystNoDataBase):
         Returns:
             New :class:`CrystData` object with the updated ``mask``.
         """
+        if len(self.data) == 0:
+            raise ValueError('no data in the container')
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
         if vmin >= vmax:
             raise ValueError('vmin must be less than vmax')
+
         if roi is None:
             roi = (0, self.shape[1], 0, self.shape[2])
 
@@ -413,19 +418,55 @@ class CrystBase(CrystNoDataBase):
         new_mask[roi[0]:roi[1], roi[2]:roi[3]] &= mask
         return self.replace(mask=new_mask)
 
-    @overload
-    def update_whitefield(self, method: MedianOrRMean, frames: Optional[Indices]=None,
-                          r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-                          num_threads: int=1) -> 'CrystWithWF': ...
+    def update_snr(self) -> 'CrystData':
+        """Return a new :class:`CrystData` object with new background corrected detector
+        images.
 
-    @overload
-    def update_whitefield(self, method: RMeanScale, frames: Optional[Indices]=None,
-                          r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-                          num_threads: int=1) -> 'CrystWithWFAndSTD': ...
+        Raises:
+            ValueError : If there is no ``whitefield`` inside the container.
+
+        Returns:
+            New :class:`CrystData` object with the updated ``cor_data``.
+        """
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+        if len(self.std) == 0:
+            raise ValueError('no std in the container')
+        if len(self.whitefield) == 0:
+            raise ValueError('no whitefield in the container')
+
+        whitefields = self.scales[:, None, None] * self.whitefield
+        snr = np.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
+        return self.replace(snr=snr)
+
+    def update_std(self, method="robust-scale", frames: Optional[Indices]=None,
+                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                   num_threads: int=1) -> 'CrystData':
+        if frames is None:
+            frames = np.arange(self.shape[0])
+
+        if method == "robust-scale":
+            if len(self.data) == 0:
+                raise ValueError('no data in the container')
+            if len(self.mask) == 0:
+                raise ValueError('no mask in the container')
+
+            _, std = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0, r1=r1,
+                                 n_iter=n_iter, lm=lm, return_std=True,
+                                 num_threads=num_threads)
+        elif method == "poisson":
+            if len(self.whitefield) == 0:
+                raise ValueError('no whitefield in the container')
+
+            std = np.sqrt(self.whitefield)
+        else:
+            raise ValueError(f"Invalid method argument: {method}")
+
+        return self.replace(std=std)
 
     def update_whitefield(self, method: WFMethod='median', frames: Optional[Indices]=None,
                           r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-                          num_threads: int=1) -> 'CrystWithWF | CrystWithWFAndSTD':
+                          num_threads: int=1) -> 'CrystData':
         """Return a new :class:`CrystData` object with new whitefield.
 
         Args:
@@ -453,162 +494,30 @@ class CrystBase(CrystNoDataBase):
         Returns:
             New :class:`CrystData` object with the updated ``whitefield``.
         """
+        if len(self.data) == 0:
+            raise ValueError('no data in the container')
+        if len(self.mask) == 0:
+            raise ValueError('no mask in the container')
+
         if frames is None:
             frames = np.arange(self.shape[0])
 
         if method == 'median':
             whitefield = median(inp=self.data[frames] * self.mask, axis=0,
                                 num_threads=num_threads)
-            return CrystWithWF(**self.replace(whitefield=whitefield).to_dict())
+            return self.replace(whitefield=whitefield)
         if method == 'robust-mean':
             whitefield = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0,
                                      r1=r1, n_iter=n_iter, lm=lm,
                                      num_threads=num_threads)
-            return CrystWithWF(**self.replace(whitefield=whitefield).to_dict())
+            return self.replace(whitefield=whitefield)
         if method == 'robust-mean-scale':
             whitefield, std = robust_mean(inp=self.data[frames] * self.mask, axis=0,
                                           r0=r0, r1=r1, n_iter=n_iter, lm=lm,
                                           return_std=True, num_threads=num_threads)
-            return CrystWithWFAndSTD(**self.replace(whitefield=whitefield, std=std).to_dict())
+            return self.replace(whitefield=whitefield, std=std)
 
         raise ValueError('Invalid method argument')
-
-@dataclass
-class CrystWithWFBase(CrystBase):
-    whitefield  : NDRealArray
-
-    def update_std(self, method="robust-scale", frames: Optional[Indices]=None,
-                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-                   num_threads: int=1) -> 'CrystWithWFAndSTD':
-        if frames is None:
-            frames = np.arange(self.shape[0])
-
-        if method == "robust-scale":
-            _, std = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0, r1=r1,
-                                 n_iter=n_iter, lm=lm, return_std=True,
-                                 num_threads=num_threads)
-        elif method == "poisson":
-            std = np.sqrt(self.whitefield)
-        else:
-            raise ValueError(f"Invalid method argument: {method}")
-
-        return CrystWithWFAndSTD(**self.replace(std=std).to_dict())
-
-CSTD = TypeVar("CSTD", bound="CrystWithWFAndSTDBase")
-
-@dataclass
-class CrystWithWFAndSTDBase(CrystWithWFBase):
-    std         : NDRealArray
-
-    def update_snr(self) -> 'CrystFull':
-        """Return a new :class:`CrystData` object with new background corrected detector
-        images.
-
-        Raises:
-            ValueError : If there is no ``whitefield`` inside the container.
-
-        Returns:
-            New :class:`CrystData` object with the updated ``cor_data``.
-        """
-        whitefields = self.scales[:, None, None] * self.whitefield
-        snr = np.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
-        return CrystFull(**self.replace(snr=snr).to_dict())
-
-    def scale_whitefield(self: CSTD, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
-                         n_iter: int=12, lm: float=9.0, num_threads: int=1) -> CSTD:
-        """Return a new :class:`CrystData` object with a new set of whitefields. A set of
-        backgrounds is generated by robustly fitting a design matrix `W` to the measured
-        patterns.
-
-        Args:
-            method : Choose one of the following methods to scale the white-field:
-
-                * "median" : By taking a median of data and whitefield.
-                * "robust-lsq" : By solving a least-squares problem with truncated
-                  with the fast least k-th order statistics (FLkOS) estimator.
-
-            r0 : A lower bound guess of ratio of inliers. We'd like to make a sample
-                out of worst inliers from data points that are between `r0` and `r1`
-                of sorted residuals.
-            r1 : An upper bound guess of ratio of inliers. Choose the `r0` to be as
-                high as you are sure the ratio of data is inlier.
-            n_iter : Number of iterations of fitting a gaussian with the FLkOS
-                algorithm.
-            lm : How far (normalized by STD of the Gaussian) from the mean of the
-                Gaussian, data is considered inlier.
-
-        Raises:
-            ValueError : If there is no ``data`` inside the container.
-            ValueError : If there is no ``whitefield`` inside the container.
-
-        Returns:
-            An array of scale factors for each frame in the container.
-        """
-        mask = self.mask & (self.std > 0.0)
-        y: NDRealArray = np.where(mask, self.data / self.std, 0.0)[:, mask]
-        W: NDRealArray = np.where(mask, self.whitefield / self.std, 0.0)[None, mask]
-
-        if method == "robust-lsq":
-            scales = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                                num_threads=num_threads)
-            return self.replace(scales=scales.ravel())
-
-        if method == "median":
-            scales = median(y * W, axis=1, num_threads=num_threads)[:, None] / \
-                     median(W * W, axis=1, num_threads=num_threads)[:, None]
-            return self.replace(scales=scales.ravel())
-
-        raise ValueError(f"Invalid method argument: {method}")
-
-@dataclass
-class CrystNoData(CrystNoDataBase):
-    data        : Optional[NDRealArray] = field(default=None)
-    frames      : Optional[NDIntArray] = field(default=None)
-    snr         : Optional[NDRealArray] = field(default=None)
-    std         : Optional[NDRealArray] = field(default=None)
-    whitefield  : Optional[NDRealArray] = field(default=None)
-
-@dataclass
-class Cryst(CrystBase):
-    snr         : Optional[NDRealArray] = field(default=None)
-    std         : Optional[NDRealArray] = field(default=None)
-    whitefield  : Optional[NDRealArray] = field(default=None)
-
-@dataclass
-class CrystWithWF(CrystWithWFBase):
-    snr         : Optional[NDRealArray] = field(default=None)
-    std         : Optional[NDRealArray] = field(default=None)
-
-@dataclass
-class CrystWithWFAndSTD(CrystWithWFAndSTDBase):
-    snr         : Optional[NDRealArray] = field(default=None)
-
-@dataclass
-class CrystFull(CrystBase):
-    snr         : NDRealArray
-    whitefield  : NDRealArray
-
-    def streak_detector(self, structure: Structure2D) -> 'StreakDetector':
-        """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR frames.
-
-        Raises:
-            ValueError : If there is no ``whitefield`` inside the container.
-            ValueError : If there is no ``snr`` inside the container.
-
-        Returns:
-            A CBC pattern detector based on :class:`cbclib_v2.bin.LSD` Line Segment Detection [LSD]_
-            algorithm.
-        """
-        parent = cast(ReferenceType[CrystFull], ref(self))
-        idxs = np.arange(self.shape[0])
-        return StreakDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
-                              structure=structure, transform=ScaleTransform())
-
-    def region_detector(self, structure: Structure2D):
-        parent = cast(ReferenceType[CrystFull], ref(self))
-        idxs = np.arange(self.shape[0])
-        return RegionDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
-                              structure=structure, transform=ScaleTransform())
 
 @dataclass
 class ScaleTransform():
@@ -645,7 +554,7 @@ class DetectorBase(DataContainer):
     data            : NDRealArray
     mask            : NDBoolArray
     transform       : ScaleTransform
-    parent          : ReferenceType[CrystFull]
+    parent          : ReferenceType[CrystData]
 
     @property
     def shape(self) -> Shape:

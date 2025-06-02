@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Iterable, Iterator, List, Optional, overload
-from ..annotations import Array, IntSequence, RealSequence, NDRealArray
+from ..annotations import Array, BoolArray, IntSequence, RealSequence, NDRealArray
 
 class PointSet2D:
     x : List[int]
@@ -246,12 +246,14 @@ class Pixels2DDouble:
 
 Structure = Structure2D | Structure3D
 PointSet = PointSet2D | PointSet3D
+ListPointSet = List[PointSet2D] | List[PointSet3D]
 Regions = Regions2D | Regions3D
 ListRegions = List[Regions2D] | List[Regions3D]
 
-def binary_dilation(input: Array, structure: Structure, iterations: int=1,
-                    mask: Optional[Array]=None, axes: Optional[List[int]]=None, num_threads: int=1
-                    ) -> Array:
+def binary_dilation(input: BoolArray, structure: Structure,
+                    seeds: ListPointSet | PointSet | None=None, iterations: int=1,
+                    mask: Optional[BoolArray]=None, axes: Optional[List[int]]=None,
+                    num_threads: int=1) -> BoolArray:
     ...
 
 @overload
@@ -284,7 +286,7 @@ def label(mask: Array, structure: Structure3D, seeds: PointSet3D, npts: int=1,
           axes: None=None, num_threads: int=1) -> Regions3D:
     ...
 
-def label(mask: Array, structure: Structure, seeds: List[PointSet] | PointSet | None=None,
+def label(mask: Array, structure: Structure, seeds: ListPointSet | PointSet | None=None,
           npts: int=1, axes: List[int] | None=None, num_threads: int=1) -> ListRegions | Regions:
     ...
 

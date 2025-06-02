@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from jax import random
-from cbclib_v2.jax import CBDIndexer, CBDModel
+from cbclib_v2.indexer import CBDIndexer, CBDModel
 from cbclib_v2.annotations import KeyArray
 
 @pytest.fixture

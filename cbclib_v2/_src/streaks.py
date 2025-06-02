@@ -1,45 +1,67 @@
 from dataclasses import dataclass
-from typing import Iterator, Optional, Tuple, TypeVar
+from typing import Optional, Tuple, TypeVar
 import numpy as np
 import pandas as pd
-from .annotations import IntArray, IntSequence, RealArray, RealSequence, Shape
-from .data_container import ArrayContainer, ArrayNamespace, NumPy, to_list
+from .annotations import IntArray, RealArray, RealSequence, Shape
+from .data_container import ArrayContainer, ArrayNamespace, IndexedContainer, NumPy
 from .src.bresenham import draw_lines, write_lines
 
-L = TypeVar("L", bound="BaseLines")
+L = TypeVar("L", bound='BaseLines')
 
 class BaseLines(ArrayContainer):
-    index       : IntArray
     lines       : RealArray
+
+    @property
+    def ndim(self) -> int:
+        return self.lines.shape[-1] // 2
+
+    @property
+    def length(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.sqrt(xp.sum((self.pt1 - self.pt0)**2, axis=-1))
 
     @property
     def shape(self) -> Shape:
         return self.lines.shape[:-1]
 
     @property
+    def points(self) -> RealArray:
+        return self.lines.reshape(self.lines.shape[:-1] + (2, self.ndim))
+
+    @property
+    def pt0(self) -> RealArray:
+        return self.lines[..., :self.ndim]
+
+    @property
+    def pt1(self) -> RealArray:
+        return self.lines[..., self.ndim:]
+
+    @property
     def x(self) -> RealArray:
-        return self.lines[..., ::2]
+        return self.lines[..., ::self.ndim]
 
     @property
     def y(self) -> RealArray:
-        return self.lines[..., 1::2]
+        return self.lines[..., 1::self.ndim]
 
-    def __iter__(self: L) -> Iterator[L]:
-        xp = self.__array_namespace__()
-        indices = xp.unique(self.index)
-        for index in indices:
-            yield self[self.index == index]
+    def intersection(self: L, other: L) -> RealArray:
+        def vector_dot(a: RealArray, b: RealArray) -> RealArray:
+            return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
 
-    def __len__(self) -> int:
-        xp = self.__array_namespace__()
-        return xp.unique(self.index).size
+        tau = self.pt1 - self.pt0
+        other_tau = other.pt1 - other.pt0
 
-    def select(self: L, indices: IntSequence) -> L:
+        t = vector_dot(other.pt0 - self.pt0, other_tau) / vector_dot(tau, other_tau)
+        return self.pt0 + t[..., None] * tau
+
+    def project(self, point: RealArray) -> RealArray:
         xp = self.__array_namespace__()
-        patterns = list(iter(self))
-        result = [patterns[index].replace(index=xp.full(patterns[index].index.size, new_index))
-                  for new_index, index in enumerate(to_list(indices))]
-        return type(self).concatenate(*result)
+        tau = self.pt1 - self.pt0
+        center = 0.5 * (self.pt0 + self.pt1)
+        r = point - center
+        r_tau = xp.sum(tau * r, axis=-1) / xp.sum(tau**2, axis=-1)
+        r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
+        return tau * r_tau + center
 
     def to_lines(self, width: Optional[RealSequence]=None) -> RealArray:
         """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
@@ -60,7 +82,11 @@ class BaseLines(ArrayContainer):
         return lines
 
 @dataclass
-class Streaks(BaseLines):
+class Lines(BaseLines):
+    lines       : RealArray
+
+@dataclass
+class Streaks(IndexedContainer, BaseLines):
     index       : IntArray
     lines       : RealArray
 
@@ -101,10 +127,11 @@ class Streaks(BaseLines):
         Returns:
             A pattern in dictionary format.
         """
+        xp = self.__array_namespace__()
         idxs, ids, values = write_lines(lines=self.to_lines(width=width), shape=shape,
                                         idxs=self.index, kernel=kernel, num_threads=num_threads)
         normalised_shape = (np.prod(shape[:-2], dtype=int),) + shape[-2:]
-        frames, y, x = np.unravel_index(idxs, normalised_shape)
+        frames, y, x = xp.unravel_index(idxs, normalised_shape)
 
         data = {'index': ids, 'frames': frames, 'y': y, 'x': x, 'value': values}
         return pd.DataFrame(data)
