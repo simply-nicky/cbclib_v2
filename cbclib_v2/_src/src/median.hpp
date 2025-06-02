@@ -53,7 +53,7 @@ double median_1d(RandomIt first, RandomIt last, Compare comp)
         auto low = std::next(first, n / 2 - 1), high = std::next(first, n / 2);
         std::nth_element(first, low, last, comp);
         std::nth_element(high, high, last, comp);
-        return (*low + *high) / 2;
+        return 0.5 * (*low + *high);
     }
 }
 
@@ -66,16 +66,16 @@ T extend_point(const Container & coord, const array<T> & arr, extend mode, const
     if (mode == extend::constant) return cval;
 
     std::vector<I> close;
-    std::vector<I> min (arr.ndim, I());
+    std::vector<I> min (arr.ndim(), I());
 
     switch (mode)
     {
         /* aaaaaaaa|abcd|dddddddd */
         case extend::nearest:
 
-            for (size_t n = 0; n < arr.ndim; n++)
+            for (size_t n = 0; n < arr.ndim(); n++)
             {
-                if (coord[n] >= static_cast<I>(arr.shape[n])) close.push_back(arr.shape[n] - 1);
+                if (coord[n] >= static_cast<I>(arr.shape(n))) close.push_back(arr.shape(n) - 1);
                 else if (coord[n] < I()) close.push_back(I());
                 else close.push_back(coord[n]);
             }
@@ -85,21 +85,21 @@ T extend_point(const Container & coord, const array<T> & arr, extend mode, const
         /* cbabcdcb|abcd|cbabcdcb */
         case extend::mirror:
 
-            detail::mirror(coord.begin(), coord.end(), std::back_inserter(close), min.begin(), arr.shape.begin());
+            detail::mirror(coord.begin(), coord.end(), std::back_inserter(close), min.begin(), arr.shape().begin());
 
             break;
 
         /* abcddcba|abcd|dcbaabcd */
         case extend::reflect:
 
-            detail::reflect(coord.begin(), coord.end(), std::back_inserter(close), min.begin(), arr.shape.begin());
+            detail::reflect(coord.begin(), coord.end(), std::back_inserter(close), min.begin(), arr.shape().begin());
 
             break;
 
         /* abcdabcd|abcd|abcdabcd */
         case extend::wrap:
 
-            detail::wrap(coord.begin(), coord.end(), std::back_inserter(close), min.begin(), arr.shape.begin());
+            detail::wrap(coord.begin(), coord.end(), std::back_inserter(close), min.begin(), arr.shape().begin());
 
             break;
 
@@ -118,12 +118,12 @@ public:
 
     ImageFilter(const array<bool> & footprint)
     {
-        for (auto riter = rect_iterator(footprint.shape); !riter.is_end(); ++riter)
+        for (size_t index = 0; const auto & pt : rectangle_range(footprint.shape()))
         {
-            if (footprint[riter.index])
+            if (footprint[index++])
             {
                 auto & offset = offsets.emplace_back();
-                std::transform(riter.coord.begin(), riter.coord.end(), footprint.shape.begin(), std::back_inserter(offset),
+                std::transform(pt.begin(), pt.end(), footprint.shape().begin(), std::back_inserter(offset),
                                [](long crd, size_t dim){return crd - dim / 2;});
             }
         }
@@ -146,7 +146,7 @@ public:
             for (size_t n = 0; n < offset.size(); n++)
             {
                 current.push_back(coord[n] + offset[n]);
-                extend |= (current.back() >= static_cast<long>(image.shape[n])) || (current.back() < 0);
+                extend |= (current.back() >= static_cast<long>(image.shape(n))) || (current.back() < 0);
             }
 
             if (extend)

@@ -1,10 +1,9 @@
 import numpy as np
 from scipy import ndimage
-from scipy.spatial import KDTree
 import pytest
-from cbclib_v2.kdtree import build_kd_tree
-from cbclib_v2.ndimage import median, median_filter
+from cbclib_v2.ndimage import median, median_filter, robust_mean
 from cbclib_v2.annotations import Mode, NDBoolArray, NDRealArray, Shape
+from cbclib_v2.test_util import check_close
 
 class TestImageProcessing():
     @pytest.fixture(params=[(4, 11, 15), (15, 20)])
@@ -56,15 +55,15 @@ class TestImageProcessing():
 
         assert np.all(out == out2)
 
-    @pytest.mark.parametrize("num_points,num_queries,num_neighbours,ndim",
-                             [(100, (10, 10), 3, 1), (100, (3, 2, 5), 1, 3)])
-    def test_kd_tree(self, rng: np.random.Generator, num_points: int, num_queries: Shape,
-                     num_neighbours: int, ndim: int):
-        points = rng.random((num_points, ndim))
-        query = rng.random(num_queries + (ndim,))
-
-        dist, out = build_kd_tree(points).find_nearest(query, num_neighbours)
-        dist2, out2 = KDTree(points).query(query, num_neighbours)
-
-        np.testing.assert_allclose(np.squeeze(dist), dist2)
-        assert np.all(np.squeeze(out) == out2)
+    @pytest.mark.parametrize('axis,lm', [(-1, 9.0)])
+    def test_robust_mean(self, input: NDRealArray, axis: int, lm: float):
+        mean = np.median(input, axis=axis, keepdims=True)
+        errors = (input - mean)**2
+        indices = np.lexsort((input, errors), axis=axis)
+        errors = np.take_along_axis(errors, indices, axis=axis)
+        cumsum = np.cumsum(errors, axis=axis)
+        cumsum = np.delete(np.insert(cumsum, 0, 0, axis=axis), -1, axis=axis)
+        threshold = np.arange(input.shape[axis]) * errors
+        mask = lm * cumsum > threshold
+        mean = np.mean(np.take_along_axis(input, indices, axis=axis), where=mask, axis=axis)
+        check_close(mean, robust_mean(input, axis=axis, n_iter=0, lm=lm))

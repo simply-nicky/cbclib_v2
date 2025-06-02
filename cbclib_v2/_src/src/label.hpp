@@ -1,559 +1,539 @@
-#ifndef LABEL_H_
-#define LABEL_H_
+#ifndef NEW_LABEL_H_
+#define NEW_LABEL_H_
 #include "array.hpp"
 #include "geometry.hpp"
 
 namespace cbclib {
 
-template <typename T>
-using pixel_t = std::tuple<point_t, T>;
+// Image moments class
+template <typename T, size_t N>
+using PixelND = std::pair<PointND<long, N>, T>;
+
+template <typename T, size_t N>
+using PixelSetND = std::set<PixelND<T, N>>;
 
 template <typename T>
-using pset_t = std::set<pixel_t<T>>;
-
-template <typename Pt, typename = void>
-struct is_point : std::false_type {};
-
-template <typename Pt>
-struct is_point <Pt,
-    typename std::enable_if_t<std::is_base_of_v<Point<typename Pt::value_type>, std::remove_cvref_t<Pt>>>
-> : std::true_type {};
-
-template <typename Pt>
-constexpr bool is_point_v = is_point<Pt>::value;
+using PixelSet = PixelSetND<T, 2>;
 
 namespace detail {
 
-template <typename Container, typename = std::enable_if_t<is_point_v<typename Container::value_type>>>
-auto get_x(const Container & list)
+template <typename Container, typename Element = typename Container::value_type, typename T = typename Element::value_type>
+std::vector<T> get_x(const Container & c, size_t index)
 {
-    using T = Container::value_type::value_type;
     std::vector<T> x;
-    std::transform(list.begin(), list.end(), std::back_inserter(x), [](const Point<T> & elem){return elem.x();});
+    std::transform(c.begin(), c.end(), std::back_inserter(x), [index](const Element & elem){return elem[index];});
     return x;
 }
 
-template <typename Container, typename = std::enable_if_t<is_point_v<typename Container::value_type>>>
-auto get_y(const Container & list)
-{
-    using T = Container::value_type::value_type;
-    std::vector<T> y;
-    std::transform(list.begin(), list.end(), std::back_inserter(y), [](const Point<T> & elem){return elem.y();});
-    return y;
 }
 
+template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
+PixelND<T, N> make_pixel(const PointND<I, N> & point, const array<T> & data)
+{
+    return std::make_pair(point, data.at(point.coordinate()));
 }
 
-template <typename T, typename Pt, typename I = std::remove_cvref_t<Pt>::value_type,
-    typename = std::enable_if_t<
-        std::is_base_of_v<Point<I>, std::remove_cvref_t<Pt>> && std::is_integral_v<I>
-    >
->
-pixel_t<T> make_pixel(Pt && point, const array<T> & data)
+template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
+PixelND<T, N> make_pixel(PointND<I, N> && point, const array<T> & data)
 {
-    return std::make_tuple(std::forward<Pt>(point), data.at(point.coordinate()));
+    return std::make_pair(std::move(point), data.at(point.coordinate()));
+}
+
+template <typename... Ix, typename T> requires is_all_integral<Ix...>
+PixelND<T, sizeof...(Ix)> make_pixel(T value, Ix... xs)
+{
+    return std::make_pair(PointND<long, sizeof...(Ix)>{xs...}, value);
 }
 
 // Image moments class
 
-template <typename T>
-struct CentralMoments
-{
-    T mu_x, mu_y, mu_xx, mu_xy, mu_yy;
+template <typename T, size_t N>
+class MomentsND;
 
-    Point<T> center_of_mass(const Point<T> & origin) const
+template <typename T, size_t N>
+class CentralMomentsND
+{
+public:
+    std::array<T, N> first() const
     {
-        return {mu_x + origin.x(), mu_y + origin.y()};
+        return mu_x + origin;
     }
 
-    T theta() const
+    std::array<T, N * N> second() const
     {
-        T theta = std::atan(2 * mu_xy / (mu_xx - mu_yy)) / 2;
-        if (mu_yy > mu_xx) theta += M_PI_2;
+        std::array<T, N * N> cmat;
+        for (size_t n = 0; n < N; n++) cmat[n + N * n] = mu_xx[n];
+        for (size_t n = 0; n < NumPairs; n++)
+        {
+            auto [i, j] = UniquePairs<N>::instance().pairs(n);
+            cmat[i + N * j] = mu_xy[n]; cmat[j + N * i] = mu_xy[n];
+        }
+        return cmat;
+    }
+
+    // Angle between the largest eigenvector of the covariance matrix and x-axis
+    T theta() const requires (N == 2)
+    {
+        T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
+        if (mu_xx[1] > mu_xx[0]) theta += M_PI_2;
         return detail::modulo(theta, M_PI);
     }
 
-    std::array<T, 3> gauss() const
+    Line<T> line() const requires (N == 2)
     {
-        T div = 2 * (mu_xx * mu_yy - mu_xy * mu_xy);
-        return {mu_yy / div, mu_xx / div, -mu_xy / div};
+        T angle = theta();
+        Point<T> tau {std::cos(angle), std::sin(angle)};
+        T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
+        T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
+        return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
-    std::array<T, 2> principal_axes() const
-    {
-        auto [a, b, c] = gauss();
-        T p = std::sqrt((a - b) * (a - b) + 4 * c * c);
-        return {std::sqrt(1 / (a + b - p)), std::sqrt(1 / (a + b + p))};
-    }
+private:
+    constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
+    PointND<T, N> origin;
+    PointND<T, N> mu_x, mu_xx;
+    PointND<T, NumPairs> mu_xy;
+
+    friend class MomentsND<T, N>;
+
+    CentralMomentsND(PointND<T, N> pt) : origin(std::move(pt)) {}
+    CentralMomentsND(PointND<T, N> pt, PointND<T, N> mx, PointND<T, N> mxx, PointND<T, NumPairs> mxy) :
+        origin(std::move(pt)), mu_x(std::move(mx)), mu_xx(std::move(mxx)), mu_xy(std::move(mxy)) {}
 };
 
-template <typename T>
-struct Moments
+template <typename T, size_t N>
+class MomentsND
 {
-    Point<T> pt0;
-    T mu, mu_x, mu_y, mu_xx, mu_xy, mu_yy;
+public:
+    MomentsND() = default;
 
-    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<Point<T>,  std::remove_cvref_t<Pt>>>>
-    static Moments from_pset(Pt && pt0, const pset_t<T> & pset)
+    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt>>>>
+    MomentsND(Pt && pt) : org(std::forward<Pt>(pt)), mu(), mu_x(), mu_xx(), mu_xy() {}
+
+    MomentsND(const PixelSetND<T, N> & pset) : MomentsND()
     {
-        Moments m {std::forward<Pt>(pt0)};
-        for (const auto & [pt, val] : pset)
+        if (pset.size())
         {
-            m.add_point(pt, val);
-        }
-        return m;
-    }
-
-    static Moments from_pset(const pset_t<T> & pset)
-    {
-        Point<T> pt0 {T(), T()};
-        T mu = T();
-        for (const auto & [pt, val] : pset)
-        {
-            pt0 += val * pt;
-            mu += val;
-        }
-
-        if (mu) return Moments::from_pset(pt0 / mu, pset);
-        else
-        {
-            Moments m;
-            for (const auto & [pt, _] : pset)
-            {
-                m.pt0 += pt;
-            }
-            m.pt0 /= pset.size();
-            return m;
+            org = std::next(pset.begin(), pset.size() / 2)->first;
+            insert(pset.begin(), pset.end());
         }
     }
 
-    Moments operator+(const Moments & m) const
+    // In-place operators
+
+    MomentsND & operator+=(MomentsND rhs)
     {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            return {pt0, mu + new_m.mu, mu_x + new_m.mu_x, mu_y + new_m.mu_y,
-                    mu_xx + new_m.mu_xx, mu_xy + new_m.mu_xy, mu_yy + new_m.mu_yy};
-        }
-
-        return {pt0, mu + m.mu, mu_x + m.mu_x, mu_y + m.mu_y,
-                mu_xx + m.mu_xx, mu_xy + m.mu_xy, mu_yy + m.mu_yy};
-    }
-
-    Moments operator-(const Moments & m) const
-    {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            return {pt0, mu - new_m.mu, mu_x - new_m.mu_x, mu_y - new_m.mu_y,
-                    mu_xx - new_m.mu_xx, mu_xy - new_m.mu_xy, mu_yy - new_m.mu_yy};
-        }
-
-        return {pt0, mu - m.mu, mu_x - m.mu_x, mu_y - m.mu_y,
-                mu_xx - m.mu_xx, mu_xy - m.mu_xy, mu_yy - m.mu_yy};
-    }
-
-    Moments & operator+=(const Moments & m)
-    {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            mu += new_m.mu; mu_x += new_m.mu_x; mu_y += new_m.mu_y;
-            mu_xx += new_m.mu_xx; mu_xy += new_m.mu_xy; mu_yy += new_m.mu_yy;
-            return *this;
-        }
-
-        mu += m.mu; mu_x += m.mu_x; mu_y += m.mu_y;
-        mu_xx += m.mu_xx; mu_xy += m.mu_xy; mu_yy += m.mu_yy;
+        rhs.move(org);
+        mu += rhs.mu;
+        mu_x += rhs.mu_x;
+        mu_xx += rhs.mu_xx;
+        mu_xy += rhs.mu_xy;
         return *this;
     }
 
-    Moments & operator-=(const Moments & m)
+    MomentsND & operator-=(MomentsND rhs)
     {
-        if (pt0 != m.pt0)
-        {
-            auto new_m = m.update_seed(pt0);
-            mu -= new_m.mu; mu_x -= new_m.mu_x; mu_y -= new_m.mu_y;
-            mu_xx -= new_m.mu_xx; mu_xy -= new_m.mu_xy; mu_yy -= new_m.mu_yy;
-            return *this;
-        }
-
-        mu -= m.mu; mu_x -= m.mu_x; mu_y -= m.mu_y;
-        mu_xx -= m.mu_xx; mu_xy -= m.mu_xy; mu_yy -= m.mu_yy;
+        rhs.move(org);
+        mu -= rhs.mu;
+        mu_x -= rhs.mu_x;
+        mu_xx -= rhs.mu_xx;
+        mu_xy -= rhs.mu_xy;
         return *this;
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    void add_point(const Point<V> & point, T val)
+    void insert(const PointND<V, N> & point, T val)
     {
-        auto dist = point - pt0;
+        auto r = point - org;
 
+        val = std::max(val, T());
         mu += val;
-        mu_x += dist.x() * val;
-        mu_y += dist.y() * val;
-        mu_xx += dist.x() * dist.x() * val;
-        mu_xy += dist.x() * dist.y() * val;
-        mu_yy += dist.y() * dist.y() * val;
+        mu_x += r * val;
+        mu_xx += r * r * val;
+        for (size_t n = 0; n < NumPairs; n++)
+        {
+            auto [i, j] = UniquePairs<N>::instance().pairs(n);
+            mu_xy[n] += r[i] * r[j] * val;
+        }
     }
 
-    CentralMoments<T> central_moments() const
+    template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
+    void insert(const PixelND<V, N> & pixel)
+    {
+        insert(std::get<0>(pixel), std::get<1>(pixel));
+    }
+
+    template <typename InputIt, typename Value = typename std::iterator_traits<InputIt>::value_type, typename V = typename Value::second_type,
+        typename = std::enable_if_t<std::is_same_v<PixelND<V, N>, Value> && std::is_convertible_v<T, V>>
+    >
+    void insert(InputIt first, InputIt last)
+    {
+        for (; first != last; ++first) insert(*first);
+    }
+
+    void move(const PointND<T, N> & point)
+    {
+        if (org != point)
+        {
+            auto r = org - point;
+            mu_xx += 2 * r * mu_x + r * r * mu;
+            for (size_t n = 0; n < NumPairs; n++)
+            {
+                auto [i, j] = UniquePairs<N>::instance().pairs(n);
+                mu_xy[n] += r[i] * mu_x[j] + r[j] * mu_x[i] + r[i] * r[j] * mu;
+            }
+            mu_x += r * mu;
+            org = point;
+        }
+    }
+
+    // Friend members
+
+    friend MomentsND operator+(const MomentsND & lhs, const MomentsND & rhs)
+    {
+        MomentsND result = lhs;
+        result += rhs;
+        return result;
+    }
+
+    friend MomentsND operator-(const MomentsND & lhs, const MomentsND & rhs)
+    {
+        MomentsND result = lhs;
+        result += rhs;
+        return result;
+    }
+
+    friend std::ostream & operator<<(std::ostream & os, const MomentsND & m)
+    {
+        os << "{origin = " << m.org << ", mu = " << m.mu << ", mu_x = " << m.mu_x
+           << ", mu_xx = " << m.mu_xx << ", mu_xy = " << m.mu_xy << "}";
+        return os;
+    }
+
+    // Other members
+
+    CentralMomentsND<T, N> central() const
     {
         if (mu)
         {
-            T mx = mu_x / mu;
-            T my = mu_y / mu;
-            return CentralMoments<T>{mx, my, mu_xx / mu - mx * mx,
-                                     mu_xy / mu - mx * my, mu_yy / mu - my * my};
-        }
-        return CentralMoments<T>{};
-    }
-
-    Moments update_seed(const Point<T> & pt) const
-    {
-        auto dist = pt0 - pt;
-        return {pt, mu, mu_x + dist.x() * mu, mu_y + dist.y() * mu,
-                mu_xx + 2 * dist.x() * mu_x + dist.x() * dist.x() * mu,
-                mu_xy + dist.x() * mu_y + dist.y() * mu_x + dist.x() * dist.y() * mu,
-                mu_yy + 2 * dist.y() * mu_y + dist.y() * dist.y() * mu};
-    }
-
-    friend std::ostream & operator<<(std::ostream & os, const Moments & m)
-    {
-        os << "{" << m.x0 << ", " << m.y0 << ", " << m.mu << ", " << m.mu_x  << ", " << m.mu_y << ", "
-           << m.mu_xx << ", " << m.mu_xy << ", " << m.mu_yy << "}";
-        return os;
-    }
-};
-
-// Container of points (Python interface)
-template <class Container, typename = std::enable_if_t<is_point_v<typename Container::value_type>>>
-struct PointsContainer
-{
-    using container_type = Container;
-    using point_type = Container::value_type;
-    using value_type = Container::value_type::value_type;
-
-    container_type points;
-
-    PointsContainer() = default;
-
-    template <typename Pts, typename = std::enable_if_t<std::is_same_v<Container, std::remove_cvref_t<Pts>>>>
-    PointsContainer(Pts && p) : points(std::forward<Pts>(p)) {}
-
-    operator container_type && () && { return std::move(points); }
-
-    container_type & operator*() {return points;}
-    const container_type & operator*() const {return points;}
-
-    container_type * operator->() {return &(points);}
-    const container_type * operator->() const {return &(points);}
-
-    std::vector<value_type> x() const {return detail::get_x(points);}
-    std::vector<value_type> y() const {return detail::get_y(points);}
-
-    std::string info() const
-    {
-        return "<Points, size = " + std::to_string(points.size()) + ">";
-    }
-};
-
-struct PointsList : public PointsContainer<std::vector<point_t>>
-{
-    using PointsContainer::PointsContainer;
-};
-
-// Connectivity structure class
-
-struct Structure : public PointsContainer<std::set<point_t>>
-{
-    int radius, rank;
-
-    Structure(int radius, int rank) : radius(radius), rank(rank)
-    {
-        if (rank > 2 * radius) rank = 2 * radius;
-        for (int i = -radius; i <= radius; i++)
-        {
-            for (int j = -radius; j <= radius; j++)
+            auto M_X = mu_x / mu;
+            auto M_XX = mu_xx / mu - M_X * M_X;
+            PointND<T, NumPairs> M_XY {};
+            for (size_t n = 0; n < NumPairs; n++)
             {
-                if (std::abs(i) + std::abs(j) <= rank) points.emplace_hint(points.end(), point_type{j, i});
+                auto [i, j] = UniquePairs<N>::instance().pairs(n);
+                M_XY[n] = mu_xy[n] / mu - M_X[i] * M_X[j];
             }
+            return {org, std::move(M_X), std::move(M_XX), std::move(M_XY)};
         }
+        return {org};
     }
 
-    std::string info() const
+    const PointND<T, N> & origin() const {return org;}
+
+    T zeroth() const {return mu;}
+    std::array<T, N> first() const {return mu_x + org * mu;}
+    std::array<T, N * N> second() const
     {
-        return "<Structure, radius = " + std::to_string(radius) + ", rank = " + std::to_string(rank) +
-                         ", points = <Points, size = " + std::to_string(points.size()) + ">>";
-    }
-};
-
-// Extended interface of set of points - needed for Regions
-
-struct PointsSet : public PointsContainer<std::set<point_t>>
-{
-    using PointsContainer::PointsContainer;
-
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, point_type>>>
-    PointsSet(point_type seed, Func && func, const Structure & srt)
-    {
-        if (std::forward<Func>(func)(seed))
+        std::array<T, N * N> matrix {};
+        for (size_t n = 0; n < N; n++)
         {
-            std::vector<point_type> last_pixels;
-            std::unordered_set<point_type, detail::PointHasher<value_type>> new_pixels;
-
-            last_pixels.emplace_back(std::move(seed));
-
-            while (last_pixels.size())
-            {
-                for (const auto & point: last_pixels)
-                {
-                    for (const auto & shift: srt.points)
-                    {
-                        new_pixels.insert(point + shift);
-                    }
-                }
-                last_pixels.clear();
-
-                for (auto && point: new_pixels)
-                {
-                    if (std::forward<Func>(func)(point))
-                    {
-                        auto [iter, is_added] = points.insert(std::forward<decltype(point)>(point));
-                        if (is_added) last_pixels.push_back(*iter);
-                    }
-                }
-                new_pixels.clear();
-            }
+            matrix[n + N * n] = mu_xx[n] + 2 * org[n] * mu_x[n] + org[n] * org[n] * mu;
         }
-    }
-
-    PointsSet(point_type seed, const array<bool> & mask, const Structure & srt) :
-        PointsSet(seed, [&mask](point_type pt){return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());}, srt) {}
-
-    PointsSet filter(array<bool> & mask, const Structure & srt, size_t npts) const
-    {
-        PointsSet result;
-
-        for (const auto & point : points)
+        for (size_t n = 0; n < NumPairs; n++)
         {
-            if (mask.is_inbound(point.coordinate()) && mask.at(point.coordinate()))
-            {
-                PointsSet support {point, mask, srt};
-
-                for (auto pt : *support) mask.at(pt.coordinate()) = false;
-
-                if (support->size() >= npts) result->merge(std::move(*support));
-            }
+            auto [i, j] = UniquePairs<N>::instance().pairs(n);
+            auto m_xy = mu_xy[n] + org[i] * mu_x[j] + org[j] * mu_x[i] + org[i] * org[j] * mu;
+            matrix[i + N * j] = m_xy; matrix[j + N * i] = m_xy;
         }
-
-        return result;
-    }
-
-    template <typename Mask, typename = std::enable_if_t<std::is_base_of_v<array<bool>, std::remove_cvref_t<Mask>>>>
-    Mask && mask(Mask && m) const
-    {
-        for (auto pt : points)
-        {
-            if (m.is_inbound(pt.coordinate())) m.at(pt.coordinate()) = true;
-        }
-        return std::forward<Mask>(m);
-    }
-};
-
-// Set of [point, value] pairs
-
-template <typename T>
-struct Pixels
-{
-    Moments<T> moments;
-    pset_t<T> pset;
-
-    Pixels() = default;
-    Pixels(const pset_t<T> & pset) : moments(Moments<T>::from_pset(pset)), pset(pset) {}
-    Pixels(pset_t<T> && pset) : moments(Moments<T>::from_pset(pset)), pset(std::move(pset)) {}
-
-    Pixels(const PointsSet & points, const array<T> & data)
-    {
-        for (auto pt : points.points)
-        {
-            if (data.is_inbound(pt.coordinate())) pset.insert(make_pixel(pt, data));
-        }
-        moments = Moments<T>::from_pset(pset);
-    }
-
-    Pixels(PointsSet && points, const array<T> & data)
-    {
-        std::transform(std::make_move_iterator(points.points.begin()),
-                       std::make_move_iterator(points.points.end()),
-                       std::inserter(pset, pset.begin()),
-                       [&data](auto && point){return make_pixel(std::forward<decltype(point)>(point), data);});
-        moments = Moments<T>::from_pset(pset);
-    }
-
-    Pixels merge(const Pixels & pixels) const
-    {
-        pset_t<T> pint, pmrg;
-        std::set_intersection(pset.begin(), pset.end(), pixels.pset.begin(), pixels.pset.end(), std::inserter(pint, pint.begin()));
-        std::set_union(pset.begin(), pset.end(), pixels.pset.begin(), pixels.pset.end(), std::inserter(pmrg, pmrg.begin()));
-
-        auto m = moments + pixels.moments - Moments<T>::from_pset(moments.pt0, pint);
-
-        if (m.mu) return {pmrg, m.update_seed(moments.central_moments().center_of_mass(moments.pt0))};
-        return {pmrg, m};
-    }
-
-    void insert(Pixels && pixels)
-    {
-        pset_t<T> pint;
-        std::set_intersection(pset.begin(), pset.end(), pixels.pset.begin(), pixels.pset.end(), std::inserter(pint, pint.begin()));
-
-        moments += pixels.moments - Moments<T>::from_pset(moments.pt0, pint);
-
-        pset.insert(std::make_move_iterator(pixels.pset.begin()), std::make_move_iterator(pixels.pset.end()));
-    }
-
-    Line<T> get_line() const
-    {
-        if (moments.mu)
-        {
-            auto cm = moments.central_moments();
-            T theta = cm.theta();
-            Point<T> tau {std::cos(theta), std::sin(theta)};
-            Point<T> ctr = cm.center_of_mass(moments.pt0);
-
-            T tmin = std::numeric_limits<T>::max(), tmax = std::numeric_limits<T>::lowest();
-            for (const auto & [pt, _] : pset)
-            {
-                T prod = dot(tau, pt - ctr);
-                if (prod < tmin) tmin = prod;
-                if (prod > tmax) tmax = prod;
-            }
-
-            if (tmin != std::numeric_limits<T>::max() && tmax != std::numeric_limits<T>::lowest())
-                return {ctr + tmin * tau, ctr + tmax * tau};
-        }
-        return {moments.pt0, moments.pt0};
-    }
-};
-
-struct Regions
-{
-    std::array<size_t, 2> shape;
-    std::vector<PointsSet> regions;
-
-    template <typename Shape, typename Rgn, typename I = std::remove_cvref_t<Shape>::value_type, typename = std::enable_if_t<
-        std::is_same_v<std::array<I, 2>, std::remove_cvref_t<Shape>> &&
-        std::is_same_v<std::vector<PointsSet>, std::remove_cvref_t<Rgn>> &&
-        std::is_integral_v<I>
-    >>
-    Regions(Shape && s, Rgn && r) : shape(std::forward<Shape>(s)), regions(std::forward<Rgn>(r)) {}
-
-    template <typename Shape, typename I = std::remove_cvref_t<Shape>::value_type, typename = std::enable_if_t<
-        std::is_same_v<std::array<I, 2>, std::remove_cvref_t<Shape>> && std::is_integral_v<I>
-    >>
-    Regions(Shape && s) : Regions(std::forward<Shape>(s), std::vector<PointsSet>()) {}
-
-    std::vector<PointsSet> & operator*() {return regions;}
-    const std::vector<PointsSet> & operator*() const {return regions;}
-
-    std::vector<PointsSet> * operator->() {return &(regions);}
-    const std::vector<PointsSet> * operator->() const {return &(regions);}
-
-    std::string info() const
-    {
-        return "<Regions, shape = {" + std::to_string(shape[0]) + ", " + std::to_string(shape[1]) +
-               "}, regions = <List[PointsSet], size = " + std::to_string(regions.size()) + ">>";
-    }
-
-    Regions filter(const Structure & str, size_t npts) const
-    {
-        auto vec = mask();
-        array<bool> mask {shape, reinterpret_cast<bool *>(vec.data())};
-
-        Regions result {shape};
-        for (const auto & region : regions)
-        {
-            auto new_region = region.filter(mask, str, npts);
-            if (new_region.points.size()) result->emplace_back(std::move(new_region));
-        }
-        return result;
-    }
-
-    std::vector<unsigned char> mask() const
-    {
-        std::vector<unsigned char> vec (shape[0] * shape[1], false);
-
-        array<bool> mask {shape, reinterpret_cast<bool *>(vec.data())};
-        for (const auto & region : regions) mask = region.mask(mask);
-
-        return vec;
-    }
-
-    template <typename T>
-    auto center_of_mass(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            return std::move(region.moments.central_moments().center_of_mass(region.moments.pt0)).to_array();
-        });
-    }
-
-    template <typename T>
-    auto gauss_fit(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            return region.moments.central_moments().gauss();
-        });
-    }
-
-    template <typename T>
-    auto ellipse_fit(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            auto cm = region.moments.central_moments();
-            auto [a, b] = cm.principal_axes();
-            auto theta = cm.theta();
-            return std::array<T, 3>{a, b, theta};
-        });
-    }
-
-    template <typename T>
-    auto line_fit(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region) -> std::array<T, 4>
-        {
-            return region.get_line().to_array();
-        });
-    }
-
-    template <typename T>
-    auto moments(const array<T> & data) const
-    {
-        return apply(data, [](const Pixels<T> & region)
-        {
-            auto cm = region.moments.central_moments();
-            return std::array<T, 4>{region.moments.mu, cm.mu_xx, cm.mu_xy, cm.mu_yy};
-        });
+        return matrix;
     }
 
 private:
-    template <typename T, typename Func>
-    auto apply(const array<T> & data, Func && func) const
-    {
-        std::vector<std::invoke_result_t<Func, Pixels<T>>> results;
-        for (const auto & region : regions)
-        {
-            results.emplace_back(std::forward<Func>(func)(Pixels<T>{region, data}));
-        }
+    constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
 
-        return results;
-    }
+    PointND<T, N> org;
+    T mu;
+    PointND<T, N> mu_x, mu_xx;
+    PointND<T, NumPairs> mu_xy;
 };
 
 template <typename T>
-auto label(py::array_t<bool> mask, Structure structure, size_t npts, std::optional<std::tuple<size_t, size_t>> ax, unsigned threads);
+using Moments = MomentsND<T, 2>;
+
+// Connectivity structure class
+
+template <size_t N>
+struct StructureND : public WrappedContainer<std::vector<PointND<long, N>>>
+{
+public:
+    using WrappedContainer<std::vector<PointND<long, N>>>::begin;
+    using WrappedContainer<std::vector<PointND<long, N>>>::end;
+    using WrappedContainer<std::vector<PointND<long, N>>>::size;
+
+    int radius, rank;
+
+    StructureND(int radius, int rank) : radius(radius), rank(rank)
+    {
+        PointND<long, N> shape;
+        for (size_t i = 0; i < N; i++) shape[i] = 2 * radius + 1;
+        for (auto point : rectangle_range<PointND<long, N>>{std::move(shape)})
+        {
+            point -= radius;
+            long abs = 0;
+            for (size_t i = 0; i < N; i++) abs += std::abs(point[i]);
+            if (abs <= rank) m_ctr.emplace_back(std::move(point));
+        }
+    }
+
+    StructureND & sort()
+    {
+        auto compare = [](const PointND<long, N> & a, const PointND<long, N> & b)
+        {
+            return magnitude(a) < magnitude(b);
+        };
+        std::sort(begin(), end(), compare);
+        return *this;
+    }
+
+    std::string info() const
+    {
+        return "<StructureND, N = " + std::to_string(N) + ", radius = " + std::to_string(radius) +
+               ", rank = " + std::to_string(rank) + ", points = <PointsND, size = " +  std::to_string(size()) + ">>";
+    }
+
+protected:
+    using WrappedContainer<std::vector<PointND<long, N>>>::m_ctr;
+};
+
+using Structure = StructureND<2>;
+
+// Extended interface of set of points - needed for Regions
+
+template <size_t N>
+class PointSetND : public WrappedContainer<std::set<PointND<long, N>>>
+{
+public:
+    using WrappedContainer<std::set<PointND<long, N>>>::WrappedContainer;
+    using WrappedContainer<std::set<PointND<long, N>>>::begin;
+    using WrappedContainer<std::set<PointND<long, N>>>::end;
+    using WrappedContainer<std::set<PointND<long, N>>>::size;
+
+    PointSetND() = default;
+
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
+    void dilate(Func && func, const StructureND<N> & structure)
+    {
+        std::vector<PointND<long, N>> last_pixels {begin(), end()};
+        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
+
+        while (last_pixels.size())
+        {
+            for (const auto & point: last_pixels)
+            {
+                for (const auto & shift: structure)
+                {
+                    new_pixels.insert(point + shift);
+                }
+            }
+            last_pixels.clear();
+
+            for (auto && point: new_pixels)
+            {
+                if (std::forward<Func>(func)(point))
+                {
+                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
+                    if (is_added) last_pixels.push_back(*iter);
+                }
+            }
+            new_pixels.clear();
+        }
+    }
+
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
+    void dilate(Func && func, const StructureND<N> & structure, size_t n_iter)
+    {
+        std::vector<PointND<long, N>> last_pixels {begin(), end()};
+        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
+
+        for (size_t n = 0; n < n_iter; n++)
+        {
+            for (const auto & point: last_pixels)
+            {
+                for (const auto & shift: structure)
+                {
+                    new_pixels.insert(point + shift);
+                }
+            }
+            last_pixels.clear();
+
+            for (auto && point: new_pixels)
+            {
+                if (std::forward<Func>(func)(point))
+                {
+                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
+                    if (is_added) last_pixels.push_back(*iter);
+                }
+            }
+            new_pixels.clear();
+        }
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> & array, bool value) const
+    {
+        for (const auto & pt : m_ctr)
+        {
+            if (array.is_inbound(pt.coordinate())) array.at(pt.coordinate()) = value;
+        }
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> && array, bool value) const
+    {
+        mask(array, value);
+    }
+
+    std::string info() const
+    {
+        return "<PointsSetND, N = " + std::to_string(N) + ", size = " + std::to_string(m_ctr.size()) + ">";
+    }
+
+protected:
+    using WrappedContainer<std::set<PointND<long, N>>>::m_ctr;
+};
+
+using PointSet = PointSetND<2>;
+
+// Set of [point, value] pairs
+
+template <typename T, size_t N>
+class PixelsND
+{
+public:
+    PixelsND() = default;
+
+    PixelsND(const PixelSetND<T, N> & pset) : m_mnt(pset), m_pset(pset) {}
+    PixelsND(PixelSetND<T, N> && pset) : m_mnt(pset), m_pset(std::move(pset)) {}
+
+    PixelsND(const PointSetND<N> & points, const array<T> & data)
+    {
+        for (auto && pt : points)
+        {
+            if (data.is_inbound(pt.coordinate()))
+            {
+                m_pset.emplace_hint(m_pset.end(), make_pixel(std::forward<decltype(pt)>(pt), data));
+            }
+        }
+        m_mnt = m_pset;
+    }
+
+    void merge(PixelsND & source)
+    {
+        auto first1 = m_pset.begin(), last1 = m_pset.end();
+        auto first2 = source.m_pset.begin(), last2 = source.m_pset.end();
+        for (; first1 != last1 && first2 != last2;)
+        {
+            if (*first2 < *first1)
+            {
+                m_mnt.insert(*first2);
+                m_pset.insert(first1, source.m_pset.extract(first2++));
+            }
+            else if (*first2 > *first1) ++first1;
+            else
+            {
+                ++first1; ++first2;
+            }
+        }
+        for (; first2 != last2;)
+        {
+            m_mnt.insert(*first2);
+            m_pset.insert(first1, source.m_pset.extract(first2++));
+        }
+    }
+
+    void merge(PixelsND && source)
+    {
+        merge(source);
+    }
+
+    Line<T> line() const requires (N == 2)
+    {
+        if (m_mnt.zeroth()) return m_mnt.central().line();
+        return {m_mnt.origin(), m_mnt.origin()};
+    }
+
+    const PixelSetND<T, N> & pixels() const {return m_pset;}
+    const MomentsND<T, N> & moments() const {return m_mnt;}
+
+protected:
+    MomentsND<T, N> m_mnt;
+    PixelSetND<T, N> m_pset;
+};
+
+template <typename T>
+using Pixels = PixelsND<T, 2>;
+
+template <size_t N>
+class RegionsND : public WrappedContainer<std::vector<PointSetND<N>>>
+{
+public:
+    using WrappedContainer<std::vector<PointSetND<N>>>::WrappedContainer;
+    using WrappedContainer<std::vector<PointSetND<N>>>::size;
+
+    RegionsND() = default;
+
+    std::string info() const
+    {
+        return "<RegionsND, regions = <List[PointSetND], size = " + std::to_string(size()) + ">>";
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> & array, bool value) const
+    {
+        for (const auto & region: m_ctr) region.mask(array, value);
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> && array, bool value) const
+    {
+        mask(array, value);
+    }
+
+protected:
+    using WrappedContainer<std::vector<PointSetND<N>>>::m_ctr;
+};
+
+template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
+RegionsND<N> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
+{
+    std::vector<PointSetND<N>> regions;
+    auto func = [&mask](const PointND<long, N> & pt)
+    {
+        return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());
+    };
+
+    for (; first != last; ++first)
+    {
+        size_t index = mask.index_at(first->coordinate());
+        if (mask[index])
+        {
+            PointSetND<N> points;
+            points->insert(*first);
+            points.dilate(func, structure);
+            points.mask(mask, false);
+            if (points.size() >= npts) regions.emplace_back(std::move(points));
+        }
+    }
+
+    return RegionsND<N>{std::move(regions)};
+}
+
+template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
+RegionsND<N> labelise(InputIt first, InputIt last, array<I> && mask, const StructureND<N> & structure, size_t npts)
+{
+    return labelise(first, last, mask, structure, npts);
+}
 
 }
 

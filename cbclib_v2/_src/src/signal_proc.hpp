@@ -12,8 +12,8 @@ namespace cbclib {
    coordinates (float) follow the convention:   [x, y, z, ...]
  */
 
-template <typename T, typename U>
-T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const std::vector<U> & coord)
+template <typename T, typename Coord, typename U = typename Coord::value_type>
+T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const Coord & coord)
 {
     std::vector<size_t> lbound, ubound;
     std::vector<T> dx;
@@ -26,9 +26,9 @@ T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const std::
         // uiter is GREATER
         auto uiter = std::upper_bound(grid[index].begin(), grid[index].end(), coord[index]);
         // lbound is LESS OR EQUAL
-        lbound.push_back(std::clamp<size_t>(std::distance(grid[index].begin(), uiter) - 1, 0, grid[index].size - 1));
+        lbound.push_back(std::clamp<size_t>(std::distance(grid[index].begin(), uiter) - 1, 0, grid[index].size() - 1));
         // rbound is GREATER OR EQUAL
-        ubound.push_back(std::clamp<size_t>(std::distance(grid[index].begin(), liter), 0, grid[index].size - 1));
+        ubound.push_back(std::clamp<size_t>(std::distance(grid[index].begin(), liter), 0, grid[index].size() - 1));
     }
 
     for (size_t n = 0; n < coord.size(); n++)
@@ -69,7 +69,7 @@ T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const std::
         {
             std::ostringstream oss;
             oss << "Invalid index: {";
-            std::copy(point.begin(), point.end(), std::experimental::make_ostream_joiner(std::cout, ", "));
+            std::copy(point.begin(), point.end(), std::experimental::make_ostream_joiner(oss, ", "));
             oss << "}";
             throw std::runtime_error(oss.str());
         }
@@ -78,23 +78,11 @@ T bilinear(const array<T> & arr, const std::vector<array<U>> & grid, const std::
     return out;
 }
 
-template <typename T>
-py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
-                            std::vector<py::array_t<T, py::array::c_style | py::array::forcecast>> grid,
-                            py::array_t<T, py::array::c_style | py::array::forcecast> coords, unsigned threads);
-
-/*----------------------------------------------------------------------------*/
-/*---------------------------- Kernel regression -----------------------------*/
-/*----------------------------------------------------------------------------*/
-
-template <typename T>
-py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forcecast> y,
-                          py::array_t<T, py::array::c_style | py::array::forcecast> x,
-                          py::array_t<T, py::array::c_style | py::array::forcecast> x_hat, T sigma, std::string kernel,
-                          std::optional<py::array_t<T, py::array::c_style | py::array::forcecast>> w, unsigned threads);
-
-template <typename InputIt, typename T, typename Axes, class UnaryFunction>
-UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction unary_op, const array<T> & arr, const Axes & axes, size_t order)
+template <typename InputIt, typename T, typename Axes, class UnaryFunction, typename = std::enable_if_t<
+    (std::is_base_of_v<typename array<T>::iterator, InputIt> || std::is_base_of_v<typename array<T>::const_iterator, InputIt>) &&
+    std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t> && std::is_integral_v<typename Axes::value_type>
+>>
+UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction && unary_op, const array<T> & arr, const Axes & axes, size_t order)
 {
     // First element can't be a maximum
     auto iter = (first != last) ? std::next(first) : first;
@@ -111,15 +99,16 @@ UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction unary_op, con
 
             if (*ahead < *iter)
             {
-                auto index = arr.index(iter);
+                // It will return an index relative to the arr.begin() since it's stride is smaller
+                auto index = std::addressof(*iter) - arr.data();
 
                 size_t n = 1;
                 for (; n < axes.size(); n++)
                 {
                     auto coord = arr.index_along_dim(index, axes[n]);
-                    if (coord > 1 && coord < arr.shape[axes[n]] - 1)
+                    if (coord > 1 && coord < arr.shape(axes[n]) - 1)
                     {
-                        if (arr[index - arr.stride(axes[n])] < *iter && arr[index + arr.stride(axes[n])] < *iter)
+                        if (arr[index - arr.strides(axes[n])] < *iter && arr[index + arr.strides(axes[n])] < *iter)
                         {
                             continue;
                         }
@@ -128,7 +117,7 @@ UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction unary_op, con
                     break;
                 }
 
-                if (n >= order) unary_op(index);
+                if (n >= order) std::forward<UnaryFunction>(unary_op)(index);
 
                 // Skip samples that can't be maximum, check if it's not last
                 if (ahead != last) iter = ahead;
@@ -138,11 +127,8 @@ UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction unary_op, con
         iter = std::next(iter);
     }
 
-    return unary_op;
+    return std::forward<UnaryFunction>(unary_op);
 }
-
-template <typename T, typename U>
-py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::forcecast> inp, U axis, unsigned threads);
 
 }
 

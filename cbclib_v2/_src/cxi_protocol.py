@@ -1,76 +1,84 @@
-"""CXI protocol (:class:`cbclib.CXIProtocol`) is a helper class for a :class:`cbclib.CrystData`
-data container, which tells it where to look for the necessary data fields in a CXI file. The
-class is fully customizable so you can tailor it to your particular data structure of CXI file.
+"""CXI protocol (:class:`cbclib_v2.CXIProtocol`) is a helper class for a
+:class:`cbclib_v2.CrystData` data container, which tells it where to look for the necessary data
+fields in a CXI file. The class is fully customizable so you can tailor it to your particular data
+structure of CXI file.
 
 Examples:
     Generate the default built-in CXI protocol as follows:
 
     >>> import cbclib as cbc
     >>> cbc.CXIProtocol.import_default()
-    CXIProtocol(load_paths={...})
+    CXIProtocol(paths={...})
 """
 from dataclasses import dataclass, field
 from functools import partial
-from enum import auto, Enum
+from enum import Enum
 from glob import iglob
 from multiprocessing import Pool
 import os
 import fnmatch
 import re
 from types import TracebackType
-from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Protocol, Tuple, Union,
-                    cast, get_type_hints)
+from typing import (Any, Callable, ClassVar, Dict, List, Literal, Optional, Protocol, Sequence,
+                    Tuple, cast, get_type_hints)
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
 from extra_data import open_run, stack_detector_data, DataCollection
 from extra_geom import JUNGFRAUGeometry
-from .data_container import DataContainer, Parser, INIParser, JSONParser, StringFormatting
-from .annotations import Indices, IntTuple, NDArray, NDIntArray, Shape
+from .data_container import Container, to_list
+from .parser import Parser, INIParser, JSONParser
+from .annotations import (Array, Indices, IntSequence, IntTuple, NDArray, NDIntArray, Processor,
+                          Shape)
 
 EXP_ROOT_DIR = '/gpfs/exfel/exp'
 CXI_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cxi_protocol.ini')
 
 cxi_worker : Callable[[str], Tuple[Any, ...]]
-read_worker : Callable[[NDArray], NDArray]
+read_worker : Callable[[Array], NDArray]
 
-class Kinds(Enum):
-    SCALAR = auto()
-    SEQUENCE = auto()
-    FRAME = auto()
-    STACK = auto()
-    NO_KIND = auto()
+class Kinds(str, Enum):
+    scalar = 'scalar'
+    sequence = 'sequence'
+    frame = 'frame'
+    stack = 'stack'
+    no_kind = 'none'
 
-class CrystProtocol():
-    kinds       : ClassVar[Dict[str, Kinds]] = {'data': Kinds.STACK, 'good_frames': Kinds.SEQUENCE,
-                                                'mask': Kinds.FRAME, 'frames': Kinds.SEQUENCE,
-                                                'whitefield': Kinds.FRAME, 'snr': Kinds.STACK,
-                                                'std': Kinds.FRAME, 'scales': Kinds.SEQUENCE}
+Kind = Literal['scalar', 'sequence', 'frame', 'stack', 'none']
 
-    @classmethod
-    def get_kind(cls, attr: str) -> Kinds:
-        return cls.kinds.get(attr, Kinds.NO_KIND)
+class BaseProtocol(Container):
+    paths       : Dict[str, str | List[str]]
+    kinds       : Dict[str, Kind]
+
+    def __post_init__(self):
+        self.kinds = {attr: self.kinds[attr] for attr in self.paths}
+
+    def get_kind(self, attr: str) -> Kinds:
+        return Kinds(self.kinds.get(attr, 'none'))
+
+    def has_kind(self, *attributes: str, kind: Kinds=Kinds.stack) -> bool:
+        for attr in attributes:
+            if self.get_kind(attr) is kind:
+                return True
+        return False
 
 @dataclass
-class CXIProtocol(DataContainer):
+class CXIProtocol(BaseProtocol):
     """CXI protocol class. Contains a CXI file tree path with the paths written to all the data
-    attributes necessary for the :class:`cbclib.CrystData` detector data container, their
+    attributes necessary for the :class:`cbclib_v2.CrystData` detector data container, their
     corresponding attributes' data types, and data structure.
 
     Args:
-        load_paths : Dictionary with attributes' CXI default file paths.
+        paths : Dictionary with attributes' CXI default file paths.
     """
-    load_paths  : Dict[str, List[str]]
-    known_ndims: ClassVar[Dict[Kinds, IntTuple]] = {Kinds.STACK: (3,), Kinds.FRAME: (2, 3),
-                                                    Kinds.SEQUENCE: (1, 2, 3),
-                                                    Kinds.SCALAR: (0, 1, 2)}
-
-    def __post_init__(self):
-        self.load_paths = {attr: paths for attr, paths in self.load_paths.items()
-                           if CrystProtocol.get_kind(attr) != Kinds.NO_KIND}
+    paths       : Dict[str, List[str]]
+    kinds       : Dict[str, Kind]
+    known_ndims : ClassVar[Dict[Kinds, IntTuple]] = {Kinds.stack: (3,), Kinds.frame: (2, 3),
+                                                     Kinds.sequence: (1, 2, 3),
+                                                     Kinds.scalar: (0, 1, 2)}
 
     def read_worker(self, fname: str, attr: str) -> Tuple[Any, Any, Any]:
-        kind = CrystProtocol.get_kind(attr)
+        kind = self.get_kind(attr)
         with h5py.File(fname) as cxi_file:
             shapes = self.read_file_shapes(attr, cxi_file)
             for cxi_path, shape in shapes.items():
@@ -79,10 +87,10 @@ class CXIProtocol(DataContainer):
                             f' {cxi_path} has invalid shape: {str(shape)}'
                     raise ValueError(err_txt)
 
-                if kind in [Kinds.STACK, Kinds.SEQUENCE]:
+                if kind in [Kinds.stack, Kinds.sequence]:
                     return (shape[0] * [cxi_file.filename,],
                             shape[0] * [cxi_path,], range(shape[0]))
-                if kind in [Kinds.FRAME, Kinds.SCALAR]:
+                if kind in [Kinds.frame, Kinds.scalar]:
                     return ([cxi_file.filename,], [cxi_path,], [tuple(),])
 
             return ([], [], [])
@@ -90,10 +98,10 @@ class CXIProtocol(DataContainer):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'load_paths': 'load_paths'},
+            return INIParser({'paths': 'paths', 'kinds': 'kinds'},
                              types=get_type_hints(cls))
         if ext == 'json':
-            return JSONParser({'load_paths': 'load_paths'})
+            return JSONParser({'paths': 'paths', 'kinds': 'kinds'})
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -108,17 +116,17 @@ class CXIProtocol(DataContainer):
             file = CXI_PROTOCOL
         return cls(**cls.parser(ext).read(file))
 
-    def add_attribute(self, attr: str, load_paths: List[str]) -> 'CXIProtocol':
+    def add_attribute(self, attr: str, paths: List[str]) -> 'CXIProtocol':
         """Add a data attribute to the protocol.
 
         Args:
             attr : Attribute's name.
-            load_paths : List of attribute's CXI paths.
+            paths : List of attribute's CXI paths.
 
         Returns:
             A new protocol with the new attribute included.
         """
-        return self.replace(load_paths = dict(**self.load_paths, **{attr: load_paths}))
+        return self.replace(paths=self.paths | {attr: paths})
 
     def find_path(self, attr: str, cxi_file: h5py.File) -> str:
         """Find attribute's path in a CXI file `cxi_file`.
@@ -131,13 +139,13 @@ class CXIProtocol(DataContainer):
             Attribute's path in the CXI file, returns an empty string if the attribute is not
             found.
         """
-        paths = self.get_load_paths(attr)
+        paths = self.get_paths(attr)
         for path in paths:
             if path in cxi_file:
                 return path
         return str()
 
-    def get_load_paths(self, attr: str, value: List[str]=[]) -> List[str]:
+    def get_paths(self, attr: str, value: List[str]=[]) -> List[str]:
         """Return the attribute's default path in the CXI file. Return ``value`` if ``attr`` is not
         found.
 
@@ -148,7 +156,7 @@ class CXIProtocol(DataContainer):
         Returns:
             Attribute's cxi file path.
         """
-        return self.load_paths.get(attr, value)
+        return self.paths.get(attr, value)
 
     def get_ndim(self, attr: str, value: IntTuple=(0, 1, 2, 3)) -> IntTuple:
         """Return the acceptable number of dimensions that the attribute's data may have.
@@ -160,11 +168,11 @@ class CXIProtocol(DataContainer):
         Returns:
             Number of dimensions acceptable for the attribute.
         """
-        return self.known_ndims.get(CrystProtocol.get_kind(attr), value)
+        return self.known_ndims.get(self.get_kind(attr), value)
 
     def read_frame_shape(self, cxi_file: h5py.File) -> Tuple[int, int]:
-        for attr in self.load_paths:
-            if CrystProtocol.get_kind(attr) in (Kinds.STACK, Kinds.FRAME):
+        for attr in self.paths:
+            if self.get_kind(attr) in (Kinds.stack, Kinds.frame):
                 for shape in self.read_file_shapes(attr, cxi_file).values():
                     return cast(Tuple[int, int], shape[-2:])
 
@@ -211,9 +219,9 @@ class CXIProtocol(DataContainer):
             Dataset indices of the data pertined to the attribute ``attr``.
         """
         files, cxi_paths, fidxs = [], [], []
-        kind = CrystProtocol.get_kind(attr)
+        kind = self.get_kind(attr)
 
-        if kind != Kinds.NO_KIND:
+        if kind != Kinds.no_kind:
             for fname in fnames:
                 new_files, new_cxi_paths, new_fidxs = self.read_worker(fname, attr)
                 files.extend(new_files)
@@ -225,10 +233,8 @@ class CXIProtocol(DataContainer):
         raise ValueError(f"Invalid attribute {attr}")
 
 class ReadWorker(Protocol):
-    def __call__(self, index: NDArray, ss_idxs: Indices, fs_idxs: Indices) -> NDArray:
+    def __call__(self, index: Array, ss_idxs: Indices, fs_idxs: Indices) -> NDArray:
         ...
-
-Processor = Callable[[NDArray], Union[NDArray, int, float]]
 
 @dataclass
 class CXIReader():
@@ -241,13 +247,13 @@ class CXIReader():
         read_worker = partial(reader, ss_idxs=ss_idxs, fs_idxs=fs_idxs, proc=proc)
 
     @staticmethod
-    def read_item(index: NDArray) -> NDArray:
+    def read_item(index: Array) -> NDArray:
         dset : h5py.Dataset = cast(h5py.Dataset, h5py.File(index[0])[index[1]])
         return dset[index[2]]
 
     @staticmethod
-    def read_frame(index: NDArray, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> Union[NDArray, int, float]:
+    def read_frame(index: Array, ss_idxs: Indices, fs_idxs: Indices, proc: Optional[Processor]
+                   ) -> NDArray | int | float | Sequence[int] | Sequence[float]:
         dset : h5py.Dataset = cast(h5py.Dataset, h5py.File(index[0])[index[1]])
         data = dset[index[2]][..., ss_idxs, fs_idxs]
         if proc is not None:
@@ -255,10 +261,10 @@ class CXIReader():
         return data
 
     @staticmethod
-    def read_worker(index: NDArray) -> NDArray:
+    def read_worker(index: Array) -> NDArray:
         return read_worker(index)
 
-    def load_stack(self, attr: str, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
+    def load_stack(self, attr: str, idxs: Array, ss_idxs: Indices, fs_idxs: Indices,
                    proc: Optional[Processor], processes: int, verbose: bool) -> NDArray:
         stack = []
 
@@ -270,11 +276,11 @@ class CXIReader():
 
         return np.stack(stack, axis=0)
 
-    def load_frame(self, index: NDArray, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> Union[NDArray, int, float]:
+    def load_frame(self, index: Array, ss_idxs: Indices, fs_idxs: Indices, proc: Optional[Processor]
+                   ) -> NDArray | int | float | Sequence[int] | Sequence[float]:
         return self.read_frame(index, ss_idxs, fs_idxs, proc)
 
-    def load_sequence(self, idxs: NDArray) -> NDArray:
+    def load_sequence(self, idxs: Array) -> NDArray:
         return np.array([self.read_item(index) for index in idxs])
 
 @dataclass
@@ -298,9 +304,9 @@ class CXIWriter():
             if cxi_path:
                 return file, cxi_path
 
-        return None, self.protocol.get_load_paths(attr)[0]
+        return None, self.protocol.get_paths(attr)[0]
 
-    def save_stack(self, attr: str, data: NDArray, mode: str='overwrite',
+    def save_stack(self, attr: str, data: Array, mode: str='overwrite',
                     idxs: Optional[Indices]=None) -> None:
         file, cxi_path = self.find_dataset(attr)
 
@@ -323,8 +329,7 @@ class CXIWriter():
                         idxs = [idxs,]
                     if len(idxs) != data.shape[0]:
                         raise ValueError('Incompatible indices')
-                    dset.resize(max(dset.shape[0], max(idxs) + 1),
-                                            axis=0)
+                    dset.resize(max(dset.shape[0], max(idxs) + 1), axis=0)
                     dset[idxs] = data
 
         else:
@@ -336,7 +341,7 @@ class CXIWriter():
                                 chunks=(1,) + data.shape[1:],
                                 maxshape=(None,) + data.shape[1:])
 
-    def save_data(self, attr: str, data: NDArray) -> None:
+    def save_data(self, attr: str, data: Array) -> None:
         file, cxi_path = self.find_dataset(attr)
 
         if file is not None and cxi_path in file:
@@ -351,8 +356,13 @@ class CXIWriter():
                 del file[cxi_path]
             file.create_dataset(cxi_path, data=data, shape=data.shape)
 
-class FileStore():
-    size : int
+class FileStore(Container):
+    protocol    : BaseProtocol
+    size        : int
+
+    def __post_init__(self):
+        if self.is_empty():
+            self.update()
 
     def attributes(self) -> List[str]:
         raise NotImplementedError
@@ -365,7 +375,7 @@ class FileStore():
     def read_frame_shape(self) -> Tuple[int, int]:
         raise NotImplementedError
 
-    def save(self, attr: str, data: NDArray, mode: str='overwrite',
+    def save(self, attr: str, data: Array, mode: str='overwrite',
              idxs: Optional[Indices]=None):
         raise NotImplementedError
 
@@ -388,7 +398,7 @@ class CXIStore(FileStore):
     Attributes:
         files : Dictionary of paths to the files and their file
             objects.
-        protocol : :class:`cbclib.CXIProtocol` protocol object.
+        protocol : :class:`cbclib_v2.CXIProtocol` protocol object.
         mode : File mode. Valid modes are:
 
             * 'r' : Readonly, file must exist (default).
@@ -399,7 +409,7 @@ class CXIStore(FileStore):
     """
     Mode = Literal['r', 'r+', 'w', 'w-', 'x', 'a']
 
-    names       : Union[str, List[str]]
+    names       : str | List[str]
     mode        : Mode = 'r'
     protocol    : CXIProtocol = CXIProtocol.read()
     files       : Dict[str, Optional[h5py.File]] = field(default_factory=dict)
@@ -408,13 +418,15 @@ class CXIStore(FileStore):
     def __post_init__(self):
         if self.mode not in ['r', 'r+', 'w', 'w-', 'x', 'a']:
             raise ValueError(f'Wrong file mode: {self.mode}')
-        if len(self.files) != len(StringFormatting.str_to_list(self.names)):
-            self.files = {fname: None for fname in StringFormatting.str_to_list(self.names)}
+        if len(self.files) != len(to_list(self.names)):
+            self.files = {fname: h5py.File(fname, mode=self.mode)
+                          for fname in to_list(self.names)}
+        super().__post_init__()
 
     @property
     def size(self) -> int:
-        for attr in self.protocol.load_paths:
-            if CrystProtocol.get_kind(attr) == Kinds.STACK:
+        for attr in self.protocol.paths:
+            if self.protocol.get_kind(attr) in [Kinds.stack, Kinds.sequence]:
                 if attr in self.indices:
                     return self.indices[attr].shape[0]
         return 0
@@ -426,7 +438,6 @@ class CXIStore(FileStore):
         return isopen
 
     def __enter__(self) -> 'CXIStore':
-        self.open()
         return self
 
     def __exit__(self, exc_type: Optional[BaseException], exc: Optional[BaseException],
@@ -440,10 +451,11 @@ class CXIStore(FileStore):
 
     def close(self):
         """Close the files."""
-        for fname, cxi_file in self.files.items():
-            if cxi_file is not None:
-                cxi_file.close()
-            self.files[fname] = None
+        if self:
+            for fname, cxi_file in self.files.items():
+                if cxi_file is not None:
+                    cxi_file.close()
+                self.files[fname] = None
 
     def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
@@ -462,9 +474,12 @@ class CXIStore(FileStore):
         Returns:
             Attribute's data array.
         """
-        kind = CrystProtocol.get_kind(attr)
+        if not self:
+            raise KeyError("Unable to load data (file is closed)")
 
-        if kind == Kinds.NO_KIND:
+        kind = self.protocol.get_kind(attr)
+
+        if kind == Kinds.no_kind:
             raise ValueError(f'Invalid attribute: {attr:s}')
 
         if idxs is None:
@@ -472,26 +487,20 @@ class CXIStore(FileStore):
 
         reader = CXIReader(self.protocol)
 
-        if kind == Kinds.STACK:
+        if kind == Kinds.stack:
             return reader.load_stack(attr=attr, idxs=self.indices[attr][idxs],
                                      processes=processes, ss_idxs=ss_idxs,
                                      fs_idxs=fs_idxs, proc=proc, verbose=verbose)
-        elif kind == Kinds.FRAME:
+        if kind == Kinds.frame:
             return np.asarray(reader.load_frame(index=self.indices[attr][0],
                                                 ss_idxs=ss_idxs, fs_idxs=fs_idxs,
                                                 proc=proc))
-        elif kind == Kinds.SCALAR:
+        if kind == Kinds.scalar:
             return reader.load_sequence(idxs=self.indices[attr][0])
-        elif kind == Kinds.SEQUENCE:
+        if kind == Kinds.sequence:
             return reader.load_sequence(idxs=self.indices[attr][idxs])
-        else:
-            raise ValueError("Wrong kind: " + str(kind))
 
-    def open(self):
-        """Open the files."""
-        if not self:
-            for fname in self.files:
-                self.files[fname] = h5py.File(fname, mode=self.mode)
+        raise ValueError("Wrong kind: " + str(kind))
 
     def read_frame_shape(self) -> Tuple[int, int]:
         """Read the input files and return a shape of the `frame` type data attribute.
@@ -502,12 +511,11 @@ class CXIStore(FileStore):
         Returns:
             The shape of the 2D `frame`-like data attribute.
         """
-        with self:
-            for cxi_file in self.files.values():
-                return self.protocol.read_frame_shape(cast(h5py.File, cxi_file))
-            return (0, 0)
+        for cxi_file in self.files.values():
+            return self.protocol.read_frame_shape(cast(h5py.File, cxi_file))
+        return (0, 0)
 
-    def save(self, attr: str, data: NDArray, mode: str='overwrite',
+    def save(self, attr: str, data: Array, mode: str='overwrite',
              idxs: Optional[Indices]=None):
         """Save a data array pertained to the data attribute into the first file.
 
@@ -527,31 +535,33 @@ class CXIStore(FileStore):
             ValueError : If the file is opened in read-only mode.
             RuntimeError : If the file is not opened.
         """
+        if not self:
+            raise KeyError("Unable to save data (file is closed)")
         if self.mode == 'r':
             raise ValueError('File is open in read-only mode')
-        kind = CrystProtocol.get_kind(attr)
+        kind = self.protocol.get_kind(attr)
 
-        with self:
-            writer = CXIWriter(cast(List[h5py.File], list(self.files.values())),
-                               self.protocol)
+        writer = CXIWriter(cast(List[h5py.File], list(self.files.values())),
+                            self.protocol)
 
-            if kind in (Kinds.STACK, Kinds.SEQUENCE):
-                return writer.save_stack(attr=attr, data=data, mode=mode, idxs=idxs)
+        if kind in (Kinds.stack, Kinds.sequence):
+            writer.save_stack(attr=attr, data=data, mode=mode, idxs=idxs)
 
-            if kind in (Kinds.FRAME, Kinds.SCALAR):
-                return writer.save_data(attr=attr, data=data)
+        if kind in (Kinds.frame, Kinds.scalar):
+            writer.save_data(attr=attr, data=data)
 
     def update(self):
         """Read the files for the data attributes contained in the protocol."""
         self.indices = {}
-        for attr in self.protocol.load_paths:
+        for attr in self.protocol.paths:
             idxs = self.protocol.read_indices(attr, list(self.files))
             if idxs.size:
                 self.indices[attr] = idxs
 
 @dataclass
-class ExtraProtocol(DataContainer):
-    data_paths  : Dict[str, str]
+class ExtraProtocol(BaseProtocol):
+    paths       : Dict[str, str]
+    kinds       : Dict[str, Kind]
     folder      : str
     geom_path   : str
     modules     : int
@@ -565,11 +575,12 @@ class ExtraProtocol(DataContainer):
         if ext == 'ini':
             return INIParser({'experiment': ('folder', 'geom_path', 'modules', 'pattern',
                                              'proposal', 'source', 'starts_at'),
-                              'data_paths': 'data_paths'}, types=get_type_hints(cls))
+                              'paths': 'paths', 'kinds': 'kinds'},
+                              types=get_type_hints(cls))
         if ext == 'json':
             return JSONParser({'experiment': ('folder', 'geom_path', 'modules', 'pattern',
                                               'proposal', 'source', 'starts_at'),
-                               'data_paths': 'data_paths'})
+                               'paths': 'paths', 'kinds': 'kinds'})
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -598,7 +609,7 @@ class ExtraProtocol(DataContainer):
         return JUNGFRAUGeometry.from_crystfel_geom(self.geom_path)
 
     def detector_data(self, attr: str, train_data: Dict) -> NDArray:
-        data = stack_detector_data(train_data, self.data_paths[attr], modules=self.modules,
+        data = stack_detector_data(train_data, self.paths[attr], modules=self.modules,
                                    starts_at=self.starts_at, pattern=self.pattern)
         return np.asarray(data)
 
@@ -609,9 +620,9 @@ class ExtraProtocol(DataContainer):
 
         raise ValueError(f"Couldn't find proposal dir for {self.proposal:!r}")
 
-    def find_files(self, prop_dir: str, run: Union[int, List[int]], include: str='*') -> List[str]:
+    def find_files(self, prop_dir: str, run: IntSequence, include: str='*') -> List[str]:
         files = []
-        for current in np.atleast_1d(run):
+        for current in to_list(run):
             path = os.path.join(prop_dir, self.folder, f'r{current:04d}')
             new_files = [f for f in os.listdir(path)
                          if f.endswith('.h5') and (f.lower() != 'overview.h5')]
@@ -619,7 +630,7 @@ class ExtraProtocol(DataContainer):
             files.extend(new_files)
         return files
 
-    def train_ids(self, run: Union[int, List[int]], include: str='*',
+    def train_ids(self, run: int | List[int], include: str='*',
                   processes: int=1) -> NDIntArray:
         files = self.find_files(self.find_proposal(), run, include)
 
@@ -631,13 +642,14 @@ class ExtraProtocol(DataContainer):
         return np.unique(np.concatenate(tids))
 
     def open_run(self, run: int) -> DataCollection:
-        run_data: DataCollection = open_run(proposal=self.proposal, run=run, data=self.folder)
+        run_data: DataCollection = open_run(proposal=self.proposal, run=run, data=self.folder,
+                                            parallelize=False)
         return run_data.select(self.source)
 
     def read_frame_shape(self) -> Shape:
         return self.detector_geometry().output_array_for_position().shape
 
-    def read_indices(self, run: Union[int, List[int]], include: str='*') -> NDIntArray:
+    def read_indices(self, run: int | List[int], include: str='*') -> NDIntArray:
         files = self.find_files(self.find_proposal(), run, include)
 
         tids = [self.get_index_and_run(file) for file in files]
@@ -649,19 +661,20 @@ class ExtraReader():
     geom : JUNGFRAUGeometry
 
     @staticmethod
-    def initializer(protocol: ExtraProtocol, attr: str, ss_idxs: NDIntArray, fs_idxs: NDIntArray,
-                    proc: Optional[Processor]):
+    def initializer(protocol: ExtraProtocol, attr: str, ss_idxs: NDIntArray,
+                    fs_idxs: NDIntArray, proc: Optional[Processor]):
         global worker
         worker = partial(ExtraReader(protocol, protocol.detector_geometry()).read_frame,
                          attr=attr, ss_idxs=ss_idxs, fs_idxs=fs_idxs, proc=proc)
 
     @staticmethod
-    def read_worker(index: NDArray) -> Union[NDArray, int, float]:
+    def read_worker(index: Array) -> NDArray | int | float | Sequence[int] | Sequence[float]:
         return worker(index)
 
-    def read_frame(self, index: NDArray, attr: str, ss_idxs: Indices,
-                   fs_idxs: Indices, proc: Optional[Processor]) -> Union[NDArray, int, float]:
-        run = self.protocol.open_run(index[0])
+    def read_frame(self, index: Array, attr: str, ss_idxs: Indices,
+                   fs_idxs: Indices, proc: Optional[Processor]
+                   ) -> NDArray | int | float | Sequence[int] | Sequence[float]:
+        run = self.protocol.open_run(int(index[0]))
         _, train_data = run.train_from_id(index[1])
         data = self.protocol.detector_data(attr, train_data)
         data = np.nan_to_num(data, nan=0, posinf=0, neginf=0)
@@ -670,7 +683,7 @@ class ExtraReader():
             data = proc(data)
         return data
 
-    def load(self, attr: str, idxs: NDArray, ss_idxs: Indices, fs_idxs: Indices,
+    def load(self, attr: str, idxs: Array, ss_idxs: Indices, fs_idxs: Indices,
              processes: int, proc: Optional[Processor], verbose: bool) -> NDArray:
         stack = []
         with Pool(processes=processes, initializer=type(self).initializer,
@@ -683,7 +696,7 @@ class ExtraReader():
 
 @dataclass
 class ExtraStore(FileStore):
-    runs : Union[int, List[int]]
+    runs : int | List[int]
     protocol : ExtraProtocol
     indices : NDIntArray = field(default_factory=lambda: np.array([], dtype=int))
 
@@ -692,7 +705,7 @@ class ExtraStore(FileStore):
         return self.indices.shape[0]
 
     def attributes(self) -> List[str]:
-        return list(self.protocol.data_paths)
+        return list(self.protocol.paths)
 
     def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,

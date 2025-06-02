@@ -1,35 +1,98 @@
 """Transforms are common image transformations. They can be chained together using
-:class:`cbclib.ComposeTransforms`. You pass a :class:`cbclib.Transform` instance to a data
-container :class:`cbclib.CrystData`. All transform classes are inherited from the abstract
-:class:`cbclib.Transform` class.
+:class:`cbclib_v2.ComposeTransforms`. You pass a :class:`cbclib_v2.Transform` instance to a data
+container :class:`cbclib_v2.CrystData`. All transform classes are inherited from the abstract
+:class:`cbclib_v2.Transform` class.
 """
-from configparser import ConfigParser
+from collections import defaultdict
 from dataclasses import dataclass, fields
-import json
-import os
-import re
-from typing import (Any, Callable, ClassVar, Dict, Iterator, List, Tuple, Type, Union, TypeVar,
-                    get_args, get_origin, overload)
+from typing import (Any, DefaultDict, Dict, Iterable, Iterator, List, Sequence, Set, Sized, Tuple,
+                    Type, TypeVar, get_origin, get_type_hints, overload)
 import numpy as np
 import jax.numpy as jnp
-from .annotations import Array, DataclassInstance, ExpandedType, NDArray, JaxArray, NDIntArray
+from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, Indices, IntArray,
+                          IntSequence, JaxArray, JaxNumPy, NDArray, NumPy, NDIntArray, RealSequence,
+                          Scalar)
 
+def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
+           xp: ArrayNamespace = JaxNumPy) -> Array:
+    if xp is jnp:
+        return jnp.asarray(a).at[indices].add(b)
+    np.add.at(np.asarray(a), indices, b)
+    return np.asarray(a)
+
+def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace = JaxNumPy) -> Array:
+    sort_idxs = xp.argsort(a)
+    idxs = set_at(xp.zeros(a.size, dtype=int), sort_idxs, xp.arange(a.size))
+    result = xp.full(xp.unique(indices).size, a.size + 1, dtype=int)
+    return sort_idxs[min_at(result, indices, idxs)]
+
+def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
+           xp: ArrayNamespace = JaxNumPy) -> Array:
+    if xp is jnp:
+        return jnp.asarray(a).at[indices].min(b)
+    np.minimum.at(np.asarray(a), indices, b)
+    return np.asarray(a)
+
+def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
+           xp: ArrayNamespace = JaxNumPy) -> Array:
+    if xp is jnp:
+        return jnp.asarray(a).at[indices].set(b)
+    a[indices] = b
+    return np.asarray(a)
+
+@overload
+def to_list(sequence: IntSequence) -> List[int]: ...
+
+@overload
+def to_list(sequence: RealSequence) -> List[float]: ...
+
+@overload
+def to_list(sequence: Sequence[str] | str) -> List[str]: ...
+
+@overload
+def to_list(sequence: Sequence[Any]) -> List[Any]: ...
+
+def to_list(sequence: IntSequence |  RealSequence | str | Sequence[Any]
+            ) -> List[int] | List[float] | List[str] | List[Any]:
+    if isinstance(sequence, str):
+        return [sequence,]
+    if isinstance(sequence, (np.ndarray, JaxArray)):
+        return to_list(sequence.tolist())
+    if isinstance(sequence, (int, np.integer)):
+        return [int(sequence),]
+    if isinstance(sequence, (float, np.floating)):
+        return [float(sequence),]
+    return list(sequence)
+
+C = TypeVar("C", bound="Container")
 D = TypeVar("D", bound="DataContainer")
+A = TypeVar("A", bound="ArrayContainer")
 
-class DataContainer(DataclassInstance):
-    """Abstract data container class based on :class:`dataclass`. Has :class:`dict` interface,
-    and :func:`DataContainer.replace` to create a new obj with a set of data attributes replaced.
-    """
+class Container(DataclassInstance):
+    @classmethod
+    def from_dict(cls: Type[C], **values: Any) -> C:
+        kwargs = {}
+        types = get_type_hints(cls)
+        for field in fields(cls):
+            attr_type = types[field.name]
+            if get_origin(attr_type) is not None:
+                attr_type = get_origin(attr_type)
+            if issubclass(attr_type, Container):
+                kwargs[field.name] = attr_type.from_dict(**values[field.name])
+            else:
+                kwargs[field.name] = attr_type(values[field.name])
+        return cls(**kwargs)
+
     def contents(self) -> Dict[str, Any]:
         """Return a list of the attributes stored in the container that are initialised.
 
         Returns:
             List of the attributes stored in the container.
         """
-        return {field.name: getattr(self, field.name) for field in fields(self)
-                if getattr(self, field.name) is not None}
+        return {f.name: getattr(self, f.name) for f in fields(self)
+                if not isinstance(getattr(self, f.name), Sized) or len(getattr(self, f.name))}
 
-    def replace(self: D, **kwargs: Any) -> D:
+    def replace(self: C, **kwargs: Any) -> C:
         """Return a new container object with a set of attributes replaced.
 
         Args:
@@ -41,304 +104,116 @@ class DataContainer(DataclassInstance):
         return type(self)(**(self.to_dict() | kwargs))
 
     def to_dict(self) -> Dict[str, Any]:
-        """Export the :class:`Sample` object to a :class:`dict`.
+        """Export the :class:`DataContainer` object to a :class:`dict`.
 
         Returns:
-            A dictionary of :class:`Sample` object's attributes.
+            A dictionary of :class:`DataContainer` object's attributes.
         """
-        return {field.name: getattr(self, field.name) for field in fields(self)}
-
-class BaseFormatter:
-    aliases : ClassVar[Tuple[Type, ...]]
-
-    @classmethod
-    def is_instance(cls, t: ExpandedType) -> bool:
-        if isinstance(t, tuple):
-            return any(t[0] is alias for alias in cls.aliases)
-
-        return any(t is alias for alias in cls.aliases)
-
-class SimpleFormatter(BaseFormatter):
-    @classmethod
-    def format_string(cls, string: str) -> Any:
-        return cls.aliases[0](string)
-
-class Formatter(BaseFormatter):
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> Any:
-        raise NotImplementedError
-
-class FloatFormatter(SimpleFormatter):
-    aliases = (float, np.floating)
-
-class IntFormatter(SimpleFormatter):
-    aliases = (int, np.integer)
-
-class BoolFormatter(SimpleFormatter):
-    aliases = (bool,)
-
-class StringFormatter(SimpleFormatter):
-    aliases = (str,)
-
-class ListFormatter(Formatter):
-    aliases = (list,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> List:
-        is_list = re.search(r'^\[([\s\S]*)\]$', string)
-        if is_list:
-            return [dtype(p.strip('\'\"'))
-                    for p in re.split(r'\s*,\s*', is_list.group(1)) if p]
-        raise ValueError(f"Invalid string: '{string}'")
-
-class TupleFormatter(Formatter):
-    aliases = (tuple,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> Tuple:
-        is_tuple = re.search(r'^\(([\s\S]*)\)$', string)
-        if is_tuple:
-            return tuple(dtype(p.strip('\'\"'))
-                         for p in re.split(r'\s*,\s*', is_tuple.group(1)) if p)
-        raise ValueError(f"Invalid string: '{string}'")
-
-class NDArrayFormatter(Formatter):
-    aliases = (np.ndarray,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> NDArray:
-        is_list = re.search(r'^\[([\s\S]*)\]$', string)
-        if is_list:
-            return np.fromstring(is_list.group(1), dtype=dtype, sep=',')
-        raise ValueError(f"Invalid string: '{string}'")
-
-class JaxArrayFormatter(Formatter):
-    aliases = (JaxArray,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> JaxArray:
-        is_list = re.search(r'^\[([\s\S]*)\]$', string)
-        if is_list:
-            return jnp.fromstring(is_list.group(1), dtype=dtype, sep=',')
-        raise ValueError(f"Invalid string: '{string}'")
-
-class StringFormatting:
-    FormatterDict = Dict[str, Union[Type[SimpleFormatter], Type[Formatter]]]
-    formatters : FormatterDict = {'ndarray': NDArrayFormatter,
-                                  'list': ListFormatter,
-                                  'tuple': TupleFormatter,
-                                  'Array': JaxArrayFormatter,
-                                  'float': FloatFormatter,
-                                  'int': IntFormatter,
-                                  'bool': BoolFormatter,
-                                  'str': StringFormatter}
-    @classmethod
-    def expand_types(cls, t: Type) -> ExpandedType:
-        origin = get_origin(t)
-        if origin is None:
-            return t
-        return (origin, [cls.expand_types(arg) for arg in get_args(t)])
-
-    @classmethod
-    def list_types(cls, expanded_type: ExpandedType) -> List[ExpandedType]:
-        def add_type(t: ExpandedType, types: List):
-            if not isinstance(t, tuple):
-                types.append(t)
+        result = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, Container):
+                result[field.name] = value.to_dict()
             else:
-                origin, args = t
-                types.append((origin, args))
-                if len(args) > 1:
-                    for arg in args:
-                        add_type(arg, types)
-
-        types = []
-        add_type(expanded_type, types)
-        return types
-
-    @classmethod
-    def flatten_list(cls, nested_list: List) -> List:
-        if not bool(nested_list):
-            return nested_list
-
-        if isinstance(nested_list[0], (list, tuple)):
-            return cls.flatten_list(*nested_list[:1]) + list(cls.flatten_list(nested_list[1:]))
-
-        return list(nested_list[:1]) + cls.flatten_list(nested_list[1:])
-
-    @classmethod
-    def get_dtype(cls, types: List) -> Type:
-        formatters = [formatter for formatter in cls.formatters.values()
-                      if issubclass(formatter, SimpleFormatter)]
-        for formatter in formatters:
-            for t in types:
-                if formatter.is_instance(t):
-                    return formatter.aliases[0]
-        return float
-
-    @classmethod
-    def get_formatter(cls, t: Type) -> Callable[[str,], Any]:
-        types = cls.list_types(cls.expand_types(t))
-        for formatter in cls.formatters.values():
-            for extended_type in types:
-                if formatter.is_instance(extended_type):
-                    if issubclass(formatter, SimpleFormatter):
-                        return formatter.format_string
-
-                    if isinstance(extended_type, tuple):
-                        dtype = cls.get_dtype(cls.flatten_list(extended_type[1]))
-                    else:
-                        dtype = float
-
-                    return lambda string: formatter.format_string(string, dtype)
-        return str
-
-    @classmethod
-    def format_dict(cls, dct: Dict[str, Any], types: Dict[str, Type]) -> Dict[str, Any]:
-        formatted_dct = {}
-        for attr, val in dct.items():
-            formatter = cls.get_formatter(types[attr])
-            if isinstance(val, dict):
-                formatted_dct[attr] = {k: formatter(v) for k, v in val.items()}
-            if isinstance(val, str):
-                formatted_dct[attr] = formatter(val)
-        return formatted_dct
-
-    @overload
-    @classmethod
-    def to_string(cls, node: Dict[str, Any]) -> Dict[str, str]:
-        ...
-
-    @overload
-    @classmethod
-    def to_string(cls, node: List[Any]) -> List[str]:
-        ...
-
-    @overload
-    @classmethod
-    def to_string(cls, node: Union[Any, Array]) -> str:
-        ...
-
-    @classmethod
-    def to_string(cls, node: Union[Any, Dict[str, Any], List[Any], Array]
-                  ) -> Union[str, List[str], Dict[str, str]]:
-        if isinstance(node, dict):
-            return {k: cls.to_string(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [cls.to_string(v) for v in node]
-        if isinstance(node, (np.ndarray, JaxArray)):
-            return np.array2string(np.array(node), separator=',')
-        return str(node)
-
-    @staticmethod
-    def str_to_list(strings: Union[str, List[str]]) -> List[str]:
-        """Convert `strings` to a list of strings.
-
-        Args:
-            strings : String or a list of strings
-
-        Returns:
-            List of strings.
-        """
-        if isinstance(strings, str):
-            return [strings,]
-        return list(str(string) for string in strings)
-
-class Parser():
-    fields : Dict[str, Union[str, List[str], Dict[str, str]]]
-
-    def read_all(self, file: str) -> Dict[str, Any]:
-        raise NotImplementedError
-
-    def read(self, file: str) -> Dict[str, Any]:
-        """Initialize the container object with an INI file ``file``.
-
-        Args:
-            file : Path to the ini file.
-
-        Returns:
-            A new container with all the attributes imported from the ini file.
-        """
-        parser = self.read_all(file)
-
-        result: Dict[str, Any] = {}
-        for section, attrs in self.fields.items():
-            if isinstance(attrs, str):
-                result[attrs] = dict(parser[section])
-            elif isinstance(attrs, tuple):
-                for attr in attrs:
-                    result[attr] = parser[section][attr]
-            elif isinstance(attrs, dict):
-                for key, attr in attrs.items():
-                    result[attr] = parser[section][key]
-            else:
-                raise TypeError(f"Invalid 'fields' values: {attrs}")
-
+                result[field.name] = value
         return result
 
-    def to_dict(self, obj: Any) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-        for section, attrs in self.fields.items():
-            if isinstance(attrs, str):
-                result[section] = getattr(obj, attrs)
-            if isinstance(attrs, tuple):
-                result[section] = {attr: getattr(obj, attr) for attr in attrs}
-            if isinstance(attrs, dict):
-                result[section] = {key: getattr(obj, attr) for key, attr in attrs.items()}
-        return result
-
-    def write(self, file: str, obj: Any):
-        raise NotImplementedError
-
-@dataclass
-class INIParser(Parser, DataContainer):
-    """Abstract data container class based on :class:`dataclass` with an interface to read from
-    and write to INI files.
+class DataContainer(Container):
+    """Abstract data container class based on :class:`dataclass`. Has :class:`dict` interface,
+    and :func:`DataContainer.replace` to create a new obj with a set of data attributes replaced.
     """
-    fields : Dict[str, Union[str, Tuple[str, ...]]]
-    types : Dict[str, Type]
+    def __post_init__(self):
+        self.__namespace__ = array_namespace(*self.contents().values())
 
-    def read_all(self, file: str) -> Dict[str, Any]:
-        if not os.path.isfile(file):
-            raise ValueError(f"File {file} doesn't exist")
+    def __array_namespace__(self) -> ArrayNamespace:
+        return self.__namespace__
 
-        ini_parser = ConfigParser()
-        ini_parser.read(file)
+    def asjax(self: D) -> D:
+        data = {attr: jnp.asarray(val) for attr, val in self.contents().items()
+                if isinstance(val, np.ndarray)}
+        return self.replace(**data)
 
-        return {section: dict(ini_parser.items(section)) for section in ini_parser.sections()}
+    def asnumpy(self: D) -> D:
+        data = {attr: np.asarray(val) for attr, val in self.contents().items()
+                if isinstance(val, JaxArray)}
+        return self.replace(**data)
 
-    def read(self, file: str) -> Dict[str, Any]:
-        return StringFormatting.format_dict(super().read(file), self.types)
+class ArrayContainer(DataContainer):
+    @classmethod
+    def concatenate(cls: Type[A], containers: Iterable[A]) -> A:
+        xp = array_namespace(*containers)
+        result : DefaultDict[str, List] = defaultdict(list)
+        for container in containers:
+            for key, val in container.contents().items():
+                result[key].append(val)
+        return cls(**{key: xp.concatenate(val) for key, val in result.items()})
 
-    def to_dict(self, obj: Any) -> Dict[str, str]:
-        return StringFormatting.to_string(super().to_dict(obj))
+    def __getitem__(self: A, indices: Indices | BoolArray) -> A:
+        data = {attr: None for attr in self.to_dict()}
+        data = data | {attr: val[indices] for attr, val in self.contents().items()}
+        return self.replace(**data)
 
-    def write(self, file: str, obj: Any):
-        """Save all the attributes stored in the container to an INI file ``file``.
+def split(containers: Iterable[A], size: int) -> Iterator[A]:
+    chunk: List[A] = []
+    types: Set[Type[A]] = set()
 
-        Args:
-            file : Path to the ini file.
-        """
-        ini_parser = ConfigParser()
-        for section, val in self.to_dict(obj).items():
-            ini_parser[section] = val
+    for container in containers:
+        chunk.append(container)
+        types.add(type(container))
 
-        with np.printoptions(precision=None):
-            with open(file, 'w') as out_file:
-                ini_parser.write(out_file)
+        if len(chunk) == size:
+            if len(types) != 1:
+                raise ValueError("Containers must have the same type")
+            t = types.pop()
+            if not issubclass(t, ArrayContainer):
+                raise ValueError(f"Containers have an invalid type: {t}")
+            yield t.concatenate(chunk)
 
-@dataclass
-class JSONParser(Parser, DataContainer):
-    fields: Dict[str, Union[str, Tuple[str, ...]]]
+            chunk.clear()
 
-    def read_all(self, file: str) -> Dict[str, Any]:
-        with open(file, 'r') as f:
-            json_dict = json.load(f)
+    if len(chunk):
+        if len(types) != 1:
+            raise ValueError("Containers must have the same type")
+        t = types.pop()
+        if not issubclass(t, ArrayContainer):
+            raise ValueError(f"Containers have an invalid type: {t}")
+        yield t.concatenate(chunk)
 
-        return json_dict
+I = TypeVar("I", bound="IndexedContainer")
 
-    def write(self, file: str, obj: Any):
-        with open(file, 'w') as out_file:
-            json.dump(self.to_dict(obj), out_file, sort_keys=True, ensure_ascii=False, indent=4)
+class IndexedContainer(ArrayContainer):
+    index       : IntArray
+
+    def __post_init__(self):
+        super().__post_init__()
+        xp = self.__array_namespace__()
+        self._indices = xp.asarray(xp.unique(self.index))
+
+    def __iter__(self: I) -> Iterator[I]:
+        for index in self._indices:
+            yield self[self.index == index]
+
+    def __len__(self) -> int:
+        return self._indices.size
+
+    def indices(self) -> IntArray:
+        return self._indices
+
+    def inverse(self) -> IntArray:
+        xp = self.__array_namespace__()
+        return xp.unique_inverse(self.index).inverse_indices
+
+    def select(self: I, indices: IntSequence) -> I:
+        xp = self.__array_namespace__()
+        patterns = list(iter(self))
+        result = [patterns[index].replace(index=xp.full(patterns[index].index.size, new_index))
+                  for new_index, index in enumerate(to_list(indices))]
+        return type(self).concatenate(result)
+
+def array_namespace(*arrays: Array | DataContainer | Any) -> ArrayNamespace:
+    namespaces = set(array.__array_namespace__() for array in arrays
+                     if isinstance(array, (JaxArray, np.ndarray, DataContainer)))
+    return JaxNumPy if JaxNumPy in namespaces else NumPy
 
 class Transform(DataContainer):
     """Abstract transform class."""
@@ -379,7 +254,7 @@ class Crop(Transform):
     Args:
         roi : Region of interest. Comprised of four elements ``[y_min, y_max, x_min, x_max]``.
     """
-    roi : Union[List[int], Tuple[int, int, int, int], NDIntArray]
+    roi : List[int] | Tuple[int, int, int, int] | NDIntArray
 
     def __eq__(self, obj: object) -> bool:
         if isinstance(obj, Crop):
@@ -544,6 +419,7 @@ class ComposeTransforms(Transform):
     transforms : List[Transform]
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if len(self.transforms) < 2:
             raise ValueError('Two or more transforms are needed to compose')
 
@@ -552,8 +428,14 @@ class ComposeTransforms(Transform):
     def __iter__(self) -> Iterator[Transform]:
         return self.transforms.__iter__()
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[Transform, List[Transform]]:
-        return self.transforms[idx]
+    @overload
+    def __getitem__(self, index: int) -> Transform: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> List[Transform]: ...
+
+    def __getitem__(self, index: int | slice) -> Transform | List[Transform]:
+        return self.transforms[index]
 
     def index_array(self, ss_idxs: NDIntArray,
                     fs_idxs: NDIntArray) -> Tuple[NDIntArray, NDIntArray]:

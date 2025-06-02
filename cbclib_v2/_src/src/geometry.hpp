@@ -20,7 +20,7 @@ struct PointND : public std::array<T, N>
     // In-place operators
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator+=(const std::array<V, N> & rhs) &
+    PointND & operator+=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x += rhs[std::addressof(x) - this->data()];
         return *this;
@@ -34,7 +34,7 @@ struct PointND : public std::array<T, N>
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator-=(const std::array<V, N> & rhs) &
+    PointND & operator-=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x -= rhs[std::addressof(x) - this->data()];
         return *this;
@@ -48,7 +48,7 @@ struct PointND : public std::array<T, N>
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator*=(const std::array<V, N> & rhs) &
+    PointND & operator*=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x *= rhs[std::addressof(x) - this->data()];
         return *this;
@@ -62,7 +62,7 @@ struct PointND : public std::array<T, N>
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    PointND & operator/=(const std::array<V, N> & rhs) &
+    PointND & operator/=(const PointND<V, N> & rhs) &
     {
         for (auto & x: *this) x /= rhs[std::addressof(x) - this->data()];
         return *this;
@@ -215,8 +215,8 @@ struct PointND : public std::array<T, N>
     const T & y() const requires(N >= 2) {return this->operator[](1);}
 };
 
-template <template <typename, size_t> class Array, typename T, size_t... sizes>
-auto concatenate(const Array<T, sizes> &... arrays)
+template <template <typename, size_t> class Array, typename T, size_t ... sizes>
+auto concatenate(const Array<T, sizes> & ... arrays)
 {
     Array<T, (sizes + ...)> result;
     size_t index {};
@@ -256,97 +256,171 @@ auto amplitude(const Array<T, N> & a) -> decltype(std::sqrt(std::declval<T &>())
     return std::sqrt(magnitude(a));
 }
 
-template <class Container, typename T = typename Container::value_type, size_t N>
+template <size_t N, class Container, typename T = typename Container::value_type>
 constexpr PointND<T, N> to_point(Container & a, size_t start)
 {
-    return apply_to_sequence<N>([&a, start](auto... idxs){return {a[start + idxs]...};});
+    return apply_to_sequence<N>([&a, start](auto... idxs) -> PointND<T, N> {return {a[start + idxs]...};});
 }
 
 template <typename T>
 using Point = PointND<T, 2>;
 
-using point_t = Point<long>;
-
-template <typename T>
-struct Line
+template <typename T, size_t N>
+struct LineND
 {
-    Point<T> pt0, pt1;
+    PointND<T, N> pt0, pt1;
 
-    Line() = default;
+    LineND() = default;
 
     template <typename Pt0, typename Pt1, typename = std::enable_if_t<
-        std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt0>> &&
-        std::is_base_of_v<Point<T>, std::remove_cvref_t<Pt1>>
+        std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt0>> &&
+        std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt1>>
     >>
-    Line(Pt0 && pt0, Pt1 && pt1) : pt0(std::forward<Pt0>(pt0)), pt1(std::forward<Pt1>(pt1)) {}
+    LineND(Pt0 && pt0, Pt1 && pt1) : pt0(std::forward<Pt0>(pt0)), pt1(std::forward<Pt1>(pt1)) {}
 
-    Line(T x0, T y0, T x1, T y1) : Line(Point<T>{x0, y0}, Point<T>{x1, y1}) {}
+    bool operator==(const LineND<T, N> & rhs) const {return pt0 == rhs.pt0 && pt1 == rhs.pt1;}
+    bool operator!=(const LineND<T, N> & rhs) const {return !operator==(rhs);}
 
-    Point<T> norm() const {return {pt1.y() - pt0.y(), pt0.x() - pt1.x()};}
+    PointND<T, N> normal() const requires(N >= 2)
+    {
+        PointND<T, N> norm {};
+        norm[0] = pt1[1] - pt0[1];
+        norm[1] = pt0[0] - pt1[0];
+        return norm;
+    }
 
-    Point<T> tangent() const {return {pt1.x() - pt0.x(), pt1.y() - pt0.y()};}
-
-    auto theta() const {return std::atan(pt1.y() - pt0.y(), pt1.x() - pt0.x());}
+    PointND<T, N> tangent() const {return pt1 - pt0;}
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
-    W distance(const Point<V> & point) const
+    PointND<W, N> project_to_streak(const PointND<V, N> & point) const
     {
-        auto tau = tangent(), n = norm();
+        auto tau = tangent();
         auto mag = magnitude(tau);
 
         if (mag)
         {
-            auto compare_point = [](const Point<V> & a, const Point<V> & b){return magnitude(a) < magnitude(b);};
-            auto r = std::min(point - pt0, pt1 - point, compare_point);
-
-            // need to divide by mag : dist = amplitude(norm() * dot(norm(), r) / magnitude(norm()))
+            auto center = 0.5 * (pt0 + pt1);
+            auto r = point - center;
             auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            auto r_norm = static_cast<W>(dot(n, r)) / mag;
-            if (r_tau > 1) return amplitude(n * r_norm + tau * (r_tau - 1));
-            if (r_tau < 0) return amplitude(n * r_norm + tau * r_tau);
-            return amplitude(n * r_norm);
+            return std::clamp<W>(r_tau, -0.5, 0.5) * tau + center;
         }
-        return amplitude(pt0 - point);
+        return pt0;
     }
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
-    W normal_distance(const Point<V> & point) const
+    W distance(const PointND<V, N> & point) const
     {
-        auto mag = magnitude(tangent());
+        return amplitude(point - project_to_streak(point));
+    }
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    PointND<W, N> project_to_line(const PointND<V, N> & point) const
+    {
+        auto tau = tangent();
+        auto mag = magnitude(tau);
 
         if (mag)
         {
-            auto compare_point = [](const Point<V> & a, const Point<V> & b){return magnitude(a) < magnitude(b);};
-            auto r = std::min(point - pt0, pt1 - point, compare_point);
-            return abs(dot(norm(), r) / std::sqrt(mag));
+            auto center = 0.5 * (pt0 + pt1);
+            auto r = point - center;
+            auto r_tau = static_cast<W>(dot(tau, r)) / mag;
+            return r_tau * tau + center;
         }
-        return amplitude(pt0 - point);
+        return pt0;
     }
 
-    friend std::ostream & operator<<(std::ostream & os, const Line<T> & line)
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    W normal_distance(const PointND<V, N> & point) const
+    {
+        return amplitude(point - project_to_line(point));
+    }
+
+    friend std::ostream & operator<<(std::ostream & os, const LineND<T, N> & line)
     {
         os << "{" << line.pt0 << ", " << line.pt1 << "}";
         return os;
     }
 
-    std::array<T, 4> to_array() const {return {pt0.x(), pt0.y(), pt1.x(), pt1.y()};}
+    std::array<T, 2 * N> to_array() const {return concatenate(pt0.to_array(), pt1.to_array());}
+    std::pair<PointND<T, N>, PointND<T, N>> to_pair() const & {return std::make_pair(pt0, pt1);}
+    std::pair<PointND<T, N>, PointND<T, N>> to_pair() && {return std::make_pair(std::move(pt0), std::move(pt1));}
 };
+
+template <typename T>
+using Line = LineND<T, 2>;
 
 namespace detail{
 
-template <typename T>
+template <typename T, size_t N = 2>
 struct PointHasher
 {
-    size_t operator()(const Point<T> & point) const
+    size_t operator()(const PointND<T, N> & point) const
     {
         size_t h = 0;
-        h = detail::hash_combine(h, point.x());
-        h = detail::hash_combine(h, point.y());
+        for (size_t i = 0; i < N; i++) h = detail::hash_combine(h, point[i]);
         return h;
     }
 };
 
 }
+
+template <size_t N, typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+std::array<I, N + 1> normalise_shape(const std::vector<I> & shape)
+{
+    if (shape.size() < N)
+        fail_container_check("wrong number of dimensions (" + std::to_string(shape.size()) +
+                             " < " + std::to_string(N) + ")", shape);
+    std::array<I, N + 1> res {std::reduce(shape.begin(), std::prev(shape.end(), N), I(1), std::multiplies())};
+    for (size_t i = 0; i < N; i++) res[i + 1] = shape[shape.size() - N + i];
+    return res;
+}
+
+template <size_t N>
+class UniquePairs
+{
+public:
+    constexpr static size_t NumPairs = N * (N - 1) / 2;
+
+    static const UniquePairs & instance()
+    {
+        static UniquePairs axes;
+        return axes;
+    }
+
+    UniquePairs(const UniquePairs &)        = delete;
+    void operator=(const UniquePairs &)     = delete;
+
+    const std::pair<size_t, size_t> & pairs(size_t index) const {return m_pairs[index];}
+    const std::array<size_t, N - 1> & indices(size_t axis) const {return m_lookup[axis];}
+
+private:
+    std::array<std::pair<size_t, size_t>, NumPairs> m_pairs;
+    std::array<std::array<size_t, N - 1>, N> m_lookup;
+
+    UniquePairs()
+    {
+        std::pair<size_t, size_t> pair {};
+        for (size_t i = 0; i < NumPairs; i++)
+        {
+            ++pair.second;
+            if (pair.second == N)
+            {
+                ++pair.first;
+                pair.second = pair.first + 1;
+            }
+            m_pairs[i] = pair;
+        }
+
+        for (size_t i = 0; i < N; i++)
+        {
+            size_t index = 0;
+            for (size_t j = 0; j < NumPairs; j++)
+            {
+                if (m_pairs[j].first == i || m_pairs[j].second == i) m_lookup[i][index++] = j;
+            }
+        }
+    }
+};
 
 }
 
