@@ -79,7 +79,7 @@ ExpandedType = Type | Tuple[Type, List]
 Norm = Literal['backward', 'forward', 'ortho']
 Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
 
-Processor = Callable[[NDArray], NDArray | int | float | Sequence[int] | Sequence[float]]
+ReadOut = Array | int | float | Sequence[int] | Sequence[float]
 
 class EighResult(NamedTuple):
     eigenvalues : Array
@@ -104,12 +104,12 @@ class LinalgNamespace(Protocol):
             An array of determinants of shape ``a.shape[:-2]``.
 
         See also:
-            :func:`jax.scipy.linalg.det`: Scipy-style API for determinant.
+            :func:`linalg.det`: Scipy-style API for determinant.
 
         Examples:
-            >>> a = jnp.array([[1, 2],
-            ...                [3, 4]])
-            >>> jnp.linalg.det(a)
+            >>> a = xp.array([[1, 2],
+            ...               [3, 4]])
+            >>> xp.linalg.det(a)
             Array(-2., dtype=float32)
         """
         ...
@@ -2186,6 +2186,55 @@ class ArrayNamespace(Protocol):
             ...                   [False]])
             >>> xp.min(x, axis=0, keepdims=True, initial=0, where=where)
             Array([[0, 0, 0, 0]], dtype=int32)
+        """
+        ...
+
+    def nan_to_num(self, x: ArrayLike, copy: bool = True, nan: ArrayLike = 0.0,
+                   posinf: ArrayLike | None = None, neginf: ArrayLike | None = None
+                   ) -> Array:
+        """Replace NaN and infinite entries in an array.
+
+        Array API implementation of :func:`numpy.nan_to_num`.
+
+        Args:
+            x: array of values to be replaced. If it does not have an inexact
+                dtype it will be returned unmodified.
+            copy: Whether to create a copy of x (True) or to replace values
+                in-place (False). The in-place operation only occurs if casting
+                to an array does not require a copy. Default is True.
+            nan: value to substitute for NaN entries. Defaults to 0.0.
+            posinf: value to substitute for positive infinite entries.
+                Defaults to the maximum representable value.
+            neginf: value to substitute for positive infinite entries.
+                Defaults to the minimum representable value.
+
+        Returns:
+            A copy of ``x`` with the requested substitutions.
+
+        See also:
+            - :func:`isnan`: return True where the array contains NaN
+            - :func:`isposinf`: return True where the array contains +inf
+            - :func:`isneginf`: return True where the array contains -inf
+
+        Examples:
+            >>> x = xp.array([0, xp.nan, 1, xp.inf, 2, -xp.inf])
+
+            Default substitution values:
+
+            >>> xp.nan_to_num(x)
+            Array([ 0.0000000e+00,  0.0000000e+00,  1.0000000e+00,  3.4028235e+38,
+                    2.0000000e+00, -3.4028235e+38], dtype=float32)
+
+            Overriding substitutions for ``-inf`` and ``+inf``:
+
+            >>> xp.nan_to_num(x, posinf=999, neginf=-999)
+            Array([   0.,    0.,    1.,  999.,    2., -999.], dtype=float32)
+
+            If you only wish to substitute for NaN values while leaving ``inf`` values
+            untouched, using :func:`~where` with :func:`isnan` is a better option:
+
+            >>> xp.where(xp.isnan(x), 0, x)
+            Array([  0.,   0.,   1.,  inf,   2., -inf], dtype=float32)
         """
         ...
 

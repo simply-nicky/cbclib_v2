@@ -16,7 +16,7 @@ from weakref import ref
 import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, FileStore, Kinds
-from .data_container import DataContainer, Transform
+from .data_container import DataContainer
 from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
 from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray,
@@ -29,7 +29,7 @@ from .src.median import median, robust_mean, robust_lsq
 WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
 
 def read_hdf(input_file: FileStore, *attributes: str,
-             idxs: Optional[IntSequence]=None, transform: Optional[Transform]=None,
+             indices: None | IntSequence | Tuple[IntSequence, Indices, Indices]=None,
              processes: int=1, verbose: bool=True) -> 'CrystData':
     """Load data attributes from the input files in `files` file handler object.
 
@@ -47,17 +47,21 @@ def read_hdf(input_file: FileStore, *attributes: str,
     Returns:
         New :class:`CrystData` object with the attributes loaded.
     """
-    shape = input_file.read_frame_shape()
-
     if not attributes:
         attributes = tuple(input_file.attributes())
 
-    if idxs is None:
-        idxs = list(range(input_file.size))
-    idxs = np.atleast_1d(idxs)
+    if indices is None:
+        frames = list(range(input_file.size))
+        ss_idxs, fs_idxs = slice(None), slice(None)
+    elif isinstance(indices, (tuple, list)):
+        frames, ss_idxs, fs_idxs = indices
+    else:
+        frames = indices
+        ss_idxs, fs_idxs = slice(None), slice(None)
+    frames = np.atleast_1d(frames)
 
     if input_file.protocol.has_kind(*attributes, kind=Kinds.stack):
-        data_dict: Dict[str, Any] = {'frames': idxs}
+        data_dict: Dict[str, Any] = {'frames': frames}
     else:
         data_dict: Dict[str, Any] = {}
 
@@ -65,24 +69,15 @@ def read_hdf(input_file: FileStore, *attributes: str,
         if attr not in input_file.attributes():
             raise ValueError(f"No '{attr}' attribute in the input files")
 
-        if transform and shape[0] * shape[1]:
-            ss_idxs, fs_idxs = np.indices(shape)
-            ss_idxs, fs_idxs = transform.index_array(ss_idxs, fs_idxs)
-            data = input_file.load(attr, idxs=idxs, ss_idxs=ss_idxs,
-                                   fs_idxs=fs_idxs, processes=processes,
-                                   verbose=verbose)
-        else:
-            data = input_file.load(attr, idxs=idxs, processes=processes,
-                                   verbose=verbose)
+        data = input_file.load(attr, idxs=frames, ss_idxs=ss_idxs, fs_idxs=fs_idxs,
+                               processes=processes, verbose=verbose)
 
         data_dict[attr] = data
 
     return CrystData(**data_dict)
 
 def write_hdf(container: 'CrystData', output_file: FileStore, *attributes: str,
-              good_frames: Optional[Indices]=None, transform: Optional[Transform]=None,
-              input_file: Optional[FileStore]=None, mode: str='overwrite',
-              idxs: Optional[Indices]=None):
+              mode: str='overwrite', indices: Optional[Indices]=None):
     """Save data arrays of the data attributes contained in the container to an output file.
 
     Args:
@@ -103,18 +98,10 @@ def write_hdf(container: 'CrystData', output_file: FileStore, *attributes: str,
     if not attributes:
         attributes = tuple(container.contents())
 
-    if good_frames is None:
-        good_frames = np.arange(container.shape[0])
-
     for attr in attributes:
         data = np.asarray(getattr(container, attr))
         if data is not None:
-            kind = output_file.protocol.get_kind(attr)
-
-            if kind in (Kinds.stack, Kinds.sequence):
-                data = data[good_frames]
-
-            output_file.save(attr, data, mode=mode, idxs=idxs)
+            output_file.save(attr, data, mode=mode, idxs=indices)
 
 @dataclass
 class CrystData(DataContainer):

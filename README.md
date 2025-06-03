@@ -14,8 +14,4 @@ data processing of convergent beam crystallography datasets.
 ## Installation from source
 In order to build the package from source simply execute the following command:
 
-    python setup.py install
-
-or:
-
-    pip install -r requirements.txt -e . -v
+    pip install .
