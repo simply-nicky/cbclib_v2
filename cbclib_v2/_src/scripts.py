@@ -1,9 +1,9 @@
 from multiprocessing import Pool
-from typing import Any, Dict, Iterable, Iterator, Literal, Tuple, overload
+from typing import Any, Callable, Dict, Iterable, Iterator, Literal, Tuple, overload
 from dataclasses import dataclass
 from tqdm.auto import tqdm
 from .annotations import (ArrayNamespace, IntArray, NDArray, NDBoolArray, NDRealArray, NumPy,
-                               Processor, RealArray)
+                          ReadOut, RealArray)
 from .data_container import ArrayContainer, Container, D, array_namespace, split
 from .data_processing import CrystData
 from .label import Structure2D, Structure3D
@@ -59,7 +59,7 @@ class CrystMetadata(ArrayContainer):
     whitefield  : NDRealArray
 
 def pattern_recognition(metadata: CrystMetadata, params: RegionFinderParameters,
-                        xp: ArrayNamespace=NumPy) -> Processor:
+                        xp: ArrayNamespace=NumPy) -> Callable[[NDArray], ReadOut]:
     def pattern_goodness(data: NDArray) -> Tuple[float, float]:
         cryst_data = CrystData(data=data[None], std=metadata.std, mask=metadata.mask,
                                whitefield=metadata.whitefield)
