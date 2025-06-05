@@ -1,4 +1,4 @@
-from typing import (Any, Callable, ClassVar, Dict, Hashable, Iterable, Mapping, Optional, Tuple,
+from typing import (Any, Callable, ClassVar, Dict, Hashable, Iterable, Mapping, Tuple,
                     Type, TypeVar, overload)
 import dataclasses
 from dataclasses import MISSING, Field, fields
@@ -10,7 +10,7 @@ from .annotations import KeyArray, PyTree
 Generator = Callable[[KeyArray], Any]
 
 class DynamicField(Field):
-    random  : Optional[Generator]
+    random  : Generator | None
 
     def __init__(self, name, type, default, default_factory, random, init,
                  repr, hash, compare, metadata, kw_only):
@@ -25,31 +25,31 @@ T = TypeVar('T')
 # to understand the magic that happens at runtime.
 @overload
 def field(*, default: T, random: Any=..., static: bool=..., init: bool=...,
-          repr: bool=..., hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> T:
+          repr: bool=..., hash: bool | None=..., compare: bool=...,
+          metadata: Mapping[str, Any] | None=..., kw_only: bool=...) -> T:
     ...
 
 @overload
 def field(*, default_factory: Callable[[], T], random: Any=..., static: bool=...,
-          init: bool=..., repr: bool=..., hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> T:
+          init: bool=..., repr: bool=..., hash: bool | None=..., compare: bool=...,
+          metadata: Mapping[str, Any] | None=..., kw_only: bool=...) -> T:
     ...
 
 @overload
 def field(*, random: Callable[[KeyArray], T], static: bool=..., init: bool=...,
-          repr: bool=..., hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> T:
+          repr: bool=..., hash: bool | None=..., compare: bool=...,
+          metadata: Mapping[str, Any] | None=..., kw_only: bool=...) -> T:
     ...
 
 @overload
 def field(*, static: bool=..., init: bool=..., repr: bool=...,
-          hash: Optional[bool]=..., compare: bool=...,
-          metadata: Optional[Mapping[str, Any]]=..., kw_only: bool=...) -> Any:
+          hash: bool | None=..., compare: bool=...,
+          metadata: Mapping[str, Any] | None=..., kw_only: bool=...) -> Any:
     ...
 
 def add_dynamic_field(func: Callable):
     def wrapper(*args, random: Any=MISSING, static: bool=False,
-                metadata: Optional[Mapping[str, Any]]=None, **kwargs):
+                metadata: Mapping[str, Any] | None=None, **kwargs):
         if metadata is None:
             metadata = {}
         metadata = dict(metadata) | {'static': static, 'random': random}
@@ -58,8 +58,8 @@ def add_dynamic_field(func: Callable):
     return wrapper
 
 def field(*, default: Any=MISSING, default_factory: Any=MISSING, random: Any=MISSING,
-          static: bool=False, init: bool=True, repr: bool=True, hash: Optional[bool]=None,
-          compare: bool=True, metadata: Optional[Mapping[str, Any]]=None,
+          static: bool=False, init: bool=True, repr: bool=True, hash: bool | None=None,
+          compare: bool=True, metadata: Mapping[str, Any] | None=None,
           kw_only=MISSING) -> Any:
     """A field creator with a static indicator.
 

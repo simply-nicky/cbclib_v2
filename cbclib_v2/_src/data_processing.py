@@ -10,7 +10,7 @@ Examples:
     >>> data = cbc.CrystData(inp_file)
     >>> data = data.load()
 """
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, TypeVar, cast
+from typing import Any, ClassVar, Dict, List, Literal, Tuple, TypeVar, cast
 from dataclasses import dataclass
 from weakref import ref
 import numpy as np
@@ -19,17 +19,19 @@ from .cxi_protocol import CXIProtocol, FileStore, Kinds
 from .data_container import DataContainer
 from .streak_finder import PatternsStreakFinder, Peaks
 from .streaks import Streaks
-from .annotations import (Indices, IntSequence, NDArrayLike, NDBoolArray, NDIntArray,
-                          NDRealArray, RealSequence, ReferenceType, ROI, Shape)
+from .annotations import (ArrayLike, ArrayNamespace, BoolArray, Indices, IntArray, IntSequence,
+                          NumPy, RealArray, RealSequence, ReferenceType, ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
                     covariance_matrix, Regions2D, Structure2D)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
+MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
+STDMethod = Literal['poisson', 'robust-scale']
 WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
 
 def read_hdf(input_file: FileStore, *attributes: str,
-             indices: None | IntSequence | Tuple[IntSequence, Indices, Indices]=None,
+             indices: IntSequence | Tuple[IntSequence, Indices, Indices] | None=None,
              processes: int=1, verbose: bool=True) -> 'CrystData':
     """Load data attributes from the input files in `files` file handler object.
 
@@ -77,7 +79,7 @@ def read_hdf(input_file: FileStore, *attributes: str,
     return CrystData(**data_dict)
 
 def write_hdf(container: 'CrystData', output_file: FileStore, *attributes: str,
-              mode: str='overwrite', indices: Optional[Indices]=None):
+              mode: str='overwrite', indices: Indices | None=None):
     """Save data arrays of the data attributes contained in the container to an output file.
 
     Args:
@@ -95,12 +97,13 @@ def write_hdf(container: 'CrystData', output_file: FileStore, *attributes: str,
     Raises:
         ValueError : If the ``output_file`` is not defined inside the container.
     """
+    xp = container.__array_namespace__()
     if not attributes:
         attributes = tuple(container.contents())
 
     for attr in attributes:
-        data = np.asarray(getattr(container, attr))
-        if data is not None:
+        data = xp.asarray(getattr(container, attr))
+        if not container.is_empty(data):
             output_file.save(attr, data, mode=mode, idxs=indices)
 
 @dataclass
@@ -122,42 +125,43 @@ class CrystData(DataContainer):
         snr : Signal-to-noise ratio.
         whitefields : A set of white-fields generated for each pattern separately.
     """
-    data        : NDRealArray = np.array([])
+    data        : RealArray = np.array([])
 
-    whitefield  : NDRealArray = np.array([])
-    std         : NDRealArray = np.array([])
-    snr         : NDRealArray = np.array([])
+    whitefield  : RealArray = np.array([])
+    std         : RealArray = np.array([])
+    snr         : RealArray = np.array([])
 
-    frames      : NDIntArray = np.array([], dtype=int)
-    mask        : NDBoolArray = np.array([], dtype=bool)
-    scales      : NDRealArray = np.array([])
+    frames      : IntArray = np.array([], dtype=int)
+    mask        : BoolArray = np.array([], dtype=bool)
+    scales      : RealArray = np.array([])
 
     protocol    : ClassVar[CXIProtocol] = CXIProtocol.read()
 
     def __post_init__(self):
         super().__post_init__()
+        xp = self.__array_namespace__()
         if self.frames.size != self.shape[0]:
-            self.frames = np.arange(self.shape[0])
+            self.frames = xp.arange(self.shape[0])
         if self.mask.shape != self.shape[1:]:
-            self.mask = np.ones(self.shape[1:], dtype=bool)
+            self.mask = xp.ones(self.shape[1:], dtype=bool)
         if self.scales.shape != (self.shape[0],):
-            self.scales = np.ones(self.shape[0])
+            self.scales = xp.ones(self.shape[0])
 
     @property
     def shape(self) -> Shape:
         shape = [0, 0, 0]
         for attr, data in self.contents().items():
-            if data is not None and self.protocol.get_kind(attr) == Kinds.sequence:
+            if self.protocol.get_kind(attr) == Kinds.sequence:
                 shape[0] = data.shape[0]
                 break
 
         for attr, data in self.contents().items():
-            if data is not None and self.protocol.get_kind(attr) == Kinds.frame:
+            if self.protocol.get_kind(attr) == Kinds.frame:
                 shape[1:] = data.shape
                 break
 
         for attr, data in self.contents().items():
-            if data is not None and self.protocol.get_kind(attr) == Kinds.stack:
+            if self.protocol.get_kind(attr) == Kinds.stack:
                 shape[0] = np.prod(data.shape[:-2])
                 shape[1:] = data.shape[-2:]
                 break
@@ -166,15 +170,15 @@ class CrystData(DataContainer):
 
     def apply_mask(self) -> 'CrystData':
         attributes = {}
-        if len(self.whitefield):
+        if not self.is_empty(self.whitefield):
             attributes['whitefield'] = self.whitefield * self.mask
-        if len(self.std):
+        if not self.is_empty(self.std):
             attributes['std'] = self.std * self.mask
-        if len(self.snr):
+        if not self.is_empty(self.snr):
             attributes['snr'] = self.snr * self.mask
         return self.replace(**attributes)
 
-    def import_mask(self, mask: NDBoolArray, update: str='reset') -> 'CrystData':
+    def import_mask(self, mask: BoolArray, update: str='reset') -> 'CrystData':
         """Return a new :class:`CrystData` object with the new mask.
 
         Args:
@@ -189,7 +193,7 @@ class CrystData(DataContainer):
         Returns:
             New :class:`CrystData` object with the updated ``mask``.
         """
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
         if mask.shape != self.shape[1:]:
             raise ValueError('mask and data have incompatible shapes: '\
@@ -215,7 +219,7 @@ class CrystData(DataContainer):
         Returns:
             New :class:`CrystData` object with the updated ``mask``.
         """
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
 
         mask = np.copy(self.mask)
@@ -223,9 +227,9 @@ class CrystData(DataContainer):
         return self.replace(mask=mask).apply_mask()
 
     def region_detector(self, structure: Structure2D):
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
-        if len(self.snr) == 0:
+        if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
         parent = cast(ReferenceType[CrystData], ref(self))
@@ -242,7 +246,8 @@ class CrystData(DataContainer):
         Returns:
             New :class:`CrystData` object with the default ``mask``.
         """
-        return self.replace(mask=np.array([], dtype=bool))
+        xp = self.__array_namespace__()
+        return self.replace(mask=xp.array([], dtype=bool))
 
     def scale_whitefield(self, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
                          n_iter: int=12, lm: float=9.0, num_threads: int=1) -> 'CrystData':
@@ -274,32 +279,33 @@ class CrystData(DataContainer):
         Returns:
             An array of scale factors for each frame in the container.
         """
-        if len(self.data) == 0:
+        if self.is_empty(self.data):
             raise ValueError('no data in the container')
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
-        if len(self.std) == 0:
+        if self.is_empty(self.std):
             raise ValueError('no std in the container')
-        if len(self.whitefield) == 0:
+        if self.is_empty(self.whitefield):
             raise ValueError('no whitefield in the container')
 
+        xp = self.__array_namespace__()
         mask = self.mask & (self.std > 0.0)
-        y: NDRealArray = np.where(mask, self.data / self.std, 0.0)[:, mask]
-        W: NDRealArray = np.where(mask, self.whitefield / self.std, 0.0)[None, mask]
+        y: RealArray = xp.where(mask, self.data / self.std, 0.0)[:, mask]
+        W: RealArray = xp.where(mask, self.whitefield / self.std, 0.0)[None, mask]
 
         if method == "robust-lsq":
             scales = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
                                 num_threads=num_threads)
-            return self.replace(scales=scales.ravel())
+            return self.replace(scales=xp.ravel(scales))
 
         if method == "median":
             scales = median(y * W, axis=1, num_threads=num_threads)[:, None] / \
                      median(W * W, axis=1, num_threads=num_threads)[:, None]
-            return self.replace(scales=scales.ravel())
+            return self.replace(scales=xp.ravel(scales))
 
         raise ValueError(f"Invalid method argument: {method}")
 
-    def select(self, idxs: Optional[Indices]=None):
+    def select(self, idxs: Indices | None=None):
         """Return a new :class:`CrystData` object with the new mask.
 
         Args:
@@ -333,18 +339,19 @@ class CrystData(DataContainer):
             A CBC pattern detector based on :class:`cbclib_v2.bin.LSD` Line Segment Detection [LSD]_
             algorithm.
         """
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
-        if len(self.snr) == 0:
+        if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
+        xp = self.__array_namespace__()
         parent = cast(ReferenceType[CrystData], ref(self))
-        idxs = np.arange(self.shape[0])
+        idxs = xp.arange(self.shape[0])
         return StreakDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
                               structure=structure, transform=ScaleTransform())
 
-    def update_mask(self, method: str='no-bad', vmin: int=0, vmax: int=65535,
-                    snr_max: float=3.0, roi: Optional[ROI]=None) -> 'CrystData':
+    def update_mask(self, method: MaskMethod='no-bad', vmin: int=0, vmax: int=65535,
+                    snr_max: float=3.0, roi: ROI | None=None) -> 'CrystData':
         """Return a new :class:`CrystData` object with the updated bad pixels mask.
 
         Args:
@@ -374,34 +381,35 @@ class CrystData(DataContainer):
         Returns:
             New :class:`CrystData` object with the updated ``mask``.
         """
-        if len(self.data) == 0:
+        if self.is_empty(self.data):
             raise ValueError('no data in the container')
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
+
+        xp = self.__array_namespace__()
         if vmin >= vmax:
             raise ValueError('vmin must be less than vmax')
-
         if roi is None:
             roi = (0, self.shape[1], 0, self.shape[2])
 
         data = (self.data * self.mask)[:, roi[0]:roi[1], roi[2]:roi[3]]
 
         if method == 'all-bad':
-            mask = np.zeros(self.shape[1:], dtype=bool)
+            mask = xp.zeros(self.shape[1:], dtype=bool)
         elif method == 'no-bad':
-            mask = np.ones(self.shape[1:], dtype=bool)
+            mask = xp.ones(self.shape[1:], dtype=bool)
         elif method == 'range':
-            mask = np.all((data >= vmin) & (data < vmax), axis=0)
+            mask = xp.all((data >= vmin) & (data < vmax), axis=0)
         elif method == 'snr':
             if self.snr is None:
                 raise ValueError('No snr in the container')
 
             snr = self.snr[:, roi[0]:roi[1], roi[2]:roi[3]]
-            mask = np.mean(np.abs(snr), axis=0) < snr_max
+            mask = xp.mean(xp.abs(snr), axis=0) < snr_max
         else:
             raise ValueError(f'Invalid method argument: {method:s}')
 
-        new_mask = np.copy(self.mask)
+        new_mask = xp.copy(self.mask)
         new_mask[roi[0]:roi[1], roi[2]:roi[3]] &= mask
         return self.replace(mask=new_mask)
 
@@ -415,43 +423,46 @@ class CrystData(DataContainer):
         Returns:
             New :class:`CrystData` object with the updated ``cor_data``.
         """
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
-        if len(self.std) == 0:
+        if self.is_empty(self.std):
             raise ValueError('no std in the container')
-        if len(self.whitefield) == 0:
+        if self.is_empty(self.whitefield):
             raise ValueError('no whitefield in the container')
 
+        xp = self.__array_namespace__()
         whitefields = self.scales[:, None, None] * self.whitefield
-        snr = np.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
+        snr = xp.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
         return self.replace(snr=snr)
 
-    def update_std(self, method="robust-scale", frames: Optional[Indices]=None,
+    def update_std(self, method: STDMethod='robust-scale', frames: Indices | None=None,
                    r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
                    num_threads: int=1) -> 'CrystData':
+        xp = self.__array_namespace__()
         if frames is None:
-            frames = np.arange(self.shape[0])
+            frames = xp.arange(self.shape[0])
 
-        if method == "robust-scale":
-            if len(self.data) == 0:
+        if method == 'robust-scale':
+            if self.is_empty(self.data):
                 raise ValueError('no data in the container')
-            if len(self.mask) == 0:
+            if self.is_empty(self.mask):
                 raise ValueError('no mask in the container')
 
             _, std = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0, r1=r1,
                                  n_iter=n_iter, lm=lm, return_std=True,
                                  num_threads=num_threads)
-        elif method == "poisson":
-            if len(self.whitefield) == 0:
+            std = xp.asarray(std)
+        elif method == 'poisson':
+            if self.is_empty(self.whitefield):
                 raise ValueError('no whitefield in the container')
 
-            std = np.sqrt(self.whitefield)
+            std = xp.sqrt(self.whitefield)
         else:
             raise ValueError(f"Invalid method argument: {method}")
 
         return self.replace(std=std)
 
-    def update_whitefield(self, method: WFMethod='median', frames: Optional[Indices]=None,
+    def update_whitefield(self, method: WFMethod='median', frames: Indices | None=None,
                           r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
                           num_threads: int=1) -> 'CrystData':
         """Return a new :class:`CrystData` object with new whitefield.
@@ -481,28 +492,29 @@ class CrystData(DataContainer):
         Returns:
             New :class:`CrystData` object with the updated ``whitefield``.
         """
-        if len(self.data) == 0:
+        if self.is_empty(self.data):
             raise ValueError('no data in the container')
-        if len(self.mask) == 0:
+        if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
 
+        xp = self.__array_namespace__()
         if frames is None:
-            frames = np.arange(self.shape[0])
+            frames = xp.arange(self.shape[0])
 
         if method == 'median':
             whitefield = median(inp=self.data[frames] * self.mask, axis=0,
                                 num_threads=num_threads)
-            return self.replace(whitefield=whitefield)
+            return self.replace(whitefield=xp.asarray(whitefield))
         if method == 'robust-mean':
             whitefield = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0,
                                      r1=r1, n_iter=n_iter, lm=lm,
                                      num_threads=num_threads)
-            return self.replace(whitefield=whitefield)
+            return self.replace(whitefield=xp.asarray(whitefield))
         if method == 'robust-mean-scale':
             whitefield, std = robust_mean(inp=self.data[frames] * self.mask, axis=0,
                                           r0=r0, r1=r1, n_iter=n_iter, lm=lm,
                                           return_std=True, num_threads=num_threads)
-            return self.replace(whitefield=whitefield, std=std)
+            return self.replace(whitefield=xp.asarray(whitefield), std=xp.asarray(std))
 
         raise ValueError('Invalid method argument')
 
@@ -510,36 +522,38 @@ class CrystData(DataContainer):
 class ScaleTransform():
     scale           : float = 1.0
 
-    def interpolate(self, data: NDRealArray) -> NDRealArray:
-        x, y = np.arange(0, data.shape[-1]), np.arange(0, data.shape[-2])
+    def interpolate(self, data: RealArray, xp: ArrayNamespace=NumPy) -> RealArray:
+        x, y = xp.arange(0, data.shape[-1]), xp.arange(0, data.shape[-2])
 
-        xx = self.scale * np.arange(0, data.shape[-1] / self.scale)
-        yy = self.scale * np.arange(0, data.shape[-2] / self.scale)
-        pts = np.stack(np.meshgrid(xx, yy), axis=-1)
-        return binterpolate(data, (x, y), pts)
+        xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
+        yy = self.scale * xp.arange(0, data.shape[-2] / self.scale)
+        pts = xp.stack(xp.meshgrid(xx, yy), axis=-1)
+        return xp.asarray(binterpolate(data, (x, y), pts))
 
-    def kernel_regression(self, data: NDRealArray, sigma: float, num_threads: int=1
-                          ) -> NDRealArray:
-        x, y = np.arange(0, data.shape[-1]), np.arange(0, data.shape[-2])
-        pts = np.stack(np.meshgrid(x, y), axis=-1)
+    def kernel_regression(self, data: RealArray, sigma: float, num_threads: int=1,
+                          xp: ArrayNamespace=NumPy) -> RealArray:
+        x, y = xp.arange(0, data.shape[-1]), xp.arange(0, data.shape[-2])
+        pts = xp.stack(xp.meshgrid(x, y), axis=-1)
 
-        xx = self.scale * np.arange(0, data.shape[-1] / self.scale)
-        yy = self.scale * np.arange(0, data.shape[-2] / self.scale)
-        return kr_grid(data, pts, (xx, yy), sigma=sigma, num_threads=num_threads)[0]
+        xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
+        yy = self.scale * xp.arange(0, data.shape[-2] / self.scale)
+        return xp.asarray(kr_grid(data, pts, (xx, yy), sigma=sigma, num_threads=num_threads))[0]
 
-    def to_detector(self, x: RealSequence, y: RealSequence) -> Tuple[NDRealArray, NDRealArray]:
-        return self.scale * np.asarray(x), self.scale * np.asarray(y)
+    def to_detector(self, x: RealSequence, y: RealSequence,
+                    xp: ArrayNamespace=NumPy) -> Tuple[RealArray, RealArray]:
+        return self.scale * xp.asarray(x), self.scale * xp.asarray(y)
 
-    def to_scaled(self, x: RealSequence, y: RealSequence) -> Tuple[NDRealArray, NDRealArray]:
-        return np.asarray(x) / self.scale, np.asarray(y) / self.scale
+    def to_scaled(self, x: RealSequence, y: RealSequence,
+                  xp: ArrayNamespace=NumPy) -> Tuple[RealArray, RealArray]:
+        return xp.asarray(x) / self.scale, xp.asarray(y) / self.scale
 
 DetBase = TypeVar("DetBase", bound="DetectorBase")
 
 @dataclass
 class DetectorBase(DataContainer):
-    indices         : NDIntArray
-    data            : NDRealArray
-    mask            : NDBoolArray
+    indices         : IntArray
+    data            : RealArray
+    mask            : BoolArray
     transform       : ScaleTransform
     parent          : ReferenceType[CrystData]
 
@@ -550,25 +564,28 @@ class DetectorBase(DataContainer):
     def __getitem__(self: DetBase, idxs: Indices) -> DetBase:
         return self.replace(data=self.data[idxs], mask=self.mask[idxs], indices=self.indices[idxs])
 
-    def clip(self: DetBase, vmin: NDArrayLike, vmax: NDArrayLike) -> DetBase:
-        return self.replace(data=np.clip(self.data, vmin, vmax))
+    def clip(self: DetBase, vmin: ArrayLike, vmax: ArrayLike) -> DetBase:
+        xp = self.__array_namespace__()
+        return self.replace(data=xp.clip(self.data, vmin, vmax))
 
-    def export_coordinates(self, indices: NDIntArray, y: NDIntArray, x: NDIntArray) -> pd.DataFrame:
+    def export_coordinates(self, indices: IntArray, y: IntArray, x: IntArray) -> pd.DataFrame:
         table = {'bgd': self.parent().scales[indices] * self.parent().whitefield[y, x],
                  'frames': self.parent().frames[indices], 'snr': self.parent().snr[indices, y, x],
                  'I_raw': self.parent().data[indices, y, x], 'x': x, 'y': y}
         return pd.DataFrame(table)
 
     def downscale(self: DetBase, scale: float, sigma: float, num_threads: int=1) -> DetBase:
+        xp = self.__array_namespace__()
         transform = ScaleTransform(scale)
         data = transform.kernel_regression(self.data, sigma, num_threads)
-        mask = transform.interpolate(np.asarray(self.mask, dtype=float))
-        return self.replace(data=data, mask=np.asarray(mask, dtype=bool),
+        mask = transform.interpolate(xp.asarray(self.mask, dtype=float))
+        return self.replace(data=data, mask=xp.asarray(mask, dtype=bool),
                             transform=transform)
 
     def to_detector(self, streaks: Streaks) -> Streaks:
-        pts = np.stack(self.transform.to_detector(streaks.x, streaks.y), axis=-1)
-        return Streaks(streaks.index, np.reshape(pts, pts.shape[:-2] + (4,)))
+        xp = self.__array_namespace__()
+        pts = xp.stack(self.transform.to_detector(streaks.x, streaks.y), axis=-1)
+        return Streaks(streaks.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
 
 @dataclass
 class StreakDetector(DetectorBase, PatternsStreakFinder):
@@ -590,10 +607,11 @@ class StreakDetector(DetectorBase, PatternsStreakFinder):
         Returns:
             A list of detected streaks.
         """
+        xp = self.__array_namespace__()
         streaks = super().detect_streaks(peaks, xtol, vmin, min_size, lookahead, nfa, num_threads)
-        idxs = np.concatenate([np.full((len(pattern),), idx)
+        idxs = xp.concatenate([xp.full((len(pattern),), idx)
                                for idx, pattern in zip(self.indices, streaks)])
-        lines = np.concatenate(streaks)
+        lines = xp.concatenate(streaks)
         return Streaks(index=idxs, lines=lines)
 
     def export_table(self, streaks: Streaks, width: float,
@@ -656,20 +674,30 @@ class RegionDetector(DetectorBase):
             x.extend(pattern.x)
         return self.export_coordinates(np.array(frames), np.array(y), np.array(x))
 
-    def ellipse_fit(self, regions: List[Regions2D]) -> List[NDRealArray]:
+    def ellipse_fit(self, regions: List[Regions2D]) -> List[RealArray]:
         return ellipse_fit(regions, self.data)
 
-    def total_mass(self, regions: List[Regions2D]) -> List[NDRealArray]:
-        return total_mass(regions, self.data)
+    def total_mass(self, regions: List[Regions2D]) -> List[RealArray]:
+        xp = self.__array_namespace__()
+        arrays = total_mass(regions, self.data)
+        return [xp.asarray(array) for array in arrays]
 
-    def mean(self, regions: List[Regions2D]) -> List[NDRealArray]:
-        return mean(regions, self.data)
+    def mean(self, regions: List[Regions2D]) -> List[RealArray]:
+        xp = self.__array_namespace__()
+        arrays = mean(regions, self.data)
+        return [xp.asarray(array) for array in arrays]
 
-    def center_of_mass(self, regions: List[Regions2D]) -> List[NDRealArray]:
-        return center_of_mass(regions, self.data)
+    def center_of_mass(self, regions: List[Regions2D]) -> List[RealArray]:
+        xp = self.__array_namespace__()
+        arrays = center_of_mass(regions, self.data)
+        return [xp.asarray(array) for array in arrays]
 
-    def moment_of_inertia(self, regions: List[Regions2D]) -> List[NDRealArray]:
-        return moment_of_inertia(regions, self.data)
+    def moment_of_inertia(self, regions: List[Regions2D]) -> List[RealArray]:
+        xp = self.__array_namespace__()
+        arrays = moment_of_inertia(regions, self.data)
+        return [xp.asarray(array) for array in arrays]
 
-    def covariance_matrix(self, regions: List[Regions2D]) -> List[NDRealArray]:
-        return covariance_matrix(regions, self.data)
+    def covariance_matrix(self, regions: List[Regions2D]) -> List[RealArray]:
+        xp = self.__array_namespace__()
+        arrays = covariance_matrix(regions, self.data)
+        return [xp.asarray(array) for array in arrays]

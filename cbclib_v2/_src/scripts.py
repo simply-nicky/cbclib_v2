@@ -1,15 +1,25 @@
 from multiprocessing import Pool
-from typing import Any, Callable, Dict, Iterable, Iterator, Literal, Tuple, overload
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Tuple, overload
 from dataclasses import dataclass
 from tqdm.auto import tqdm
-from .annotations import (ArrayNamespace, IntArray, NDArray, NDBoolArray, NDRealArray, NumPy,
-                          ReadOut, RealArray)
+from .annotations import (ArrayNamespace, BoolArray, IntArray, NDArray, NDRealArray, NumPy,
+                          ReadOut, RealArray, ROI)
 from .data_container import ArrayContainer, Container, D, array_namespace, split
-from .data_processing import CrystData
-from .label import Structure2D, Structure3D
+from .data_processing import CrystData, RegionDetector, StreakDetector, Streaks, Peaks
+from .label import Structure2D, Structure3D, Regions2D
 from ..indexer.cbc_data import MillerWithRLP, Patterns
 from ..indexer.cbc_indexing import CBDIndexer, TiltOverAxis
 from ..indexer.cbc_setup import BaseSetup, TiltOverAxisState, XtalState
+
+@dataclass
+class ROIParameters(Container):
+    xmin    : int
+    xmax    : int
+    ymin    : int
+    ymax    : int
+
+    def to_roi(self) -> ROI:
+        return (self.ymin, self.ymax, self.xmin, self.xmax)
 
 @dataclass
 class StructureParameters(Container):
@@ -22,8 +32,7 @@ class StructureParameters(Container):
     @overload
     def to_structure(self, kind: Literal['3d']) -> Structure3D: ...
 
-    def to_structure(self, kind: Literal['2d', '3d']
-                     ) -> Structure2D | Structure3D:
+    def to_structure(self, kind: Literal['2d', '3d']) -> Structure2D | Structure3D:
         if kind == '2d':
             return Structure2D(self.radius, self.rank)
         if kind == '3d':
@@ -31,14 +40,144 @@ class StructureParameters(Container):
         raise ValueError(f"Invalid kind keyword: {kind}")
 
 @dataclass
-class RegionFinderParameters(Container):
+class CrystMetadata(ArrayContainer):
+    mask        : BoolArray
+    std         : RealArray
+    whitefield  : RealArray
+
+@dataclass
+class MaskParameters(Container):
+    method  : Literal['all-bad', 'no-bad', 'range', 'snr', 'std']
+    vmin    : int = 0
+    vmax    : int = 65535
+    snr_max : float = 3.0
+    std_min : float = 0.0
+    roi     : ROIParameters | None = None
+
+@dataclass
+class BackgroundParameters(Container):
+    method  : Literal['mean-poisson', 'median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
+    r0      : float = 0.0
+    r1      : float = 0.5
+    n_iter  : int = 12
+    lm      : float = 9.0
+
+@dataclass
+class MetadataParameters(Container):
+    mask        : MaskParameters
+    background  : BackgroundParameters
+    num_threads : int
+
+def create_metadata(frames: NDRealArray, params: MetadataParameters) -> CrystMetadata:
+    xp = array_namespace(frames)
+    data = CrystData(data=frames)
+
+    if params.mask.method == 'all-bad':
+        if params.mask.roi is None:
+            raise ValueError("No ROI is provided")
+        data = data.update_mask(method='all-bad', roi=params.mask.roi.to_roi())
+
+    if params.mask.method == 'range':
+        data = data.update_mask(method='range', vmin=params.mask.vmin, vmax=params.mask.vmax)
+
+    if params.background.method == 'mean-poisson':
+        data.whitefield = xp.mean(data.data * data.mask, axis=0)
+        data = data.update_std(method='poisson')
+
+    if params.background.method == 'median-poisson':
+        data.whitefield = xp.median(data.data * data.mask, axis=0)
+        data = data.update_std(method='poisson')
+
+    if params.background.method == 'robust-mean-scale':
+        data = data.update_whitefield(method='robust-mean-scale', r0=params.background.r0,
+                                      r1=params.background.r1, n_iter=params.background.n_iter,
+                                      lm=params.background.lm, num_threads=params.num_threads)
+
+    if params.background.method == 'robust-mean-poisson':
+        data = data.update_whitefield(method='robust-mean', r0=params.background.r0,
+                                      r1=params.background.r1, n_iter=params.background.n_iter,
+                                      lm=params.background.lm, num_threads=params.num_threads)
+        data = data.update_std(method='poisson')
+
+    if params.mask.method == 'snr':
+        data = data.update_mask(method='snr', snr_max=params.mask.snr_max)
+
+    if params.mask.method == 'std':
+        data = data.import_mask(data.std > params.mask.std_min)
+
+    return CrystMetadata(data.mask, data.std, data.whitefield)
+
+@dataclass
+class RegionParameters(Container):
     structure   : StructureParameters
-    ratio       : float
-    sigma       : float
     vmin        : float
     npts        : int
-    threshold   : float
+
+@dataclass
+class RegionFinderParameters(Container):
+    regions     : RegionParameters
     num_threads : int
+
+def find_regions(frames: NDArray, metadata: CrystMetadata, params: RegionFinderParameters
+                 ) -> Tuple[RegionDetector, List[Regions2D]]:
+    if frames.ndim < 2:
+        raise ValueError("Frame array must be at least 2 dimensional")
+    data = CrystData(data=frames.reshape((-1,) + frames.shape[-2:]), mask=metadata.mask,
+                     std=metadata.std, whitefield=metadata.whitefield)
+    data = data.scale_whitefield(method='median', num_threads=params.num_threads)
+    data = data.update_snr()
+    det_obj = data.region_detector(params.regions.structure.to_structure('2d'))
+    regions = det_obj.detect_regions(params.regions.vmin, params.regions.npts, params.num_threads)
+    return det_obj, regions
+
+@dataclass
+class PatternRecognitionParameters(RegionFinderParameters):
+    threshold   : float
+
+def pattern_recognition(metadata: CrystMetadata, params: PatternRecognitionParameters,
+                        xp: ArrayNamespace=NumPy) -> Callable[[NDArray], ReadOut]:
+    def pattern_goodness(frames: NDArray) -> Tuple[float, float]:
+        det_obj, regions = find_regions(frames, metadata, params)
+        masses = det_obj.total_mass(regions)[0]
+        fits = det_obj.ellipse_fit(regions)[0]
+        if fits.size:
+            values = xp.tanh((fits[:, 0] / fits[:, 1] - params.threshold)) * masses
+            positive, negative = xp.sum(values[values > 0]), -xp.sum(values[values < 0])
+            return (float(positive), float(negative))
+        return (0.0, 0.0)
+
+    return pattern_goodness
+
+@dataclass
+class StreakParameters(RegionParameters):
+    xtol        : float
+    min_size    : int
+    nfa         : int
+
+@dataclass
+class StreakFinderParameters(Container):
+    peaks       : RegionParameters
+    streaks     : StreakParameters
+    center      : Tuple[float, float] | None = None
+    num_threads : int = 1
+
+def find_streaks(frames: NDArray, metadata: CrystMetadata, params: StreakFinderParameters
+                 ) -> Tuple[StreakDetector, Streaks, List[Peaks]]:
+    if frames.ndim < 2:
+        raise ValueError("Frame array must be at least 2 dimensional")
+    data = CrystData(data=frames.reshape((-1,) + frames.shape[-2:]), mask=metadata.mask,
+                     std=metadata.std, whitefield=metadata.whitefield)
+    data = data.scale_whitefield(method='median', num_threads=params.num_threads)
+    data = data.update_snr()
+    det_obj = data.streak_detector(params.streaks.structure.to_structure('2d'))
+    peaks = det_obj.detect_peaks(params.peaks.vmin, params.peaks.npts,
+                                 params.peaks.structure.to_structure('2d'), params.num_threads)
+    streaks = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
+                                     params.streaks.min_size, nfa=params.streaks.nfa,
+                                     num_threads=params.num_threads)
+    if params.center is not None:
+        streaks = streaks.concentric_only(params.center[0], params.center[1], 0.33)
+    return det_obj, streaks, peaks
 
 @dataclass
 class CBDIndexingParameters(Container):
@@ -51,32 +190,6 @@ class CBDIndexingParameters(Container):
     n_max           : int
     vicinity        : StructureParameters
     connectivity    : StructureParameters
-
-@dataclass
-class CrystMetadata(ArrayContainer):
-    mask        : NDBoolArray
-    std         : NDRealArray
-    whitefield  : NDRealArray
-
-def pattern_recognition(metadata: CrystMetadata, params: RegionFinderParameters,
-                        xp: ArrayNamespace=NumPy) -> Callable[[NDArray], ReadOut]:
-    def pattern_goodness(data: NDArray) -> Tuple[float, float]:
-        cryst_data = CrystData(data=data[None], std=metadata.std, mask=metadata.mask,
-                               whitefield=metadata.whitefield)
-        cryst_data = cryst_data.scale_whitefield(method='median', num_threads=params.num_threads)
-        cryst_data = cryst_data.update_snr()
-        det_obj = cryst_data.region_detector(Structure2D(**params.structure.to_dict()))
-        det_obj = det_obj.downscale(params.ratio, params.sigma, params.num_threads)
-        regions = det_obj.detect_regions(params.vmin, params.npts, params.num_threads)
-        masses = det_obj.total_mass(regions)[0]
-        fits = det_obj.ellipse_fit(regions)[0]
-        if fits.size:
-            values = xp.tanh((fits[:, 0] / fits[:, 1] - params.threshold)) * masses
-            positive, negative = xp.sum(values[values > 0]), -xp.sum(values[values < 0])
-            return (float(positive), float(negative))
-        return (0.0, 0.0)
-
-    return pattern_goodness
 
 def pre_indexing(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIndexer,
                  params: CBDIndexingParameters, state: BaseSetup, parallel: bool=True
@@ -125,6 +238,8 @@ def run_pre_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup,
                          'are inconsistent')
 
     return xp.concatenate(frames), XtalState.concatenate(solutions)
+
+worker : 'IndexingWorker'
 
 @dataclass
 class IndexingWorker():

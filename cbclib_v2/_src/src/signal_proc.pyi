@@ -1,7 +1,7 @@
 from typing import List, Optional, Sequence, Tuple, overload
-from ..annotations import NDIntArray, NDRealArray, IntSequence
+from ..annotations import IntArray, NDIntArray, NDRealArray, RealArray, IntSequence
 
-def unique_indices(array: NDIntArray) -> Tuple[NDIntArray, NDIntArray, NDIntArray]:
+def unique_indices(array: IntArray) -> Tuple[NDIntArray, NDIntArray, NDIntArray]:
     """Returns the sorted unique elements of a sorted array of integers. There are three optional
     outputs in addition to the unique elements:
 
@@ -20,8 +20,8 @@ def unique_indices(array: NDIntArray) -> Tuple[NDIntArray, NDIntArray, NDIntArra
     """
     ...
 
-def binterpolate(inp: NDRealArray, grid: Sequence[NDRealArray | NDIntArray],
-                 coords: NDRealArray | NDIntArray, num_threads: int=1) -> NDRealArray:
+def binterpolate(inp: RealArray, grid: Sequence[RealArray | IntArray],
+                 coords: RealArray | IntArray, num_threads: int=1) -> NDRealArray:
     """Perform bilinear multidimensional interpolation on regular grids. The integer grid starting
     from ``(0, 0, ...)`` to ``(inp.shape[0] - 1, inp.shape[1] - 1, ...)`` is implied.
 
@@ -40,8 +40,8 @@ def binterpolate(inp: NDRealArray, grid: Sequence[NDRealArray | NDIntArray],
     """
     ...
 
-def kr_predict(y: NDRealArray, x: NDRealArray, x_hat: NDRealArray, sigma: float,
-               kernel: str='gaussian', w: Optional[NDRealArray]=None,
+def kr_predict(y: RealArray, x: RealArray, x_hat: RealArray, sigma: float,
+               kernel: str='gaussian', w: Optional[RealArray]=None,
                num_threads: int=1) -> NDRealArray:
     """Perform the multi-dimensional Nadaraya-Watson kernel regression [KerReg]_.
 
@@ -76,9 +76,9 @@ def kr_predict(y: NDRealArray, x: NDRealArray, x_hat: NDRealArray, sigma: float,
     """
     ...
 
-def kr_grid(y: NDRealArray, x: NDRealArray, grid: Sequence[NDRealArray], sigma: float,
-            kernel: str='gaussian', w: Optional[NDRealArray]=None, num_threads: int=1
-            ) -> Tuple[NDRealArray, List[float]]:
+def kr_grid(y: RealArray, x: RealArray, grid: Sequence[RealArray], sigma: float,
+            kernel: str='gaussian', w: Optional[RealArray]=None, num_threads: int=1
+            ) -> Tuple[RealArray, List[float]]:
     """Perform the multi-dimensional Nadaraya-Watson kernel regression [KerReg]_ over a grid of
     points.
 
@@ -96,16 +96,16 @@ def kr_grid(y: NDRealArray, x: NDRealArray, grid: Sequence[NDRealArray], sigma: 
     ...
 
 @overload
-def local_maxima(inp: NDRealArray, axis: IntSequence, num_threads: int=1) -> NDRealArray:
+def local_maxima(inp: RealArray, axis: IntSequence, num_threads: int=1) -> NDRealArray:
     ...
 
 @overload
-def local_maxima(inp: NDIntArray, axis: IntSequence,
-                 num_threads: int=1) -> NDIntArray:
+def local_maxima(inp: IntArray, axis: IntSequence,
+                 num_threads: int=1) -> IntArray:
     ...
 
-def local_maxima(inp: NDRealArray | NDIntArray, axis: IntSequence, num_threads: int=1
-                 ) -> NDRealArray | NDIntArray:
+def local_maxima(inp: RealArray | IntArray, axis: IntSequence, num_threads: int=1
+                 ) -> NDRealArray | IntArray:
     """
     Find local maxima in a multidimensional array along a set of axes. This function returns
     the indices of the maxima.

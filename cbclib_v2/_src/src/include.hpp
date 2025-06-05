@@ -266,6 +266,7 @@ public:
     template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
     Array && swap_axes(Array && arr) const
     {
+        // First swap the axes, PyArray_SwapAxes changes the axis order but keeps the data buffer intact
         size_t counter = 0;
         for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
@@ -275,6 +276,14 @@ public:
                 arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, counter++, i));
             }
         }
+
+        // If the swapped array is not c-style contiguous we need to change the data buffer
+        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
+        {
+            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
+        }
+
         return std::forward<Array>(arr);
     }
 
@@ -283,6 +292,7 @@ public:
     >>
     Array && swap_axes_back(Array && arr) const
     {
+        // First swap the axes, PyArray_SwapAxes changes the axis order but keeps the data buffer intact
         size_t counter = arr.ndim() - m_ctr.size();
         for (py::ssize_t i = arr.ndim() - 1; i >= 0; i--)
         {
@@ -292,6 +302,14 @@ public:
                 arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, --counter, i));
             }
         }
+
+        // If the swapped array is not c-style contiguous we need to change the data buffer
+        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
+        {
+            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
+        }
+
         return std::forward<Array>(arr);
     }
 };

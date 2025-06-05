@@ -38,6 +38,12 @@ class TestImageProcessing():
 
         assert np.all(out == out2)
 
+        for axis in range(input.ndim):
+            out = median(input, axis=axis)
+            out2 = np.median(input, axis=axis)
+
+            assert np.all(out == out2)
+
         out = median(input, mask, axis=axes)
         out2 = median(input.ravel(), mask.ravel())
 

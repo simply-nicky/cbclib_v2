@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple, TypeVar
+from typing import Tuple, TypeVar
 import numpy as np
 import pandas as pd
 from .annotations import IntArray, RealArray, RealSequence, Shape
@@ -63,7 +63,7 @@ class BaseLines(ArrayContainer):
         r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
         return tau * r_tau + center
 
-    def to_lines(self, width: Optional[RealSequence]=None) -> RealArray:
+    def to_lines(self, width: RealSequence | None=None) -> RealArray:
         """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
 
         * `[x0, y0]`, `[x1, y1]` : The coordinates of the line's ends.

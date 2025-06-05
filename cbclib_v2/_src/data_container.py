@@ -82,6 +82,10 @@ class Container(DataclassInstance):
                 kwargs[field.name] = attr_type(values[field.name])
         return cls(**kwargs)
 
+    @staticmethod
+    def is_empty(data: Any) -> bool:
+        return isinstance(data, Sized) and len(data) == 0
+
     def contents(self) -> Dict[str, Any]:
         """Return a list of the attributes stored in the container that are initialised.
 
@@ -89,7 +93,7 @@ class Container(DataclassInstance):
             List of the attributes stored in the container.
         """
         return {f.name: getattr(self, f.name) for f in fields(self)
-                if not isinstance(getattr(self, f.name), Sized) or len(getattr(self, f.name))}
+                if not self.is_empty(getattr(self, f.name))}
 
     def replace(self: C, **kwargs: Any) -> C:
         """Return a new container object with a set of attributes replaced.

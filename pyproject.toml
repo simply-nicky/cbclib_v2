@@ -2,7 +2,7 @@
 requires = [
     "setuptools>=42",
     "pybind11>=2.10.0",
-    "numpy>=1.19"
+    "numpy>=2.1.0"
 ]
 build-backend = "setuptools.build_meta"
 
@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.10.1'
+version = '0.10.2'
 dependencies = [
     'extra_data',
     'extra_geom',

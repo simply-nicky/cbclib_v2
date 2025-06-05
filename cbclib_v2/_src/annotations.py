@@ -1,5 +1,5 @@
 from dataclasses import Field
-from typing import (Any, Callable, ClassVar, Dict, Generic, List, Literal, NamedTuple, Optional, Protocol,
+from typing import (Any, Callable, ClassVar, Dict, Generic, List, Literal, NamedTuple, Protocol,
                     Sequence, Tuple, Type, TypeVar, Union, cast, overload, runtime_checkable)
 import numpy as np
 import numpy.typing as npt
@@ -12,7 +12,7 @@ Self = TypeVar('Self')
 class ReferenceType(Generic[T]):
     __callback__: Callable[['ReferenceType[T]'], Any]
     def __new__(cls: type[Self], o: T,
-                callback: Optional[Callable[['ReferenceType[T]'], Any]]=...) -> Self:
+                callback: Callable[['ReferenceType[T]'], Any] | None=...) -> Self:
         ...
     def __call__(self) -> T:
         ...
@@ -863,7 +863,13 @@ class ArrayNamespace(Protocol):
         """
         ...
 
-    def atleast_1d(self, *arys: ArrayLike) -> Array | list[Array]:
+    @overload
+    def atleast_1d(self, arys: ArrayLike, /) -> Array: ...
+
+    @overload
+    def atleast_1d(self, *arys: ArrayLike) -> List[Array]: ...
+
+    def atleast_1d(self, *arys: ArrayLike) -> Array | List[Array]:
         """Convert inputs to arrays with at least 1 dimension.
 
         Array API implementation of :func:`numpy.atleast_1d`.
@@ -1000,85 +1006,6 @@ class ArrayNamespace(Protocol):
         """
         ...
 
-    def cos(self, x: ArrayLike, /) -> RealArray:
-        """Compute a trigonometric cosine of each element of input.
-
-        Array API implementation of :obj:`numpy.cos`.
-
-        Args:
-            x: scalar or array. Angle in radians.
-
-        Returns:
-            An array containing the cosine of each element in ``x``, promotes to inexact
-            dtype.
-
-        See also:
-            - :func:`sin`: Computes a trigonometric sine of each element of input.
-            - :func:`tan`: Computes a trigonometric tangent of each element of
-                input.
-            - :func:`arccos` and :func:`acos`: Computes the inverse of
-                trigonometric cosine of each element of input.
-
-        Examples:
-            >>> pi = xp.pi
-            >>> x = xp.array([pi/4, pi/2, 3*pi/4, 5*pi/6])
-            >>> with xp.printoptions(precision=3, suppress=True):
-            ...   print(xp.cos(x))
-            [ 0.707 -0.    -0.707 -0.866]
-        """
-        ...
-
-    def cosh(self, x: ArrayLike, /) -> RealArray:
-        r"""Calculate element-wise hyperbolic cosine of input.
-
-        Array API implementation of :obj:`numpy.cosh`.
-
-        The hyperbolic cosine is defined by:
-
-        .. math::
-
-            cosh(x) = \frac{e^x + e^{-x}}{2}
-
-        Args:
-            x: input array or scalar.
-
-        Returns:
-            An array containing the hyperbolic cosine of each element of ``x``, promoting
-            to inexact dtype.
-
-        Note:
-            ``xp.cosh`` is equivalent to computing ``xp.cos(1j * x)``.
-
-        See also:
-            - :func:`sinh`: Computes the element-wise hyperbolic sine of the input.
-            - :func:`tanh`: Computes the element-wise hyperbolic tangent of the
-                input.
-            - :func:`arccosh`:  Computes the element-wise inverse of hyperbolic
-                cosine of the input.
-
-        Examples:
-            >>> x = xp.array([[3, -1, 0],
-            ...                [4, 7, -5]])
-            >>> with xp.printoptions(precision=3, suppress=True):
-            ...   xp.cosh(x)
-            Array([[ 10.068,   1.543,   1.   ],
-                   [ 27.308, 548.317,  74.21 ]], dtype=float32)
-            >>> with xp.printoptions(precision=3, suppress=True):
-            ...   xp.cos(1j * x)
-            Array([[ 10.068+0.j,   1.543+0.j,   1.   +0.j],
-                   [ 27.308+0.j, 548.317+0.j,  74.21 +0.j]], dtype=complex64, weak_type=True)
-
-            For complex-valued input:
-
-            >>> with xp.printoptions(precision=3, suppress=True):
-            ...   xp.cosh(5+1j)
-            Array(40.096+62.44j, dtype=complex64, weak_type=True)
-            >>> with xp.printoptions(precision=3, suppress=True):
-            ...   xp.cos(1j * (5+1j))
-            Array(40.096+62.44j, dtype=complex64, weak_type=True)
-        """
-        ...
-
     def compress(self, condition: ArrayLike, a: ArrayLike, axis: int | None = None, *,
                  fill_value: ArrayLike = 0) -> Array:
         """Compress an array along a given axis using a boolean condition.
@@ -1170,6 +1097,123 @@ class ArrayNamespace(Protocol):
             >>> xp.concatenate([x, y], axis=1)
             Array([[1., 1., 1., 0.],
                    [1., 1., 1., 0.]], dtype=float32)
+        """
+        ...
+
+    def copy(self, a: ArrayLike, order: str | None = None) -> Array:
+        """Return a copy of the array.
+
+        Array API implementation of :func:`numpy.copy`.
+
+        Args:
+            a: arraylike object to copy
+            order: Controls the memory layout of the copy. 'C' means C-order,
+                'F' means F-order, 'A' means 'F' if `a` is Fortran contiguous,
+                'C' otherwise. 'K' means match the layout of `a` as closely
+                as possible. (Note that this function and :meth:`ndarray.copy`
+                are very similar, but have different default values for their order
+                arguments.)
+
+        Returns:
+            a copy of the input array ``a``.
+
+        See Also:
+            - :func:`array`: create an array with or without a copy.
+
+        >>> f = lambda x: 2 * x
+        >>> x = xp.arange(4)
+        >>> y = f(x)
+        >>> print(y)
+        [0 2 4 6]
+
+        In situations like this, an explicit copy will let you keep access to the
+        original buffer:
+
+        >>> x = xp.arange(4)
+        >>> y = f(x.copy())
+        >>> print(y)
+        [0 2 4 6]
+        >>> print(x)
+        [0 1 2 3]
+        """
+        ...
+
+    def cos(self, x: ArrayLike, /) -> RealArray:
+        """Compute a trigonometric cosine of each element of input.
+
+        Array API implementation of :obj:`numpy.cos`.
+
+        Args:
+            x: scalar or array. Angle in radians.
+
+        Returns:
+            An array containing the cosine of each element in ``x``, promotes to inexact
+            dtype.
+
+        See also:
+            - :func:`sin`: Computes a trigonometric sine of each element of input.
+            - :func:`tan`: Computes a trigonometric tangent of each element of
+                input.
+            - :func:`arccos` and :func:`acos`: Computes the inverse of
+                trigonometric cosine of each element of input.
+
+        Examples:
+            >>> pi = xp.pi
+            >>> x = xp.array([pi/4, pi/2, 3*pi/4, 5*pi/6])
+            >>> with xp.printoptions(precision=3, suppress=True):
+            ...   print(xp.cos(x))
+            [ 0.707 -0.    -0.707 -0.866]
+        """
+        ...
+
+    def cosh(self, x: ArrayLike, /) -> RealArray:
+        r"""Calculate element-wise hyperbolic cosine of input.
+
+        Array API implementation of :obj:`numpy.cosh`.
+
+        The hyperbolic cosine is defined by:
+
+        .. math::
+
+            cosh(x) = \frac{e^x + e^{-x}}{2}
+
+        Args:
+            x: input array or scalar.
+
+        Returns:
+            An array containing the hyperbolic cosine of each element of ``x``, promoting
+            to inexact dtype.
+
+        Note:
+            ``xp.cosh`` is equivalent to computing ``xp.cos(1j * x)``.
+
+        See also:
+            - :func:`sinh`: Computes the element-wise hyperbolic sine of the input.
+            - :func:`tanh`: Computes the element-wise hyperbolic tangent of the
+                input.
+            - :func:`arccosh`:  Computes the element-wise inverse of hyperbolic
+                cosine of the input.
+
+        Examples:
+            >>> x = xp.array([[3, -1, 0],
+            ...                [4, 7, -5]])
+            >>> with xp.printoptions(precision=3, suppress=True):
+            ...   xp.cosh(x)
+            Array([[ 10.068,   1.543,   1.   ],
+                   [ 27.308, 548.317,  74.21 ]], dtype=float32)
+            >>> with xp.printoptions(precision=3, suppress=True):
+            ...   xp.cos(1j * x)
+            Array([[ 10.068+0.j,   1.543+0.j,   1.   +0.j],
+                   [ 27.308+0.j, 548.317+0.j,  74.21 +0.j]], dtype=complex64, weak_type=True)
+
+            For complex-valued input:
+
+            >>> with xp.printoptions(precision=3, suppress=True):
+            ...   xp.cosh(5+1j)
+            Array(40.096+62.44j, dtype=complex64, weak_type=True)
+            >>> with xp.printoptions(precision=3, suppress=True):
+            ...   xp.cos(1j * (5+1j))
+            Array(40.096+62.44j, dtype=complex64, weak_type=True)
         """
         ...
 
@@ -2542,6 +2586,30 @@ class ArrayNamespace(Protocol):
             >>> with xp.printoptions(precision=3, suppress=True):
             ...   print(xp.sin(x))
             [ 0.707  1.     0.707 -0.   ]
+        """
+        ...
+
+    def size(self, a: ArrayLike, axis: int | None=None) -> int:
+        """Return the number of elements along a given axis.
+
+        Args:
+            a: Input data.
+            axis : Axis along which the elements are counted. By default, give
+                the total number of elements.
+
+        Returns:
+            Number of elements along the specified axis.
+
+        Examples:
+            >>> a = xp.array([[1, 2, 3],
+                              [4, 5, 6]])
+            >>> xp.size(a)
+            6
+            >>> xp.size(a, 1)
+            3
+            >>> xp.size(a, 0)
+            2
+
         """
         ...
 
