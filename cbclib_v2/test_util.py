@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Tuple, overload
+from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads

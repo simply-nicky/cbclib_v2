@@ -1,6 +1,7 @@
 import pytest
 import jax.numpy as jnp
 from jax import random, jit
+from cbclib_v2 import IndexArray
 from cbclib_v2.annotations import ArrayNamespace, JaxNumPy, KeyArray
 from cbclib_v2.indexer import CBData, CBDModel, Patterns
 from cbclib_v2.test_util import check_gradient, Criterion, FullState, TestSetup
@@ -38,12 +39,12 @@ class TestCBDModel():
                          axis=-1)
         index = xp.concatenate((xp.full((num_lines // 2), 0),
                                 xp.full((num_lines - num_lines // 2), 1)))
-        return Patterns(lines=lines, index=index)
+        return Patterns(lines=lines, index=IndexArray(index))
 
     @pytest.fixture
     def data(self, key: KeyArray, patterns: Patterns, model: CBDModel, state: FullState,
              num_points: int) -> CBData:
-        return model.init_data(key, patterns, num_points, state)
+        return model.init_data_random(key, patterns, num_points, state)
 
     @pytest.fixture
     def pupil_loss(self, model: CBDModel, xp: ArrayNamespace) -> Criterion:

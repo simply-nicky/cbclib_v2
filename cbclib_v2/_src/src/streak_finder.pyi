@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Iterator, List, Tuple, overload
-from ..annotations import BoolArray, IntSequence, NDBoolArray, NDIntArray, NDRealArray, RealArray, RealSequence
+from ..annotations import (BoolArray, IntSequence, NDBoolArray, NDIntArray, NDRealArray,
+                           RealArray, RealSequence)
 from .label import Structure2D
 
 class Peaks:

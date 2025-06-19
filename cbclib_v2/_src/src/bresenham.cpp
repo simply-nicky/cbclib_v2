@@ -11,18 +11,18 @@ using py_array_t = typename py::array_t<T, py::array::c_style | py::array::force
 template <typename I, int ExtraFlags>
 void fill_indices(std::string name, size_t xsize, size_t isize, std::optional<py::array_t<I, ExtraFlags>> & idxs)
 {
-    if (xsize == 1)
+    idxs = py::array_t<I, ExtraFlags>(isize);
+
+    if (isize)
     {
-        idxs = py::array_t<I, ExtraFlags>(isize);
-        fill_array(idxs.value(), I());
+        if (xsize == 1) fill_array(idxs.value(), I());
+        else if (xsize == isize)
+        {
+            for (size_t i = 0; i < isize; i++) idxs.value().mutable_data()[i] = i;
+        }
+        else throw std::invalid_argument(name + " has an icnompatible size (" + std::to_string(isize) + " != " +
+                                         std::to_string(xsize) + ")");
     }
-    else if (xsize == isize)
-    {
-        idxs = py::array_t<I, ExtraFlags>(isize);
-        auto ptr = static_cast<I *>(idxs.value().request().ptr);
-        for (size_t i = 0; i < isize; i++) ptr[i] = i;
-    }
-    else throw std::invalid_argument(name + " is not defined");
 }
 
 template <typename I, int ExtraFlags>

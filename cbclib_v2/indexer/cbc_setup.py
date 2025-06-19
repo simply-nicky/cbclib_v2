@@ -5,7 +5,8 @@ from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .._src.state import State, dynamic_fields, field, static_fields
 from .._src.annotations import (ArrayNamespace, BoolArray, Indices, IntArray, JaxNumPy, KeyArray,
                                 NDRealArray, RealArray, RealSequence, Shape)
-from .._src.data_container import ArrayContainer, DataContainer, array_namespace
+from .._src.data_container import (ArrayContainer, Container, DataContainer, IndexArray, IndexedContainer,
+                                   array_namespace)
 from .._src.parser import Parser, INIParser, JSONParser
 
 S = TypeVar('S', bound=State)
@@ -86,10 +87,9 @@ class XtalCell(ArrayContainer, State):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'unit_cell': ('lengths', 'angles')},
-                             types={'lengths': NDRealArray, 'angles': NDRealArray})
+            return INIParser.from_container(cls, default='unit_cell')
         if ext == 'json':
-            return JSONParser({'unit_cell': ('lengths', 'angles')})
+            return JSONParser.from_container(cls, default='unit_cell')
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -139,10 +139,10 @@ class XtalState(ArrayContainer, State):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'basis': ('a', 'b', 'c')},
+            return INIParser({'basis': {'a': 'a', 'b': 'b', 'c': 'c'}},
                              types={'a': NDRealArray, 'b': NDRealArray, 'c': NDRealArray})
         if ext == 'json':
-            return JSONParser({'basis': ('a', 'b', 'c')})
+            return JSONParser({'basis': {'a': 'a', 'b': 'b', 'c': 'c'}})
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -226,10 +226,27 @@ class XtalState(ArrayContainer, State):
         return (lengths, xp.arccos(self.basis[..., 2] / lengths),
                 xp.arctan2(self.basis[..., 1], self.basis[..., 0]))
 
+class XtalList(IndexedContainer, State):
+    index       : IndexArray
+    basis       : RealArray
+
+    def to_xtals(self) -> XtalState:
+        return XtalState(self.basis)
+
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=JaxNumPy) -> 'XtalList':
+        xtals = XtalState.import_dataframe(df, xp)
+        return cls(IndexArray(df['index'].to_numpy()), xtals.basis)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        xp = self.__array_namespace__()
+        return self.to_xtals().to_dataframe(index=xp.asarray(self.index))
+
+
 L = TypeVar("L", bound='BaseLens')
 Float = float | RealArray
 
-class BaseLens(DataContainer):
+class BaseLens(Container):
     foc_pos     : Tuple[float, float, float] | RealArray
     pupil_roi   : Tuple[float, float, float, float] | RealArray
 
@@ -249,10 +266,9 @@ class BaseLens(DataContainer):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'geometry': ('foc_pos', 'pupil_roi')},
-                             types=get_type_hints(cls))
+            return INIParser.from_container(cls, default='geometry')
         if ext == 'json':
-            return JSONParser({'geometry': ('foc_pos', 'pupil_roi')})
+            return JSONParser.from_container(cls, default='geometry')
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -269,7 +285,7 @@ class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
         data = cls.parser(ext).read(file)
         return cls(tuple(data['foc_pos']), tuple(data['pupil_roi']))
 
-class FixedPupilLens(FixedLens):
+class FixedPupilLens(DataContainer, FixedLens):
     foc_pos     : RealArray
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
@@ -278,7 +294,7 @@ class FixedPupilLens(FixedLens):
         data = cls.parser(ext).read(file)
         return cls(xp.asarray(data['foc_pos']), tuple(data['pupil_roi']))
 
-class FixedApertureLens(BaseLens, State):
+class FixedApertureLens(BaseLens, DataContainer, State):
     foc_pos         : RealArray
     pupil_center    : RealArray
     aperture        : Tuple[float, float] = field(static=True)
@@ -301,14 +317,24 @@ class FixedApertureLens(BaseLens, State):
     def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureLens':
         return cls.from_roi(FixedLens.read(file, ext), xp)
 
-class RotationState(State):
+    @classmethod
+    def parser(cls, ext: str='ini') -> Parser:
+        if ext == 'ini':
+            return INIParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}},
+                             {'foc_pos': RealArray, 'pupil_roi': RealArray})
+        if ext == 'json':
+            return JSONParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}})
+
+        raise ValueError(f"Invalid format: {ext}")
+
+class RotationState(ArrayContainer, State):
     matrix : RealArray
 
     def __len__(self) -> int:
         return self.matrix.size // 9
 
     def __iter__(self) -> Iterator['RotationState']:
-        xp = self.__array_namespace__()
+        xp = array_namespace(self)
         for matrix in xp.reshape(self.matrix, (-1, 3, 3)):
             yield RotationState(matrix[None])
 
@@ -420,7 +446,7 @@ class TiltOverAxisState(ArrayContainer, State):
 
 S = TypeVar('S', bound='BaseSetup')
 
-class BaseSetup(DataContainer):
+class BaseSetup(Container):
     lens    : BaseLens
     z       : Tuple[float, ...] | RealArray
 
@@ -447,18 +473,16 @@ class BaseSetup(DataContainer):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'geometry': ('foc_pos', 'pupil_roi', 'z')},
+            return INIParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi',
+                                           'z': 'z'}},
                              types=get_type_hints(cls))
         if ext == 'json':
-            return JSONParser({'geometry': ('foc_pos', 'pupil_roi', 'z')})
+            return JSONParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi',
+                                            'z': 'z'}})
 
         raise ValueError(f"Invalid format: {ext}")
 
-    @classmethod
-    def read(cls: Type[S], file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> S:
-        raise NotImplementedError
-
-class FixedPupilSetup(BaseSetup, State):
+class FixedPupilSetup(BaseSetup, DataContainer, State):
     lens    : FixedPupilLens
     z       : RealArray
 
@@ -468,7 +492,7 @@ class FixedPupilSetup(BaseSetup, State):
         return cls(FixedPupilLens(xp.asarray(data['foc_pos']), tuple(data['pupil_roi'])),
                    xp.asarray(data['z']))
 
-class FixedApertureSetup(BaseSetup, State):
+class FixedApertureSetup(BaseSetup, DataContainer, State):
     lens    : FixedApertureLens
     z       : RealArray
 
@@ -483,11 +507,11 @@ class FixedSetup(BaseSetup, State, eq=True, unsafe_hash=True):
     z       : Tuple[float, ...] = field(static=True)
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedSetup':
+    def read(cls, file: str, ext: str='ini') -> 'FixedSetup':
         data = cls.parser(ext).read(file)
         return cls(FixedLens(tuple(data['foc_pos']), tuple(data['pupil_roi'])), tuple(data['z']))
 
-class BaseState(BaseSetup):
+class BaseState(DataContainer, BaseSetup):
     xtal    : XtalState
     setup   : BaseSetup
 

@@ -5,15 +5,14 @@ from jax import random, vmap
 from .cbc_data import (AnyPoints, CBData, CBDPoints, CircleState, LaueVectors, Miller,
                        MillerWithRLP, Patterns, PointsWithK, RLP, Rotograms, UCA)
 from .cbc_setup import (EulerState, BaseLens, BaseSetup, BaseState, RotationState, TiltState,
-                        TiltOverAxisState, XtalState)
+                        TiltOverAxisState, XtalList, XtalState)
 from .geometry import (arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, project_to_rect,
                        safe_divide, source_lines)
 from .._src.annotations import ArrayNamespace, KeyArray, IntArray, JaxNumPy, NumPy, RealArray
-from .._src.data_container import add_at, array_namespace
+from .._src.data_container import IndexArray, add_at, array_namespace
 from .._src.src.bresenham import accumulate_lines
 from .._src.src.label import PointSet3D, Structure3D, binary_dilation, center_of_mass, label
 from .._src.state import State
-from .._src.streaks import Streaks
 
 def key_combine(key: KeyArray, hkl: IntArray, xp: ArrayNamespace = JaxNumPy) -> IntArray:
     array = xp.reshape(hkl, (-1, 3))
@@ -32,27 +31,6 @@ def uniform(keys: IntArray, size: int, xp: ArrayNamespace = JaxNumPy) -> RealArr
     map_func = vmap(random.uniform, in_axes=(0, None), out_axes=-1)
     res = xp.asarray(map_func(xp.ravel(keys), (size,)))
     return xp.reshape(res, (size,) + keys.shape)
-
-@dataclass
-class Detector():
-    x_pixel_size : float
-    y_pixel_size : float
-
-    def to_indices(self, x: RealArray, y: RealArray) -> Tuple[RealArray, RealArray]:
-        return x / self.x_pixel_size, y / self.y_pixel_size
-
-    def to_coordinates(self, i: RealArray, j: RealArray) -> Tuple[RealArray, RealArray]:
-        return i * self.x_pixel_size, j * self.y_pixel_size
-
-    def to_patterns(self, streaks: Streaks) -> Patterns:
-        xp = array_namespace(streaks)
-        pts = xp.stack(self.to_coordinates(xp.asarray(streaks.x), xp.asarray(streaks.y)), axis=-1)
-        return Patterns(xp.asarray(streaks.index), xp.reshape(pts, pts.shape[:-2] + (4,)))
-
-    def to_streaks(self, patterns: Patterns) -> Streaks:
-        xp = array_namespace(patterns)
-        pts = xp.stack(self.to_indices(xp.asarray(patterns.x), xp.asarray(patterns.y)), axis=-1)
-        return Streaks(xp.asarray(patterns.index), xp.reshape(pts, pts.shape[:-2] + (4,)))
 
 class Transform():
     def __call__(self, argument: RealArray, state: State) -> RealArray:
@@ -106,7 +84,7 @@ class ChainRotations(Transform):
 
 class Circle(Transform):
     def __call__(self, argument: RealArray, state: CircleState) -> RealArray:
-        xp = state.__array_namespace__()
+        xp = array_namespace(argument)
         return (state.radius * xp.cos(argument))[..., None] * state.axis1 \
              + (state.radius * xp.sin(argument))[..., None] * state.axis2 + state.center
 
@@ -143,8 +121,9 @@ class Xtal():
 
     def hkl_to_q(self, miller: Miller, state: XtalState, xp: ArrayNamespace) -> MillerWithRLP:
         basis = xp.reshape(state.basis, (-1, 3, 3))
-        q = xp.sum(basis[miller.index] * miller.hkl_indices[..., None], axis=-2)
-        return MillerWithRLP(index=miller.index, hkl=miller.hkl, q=q)
+        hkl = xp.reshape(miller.hkl_indices, (miller.hkl.shape[0], -1, miller.hkl.shape[-1]))
+        q = xp.sum(basis[miller.index][..., None, :, :] * hkl[..., None], axis=-2)
+        return MillerWithRLP(index=miller.index, hkl=miller.hkl, q=xp.reshape(q, miller.hkl.shape))
 
     def q_to_hkl(self, rlp: RLP, state: XtalState, xp: ArrayNamespace) -> MillerWithRLP:
         basis = xp.reshape(xp.linalg.inv(state.basis), (-1, 3, 3))
@@ -215,7 +194,8 @@ class Lens():
     def source_lines(self, miller: MillerWithRLP, state: BaseLens | BaseSetup, xp: ArrayNamespace
                      ) -> LaueVectors:
         kin, is_good = source_lines(miller.q, self.kin_edges(state, xp), xp=xp)
-        index = xp.broadcast_to(miller.index, miller.q.shape[:-1])
+        shape = (miller.q.shape[0], miller.q.size // (miller.q.shape[0] * miller.q.shape[-1]))
+        index = xp.reshape(xp.broadcast_to(miller.index[..., None], shape), miller.q.shape[:-1])
         laue = LaueVectors(index=index[..., None], hkl=miller.hkl, q=miller.q[..., None, :],
                            kin=kin, kout=kin + miller.q[..., None, :])
         return laue[is_good]
@@ -243,7 +223,8 @@ class LaueSampler(Protocol):
         ...
 
 class Projector(Protocol):
-    def __call__(self, laue: LaueVectors, state: BaseLens | BaseSetup, xp: ArrayNamespace) -> RealArray:
+    def __call__(self, laue: LaueVectors, state: BaseLens | BaseSetup, xp: ArrayNamespace
+                 ) -> RealArray:
         ...
 
 Criterion = Callable[[State,], RealArray]
@@ -265,8 +246,8 @@ class CBDSetup():
     lens    : Lens = Lens()
     xtal    : Xtal = Xtal()
 
-    def kin_to_sample(self, kin: RealArray, idxs: IntArray, state: BaseState | BaseSetup
-                      ) -> RealArray:
+    def kin_to_sample(self, kin: RealArray, idxs: IntArray, state: BaseState | BaseSetup,
+                      xp: ArrayNamespace) -> RealArray:
         """Project incident wave-vectors to the sample planes.
 
         Args:
@@ -277,43 +258,43 @@ class CBDSetup():
         Returns:
             Array of sample coordinates.
         """
-        xp = state.__array_namespace__()
         return self.lens.kin_to_sample(kin, xp.asarray(state.z), idxs, state, xp)
 
-    def points_to_kout(self, points: AnyPoints, state: BaseState | BaseSetup) -> PointsWithK:
-        xp = state.__array_namespace__()
+    def points_to_kout(self, points: AnyPoints, state: BaseState | BaseSetup, xp: ArrayNamespace
+                       ) -> PointsWithK:
         if isinstance(points, CBDPoints):
             kin = points.kin
         else:
             kin = self.lens.kin_center(state, xp)
-        smp_pos = self.kin_to_sample(kin, points.index, state)
+        smp_pos = self.kin_to_sample(kin, points.index, state, xp)
         kout = det_to_k(points.points, smp_pos, arange(smp_pos.shape[:-1]), xp)
         return PointsWithK(index=points.index, points=points.points, kout=kout)
 
-    def kout_to_points(self, laue: LaueVectors, state: BaseState | BaseSetup) -> CBDPoints:
-        xp = state.__array_namespace__()
-        smp_pos = self.kin_to_sample(laue.kin, laue.index, state)
+    def kout_to_points(self, laue: LaueVectors, state: BaseState | BaseSetup, xp: ArrayNamespace
+                       ) -> CBDPoints:
+        smp_pos = self.kin_to_sample(laue.kin, laue.index, state, xp)
         points = k_to_det(laue.kout, smp_pos, arange(smp_pos.shape[:-1], xp), xp)
         return CBDPoints(**laue.to_dict(), points=points)
 
-    def patterns_to_kout(self, patterns: Patterns, state: BaseState | BaseSetup
+    def patterns_to_kout(self, patterns: Patterns, state: BaseState | BaseSetup, xp: ArrayNamespace
                          ) -> Tuple[RealArray, RealArray]:
-        xp = state.__array_namespace__()
-        pts = self.points_to_kout(patterns.points, state)
+        pts = self.points_to_kout(patterns.points, state, xp)
         return xp.min(pts.kout[..., :2], axis=-2), xp.max(pts.kout[..., :2], axis=-2)
 
-    def patterns_to_q(self, patterns: Patterns, state: BaseState | BaseSetup) -> Tuple[RLP, RLP]:
-        xp = state.__array_namespace__()
+    def patterns_to_q(self, patterns: Patterns, state: BaseState | BaseSetup, xp: ArrayNamespace
+                      ) -> Tuple[RLP, RLP]:
         kmin, kmax = self.lens.kin_min(state, xp), self.lens.kin_max(state, xp)
-        kout_min, kout_max = self.patterns_to_kout(patterns, state)
+        kout_min, kout_max = self.patterns_to_kout(patterns, state, xp)
+        index = xp.asarray(patterns.index)
         q1 = kxy_to_k(kout_min, xp) - kmin
         q2 = kxy_to_k(kout_max, xp) - kmax
-        return RLP(index=patterns.index, q=q1), RLP(index=patterns.index, q=q2)
+        return RLP(index=index, q=q1), RLP(index=index, q=q2)
 
 @dataclass
 class CBDIndexer(CBDSetup):
     num_points  : int = 100
     circle      : Circle = Circle()
+    tilt        : TiltOverAxis = TiltOverAxis()
 
     @classmethod
     def rho_map(cls) -> float:
@@ -326,17 +307,16 @@ class CBDIndexer(CBDSetup):
     def phi(self, xp: ArrayNamespace) -> RealArray:
         return xp.linspace(-2 * xp.pi, 0.0, self.num_points)
 
-    def patterns_to_uca(self, patterns: Patterns, points: PointsWithK, state: BaseState | BaseSetup
-                        ) -> UCA:
-        xp = state.__array_namespace__()
+    def patterns_to_uca(self, patterns: Patterns, points: PointsWithK, state: BaseState | BaseSetup,
+                        xp: ArrayNamespace) -> UCA:
         kmin, kmax = self.lens.kin_min(state, xp), self.lens.kin_max(state, xp)
-        kout_min, kout_max = self.patterns_to_kout(patterns, state)
+        kout_min, kout_max = self.patterns_to_kout(patterns, state, xp)
         xy = xp.stack((kout_min - kmin[:2], kout_max - kmax[:2]))
         xy_min, xy_max = xp.min(xy, axis=0), xp.max(xy, axis=0)
-        return UCA(patterns.index, xp.arange(patterns.shape[0]), points.kout,
+        return UCA(xp.asarray(patterns.index), xp.arange(patterns.shape[0]), points.kout,
                    points.kout[:, :2] - xy_min, points.kout[:, :2] - xy_max)
 
-    def candidates(self, candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace=NumPy
+    def candidates(self, candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace
                    ) -> Tuple[MillerWithRLP, UCA]:
         min_res, max_res = uca.min_resolution, uca.max_resolution
         rlp_res = xp.sum(candidates.q**2, axis=-1)
@@ -344,7 +324,7 @@ class CBDIndexer(CBDSetup):
         mask = (rlp_res[rlp_idxs] > min_res[idxs]) & (rlp_res[rlp_idxs] < max_res[idxs])
         return candidates[rlp_idxs[mask]], uca[idxs[mask]]
 
-    def intersection(self, rlp: MillerWithRLP, uca: UCA, xp: ArrayNamespace=NumPy) -> CircleState:
+    def intersection(self, rlp: MillerWithRLP, uca: UCA, xp: ArrayNamespace) -> CircleState:
         rlp_res = xp.sum(rlp.q**2, axis=-1)
         radius = xp.sqrt(rlp_res - 0.25 * rlp_res**2)
         center = 0.5 * rlp_res[..., None] * uca.kout
@@ -354,7 +334,7 @@ class CBDIndexer(CBDSetup):
         axis2 = xp.cross(uca.kout, axis1)
         return CircleState(rlp.index, center, axis1, axis2, radius)
 
-    def uca_endpoints(self, circle: CircleState, uca: UCA, xp: ArrayNamespace=NumPy) -> RealArray:
+    def uca_endpoints(self, circle: CircleState, uca: UCA, xp: ArrayNamespace) -> RealArray:
         xy_min, xy_max = uca.q_min[..., :2], uca.q_max[..., :2]
 
         a = xp.stack((circle.radius * circle.axis1[..., 0],
@@ -377,7 +357,7 @@ class CBDIndexer(CBDSetup):
         dist = xp.sqrt(xp.sum((points[..., :2] - proj)**2, axis=-1))
         return xp.take_along_axis(theta, xp.argsort(dist, axis=0)[:2], axis=0)
 
-    def rotations(self, rlp: MillerWithRLP, midpoints: RealArray, xp: ArrayNamespace = NumPy
+    def rotations(self, rlp: MillerWithRLP, midpoints: RealArray, xp: ArrayNamespace
                   ) -> TiltOverAxisState:
         source = rlp.q / xp.sqrt(xp.sum(rlp.q**2, axis=-1, keepdims=True))
         target = midpoints / xp.sqrt(xp.sum(midpoints**2, axis=-1, keepdims=True))
@@ -401,9 +381,9 @@ class CBDIndexer(CBDSetup):
         return Rotograms.from_tilts(tilts, uca.index, uca.streak_id, xp)
 
     def index(self, candidates: MillerWithRLP, patterns: Patterns, points: PointsWithK,
-              state: BaseState | BaseSetup):
-        xp = state.__array_namespace__()
-        patterns_uca = self.patterns_to_uca(patterns, points, state)
+              state: BaseState | BaseSetup) -> Rotograms:
+        xp = array_namespace(candidates, patterns, points)
+        patterns_uca = self.patterns_to_uca(patterns, points, state, xp)
         rlp, uca = self.candidates(candidates, patterns_uca, xp)
         circles = self.intersection(rlp, uca, xp)
         return self.rotograms(rlp, circles, uca, xp)
@@ -424,7 +404,7 @@ class CBDIndexer(CBDSetup):
         lines = xp.concatenate((lines, xp.full(rotograms.lines.shape[:-1] + (1,), width)),
                                axis=-1)
         _, indices, counts = xp.unique(rotograms.streak_id, return_index=True, return_counts=True)
-        frames = rotograms.inverse()
+        frames = xp.asarray(rotograms.index.reset())
 
         rmap = accumulate_lines(lines, (len(rotograms),) + shape, lines.shape[-2] * counts,
                                 frames[indices], kernel='gaussian', in_overlap='max',
@@ -456,54 +436,79 @@ class CBDIndexer(CBDSetup):
         centers = centers * self.step(rotomap.shape, xp) - self.rho_map()
         return frames, TiltOverAxisState.from_point(centers)
 
+    def solutions(self, initial: XtalState, indices: IntArray, tilts: TiltOverAxisState,
+                  patterns: Patterns) -> XtalList:
+        if len(initial) == 1:
+            return XtalList(IndexArray(patterns.index.unique()[indices]),
+                            self.tilt.of_xtal(initial, tilts).basis)
+        if len(initial) == len(patterns):
+            return XtalList(IndexArray(patterns.index.unique()[indices]),
+                            self.tilt.of_xtal(initial[indices], tilts).basis)
+        raise ValueError(f'Number of crystals ({len(initial):d}) and patterns ({len(patterns):d}) '\
+                         'are inconsistent')
+
 class CBDModel(CBDSetup):
-    def hkl_in_aperture(self, q_abs: float, state: BaseState) -> Miller:
-        xp = state.__array_namespace__()
+    def hkl_in_aperture(self, q_abs: float, state: BaseState, xp: ArrayNamespace=JaxNumPy
+                        ) -> Miller:
         hkl = self.xtal.hkl_in_ball(q_abs, state.xtal, xp)
         kz = xp.asarray([self.lens.kin_min(state, xp)[..., 2],
                          self.lens.kin_max(state, xp)[..., 2]])
         return self.xtal.hkl_in_aperture(xp.arccos(xp.min(kz)), hkl, state.xtal, xp)
 
-    def init_hkl(self, hkl_min: Miller, hkl_max: Miller, offsets: IntArray) -> Miller:
-        return Miller(index=hkl_min.index,
-                      hkl=(hkl_min.hkl_indices + hkl_max.hkl_indices) // 2).offset(offsets)
+    def init_miller(self, patterns: Patterns, state: BaseState, xp: ArrayNamespace) -> Miller:
+        q1, q2 = self.patterns_to_q(patterns, state, xp)
+        hkl_min, hkl_max = self.xtal.hkl_bounds(q1, q2, state.xtal, xp)
+        offsets = self.xtal.hkl_offsets(hkl_min, hkl_max, xp)
+        hkl = (hkl_min.hkl_indices + hkl_max.hkl_indices) // 2
+        return Miller(index=hkl_min.index, hkl=hkl).offset(offsets)
 
-    def init_patterns(self, miller: MillerWithRLP, state: BaseState | BaseSetup) -> Patterns:
-        xp = state.__array_namespace__()
+    def init_patterns(self, miller: MillerWithRLP, state: BaseState | BaseSetup,
+                      xp: ArrayNamespace=JaxNumPy) -> Patterns:
         laue = self.lens.source_lines(miller, state, xp)
-        laue = self.kout_to_points(laue, state)
+        laue = self.kout_to_points(laue, state, xp)
         return Patterns.from_points(laue)
 
-    def init_data(self, key: KeyArray, patterns: Patterns, num_points: int,
-                  state: BaseState, quantile: float=1.0, combine_key: bool=False) -> 'CBData':
+    def _init_mask(self, index: IntArray, quantile: float, xp: ArrayNamespace):
+        if xp.clip(quantile, 0.0, 1.0) < 1.0:
+            _, counts = xp.unique(index, return_counts=True)
+            counts = xp.clip(counts, 1, xp.inf)
+            return xp.concatenate([xp.arange(size) < quantile * size for size in counts])
+
+        return xp.ones(index.shape[0], dtype=bool)
+
+    def init_data(self, patterns: Patterns, state: BaseState, values: Sequence[float]=(0.0, 1.0),
+                  quantile: float=1.0) -> 'CBData':
         xp = state.__array_namespace__()
         if xp.clip(quantile, 0.0, 1.0) == 0.0:
             raise ValueError(f"Invalid quantile value: {quantile}")
 
-        q1, q2 = self.patterns_to_q(patterns, state)
-        hkl_min, hkl_max = self.xtal.hkl_bounds(q1, q2, state.xtal, xp)
-        offsets = self.xtal.hkl_offsets(hkl_min, hkl_max, xp)
-        miller = self.init_hkl(hkl_min, hkl_max, offsets)
+        miller = self.init_miller(patterns, state, xp)
+        x = xp.broadcast_to(xp.asarray(values), miller.hkl.shape[:-1] + (len(values),))
+        mask = self._init_mask(xp.asarray(patterns.index), quantile, xp)
+
+        return CBData(miller, patterns.sample(x), mask)
+
+    def init_data_random(self, key: KeyArray, patterns: Patterns, num_points: int,
+                         state: BaseState, quantile: float=1.0, combine_key: bool=False
+                         ) -> 'CBData':
+        xp = state.__array_namespace__()
+        if xp.clip(quantile, 0.0, 1.0) == 0.0:
+            raise ValueError(f"Invalid quantile value: {quantile}")
+
+        miller = self.init_miller(patterns, state, xp)
 
         if combine_key:
             x = uniform(key_combine(key, miller.hkl_indices), num_points, xp)
         else:
             x = xp.asarray(random.uniform(key, (num_points,) + miller.hkl.shape[:-1]))
 
-        if xp.clip(quantile, 0.0, 1.0) < 1.0:
-            _, counts = xp.unique(patterns.index, return_counts=True)
-            counts = xp.clip(counts, 1, jnp.inf)
-            mask = xp.concatenate([xp.arange(size) < quantile * size for size in counts])
-        else:
-            mask = xp.ones(patterns.shape[0], dtype=bool)
+        mask = self._init_mask(xp.asarray(patterns.index), quantile, xp)
         return CBData(miller, patterns.sample(x), mask)
 
-    def line_loss(self, loss: Loss='l1', xp: ArrayNamespace = JaxNumPy
-                  ) -> 'CBDLoss':
+    def line_loss(self, loss: Loss='l1', xp: ArrayNamespace=JaxNumPy) -> 'CBDLoss':
         return CBDLoss(self, self.lens.line_projector, loss_function(loss, xp))
 
-    def pupil_loss(self, loss: Loss='l1', xp: ArrayNamespace = JaxNumPy
-                   ) -> 'CBDLoss':
+    def pupil_loss(self, loss: Loss='l1', xp: ArrayNamespace=JaxNumPy) -> 'CBDLoss':
         return CBDLoss(self, self.lens.pupil_projector, loss_function(loss, xp))
 
 @dataclass(frozen=True, unsafe_hash=True)
@@ -512,37 +517,37 @@ class CBDLoss():
     projector       : Projector
     loss_fn         : LossFn
 
-    def project_data(self, data: CBData, state: BaseState) -> CBDPoints:
-        xp = state.__array_namespace__()
-        pts = self.model.points_to_kout(data.points, state)
+    def project_data(self, data: CBData, state: BaseState, xp: ArrayNamespace) -> CBDPoints:
+        pts = self.model.points_to_kout(data.points, state, xp)
         rlp = self.model.xtal.hkl_to_q(data.miller, state.xtal, xp)
-        return CBDPoints(index=pts.index, points=pts.points, hkl=rlp.hkl,
-                         q=rlp.q, kin=pts.kout - rlp.q, kout=pts.kout)
+        return CBDPoints(index=pts.index, points=pts.points, hkl=rlp.hkl, q=rlp.q[..., None, :],
+                         kin=pts.kout - rlp.q[..., None, :], kout=pts.kout)
+
+    def distance_matrix(self, points: CBDPoints, state: BaseState, xp: ArrayNamespace) -> RealArray:
+        projected = self.projector(points, state, xp)
+        return xp.mean(xp.sum(self.loss_fn(projected, points.kin), axis=-1), axis=-1)
 
     def __call__(self, data: CBData, state: BaseState) -> RealArray:
         xp = state.__array_namespace__()
-        points = self.project_data(data, state)
-        projected = self.projector(points, state, xp)
-        dist = xp.mean(xp.sum(self.loss_fn(projected, points.kin), axis=-1), axis=0)
-        dist = xp.min(dist, axis=0)
+        points = self.project_data(data, state, xp)
+        dist = self.distance_matrix(points, state, xp)
+        dist = xp.min(dist, axis=-1)
         indices = xp.lexsort((dist, data.points.index), axis=0)
         return xp.mean(dist[indices] * data.mask)
 
     def index(self, data: CBData, state: BaseState) -> Miller:
         xp = state.__array_namespace__()
-        points = self.project_data(data, state)
-        projected = self.projector(points, state, xp)
-        dist = xp.mean(xp.sum(self.loss_fn(projected, points.kin), axis=-1), axis=0)
-        idxs = xp.argmin(dist, axis=0)
+        points = self.project_data(data, state, xp)
+        dist = self.distance_matrix(points, state, xp)
+        idxs = xp.argmin(dist, axis=-1)
         hkl = xp.take_along_axis(points.hkl, idxs[None, ..., None], axis=0)[0]
         return Miller(index=points.index, hkl=hkl)
 
     def per_pattern(self, data: CBData, state: BaseState) -> RealArray:
         xp = state.__array_namespace__()
-        points = self.project_data(data, state)
-        projected = self.projector(points, state, xp)
-        dist = xp.mean(xp.sum(self.loss_fn(projected, points.kin), axis=-1), axis=0)
-        dist = xp.min(dist, axis=0)
+        points = self.project_data(data, state, xp)
+        dist = self.distance_matrix(points, state, xp)
+        dist = xp.min(dist, axis=-1)
         indices = xp.lexsort((dist, points.index), axis=0)
         return add_at(xp.zeros(len(state.xtal)), points.index, dist[indices] * data.mask, xp)
 

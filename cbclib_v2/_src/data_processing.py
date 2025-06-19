@@ -11,16 +11,16 @@ Examples:
     >>> data = data.load()
 """
 from typing import Any, ClassVar, Dict, List, Literal, Tuple, TypeVar, cast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, FileStore, Kinds
-from .data_container import DataContainer
-from .streak_finder import PatternsStreakFinder, Peaks
+from .data_container import DataContainer, IndexArray
+from .streak_finder import Peaks, detect_peaks, detect_streaks, filter_peaks
 from .streaks import Streaks
-from .annotations import (ArrayLike, ArrayNamespace, BoolArray, Indices, IntArray, IntSequence,
-                          NumPy, RealArray, RealSequence, ReferenceType, ROI, Shape)
+from .annotations import (ArrayLike, BoolArray, Indices, IntArray, IntSequence, RealArray,
+                          RealSequence, ReferenceType, ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
                     covariance_matrix, Regions2D, Structure2D)
 from .src.signal_proc import binterpolate, kr_grid
@@ -125,15 +125,15 @@ class CrystData(DataContainer):
         snr : Signal-to-noise ratio.
         whitefields : A set of white-fields generated for each pattern separately.
     """
-    data        : RealArray = np.array([])
+    data        : RealArray = field(default_factory=lambda: np.array([]))
 
-    whitefield  : RealArray = np.array([])
-    std         : RealArray = np.array([])
-    snr         : RealArray = np.array([])
+    whitefield  : RealArray = field(default_factory=lambda: np.array([]))
+    std         : RealArray = field(default_factory=lambda: np.array([]))
+    snr         : RealArray = field(default_factory=lambda: np.array([]))
 
-    frames      : IntArray = np.array([], dtype=int)
-    mask        : BoolArray = np.array([], dtype=bool)
-    scales      : RealArray = np.array([])
+    frames      : IntArray = field(default_factory=lambda: np.array([], dtype=int))
+    mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
+    scales      : RealArray = field(default_factory=lambda: np.array([]))
 
     protocol    : ClassVar[CXIProtocol] = CXIProtocol.read()
 
@@ -234,8 +234,8 @@ class CrystData(DataContainer):
 
         parent = cast(ReferenceType[CrystData], ref(self))
         idxs = np.arange(self.shape[0])
-        return RegionDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
-                              structure=structure, transform=ScaleTransform())
+        return RegionDetector(indices=idxs, data=self.snr, mask=self.mask, structure=structure,
+                              parent=parent)
 
     def reset_mask(self) -> 'CrystData':
         """Reset bad pixel mask. Every pixel is assumed to be good by default.
@@ -347,8 +347,8 @@ class CrystData(DataContainer):
         xp = self.__array_namespace__()
         parent = cast(ReferenceType[CrystData], ref(self))
         idxs = xp.arange(self.shape[0])
-        return StreakDetector(data=self.snr, mask=self.mask, parent=parent, indices=idxs,
-                              structure=structure, transform=ScaleTransform())
+        return StreakDetector(indices=idxs, data=self.snr, mask=self.mask, structure=structure,
+                              parent=parent)
 
     def update_mask(self, method: MaskMethod='no-bad', vmin: int=0, vmax: int=65535,
                     snr_max: float=3.0, roi: ROI | None=None) -> 'CrystData':
@@ -518,11 +518,11 @@ class CrystData(DataContainer):
 
         raise ValueError('Invalid method argument')
 
-@dataclass
-class ScaleTransform():
-    scale           : float = 1.0
+class ScaleTransform(DataContainer):
+    scale   : float
 
-    def interpolate(self, data: RealArray, xp: ArrayNamespace=NumPy) -> RealArray:
+    def interpolate(self, data: RealArray) -> RealArray:
+        xp = self.__array_namespace__()
         x, y = xp.arange(0, data.shape[-1]), xp.arange(0, data.shape[-2])
 
         xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
@@ -530,31 +530,30 @@ class ScaleTransform():
         pts = xp.stack(xp.meshgrid(xx, yy), axis=-1)
         return xp.asarray(binterpolate(data, (x, y), pts))
 
-    def kernel_regression(self, data: RealArray, sigma: float, num_threads: int=1,
-                          xp: ArrayNamespace=NumPy) -> RealArray:
+    def kernel_regression(self, data: RealArray, sigma: float, num_threads: int=1) -> RealArray:
+        xp = self.__array_namespace__()
         x, y = xp.arange(0, data.shape[-1]), xp.arange(0, data.shape[-2])
         pts = xp.stack(xp.meshgrid(x, y), axis=-1)
 
         xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
         yy = self.scale * xp.arange(0, data.shape[-2] / self.scale)
-        return xp.asarray(kr_grid(data, pts, (xx, yy), sigma=sigma, num_threads=num_threads))[0]
+        return xp.asarray(kr_grid(data, pts, (xx, yy), sigma=sigma, num_threads=num_threads)[0])
 
-    def to_detector(self, x: RealSequence, y: RealSequence,
-                    xp: ArrayNamespace=NumPy) -> Tuple[RealArray, RealArray]:
+    def to_detector(self, x: RealSequence, y: RealSequence) -> Tuple[RealArray, RealArray]:
+        xp = self.__array_namespace__()
         return self.scale * xp.asarray(x), self.scale * xp.asarray(y)
 
-    def to_scaled(self, x: RealSequence, y: RealSequence,
-                  xp: ArrayNamespace=NumPy) -> Tuple[RealArray, RealArray]:
+    def to_scaled(self, x: RealSequence, y: RealSequence) -> Tuple[RealArray, RealArray]:
+        xp = self.__array_namespace__()
         return xp.asarray(x) / self.scale, xp.asarray(y) / self.scale
 
 DetBase = TypeVar("DetBase", bound="DetectorBase")
 
-@dataclass
-class DetectorBase(DataContainer):
+class DetectorBase(ScaleTransform):
     indices         : IntArray
     data            : RealArray
     mask            : BoolArray
-    transform       : ScaleTransform
+    scale           : float
     parent          : ReferenceType[CrystData]
 
     @property
@@ -576,19 +575,46 @@ class DetectorBase(DataContainer):
 
     def downscale(self: DetBase, scale: float, sigma: float, num_threads: int=1) -> DetBase:
         xp = self.__array_namespace__()
-        transform = ScaleTransform(scale)
-        data = transform.kernel_regression(self.data, sigma, num_threads)
-        mask = transform.interpolate(xp.asarray(self.mask, dtype=float))
+        data = self.kernel_regression(self.data, sigma, num_threads)
+        mask = self.interpolate(xp.asarray(self.mask, dtype=float))
         return self.replace(data=data, mask=xp.asarray(mask, dtype=bool),
-                            transform=transform)
+                            scale=scale)
 
     def to_detector(self, streaks: Streaks) -> Streaks:
         xp = self.__array_namespace__()
-        pts = xp.stack(self.transform.to_detector(streaks.x, streaks.y), axis=-1)
+        pts = xp.stack(super().to_detector(streaks.x, streaks.y), axis=-1)
         return Streaks(streaks.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
 
 @dataclass
-class StreakDetector(DetectorBase, PatternsStreakFinder):
+class StreakDetector(DetectorBase):
+    indices         : IntArray
+    data            : RealArray
+    mask            : BoolArray
+    structure       : Structure2D
+    parent          : ReferenceType[CrystData]
+    scale           : float = 1.0
+
+    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
+                     num_threads: int=1) -> List[Peaks]:
+        """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
+        ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
+        between peaks is ``2 * structure.radius``.
+
+        Args:
+            vmin : Peak threshold. All peaks with values lower than ``vmin`` are discarded.
+            npts : Support size threshold. The support structure is a connected set of pixels which
+                value is above the threshold ``vmin``. A peak is discarded is the size of support
+                set is lower than ``npts``.
+            connectivity : Connectivity structure used in finding a supporting set.
+
+        Returns:
+            Set of detected peaks.
+        """
+        peaks = detect_peaks(self.data, self.mask, self.structure.rank, vmin,
+                             num_threads=num_threads)
+        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
+                            num_threads=num_threads)
+
     def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
                        lookahead: int=0, nfa: int=0, num_threads: int=1) -> Streaks:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
@@ -608,11 +634,16 @@ class StreakDetector(DetectorBase, PatternsStreakFinder):
             A list of detected streaks.
         """
         xp = self.__array_namespace__()
-        streaks = super().detect_streaks(peaks, xtol, vmin, min_size, lookahead, nfa, num_threads)
+        result = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
+                                lookahead, nfa, num_threads=num_threads)
+        if isinstance(result, list):
+            streaks = [xp.asarray(pattern.to_lines()) for pattern in result]
+        else:
+            streaks = [xp.asarray(result.to_lines()),]
         idxs = xp.concatenate([xp.full((len(pattern),), idx)
                                for idx, pattern in zip(self.indices, streaks)])
         lines = xp.concatenate(streaks)
-        return Streaks(index=idxs, lines=lines)
+        return Streaks(index=IndexArray(idxs), lines=lines)
 
     def export_table(self, streaks: Streaks, width: float,
                      kernel: str='rectangular') -> pd.DataFrame:
@@ -656,7 +687,12 @@ class StreakDetector(DetectorBase, PatternsStreakFinder):
 
 @dataclass
 class RegionDetector(DetectorBase):
-    structure   : Structure2D
+    indices         : IntArray
+    data            : RealArray
+    mask            : BoolArray
+    structure       : Structure2D
+    parent          : ReferenceType[CrystData]
+    scale           : float = 1.0
 
     def detect_regions(self, vmin: float, npts: int, num_threads: int=1) -> List[Regions2D]:
         regions = label((self.data > vmin) & self.mask, structure=self.structure, npts=npts,

@@ -1,8 +1,4 @@
-from dataclasses import dataclass, field
-from typing import List
-import numpy as np
-from .data_container import DataContainer
-from .annotations import BoolArray, Indices, NDBoolArray, NDRealArray, RealArray, Shape
+from .annotations import NDBoolArray, NDRealArray
 from .src.label import Structure2D
 from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, StreakFinder,
                                 StreakFinderResultDouble, StreakFinderResultFloat, Peaks)
@@ -23,35 +19,6 @@ class PatternStreakFinder:
 
     def detect_peaks(self, vmin: float, npts: int,
                      connectivity: Structure2D=Structure2D(1, 1)) -> Peaks:
-        peaks = detect_peaks(self.data, self.mask, self.finder.structure.rank, vmin)[0]
-        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts)
-
-    def detect_streaks(self, peaks: Peaks, xtol: float, vmin: float) -> StreakFinderResult:
-        return self.finder.detect_streaks(self.data, self.mask, peaks, xtol, vmin)
-
-@dataclass
-class PatternsStreakFinder(DataContainer):
-    data        : RealArray
-    structure   : Structure2D
-    mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
-
-    def __post_init__(self):
-        super().__post_init__()
-        xp = self.__array_namespace__()
-        if self.data.ndim < 2:
-            raise ValueError(f"Invalid number of dimensions: {self.data.ndim} != 2")
-        if self.data.shape[-2:] != self.mask.shape:
-            self.mask = xp.ones(self.data.shape[-2:], dtype=bool)
-
-    def __getitem__(self, idxs: Indices) -> 'PatternsStreakFinder':
-        return self.replace(data=self.data[idxs])
-
-    @property
-    def shape(self) -> Shape:
-        return self.data.shape
-
-    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
-                     num_threads: int=1) -> List[Peaks]:
         """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
         ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
         between peaks is ``2 * structure.radius``.
@@ -66,13 +33,10 @@ class PatternsStreakFinder(DataContainer):
         Returns:
             Set of detected peaks.
         """
-        peaks = detect_peaks(self.data, self.mask, self.structure.rank, vmin,
-                             num_threads=num_threads)
-        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
-                            num_threads=num_threads)
+        peaks = detect_peaks(self.data, self.mask, self.finder.structure.rank, vmin)[0]
+        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts)
 
-    def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0, num_threads: int=1) -> List[RealArray]:
+    def detect_streaks(self, peaks: Peaks, xtol: float, vmin: float) -> StreakFinderResult:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -89,9 +53,4 @@ class PatternsStreakFinder(DataContainer):
         Returns:
             A list of detected streaks.
         """
-        xp = self.__array_namespace__()
-        result = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
-                                lookahead, nfa, num_threads=num_threads)
-        if isinstance(result, list):
-            return [xp.asarray(pattern.to_lines()) for pattern in result]
-        return [xp.asarray(result.to_lines()),]
+        return self.finder.detect_streaks(self.data, self.mask, peaks, xtol, vmin)

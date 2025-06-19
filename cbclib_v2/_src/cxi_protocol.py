@@ -11,7 +11,6 @@ Examples:
     CXIProtocol(paths={...})
 """
 from dataclasses import dataclass, field
-from functools import partial
 from enum import Enum
 from glob import iglob
 from multiprocessing import Pool
@@ -19,8 +18,7 @@ import os
 import fnmatch
 import re
 from types import TracebackType
-from typing import (Callable, ClassVar, Dict, Iterator, List, Literal, Tuple, TypeVar,
-                    cast, get_type_hints)
+from typing import Callable, ClassVar, Dict, Iterator, List, Literal, Tuple, TypeVar, cast
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
@@ -104,10 +102,9 @@ class CXIProtocol(BaseProtocol):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'paths': 'paths', 'kinds': 'kinds'},
-                             types=get_type_hints(cls))
+            return INIParser.from_container(cls)
         if ext == 'json':
-            return JSONParser({'paths': 'paths', 'kinds': 'kinds'})
+            return JSONParser.from_container(cls)
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -333,7 +330,7 @@ class CXIWriter():
         return None, self.protocol.get_paths(attr)[0]
 
     def save_stack(self, attr: str, data: Array, mode: str='overwrite',
-                    idxs: Indices | None=None) -> None:
+                   idxs: Indices | None=None):
         xp = array_namespace(data)
         file, cxi_path = self.find_dataset(attr)
 
@@ -367,7 +364,7 @@ class CXIWriter():
                                 chunks=(1,) + data.shape[1:],
                                 maxshape=(None,) + data.shape[1:])
 
-    def save_data(self, attr: str, data: Array) -> None:
+    def save_data(self, attr: str, data: Array):
         file, cxi_path = self.find_dataset(attr)
 
         if file is not None and cxi_path in file:
@@ -437,7 +434,7 @@ class CXIStore(FileStore):
 
     names       : str | List[str]
     mode        : Mode = 'r'
-    protocol    : CXIProtocol = CXIProtocol.read()
+    protocol    : CXIProtocol = field(default_factory=CXIProtocol.read)
     files       : Dict[str, h5py.File | None] = field(default_factory=dict)
     indices     : Dict[str, CXIIndices] = field(default_factory=dict)
 
@@ -601,14 +598,9 @@ class ExtraProtocol(BaseProtocol):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'experiment': ('folder', 'geom_path', 'modules', 'pattern',
-                                             'proposal', 'source', 'starts_at'),
-                              'paths': 'paths', 'kinds': 'kinds'},
-                              types=get_type_hints(cls))
+            return INIParser.from_container(cls, 'experiment')
         if ext == 'json':
-            return JSONParser({'experiment': ('folder', 'geom_path', 'modules', 'pattern',
-                                              'proposal', 'source', 'starts_at'),
-                               'paths': 'paths', 'kinds': 'kinds'})
+            return JSONParser.from_container(cls, 'experiment')
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -712,8 +704,9 @@ class ExtraReader():
     protocol    : ExtraProtocol
     geom        : JUNGFRAUGeometry
 
-    def load(self, attr: str, idxs: ExtraIndices, ss_idxs: Indices, fs_idxs: Indices, processes: int,
-             proc: Processor | None, verbose: bool, xp: ArrayNamespace) -> Array:
+    def load(self, attr: str, idxs: ExtraIndices, ss_idxs: Indices, fs_idxs: Indices,
+             processes: int, proc: Processor | None, verbose: bool, xp: ArrayNamespace
+             ) -> Array:
         stack = []
         with Pool(processes=processes, initializer=ExtraReadWorker.initializer,
                   initargs=(self.protocol, self.geom, attr, ss_idxs, fs_idxs, proc)) as pool:

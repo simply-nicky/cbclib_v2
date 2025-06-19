@@ -1,28 +1,48 @@
 from multiprocessing import Pool
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Tuple, overload
-from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Tuple, Type, TypeVar, overload
+from dataclasses import dataclass, field
 from tqdm.auto import tqdm
+
 from .annotations import (ArrayNamespace, BoolArray, IntArray, NDArray, NDRealArray, NumPy,
                           ReadOut, RealArray, ROI)
 from .data_container import ArrayContainer, Container, D, array_namespace, split
 from .data_processing import CrystData, RegionDetector, StreakDetector, Streaks, Peaks
 from .label import Structure2D, Structure3D, Regions2D
+from .parser import JSONParser, INIParser, Parser
 from ..indexer.cbc_data import MillerWithRLP, Patterns
-from ..indexer.cbc_indexing import CBDIndexer, TiltOverAxis
-from ..indexer.cbc_setup import BaseSetup, TiltOverAxisState, XtalState
+from ..indexer.cbc_indexing import CBDIndexer
+from ..indexer.cbc_setup import BaseSetup, TiltOverAxisState, XtalList, XtalState
+
+P = TypeVar("P", bound='BaseParameters')
+
+class BaseParameters(Container):
+    @classmethod
+    def parser(cls, ext: str='ini') -> Parser:
+        if ext == 'ini':
+            return INIParser.from_container(cls, default='parameters')
+        if ext == 'json':
+            return JSONParser.from_container(cls, default='parameters')
+        raise ValueError(f"Invalid format: {ext}")
+
+    @classmethod
+    def read(cls: Type[P], file: str, ext: str='ini') -> P:
+        return cls.from_dict(**cls.parser(ext).read(file))
 
 @dataclass
-class ROIParameters(Container):
-    xmin    : int
-    xmax    : int
-    ymin    : int
-    ymax    : int
+class ROIParameters(BaseParameters):
+    xmin    : int = 0
+    xmax    : int = 0
+    ymin    : int = 0
+    ymax    : int = 0
 
     def to_roi(self) -> ROI:
         return (self.ymin, self.ymax, self.xmin, self.xmax)
 
+    def size(self) -> int:
+        return max((self.ymax - self.ymin) * (self.xmax - self.xmin), 0)
+
 @dataclass
-class StructureParameters(Container):
+class StructureParameters(BaseParameters):
     radius          : int
     rank            : int
 
@@ -46,16 +66,15 @@ class CrystMetadata(ArrayContainer):
     whitefield  : RealArray
 
 @dataclass
-class MaskParameters(Container):
+class MaskParameters(BaseParameters):
     method  : Literal['all-bad', 'no-bad', 'range', 'snr', 'std']
     vmin    : int = 0
     vmax    : int = 65535
     snr_max : float = 3.0
     std_min : float = 0.0
-    roi     : ROIParameters | None = None
 
 @dataclass
-class BackgroundParameters(Container):
+class BackgroundParameters(BaseParameters):
     method  : Literal['mean-poisson', 'median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
     r0      : float = 0.0
     r1      : float = 0.5
@@ -63,19 +82,20 @@ class BackgroundParameters(Container):
     lm      : float = 9.0
 
 @dataclass
-class MetadataParameters(Container):
+class MetadataParameters(BaseParameters):
     mask        : MaskParameters
     background  : BackgroundParameters
-    num_threads : int
+    roi         : ROIParameters = field(default_factory=ROIParameters)
+    num_threads : int = 1
 
 def create_metadata(frames: NDRealArray, params: MetadataParameters) -> CrystMetadata:
     xp = array_namespace(frames)
     data = CrystData(data=frames)
 
     if params.mask.method == 'all-bad':
-        if params.mask.roi is None:
+        if params.roi.size() == 0:
             raise ValueError("No ROI is provided")
-        data = data.update_mask(method='all-bad', roi=params.mask.roi.to_roi())
+        data = data.update_mask(method='all-bad', roi=params.roi.to_roi())
 
     if params.mask.method == 'range':
         data = data.update_mask(method='range', vmin=params.mask.vmin, vmax=params.mask.vmax)
@@ -155,7 +175,7 @@ class StreakParameters(RegionParameters):
     nfa         : int
 
 @dataclass
-class StreakFinderParameters(Container):
+class StreakFinderParameters(BaseParameters):
     peaks       : RegionParameters
     streaks     : StreakParameters
     center      : Tuple[float, float] | None = None
@@ -180,7 +200,7 @@ def find_streaks(frames: NDArray, metadata: CrystMetadata, params: StreakFinderP
     return det_obj, streaks, peaks
 
 @dataclass
-class CBDIndexingParameters(Container):
+class CBDIndexingParameters(BaseParameters):
     patterns_file   : str
     output_file     : str
     shape           : Tuple[int, int, int]
@@ -191,13 +211,17 @@ class CBDIndexingParameters(Container):
     vicinity        : StructureParameters
     connectivity    : StructureParameters
 
+    def __post_init__(self):
+        if not isinstance(self.shape, tuple):
+            self.shape = (self.shape[0], self.shape[1], self.shape[2])
+
 def pre_indexing(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIndexer,
                  params: CBDIndexingParameters, state: BaseSetup, parallel: bool=True
                  ) -> Tuple[IntArray, TiltOverAxisState]:
     num_threads = params.num_threads if parallel else 1
-    xp = array_namespace(state)
+    xp = array_namespace(candidates, patterns)
     centers = patterns.sample(xp.full(patterns.shape[0], 0.5))
-    points = indexer.points_to_kout(centers, state)
+    points = indexer.points_to_kout(centers, state, xp)
     rotograms = indexer.index(candidates, patterns, points, state)
     rotomap = indexer.rotomap(params.shape, rotograms, params.width, num_threads)
     peaks = indexer.to_peaks(rotomap, params.threshold)
@@ -206,38 +230,39 @@ def pre_indexing(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDInde
 
 def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState, state: BaseSetup,
                         xp: ArrayNamespace=NumPy) -> Iterator[MillerWithRLP]:
-    q1, q2 = indexer.patterns_to_q(patterns, state)
+    q1, q2 = indexer.patterns_to_q(patterns, state, xp)
     q_max = xp.max((xp.sqrt(xp.sum(q1.q**2, axis=-1)), xp.sqrt(xp.sum(q2.q**2, axis=-1))))
     hkl = indexer.xtal.hkl_in_ball(q_max, xtal, xp)
-    return indexer.xtal.hkl_range(patterns.indices(), hkl, xtal, xp)
+    return indexer.xtal.hkl_range(patterns.index.unique(), hkl, xtal, xp)
 
 def run_pre_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup,
                      params: CBDIndexingParameters, chunksize: int=1, xp: ArrayNamespace=NumPy
-                     ) -> Tuple[IntArray, XtalState]:
-    rlp_iterator = indexing_candidates(CBDIndexer(), patterns, xtals, state, xp)
-    frames, solutions = [], []
+                     ) -> XtalList:
+    indexer = CBDIndexer()
+    rlp_iterator = indexing_candidates(indexer, patterns, xtals, state, xp)
+    solutions: List[XtalList] = []
     total = len(patterns) // chunksize + (len(patterns) % chunksize > 0)
 
     if len(xtals) == 1:
         iterator = zip(split(patterns, chunksize), split(rlp_iterator, chunksize))
 
         for pattern, candidates in tqdm(iterator, total=total):
-            idxs, tilts = pre_indexing(candidates, pattern, CBDIndexer(), params, state)
-            frames.append(pattern.indices()[idxs])
-            solutions.append(TiltOverAxis().of_xtal(xtals, tilts))
+            idxs, tilts = pre_indexing(candidates, pattern, indexer, params, state)
+            solution = indexer.solutions(xtals, idxs, tilts, pattern)
+            solutions.append(solution)
     elif len(xtals) == len(patterns):
         iterator = zip(split(patterns, chunksize), split(rlp_iterator, chunksize),
                        split(xtals, chunksize))
 
         for pattern, candidates, xtal in tqdm(iterator, total=total):
-            idxs, tilts = pre_indexing(candidates, pattern, CBDIndexer(), params, state)
-            frames.append(pattern.indices()[idxs])
-            solutions.append(TiltOverAxis().of_xtal(xtal[idxs], tilts))
+            idxs, tilts = pre_indexing(candidates, pattern, indexer, params, state)
+            solution = indexer.solutions(xtal, idxs, tilts, pattern)
+            solutions.append(solution)
     else:
         raise ValueError(f'Number of crystals ({len(xtals):d}) and patterns ({len(patterns):d}) '\
                          'are inconsistent')
 
-    return xp.concatenate(frames), XtalState.concatenate(solutions)
+    return XtalList.concatenate(solutions)
 
 worker : 'IndexingWorker'
 
@@ -246,25 +271,23 @@ class IndexingWorker():
     state   : BaseSetup
     params  : CBDIndexingParameters
     xtal    : XtalState
+    indexer : CBDIndexer
 
-    def __call__(self, args: Tuple[Dict[str, Any], Dict[str, Any]]) -> Tuple[IntArray, RealArray]:
+    def __call__(self, args: Tuple[Dict[str, Any], Dict[str, Any]]) -> XtalList:
         candidates, patterns = MillerWithRLP(**args[0]), Patterns(**args[1])
-        idxs, tilts = pre_indexing(candidates, patterns, CBDIndexer(),
-                                   self.params, self.state, False)
-        frames = patterns.indices()[idxs]
-        if len(self.xtal) == 1:
-            solutions = TiltOverAxis().of_xtal(self.xtal, tilts)
-        else:
-            solutions = TiltOverAxis().of_xtal(self.xtal[frames], tilts)
-        return frames, solutions.basis
+        idxs, tilts = pre_indexing(candidates, patterns, self.indexer, self.params, self.state,
+                                   False)
+        initial = self.xtal if len(self.xtal) == 1 else self.xtal[idxs]
+        return self.indexer.solutions(initial, idxs, tilts, patterns)
 
     @classmethod
-    def initializer(cls, state: BaseSetup, params: CBDIndexingParameters, xtal: XtalState):
+    def initializer(cls, state: BaseSetup, params: CBDIndexingParameters, xtal: XtalState,
+                    indexer: CBDIndexer):
         global worker
-        worker = cls(state, params, xtal)
+        worker = cls(state, params, xtal, indexer)
 
     @staticmethod
-    def run(args: Tuple[Dict[str, Any], Dict[str, Any]]) -> Tuple[IntArray, RealArray]:
+    def run(args: Tuple[Dict[str, Any], Dict[str, Any]]) -> XtalList:
         return worker(args)
 
 def dict_range(containers: Iterable[D]) -> Iterator[Dict[str, Any]]:
@@ -272,16 +295,14 @@ def dict_range(containers: Iterable[D]) -> Iterator[Dict[str, Any]]:
         yield container.to_dict()
 
 def run_pre_indexing_pool(patterns: Patterns, xtals: XtalState, state: BaseSetup,
-                          params: CBDIndexingParameters, xp: ArrayNamespace=NumPy
-                          ) -> Tuple[IntArray, XtalState]:
-    rlp_iterator = indexing_candidates(CBDIndexer(), patterns, xtals, state, xp)
-    frames, solutions = [], []
+                          params: CBDIndexingParameters, xp: ArrayNamespace=NumPy) -> XtalList:
+    indexer = CBDIndexer()
+    rlp_iterator = indexing_candidates(indexer, patterns, xtals, state, xp)
+    solutions : List[XtalList] = []
     with Pool(processes=params.num_threads, initializer=IndexingWorker.initializer,
-              initargs=(state, params, xtals)) as pool:
+              initargs=(state, params, xtals, indexer)) as pool:
         iterator = zip(dict_range(rlp_iterator), dict_range(patterns))
-        for frame, solution in tqdm(pool.imap(IndexingWorker.run, iterator),
-                                    total=len(patterns)):
-            frames.append(frame)
+        for solution in tqdm(pool.imap(IndexingWorker.run, iterator), total=len(patterns)):
             solutions.append(solution)
 
-    return xp.concatenate(frames), XtalState(xp.concatenate(solutions))
+    return XtalList.concatenate(solutions)

@@ -4,7 +4,7 @@ import dataclasses
 from dataclasses import MISSING, Field, fields
 from typing_extensions import dataclass_transform
 from jax.tree_util import register_pytree_with_keys
-from .data_container import DataContainer
+from .data_container import Container
 from .annotations import KeyArray, PyTree
 
 Generator = Callable[[KeyArray], Any]
@@ -74,7 +74,7 @@ def field(*, default: Any=MISSING, default_factory: Any=MISSING, random: Any=MIS
 S = TypeVar('S', bound='BaseState')
 
 @dataclass_transform(field_specifiers=(field,))
-class BaseState(DataContainer):
+class BaseState(Container):
     __dynamic_fields__      : ClassVar[Dict[str, DynamicField]]
     __static_fields__       : ClassVar[Dict[str, Field]]
 

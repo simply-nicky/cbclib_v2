@@ -1,10 +1,16 @@
 from dataclasses import Field
 from typing import (Any, Callable, ClassVar, Dict, Generic, List, Literal, NamedTuple, Protocol,
                     Sequence, Tuple, Type, TypeVar, Union, cast, overload, runtime_checkable)
+from types import ModuleType
 import numpy as np
 import numpy.typing as npt
 from jax import Array as JaxArray, Device
 import jax.numpy as jnp
+
+GenericAlies = type(list[int]) | type(List[int])
+UnionType = type(int | list) | type(Union[int, list])
+
+AnyType = Type | GenericAlies | UnionType | str | Any
 
 T = TypeVar('T')
 Self = TypeVar('Self')
@@ -16,6 +22,14 @@ class ReferenceType(Generic[T]):
         ...
     def __call__(self) -> T:
         ...
+
+@runtime_checkable
+class Sized(Protocol):
+    def __len__(self) -> int: ...
+
+@runtime_checkable
+class SupportsNamespace(Protocol):
+    def __array_namespace__(self) -> 'ModuleType | ArrayNamespace': ...
 
 @runtime_checkable
 class DataclassInstance(Protocol):
@@ -31,7 +45,7 @@ class SupportsDType(Protocol):
 DTypeLike = Union[
     str,            # like 'float32', 'int32'
     type[Any],      # like np.float32, np.int32, float, int
-    np.dtype,       # like np.dtype('float32'), np.dtype('int32')
+    DType,       # like np.dtype('float32'), np.dtype('int32')
     SupportsDType,  # like xp.float32, xp.int32
 ]
 
@@ -74,7 +88,7 @@ RealSequence = float | np.floating[Any] | Sequence[float] | RealArray
 ROI = List[int] | Tuple[int, int, int, int] | IntArray
 
 PyTree = Any
-ExpandedType = Type | Tuple[Type, List]
+ExpandedType = AnyType | Tuple[AnyType, List]
 
 Norm = Literal['backward', 'forward', 'ortho']
 Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
@@ -86,9 +100,14 @@ class EighResult(NamedTuple):
     eigenvectors: Array
 
 class UniqueInverseResult(NamedTuple):
-    """Struct returned by :func:`jax.numpy.unique_inverse`."""
+    """Struct returned by :func:`unique_inverse`."""
     values: Array
     inverse_indices: Array
+
+class UniqueCountsResult(NamedTuple):
+    """Struct returned by :func:`unique_counts`."""
+    values: Array
+    counts: Array
 
 class LinalgNamespace(Protocol):
     def det(self, a: ArrayLike) -> RealArray:
@@ -1578,6 +1597,30 @@ class ArrayNamespace(Protocol):
             Array([[ 1., -2., -4.],
                    [ 3.,  2., -4.],
                    [-2., -3.,  1.]], dtype=float32)
+        """
+        ...
+
+    def fromstring(self, string: str, dtype: DTypeLike = float, count: int = -1, *,
+                   sep: str) -> Array:
+        """Convert a string of text into 1-D JAX array.
+
+        Array API implementation of :func:`numpy.fromstring`.
+
+        Args:
+            string: input string containing the data.
+            dtype: optional. Desired data type for the array. Default is ``float``.
+            count: optional integer specifying the number of items to read from the string.
+                If -1 (default), all items are read.
+            sep: the string used to separate values in the input string.
+
+        Returns:
+            A 1-D array containing the parsed data from the input string.
+
+        Examples:
+            >>> xp.fromstring("1 2 3", dtype=int, sep=" ")
+            Array([1, 2, 3], dtype=int32)
+            >>> xp.fromstring("0.1, 0.2, 0.3", dtype=float, count=2, sep=",")
+            Array([0.1, 0.2], dtype=float32)
         """
         ...
 
@@ -3358,6 +3401,50 @@ class ArrayNamespace(Protocol):
              [2 3]]
             >>> print(counts)
             [2 1]
+        """
+        ...
+
+    def unique_counts(self, x: ArrayLike, /) -> UniqueCountsResult:
+        """Return unique values from x, along with counts.
+
+        Array API implementation of :func:`numpy.unique_counts`; this is equivalent to calling
+        :func:`unique` with `return_counts` and `equal_nan` set to True.
+
+        Args:
+            x: N-dimensional array from which unique values will be extracted.
+
+        Returns:
+            A tuple ``(values, counts)``, with the following properties:
+
+            - ``values``:
+                an array of shape ``(n_unique,)`` containing the unique values from ``x``.
+            - ``counts``:
+                An array of shape ``(n_unique,)``. Contains the number of occurrences of each unique
+                value in ``x``.
+
+        See also:
+            - :func:`unique`: general function for computing unique values.
+            - :func:`unique_values`: compute only ``values``.
+            - :func:`unique_inverse`: compute only ``values`` and ``inverse``.
+            - :func:`unique_all`: compute ``values``, ``indices``, ``inverse_indices``,
+                and ``counts``.
+
+        Examples:
+            Here we compute the unique values in a 1D array:
+
+            >>> x = xp.array([3, 4, 1, 3, 1])
+            >>> result = xp.unique_counts(x)
+
+            The result is a :class:`~typing.NamedTuple` with two named attributes.
+            The ``values`` attribute contains the unique values from the array:
+
+            >>> result.values
+            Array([1, 3, 4], dtype=int32)
+
+            The ``counts`` attribute contains the counts of each unique value in the input:
+
+            >>> result.counts
+            Array([2, 2, 1], dtype=int32)
         """
         ...
 
