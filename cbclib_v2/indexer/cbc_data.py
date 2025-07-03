@@ -201,7 +201,7 @@ class Miller(State, ArrayContainer):
         hkl = self.hkl
         shape = hkl.shape[:-1] + offsets.shape[:-1] + hkl.shape[-1:]
         hkl = xp.reshape(xp.reshape(hkl, (-1, 3))[..., None, :] + offsets, shape)
-        return self.replace(hkl=hkl)
+        return self.replace(hkl=hkl, index=self.index[..., None])
 
 class RLP(State, ArrayContainer):
     index   : IntArray

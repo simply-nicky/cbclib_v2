@@ -45,7 +45,7 @@ class SupportsDType(Protocol):
 DTypeLike = Union[
     str,            # like 'float32', 'int32'
     type[Any],      # like np.float32, np.int32, float, int
-    DType,       # like np.dtype('float32'), np.dtype('int32')
+    DType,          # like np.dtype('float32'), np.dtype('int32')
     SupportsDType,  # like xp.float32, xp.int32
 ]
 

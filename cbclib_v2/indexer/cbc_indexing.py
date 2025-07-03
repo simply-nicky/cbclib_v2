@@ -1,7 +1,6 @@
 from typing import Callable, Iterator, List, Literal, Protocol, Sequence, Tuple
 from dataclasses import dataclass
-import jax.numpy as jnp
-from jax import random, vmap
+from jax import random
 from .cbc_data import (AnyPoints, CBData, CBDPoints, CircleState, LaueVectors, Miller,
                        MillerWithRLP, Patterns, PointsWithK, RLP, Rotograms, UCA)
 from .cbc_setup import (EulerState, BaseLens, BaseSetup, BaseState, RotationState, TiltState,
@@ -13,24 +12,6 @@ from .._src.data_container import IndexArray, add_at, array_namespace
 from .._src.src.bresenham import accumulate_lines
 from .._src.src.label import PointSet3D, Structure3D, binary_dilation, center_of_mass, label
 from .._src.state import State
-
-def key_combine(key: KeyArray, hkl: IntArray, xp: ArrayNamespace = JaxNumPy) -> IntArray:
-    array = xp.reshape(hkl, (-1, 3))
-
-    def combine(key: IntArray, val: IntArray) -> IntArray:
-        bits = xp.asarray(random.key_data(key))
-        new_bits = xp.asarray(random.key_data(vmap(random.key, 0, 0)(val)))
-        bits ^= new_bits + xp.uint32(0x9e3779b9) + (bits << 6) + (bits >> 2)
-        return xp.asarray(random.wrap_key_data(jnp.asarray(bits)))
-
-    keys = xp.broadcast_to(xp.asarray(key), (array.shape[0],))
-    keys = combine(combine(combine(keys, array[:, 0]), array[:, 1]), array[:, 2])
-    return xp.reshape(keys, hkl.shape[:-1])
-
-def uniform(keys: IntArray, size: int, xp: ArrayNamespace = JaxNumPy) -> RealArray:
-    map_func = vmap(random.uniform, in_axes=(0, None), out_axes=-1)
-    res = xp.asarray(map_func(xp.ravel(keys), (size,)))
-    return xp.reshape(res, (size,) + keys.shape)
 
 class Transform():
     def __call__(self, argument: RealArray, state: State) -> RealArray:
@@ -91,10 +72,9 @@ class Circle(Transform):
 class Xtal():
     def hkl_in_aperture(self, theta: float | RealArray, hkl: IntArray, state: XtalState,
                         xp: ArrayNamespace) -> Miller:
-        index = xp.broadcast_to(xp.expand_dims(xp.arange(len(state)),
-                                               axis=tuple(range(1, hkl.ndim))),
-                                (len(state),) + hkl.shape[:-1])
-        hkl = xp.broadcast_to(hkl[None, ...], (len(state),) + hkl.shape)
+        index = xp.broadcast_to(xp.arange(len(state)), (hkl.size // hkl.shape[-1], len(state)))
+        index = xp.reshape(index, hkl.shape[:-1] + (len(state),))
+        hkl = xp.broadcast_to(hkl[..., None, :], hkl.shape[:-1] + (len(state,), hkl.shape[-1]))
         miller = Miller(hkl=hkl, index=index)
 
         miller = self.hkl_to_q(miller, state, xp)
@@ -121,8 +101,7 @@ class Xtal():
 
     def hkl_to_q(self, miller: Miller, state: XtalState, xp: ArrayNamespace) -> MillerWithRLP:
         basis = xp.reshape(state.basis, (-1, 3, 3))
-        hkl = xp.reshape(miller.hkl_indices, (miller.hkl.shape[0], -1, miller.hkl.shape[-1]))
-        q = xp.sum(basis[miller.index][..., None, :, :] * hkl[..., None], axis=-2)
+        q = xp.sum(basis[miller.index] * miller.hkl_indices[..., None], axis=-2)
         return MillerWithRLP(index=miller.index, hkl=miller.hkl, q=xp.reshape(q, miller.hkl.shape))
 
     def q_to_hkl(self, rlp: RLP, state: XtalState, xp: ArrayNamespace) -> MillerWithRLP:
@@ -194,8 +173,7 @@ class Lens():
     def source_lines(self, miller: MillerWithRLP, state: BaseLens | BaseSetup, xp: ArrayNamespace
                      ) -> LaueVectors:
         kin, is_good = source_lines(miller.q, self.kin_edges(state, xp), xp=xp)
-        shape = (miller.q.shape[0], miller.q.size // (miller.q.shape[0] * miller.q.shape[-1]))
-        index = xp.reshape(xp.broadcast_to(miller.index[..., None], shape), miller.q.shape[:-1])
+        index = xp.broadcast_to(miller.index, miller.q.shape[:-1])
         laue = LaueVectors(index=index[..., None], hkl=miller.hkl, q=miller.q[..., None, :],
                            kin=kin, kout=kin + miller.q[..., None, :])
         return laue[is_good]
@@ -489,20 +467,15 @@ class CBDModel(CBDSetup):
         return CBData(miller, patterns.sample(x), mask)
 
     def init_data_random(self, key: KeyArray, patterns: Patterns, num_points: int,
-                         state: BaseState, quantile: float=1.0, combine_key: bool=False
-                         ) -> 'CBData':
+                         state: BaseState, quantile: float=1.0) -> 'CBData':
         xp = state.__array_namespace__()
         if xp.clip(quantile, 0.0, 1.0) == 0.0:
             raise ValueError(f"Invalid quantile value: {quantile}")
 
         miller = self.init_miller(patterns, state, xp)
-
-        if combine_key:
-            x = uniform(key_combine(key, miller.hkl_indices), num_points, xp)
-        else:
-            x = xp.asarray(random.uniform(key, (num_points,) + miller.hkl.shape[:-1]))
-
+        x = xp.asarray(random.uniform(key, miller.hkl.shape[:-1] + (num_points,)))
         mask = self._init_mask(xp.asarray(patterns.index), quantile, xp)
+
         return CBData(miller, patterns.sample(x), mask)
 
     def line_loss(self, loss: Loss='l1', xp: ArrayNamespace=JaxNumPy) -> 'CBDLoss':
@@ -532,6 +505,7 @@ class CBDLoss():
         points = self.project_data(data, state, xp)
         dist = self.distance_matrix(points, state, xp)
         dist = xp.min(dist, axis=-1)
+        # Sorting distances according to frame_id
         indices = xp.lexsort((dist, data.points.index), axis=0)
         return xp.mean(dist[indices] * data.mask)
 
@@ -540,7 +514,7 @@ class CBDLoss():
         points = self.project_data(data, state, xp)
         dist = self.distance_matrix(points, state, xp)
         idxs = xp.argmin(dist, axis=-1)
-        hkl = xp.take_along_axis(points.hkl, idxs[None, ..., None], axis=0)[0]
+        hkl = xp.take_along_axis(points.hkl, idxs[..., None, None], axis=-2)[..., 0, :]
         return Miller(index=points.index, hkl=hkl)
 
     def per_pattern(self, data: CBData, state: BaseState) -> RealArray:
@@ -548,7 +522,8 @@ class CBDLoss():
         points = self.project_data(data, state, xp)
         dist = self.distance_matrix(points, state, xp)
         dist = xp.min(dist, axis=-1)
-        indices = xp.lexsort((dist, points.index), axis=0)
+        # Sorting distances according to frame_id
+        indices = xp.lexsort((dist, data.points.index), axis=0)
         return add_at(xp.zeros(len(state.xtal)), points.index, dist[indices] * data.mask, xp)
 
     def per_streak(self, data: CBData, state: BaseState) -> RealArray:

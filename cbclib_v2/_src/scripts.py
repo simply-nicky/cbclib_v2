@@ -2,18 +2,19 @@ from multiprocessing import Pool
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Tuple, Type, TypeVar, overload
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
-
 from .annotations import (ArrayNamespace, BoolArray, IntArray, NDArray, NDRealArray, NumPy,
                           ReadOut, RealArray, ROI)
 from .data_container import ArrayContainer, Container, D, array_namespace, split
 from .data_processing import CrystData, RegionDetector, StreakDetector, Streaks, Peaks
 from .label import Structure2D, Structure3D, Regions2D
 from .parser import JSONParser, INIParser, Parser
+from .streak_finder import StreakFinderResult
 from ..indexer.cbc_data import MillerWithRLP, Patterns
 from ..indexer.cbc_indexing import CBDIndexer
 from ..indexer.cbc_setup import BaseSetup, TiltOverAxisState, XtalList, XtalState
 
 P = TypeVar("P", bound='BaseParameters')
+Detected = StreakFinderResult | List[StreakFinderResult]
 
 class BaseParameters(Container):
     @classmethod
@@ -134,7 +135,7 @@ class RegionParameters(Container):
     npts        : int
 
 @dataclass
-class RegionFinderParameters(Container):
+class RegionFinderParameters(BaseParameters):
     regions     : RegionParameters
     num_threads : int
 
@@ -169,35 +170,41 @@ def pattern_recognition(metadata: CrystMetadata, params: PatternRecognitionParam
     return pattern_goodness
 
 @dataclass
-class StreakParameters(RegionParameters):
+class StreakParameters(Container):
+    structure   : StructureParameters
     xtol        : float
+    vmin        : float
     min_size    : int
     nfa         : int
 
 @dataclass
 class StreakFinderParameters(BaseParameters):
-    peaks       : RegionParameters
-    streaks     : StreakParameters
-    center      : Tuple[float, float] | None = None
-    num_threads : int = 1
+    peaks               : RegionParameters
+    streaks             : StreakParameters
+    center              : Tuple[float, float] | None = None
+    scale_whitefield    : bool = False
+    num_threads         : int = 1
 
 def find_streaks(frames: NDArray, metadata: CrystMetadata, params: StreakFinderParameters
-                 ) -> Tuple[StreakDetector, Streaks, List[Peaks]]:
+                 ) -> Tuple[Streaks, Detected, List[Peaks], StreakDetector]:
     if frames.ndim < 2:
         raise ValueError("Frame array must be at least 2 dimensional")
     data = CrystData(data=frames.reshape((-1,) + frames.shape[-2:]), mask=metadata.mask,
                      std=metadata.std, whitefield=metadata.whitefield)
-    data = data.scale_whitefield(method='median', num_threads=params.num_threads)
+    if params.scale_whitefield:
+        data = data.scale_whitefield(method='median', num_threads=params.num_threads)
     data = data.update_snr()
     det_obj = data.streak_detector(params.streaks.structure.to_structure('2d'))
     peaks = det_obj.detect_peaks(params.peaks.vmin, params.peaks.npts,
                                  params.peaks.structure.to_structure('2d'), params.num_threads)
-    streaks = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
-                                     params.streaks.min_size, nfa=params.streaks.nfa,
-                                     num_threads=params.num_threads)
+    detected = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
+                                      params.streaks.min_size, nfa=params.streaks.nfa,
+                                      num_threads=params.num_threads)
+    streaks = det_obj.to_streaks(detected)
     if params.center is not None:
-        streaks = streaks.concentric_only(params.center[0], params.center[1], 0.33)
-    return det_obj, streaks, peaks
+        mask = streaks.concentric_only(params.center[0], params.center[1])
+        streaks = streaks[mask]
+    return streaks, detected, peaks, det_obj
 
 @dataclass
 class CBDIndexingParameters(BaseParameters):

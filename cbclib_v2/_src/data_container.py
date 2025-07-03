@@ -15,27 +15,27 @@ from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, D
                           Shape, Sized, SupportsNamespace)
 
 def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace = JaxNumPy) -> Array:
+           xp: ArrayNamespace=JaxNumPy) -> Array:
     if xp is jnp:
         return jnp.asarray(a).at[indices].add(b)
     np.add.at(np.asarray(a), indices, b)
     return np.asarray(a)
 
-def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace = JaxNumPy) -> Array:
+def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace=JaxNumPy) -> Array:
     sort_idxs = xp.argsort(a)
     idxs = set_at(xp.zeros(a.size, dtype=int), sort_idxs, xp.arange(a.size))
     result = xp.full(xp.unique(indices).size, a.size + 1, dtype=int)
     return sort_idxs[min_at(result, indices, idxs)]
 
 def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace = JaxNumPy) -> Array:
+           xp: ArrayNamespace=JaxNumPy) -> Array:
     if xp is jnp:
         return jnp.asarray(a).at[indices].min(b)
     np.minimum.at(np.asarray(a), indices, b)
     return np.asarray(a)
 
 def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace = JaxNumPy) -> Array:
+           xp: ArrayNamespace=JaxNumPy) -> Array:
     if xp is jnp:
         return jnp.asarray(a).at[indices].set(b)
     a[indices] = b
@@ -310,7 +310,7 @@ class IndexArray(DataContainer):
         xp = self.__array_namespace__()
         return IndexArray(xp.asarray(self)[idxs])
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[np.integer[Any]]:
         return self.index.array.__iter__()
 
     def __repr__(self) -> str:

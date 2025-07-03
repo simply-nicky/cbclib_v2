@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, FileStore, Kinds
 from .data_container import DataContainer, IndexArray
-from .streak_finder import Peaks, detect_peaks, detect_streaks, filter_peaks
+from .streak_finder import Peaks, StreakFinderResult, detect_peaks, detect_streaks, filter_peaks
 from .streaks import Streaks
 from .annotations import (ArrayLike, BoolArray, Indices, IntArray, IntSequence, RealArray,
                           RealSequence, ReferenceType, ROI, Shape)
@@ -616,7 +616,8 @@ class StreakDetector(DetectorBase):
                             num_threads=num_threads)
 
     def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0, num_threads: int=1) -> Streaks:
+                       lookahead: int=0, nfa: int=0, num_threads: int=1
+                       ) -> StreakFinderResult | List[StreakFinderResult]:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -633,15 +634,17 @@ class StreakDetector(DetectorBase):
         Returns:
             A list of detected streaks.
         """
+        return detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
+                              lookahead, nfa, num_threads=num_threads)
+
+    def to_streaks(self, result: StreakFinderResult | List[StreakFinderResult]) -> Streaks:
         xp = self.__array_namespace__()
-        result = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
-                                lookahead, nfa, num_threads=num_threads)
         if isinstance(result, list):
             streaks = [xp.asarray(pattern.to_lines()) for pattern in result]
         else:
             streaks = [xp.asarray(result.to_lines()),]
         idxs = xp.concatenate([xp.full((len(pattern),), idx)
-                               for idx, pattern in zip(self.indices, streaks)])
+                                for idx, pattern in zip(self.indices, streaks)])
         lines = xp.concatenate(streaks)
         return Streaks(index=IndexArray(idxs), lines=lines)
 

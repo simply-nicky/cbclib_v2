@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Tuple, TypeVar
 import numpy as np
 import pandas as pd
-from .annotations import RealArray, RealSequence, Shape
+from .annotations import BoolArray, RealArray, RealSequence, Shape
 from .data_container import ArrayContainer, ArrayNamespace, IndexArray, IndexedContainer, NumPy
 from .src.bresenham import draw_lines, write_lines
 
@@ -97,7 +97,7 @@ class Streaks(IndexedContainer, BaseLines):
         return cls(index=IndexArray(xp.asarray(df['index'].to_numpy())),
                    lines=xp.asarray(lines))
 
-    def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float) -> 'Streaks':
+    def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float=0.33) -> BoolArray:
         xp = self.__array_namespace__()
         centers = xp.mean(self.lines.reshape(-1, 2, 2), axis=1)
         norm = xp.stack([self.lines[:, 3] - self.lines[:, 1],
@@ -106,7 +106,7 @@ class Streaks(IndexedContainer, BaseLines):
         prod = xp.sum(norm * r, axis=-1)[..., None]
         proj = r - prod * norm / xp.sum(norm**2, axis=-1)[..., None]
         mask = xp.sqrt(xp.sum(proj**2, axis=-1)) / xp.sqrt(xp.sum(r**2, axis=-1)) < threshold
-        return self[mask]
+        return mask
 
     def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
                           num_threads: int=1) -> pd.DataFrame:

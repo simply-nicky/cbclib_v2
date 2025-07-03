@@ -1,24 +1,5 @@
 from typing import List, Optional, Sequence, Tuple, overload
-from ..annotations import IntArray, NDIntArray, NDRealArray, RealArray, IntSequence
-
-def unique_indices(array: IntArray) -> Tuple[NDIntArray, NDIntArray, NDIntArray]:
-    """Returns the sorted unique elements of a sorted array of integers. There are three optional
-    outputs in addition to the unique elements:
-
-    * the indices of the input array that give the unique values
-    * the indices of the unique array that reconstruct the input array
-
-    Args:
-        array : A sorted array of integers.
-
-    Returns:
-        A tuple of three arrays:
-
-        * The sorted unique values.
-        * The indices of the first occurrences of the unique values in the original array.
-        * The indices to reconstruct the original array from the unique array.
-    """
-    ...
+from ..annotations import IntArray, NDRealArray, RealArray, IntSequence
 
 def binterpolate(inp: RealArray, grid: Sequence[RealArray | IntArray],
                  coords: RealArray | IntArray, num_threads: int=1) -> NDRealArray:
