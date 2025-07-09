@@ -2,6 +2,7 @@ import pytest
 import jax.numpy as jnp
 from jax import random
 import cbclib_v2 as cbc
+from cbclib_v2 import IndexArray
 from cbclib_v2.annotations import ArrayNamespace, KeyArray, RealArray, NumPy
 from cbclib_v2.indexer import (CBData, CBDIndexer, CBDLoss, CBDModel, CircleState, MillerWithRLP,
                                Patterns, PointsWithK, TiltOverAxis, TiltOverAxisState, UCA,
@@ -53,38 +54,39 @@ class TestCBDIndexer():
                          axis=-1)
         index = xp.concatenate((xp.full((num_lines // 2), 0),
                                 xp.full((num_lines - num_lines // 2), 1)))
-        return Patterns(lines=lines, index=index)
+        return Patterns(lines=lines, index=IndexArray(index))
 
     @pytest.fixture
     def points(self, indexer: CBDIndexer, patterns: Patterns, state: FixedState,
                xp: ArrayNamespace) -> PointsWithK:
-        return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)), state)
+        return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)), state, xp)
 
     @pytest.fixture
     def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, state: FixedState,
                 xp: ArrayNamespace) -> MillerWithRLP:
         hkl = indexer.xtal.hkl_in_ball(q_abs, state.xtal, xp)
-        iterator = indexer.xtal.hkl_range(patterns.indices(), hkl, state.xtal, xp)
+        iterator = indexer.xtal.hkl_range(patterns.index.unique(), hkl, state.xtal, xp)
         return MillerWithRLP.concatenate(list(iterator))
 
     @pytest.fixture
     def patterns_uca(self, indexer: CBDIndexer, patterns: Patterns, points: PointsWithK,
-                     state: FixedState) -> UCA:
-        return indexer.patterns_to_uca(patterns, points, state)
+                     state: FixedState, xp: ArrayNamespace) -> UCA:
+        return indexer.patterns_to_uca(patterns, points, state, xp)
 
     @pytest.fixture
-    def candidates(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA
-                   ) -> MillerWithRLP:
-        return indexer.candidates(all_rlp, patterns_uca)[0]
+    def candidates(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA,
+                   xp: ArrayNamespace) -> MillerWithRLP:
+        return indexer.candidates(all_rlp, patterns_uca, xp)[0]
 
     @pytest.fixture
-    def uca(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA) -> UCA:
-        return indexer.candidates(all_rlp, patterns_uca)[1]
+    def uca(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA,
+            xp: ArrayNamespace) -> UCA:
+        return indexer.candidates(all_rlp, patterns_uca, xp)[1]
 
     @pytest.fixture
     def data(self, key: KeyArray, patterns: Patterns, model: CBDModel, state: FixedState,
              num_points: int) -> CBData:
-        return model.init_data(key, patterns, num_points, state)
+        return model.init_data_random(key, patterns, num_points, state)
 
     @pytest.fixture
     def pupil_loss(self, model: CBDModel, xp: ArrayNamespace) -> CBDLoss:
@@ -109,8 +111,9 @@ class TestCBDIndexer():
                                                           uca[uca_idxs].to_dict().values()))
 
     @pytest.fixture
-    def circles(self, indexer: CBDIndexer, candidates: MillerWithRLP, uca: UCA) -> CircleState:
-        return indexer.intersection(candidates, uca)
+    def circles(self, indexer: CBDIndexer, candidates: MillerWithRLP, uca: UCA,
+                xp: ArrayNamespace) -> CircleState:
+        return indexer.intersection(candidates, uca, xp)
 
     def test_intersection(self, indexer: CBDIndexer, circles: CircleState,
                           candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):
@@ -121,8 +124,9 @@ class TestCBDIndexer():
         check_close(xp.sum((pts - uca.kout)**2, axis=-1), xp.ones(pts.shape[:-1]))
 
     @pytest.fixture
-    def endpoints(self, indexer: CBDIndexer, circles: CircleState, uca: UCA) -> RealArray:
-        return indexer.uca_endpoints(circles, uca)
+    def endpoints(self, indexer: CBDIndexer, circles: CircleState, uca: UCA,
+                  xp: ArrayNamespace) -> RealArray:
+        return indexer.uca_endpoints(circles, uca, xp)
 
     def test_endpoints(self, indexer: CBDIndexer, circles: CircleState, endpoints: RealArray,
                        candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):

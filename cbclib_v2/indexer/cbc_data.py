@@ -1,10 +1,11 @@
-from typing import Union
+from typing import Tuple, Union
 from .cbc_setup import TiltOverAxisState
 from .geometry import safe_divide, kxy_to_k
 from .._src.annotations import ArrayNamespace, BoolArray, IntArray, RealArray, Shape
-from .._src.data_container import ArrayContainer, IndexedContainer, array_namespace
+from .._src.data_container import ArrayContainer, IndexArray, IndexedContainer, array_namespace
+from .._src.parser import INIParser, JSONParser, Parser
 from .._src.state import State
-from .._src.streaks import BaseLines
+from .._src.streaks import BaseLines, Streaks
 
 AnyPoints = Union['Points', 'PointsWithK', 'CBDPoints']
 
@@ -23,7 +24,7 @@ class Patterns(State, IndexedContainer, BaseLines):
         l : Third Miller index.
         hkl_id : Bragg reflection index.
     """
-    index       : IntArray
+    index       : IndexArray
     lines       : RealArray
 
     @classmethod
@@ -31,23 +32,62 @@ class Patterns(State, IndexedContainer, BaseLines):
         xp = array_namespace(points)
         lines = xp.reshape(points.points, points.shape[:-1] + (4,))
         index = xp.reshape(points.index, lines.shape[:-1])
-        return cls(index=index, lines=lines)
+        return cls(index=IndexArray(index), lines=lines)
 
     @property
     def points(self) -> 'Points':
-        return Points(index=self.index[..., None], points=super().points)
+        xp = self.__array_namespace__()
+        return Points(index=xp.asarray(self.index)[..., None], points=super().points)
 
     @property
     def pt0(self) -> 'Points':
-        return Points(index=self.index, points=super().pt0)
+        xp = self.__array_namespace__()
+        return Points(index=xp.asarray(self.index), points=super().pt0)
 
     @property
     def pt1(self) -> 'Points':
-        return Points(index=self.index, points=super().pt1)
+        xp = self.__array_namespace__()
+        return Points(index=xp.asarray(self.index), points=super().pt1)
 
     def sample(self, x: RealArray) -> 'Points':
-        pts = super().pt0 + x[..., None] * (super().pt1 - super().pt0)
-        return Points(points=pts, index=self.index)
+        xp = self.__array_namespace__()
+        shape = x.shape + (2,)
+        x = xp.reshape(x, (x.shape[0], -1, 1))
+        pts = super().pt0[..., None, :] + x * (super().pt1 - super().pt0)[..., None, :]
+        return Points(points=xp.reshape(pts, shape), index=xp.asarray(self.index))
+
+class Detector(State):
+    x_pixel_size : float
+    y_pixel_size : float
+
+    def to_indices(self, x: RealArray, y: RealArray) -> Tuple[RealArray, RealArray]:
+        return x / self.x_pixel_size, y / self.y_pixel_size
+
+    def to_coordinates(self, i: RealArray, j: RealArray) -> Tuple[RealArray, RealArray]:
+        return i * self.x_pixel_size, j * self.y_pixel_size
+
+    def to_patterns(self, streaks: Streaks) -> Patterns:
+        xp = array_namespace(streaks)
+        pts = xp.stack(self.to_coordinates(xp.asarray(streaks.x), xp.asarray(streaks.y)), axis=-1)
+        return Patterns(streaks.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
+
+    def to_streaks(self, patterns: Patterns) -> Streaks:
+        xp = array_namespace(patterns)
+        pts = xp.stack(self.to_indices(xp.asarray(patterns.x), xp.asarray(patterns.y)), axis=-1)
+        return Streaks(patterns.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
+
+    @classmethod
+    def parser(cls, ext: str='ini') -> Parser:
+        if ext == 'ini':
+            return INIParser.from_container(cls, default='geometry')
+        if ext == 'json':
+            return JSONParser.from_container(cls, default='geometry')
+
+        raise ValueError(f"Invalid format: {ext}")
+
+    @classmethod
+    def read(cls, file: str, ext: str='ini') -> 'Detector':
+        return cls(**cls.parser(ext).read(file))
 
 class Points(State, ArrayContainer):
     index   : IntArray
@@ -108,7 +148,7 @@ class CircleState(State, ArrayContainer):
     radius  : RealArray
 
 class Rotograms(State, IndexedContainer, BaseLines):
-    index       : IntArray
+    index       : IndexArray
     streak_id   : IntArray
     lines       : RealArray
 
@@ -117,7 +157,7 @@ class Rotograms(State, IndexedContainer, BaseLines):
                    xp: ArrayNamespace) -> 'Rotograms':
         points = tilts.axis * xp.arctan(0.25 * tilts.angles[..., None])
         lines = xp.concatenate((points[..., 1:, :], points[..., :-1, :]), axis=-1)
-        return cls(xp.asarray(index), xp.asarray(streak_id), lines)
+        return cls(IndexArray(index), xp.asarray(streak_id), lines)
 
     @property
     def angles(self) -> RealArray:
@@ -159,9 +199,9 @@ class Miller(State, ArrayContainer):
     def offset(self, offsets: IntArray) -> 'Miller':
         xp = self.__array_namespace__()
         hkl = self.hkl
-        shape = offsets.shape[:-1] + hkl.shape
-        hkl = xp.reshape(xp.reshape(hkl, (-1, 3)) + offsets[..., None, :], shape)
-        return self.replace(hkl=hkl)
+        shape = hkl.shape[:-1] + offsets.shape[:-1] + hkl.shape[-1:]
+        hkl = xp.reshape(xp.reshape(hkl, (-1, 3))[..., None, :] + offsets, shape)
+        return self.replace(hkl=hkl, index=self.index[..., None])
 
 class RLP(State, ArrayContainer):
     index   : IntArray

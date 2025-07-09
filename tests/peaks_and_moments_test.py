@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
 from cbclib_v2.label import PointSet2D, Pixels2DDouble, Structure2D, label
-from cbclib_v2.streak_finder import Peaks, detect_peaks
+from cbclib_v2.streak_finder import Peaks, detect_peaks, filter_peaks
 from cbclib_v2.test_util import check_close
 
 class TestPeaksAndMoments():
@@ -61,6 +61,31 @@ class TestPeaksAndMoments():
     def peaks(self, image: NDRealArray, mask: NDBoolArray, threshold: float) -> Peaks:
         return detect_peaks(image, mask, radius=3, vmin=threshold)[0]
 
+    @pytest.fixture(params=[100,])
+    def n_keys(self, request: pytest.FixtureRequest) -> int:
+        return request.param
+
+    @pytest.fixture(params=[5,])
+    def vrange(self, request: pytest.FixtureRequest) -> int:
+        return request.param
+
+    @pytest.fixture
+    def keys(self, rng: np.random.Generator, n_keys: int, shape: Shape) -> NDIntArray:
+        x = rng.integers(0, shape[-1], size=n_keys)
+        y = rng.integers(0, shape[-2], size=n_keys)
+        return np.stack((x, y), axis=-1)
+
+    def test_peaks_find_range(self, peaks: Peaks, keys: NDIntArray, vrange: int):
+        points = np.array(list(peaks))
+        for key in keys:
+            nearest = np.array(peaks.find_range(key[0], key[1], vrange))
+            if nearest.size:
+                dist = np.sum((key - nearest)**2)
+                assert np.min(np.sum((points - key)**2, axis=-1)) == dist
+                assert dist < vrange * vrange
+            else:
+                assert np.min(np.sum((points - key)**2, axis=-1)) >= vrange * vrange
+
     def test_peaks(self, peaks: Peaks, image: NDRealArray, mask: NDBoolArray, threshold: float):
         points = np.stack((peaks.x, peaks.y), axis=-1)
         assert np.all(mask[points[..., 1], points[..., 0]])
@@ -82,7 +107,7 @@ class TestPeaksAndMoments():
     @pytest.fixture
     def filtered(self, peaks: Peaks, image: NDRealArray, mask: NDBoolArray, connectivity: Structure2D,
                  threshold: float, npts: int) -> Peaks:
-        return peaks.filter(image, mask, connectivity, threshold, npts)
+        return filter_peaks(peaks, image, mask, connectivity, threshold, npts)
 
     def test_filtered(self, peaks: Peaks, filtered: Peaks, image: NDRealArray, mask: NDBoolArray,
                       connectivity: Structure2D, threshold: float, npts: int):
@@ -91,7 +116,9 @@ class TestPeaksAndMoments():
         pts = np.concatenate([np.stack((region.x, region.y), axis=-1) for region in regions])
         peak_pts = peak_pts[np.any(np.all(peak_pts[:, None, :] == pts[None], axis=-1), axis=-1)]
         peak_pts = peak_pts[np.lexsort((peak_pts[:, 1], peak_pts[:, 0]))]
-        assert np.all(np.stack((filtered.x, filtered.y), axis=-1) == peak_pts)
+        filtered_pts = np.stack((filtered.x, filtered.y), axis=-1)
+        filtered_pts = filtered_pts[np.lexsort((filtered_pts[:, 1], filtered_pts[:, 0]))]
+        assert np.all(filtered_pts == peak_pts)
 
     @pytest.fixture(params=[10,])
     def rank(self, request: pytest.FixtureRequest) -> int:

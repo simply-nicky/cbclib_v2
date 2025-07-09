@@ -605,7 +605,7 @@ protected:
     using ShapeContainer = detail::shape_handler::ShapeContainer;
     using array<T>::set_data;
 
-    std::vector<T> buffer;
+    std::vector<T> m_data;
 
 public:
     using array<T>::size;
@@ -613,14 +613,14 @@ public:
     vector_array() = default;
 
     template <typename Vector, typename = std::enable_if_t<std::is_base_of_v<std::vector<T>, std::remove_cvref_t<Vector>>>>
-    vector_array(ShapeContainer shape, Vector && v) : array<T>(std::move(shape), v.data()), buffer(std::forward<Vector>(v))
+    vector_array(ShapeContainer shape, Vector && v) : array<T>(std::move(shape), v.data()), m_data(std::forward<Vector>(v))
     {
-        if (buffer.size() != size()) buffer.resize(size());
+        if (m_data.size() != size()) m_data.resize(size());
     }
 
-    vector_array(ShapeContainer shape, T value = T()) : array<T>(std::move(shape), nullptr), buffer(size(), value)
+    vector_array(ShapeContainer shape, T value = T()) : array<T>(std::move(shape), nullptr), m_data(size(), value)
     {
-        set_data(buffer.data());
+        set_data(m_data.data());
     }
 };
 

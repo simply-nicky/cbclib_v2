@@ -11,7 +11,6 @@ Examples:
     CXIProtocol(paths={...})
 """
 from dataclasses import dataclass, field
-from functools import partial
 from enum import Enum
 from glob import iglob
 from multiprocessing import Pool
@@ -19,14 +18,13 @@ import os
 import fnmatch
 import re
 from types import TracebackType
-from typing import (Callable, ClassVar, Dict, Iterator, List, Literal, NamedTuple, Optional,
-                    Tuple, cast, get_type_hints)
+from typing import Callable, ClassVar, Dict, Iterator, List, Literal, Tuple, TypeVar, cast
 import h5py
 import numpy as np
 from tqdm.auto import tqdm
 from extra_data import open_run, stack_detector_data, DataCollection
 from extra_geom import JUNGFRAUGeometry
-from .data_container import Container, array_namespace, to_list
+from .data_container import Container, DataContainer, array_namespace, to_list
 from .parser import Parser, INIParser, JSONParser
 from .annotations import (Array, ArrayNamespace, Indices, IntArray, IntSequence, IntTuple, NumPy,
                           ReadOut, Shape)
@@ -34,30 +32,32 @@ from .annotations import (Array, ArrayNamespace, Indices, IntArray, IntSequence,
 EXP_ROOT_DIR = '/gpfs/exfel/exp'
 CXI_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cxi_protocol.ini')
 
-class DataIndices(NamedTuple):
-    files       : Array
-    cxi_paths   : Array
-    indices     : Array
+I = TypeVar("I", bound='DataIndices')
 
-    def __iter__(self) -> Iterator['DataIndices']:
+class DataIndices(DataContainer):
+    def __iter__(self: I) -> Iterator[I]:
         for index in range(len(self)):
             yield self[index]
 
     def __len__(self) -> int:
-        return min(self.files.size, self.cxi_paths.size)
+        xp = self.__array_namespace__()
+        return min(xp.size(val) for val in self.to_dict().values())
 
-    def __getitem__(self, indices: Indices) -> 'DataIndices':
-        file, cxi_path, index = self.files[indices], self.cxi_paths[indices], self.indices[indices]
-        return DataIndices(file.reshape(file.shape if file.shape else 1),
-                           cxi_path.reshape(cxi_path.shape if cxi_path.shape else 1),
-                           index.reshape(index.shape if index.shape else 1))
+    def __getitem__(self: I, indices: Indices) -> I:
+        xp = self.__array_namespace__()
+        data = {attr: xp.atleast_1d(val[indices]) for attr, val in self.to_dict().items()}
+        return self.replace(**data)
 
     def __reduce__(self) -> Tuple:
-        return (self.__class__, (self.files, self.cxi_paths, self.indices))
+        return (self.__class__, tuple(self.to_dict().values()))
+
+@dataclass
+class CXIIndices(DataIndices):
+    files       : Array
+    cxi_paths   : Array
+    indices     : Array
 
 Processor = Callable[[Array], ReadOut]
-cxi_worker : Callable[[DataIndices,], ReadOut]
-extra_worker : Callable[[Array,], ReadOut]
 
 class Kinds(str, Enum):
     scalar = 'scalar'
@@ -102,15 +102,14 @@ class CXIProtocol(BaseProtocol):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'paths': 'paths', 'kinds': 'kinds'},
-                             types=get_type_hints(cls))
+            return INIParser.from_container(cls)
         if ext == 'json':
-            return JSONParser({'paths': 'paths', 'kinds': 'kinds'})
+            return JSONParser.from_container(cls)
 
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
-    def read(cls, file: Optional[str]=None, ext: str='ini') -> 'CXIProtocol':
+    def read(cls, file: str | None=None, ext: str='ini') -> 'CXIProtocol':
         """Return the default :class:`CXIProtocol` object.
 
         Returns:
@@ -211,7 +210,7 @@ class CXIProtocol(BaseProtocol):
 
         return shapes
 
-    def read_indices(self, attr: str, fnames: List[str], xp: ArrayNamespace=NumPy) -> DataIndices:
+    def read_indices(self, attr: str, fnames: List[str], xp: ArrayNamespace=NumPy) -> CXIIndices:
         """Return a set of indices of the dataset containing the attribute's data inside a set
         of files.
 
@@ -243,15 +242,17 @@ class CXIProtocol(BaseProtocol):
                         cxi_paths.append(cxi_path)
                         indices.append([])
 
-        return DataIndices(xp.array(files), xp.array(cxi_paths), xp.array(indices))
+        return CXIIndices(xp.array(files), xp.array(cxi_paths), xp.array(indices))
+
+cxi_worker : Callable[[CXIIndices,], ReadOut]
 
 @dataclass
-class ReadWorker():
+class CXIReadWorker():
     ss_indices  : Indices
     fs_indices  : Indices
-    proc        : Optional[Processor] = None
+    proc        : Processor | None = None
 
-    def __call__(self, index: DataIndices) -> ReadOut:
+    def __call__(self, index: CXIIndices) -> ReadOut:
         with h5py.File(index.files[0]) as cxi_file:
             dset = cast(h5py.Dataset, cxi_file[index.cxi_paths[0]])
             if index.indices.size:
@@ -263,12 +264,12 @@ class ReadWorker():
         return data
 
     @classmethod
-    def initializer(cls, ss_indices: Indices, fs_indices: Indices, proc: Optional[None]=None):
+    def initializer(cls, ss_indices: Indices, fs_indices: Indices, proc: Processor | None=None):
         global cxi_worker
         cxi_worker = cls(ss_indices, fs_indices, proc)
 
     @classmethod
-    def read(cls, index: DataIndices) -> Array:
+    def read(cls, index: CXIIndices) -> Array:
         with h5py.File(index.files[0]) as cxi_file:
             dset = cast(h5py.Dataset, cxi_file[index.cxi_paths[0]])
             if index.indices.size:
@@ -278,39 +279,39 @@ class ReadWorker():
         return data
 
     @staticmethod
-    def run(index: DataIndices) -> ReadOut:
+    def run(index: CXIIndices) -> ReadOut:
         return cxi_worker(index)
 
 @dataclass
 class CXIReader():
     protocol : CXIProtocol
 
-    def load_stack(self, attr: str, indices: DataIndices, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor], processes: int, verbose: bool,
+    def load_stack(self, attr: str, indices: CXIIndices, ss_idxs: Indices, fs_idxs: Indices,
+                   proc: Processor | None, processes: int, verbose: bool,
                    xp: ArrayNamespace) -> Array:
         stack = []
 
-        with Pool(processes=processes, initializer=ReadWorker.initializer,
+        with Pool(processes=processes, initializer=CXIReadWorker.initializer,
                   initargs=(ss_idxs, fs_idxs, proc)) as pool:
-            for frame in tqdm(pool.imap(ReadWorker.run, iter(indices)), total=len(indices),
+            for frame in tqdm(pool.imap(CXIReadWorker.run, iter(indices)), total=len(indices),
                               disable=not verbose, desc=f'Loading {attr:s}'):
                 stack.append(frame)
 
         return xp.stack(stack, axis=0)
 
-    def load_frame(self, index: DataIndices, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor]) -> ReadOut:
-        return ReadWorker(ss_idxs, fs_idxs, proc)(index)
+    def load_frame(self, index: CXIIndices, ss_idxs: Indices, fs_idxs: Indices,
+                   proc: Processor | None) -> ReadOut:
+        return CXIReadWorker(ss_idxs, fs_idxs, proc)(index)
 
-    def load_sequence(self, indices: DataIndices, xp: ArrayNamespace) -> Array:
-        return xp.array([ReadWorker.read(index) for index in indices])
+    def load_sequence(self, indices: CXIIndices, xp: ArrayNamespace) -> Array:
+        return xp.array([CXIReadWorker.read(index) for index in indices])
 
 @dataclass
 class CXIWriter():
     files : List[h5py.File]
     protocol : CXIProtocol
 
-    def find_dataset(self, attr: str) -> Tuple[Optional[h5py.File], str]:
+    def find_dataset(self, attr: str) -> Tuple[h5py.File | None, str]:
         """Return the path to the attribute from the first file where the attribute is found. Return
         the default path if the attribute is not found inside the first file.
 
@@ -329,7 +330,7 @@ class CXIWriter():
         return None, self.protocol.get_paths(attr)[0]
 
     def save_stack(self, attr: str, data: Array, mode: str='overwrite',
-                    idxs: Optional[Indices]=None) -> None:
+                   idxs: Indices | None=None):
         xp = array_namespace(data)
         file, cxi_path = self.find_dataset(attr)
 
@@ -363,7 +364,7 @@ class CXIWriter():
                                 chunks=(1,) + data.shape[1:],
                                 maxshape=(None,) + data.shape[1:])
 
-    def save_data(self, attr: str, data: Array) -> None:
+    def save_data(self, attr: str, data: Array):
         file, cxi_path = self.find_dataset(attr)
 
         if file is not None and cxi_path in file:
@@ -389,8 +390,8 @@ class FileStore(Container):
     def attributes(self) -> List[str]:
         raise NotImplementedError
 
-    def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
-             fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
+    def load(self, attr: str, idxs: Indices | None=None, ss_idxs: Indices=slice(None),
+             fs_idxs: Indices=slice(None), proc: Processor | None=None, processes: int=1,
              verbose: bool=True, xp: ArrayNamespace=NumPy) -> Array:
         raise NotImplementedError
 
@@ -398,7 +399,7 @@ class FileStore(Container):
         raise NotImplementedError
 
     def save(self, attr: str, data: Array, mode: str='overwrite',
-             idxs: Optional[Indices]=None):
+             idxs: Indices | None=None):
         raise NotImplementedError
 
     def is_empty(self) -> bool:
@@ -433,9 +434,9 @@ class CXIStore(FileStore):
 
     names       : str | List[str]
     mode        : Mode = 'r'
-    protocol    : CXIProtocol = CXIProtocol.read()
-    files       : Dict[str, Optional[h5py.File]] = field(default_factory=dict)
-    indices     : Dict[str, DataIndices] = field(default_factory=dict)
+    protocol    : CXIProtocol = field(default_factory=CXIProtocol.read)
+    files       : Dict[str, h5py.File | None] = field(default_factory=dict)
+    indices     : Dict[str, CXIIndices] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.mode not in ['r', 'r+', 'w', 'w-', 'x', 'a']:
@@ -462,8 +463,8 @@ class CXIStore(FileStore):
     def __enter__(self) -> 'CXIStore':
         return self
 
-    def __exit__(self, exc_type: Optional[BaseException], exc: Optional[BaseException],
-                 traceback: Optional[TracebackType]):
+    def __exit__(self, exc_type: BaseException | None, exc: BaseException | None,
+                 traceback: TracebackType | None):
         self.close()
 
     def attributes(self) -> List[str]:
@@ -480,7 +481,7 @@ class CXIStore(FileStore):
                 self.files[fname] = None
 
     def load(self, attr: str, idxs: Indices=slice(None), ss_idxs: Indices=slice(None),
-             fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
+             fs_idxs: Indices=slice(None), proc: Processor | None=None, processes: int=1,
              verbose: bool=True, xp: ArrayNamespace=NumPy) -> Array:
         """Load a data attribute from the files.
 
@@ -535,7 +536,7 @@ class CXIStore(FileStore):
         return (0, 0)
 
     def save(self, attr: str, data: Array, mode: str='overwrite',
-             idxs: Optional[Indices]=None):
+             idxs: Indices | None=None):
         """Save a data array pertained to the data attribute into the first file.
 
         Args:
@@ -578,6 +579,11 @@ class CXIStore(FileStore):
                 self.indices[attr] = idxs
 
 @dataclass
+class ExtraIndices(DataIndices):
+    run         : IntArray = np.array([], dtype=int)
+    train_id    : IntArray = np.array([], dtype=int)
+
+@dataclass
 class ExtraProtocol(BaseProtocol):
     paths       : Dict[str, str]
     kinds       : Dict[str, Kind]
@@ -592,14 +598,9 @@ class ExtraProtocol(BaseProtocol):
     @classmethod
     def parser(cls, ext: str='ini') -> Parser:
         if ext == 'ini':
-            return INIParser({'experiment': ('folder', 'geom_path', 'modules', 'pattern',
-                                             'proposal', 'source', 'starts_at'),
-                              'paths': 'paths', 'kinds': 'kinds'},
-                              types=get_type_hints(cls))
+            return INIParser.from_container(cls, 'experiment')
         if ext == 'json':
-            return JSONParser({'experiment': ('folder', 'geom_path', 'modules', 'pattern',
-                                              'proposal', 'source', 'starts_at'),
-                               'paths': 'paths', 'kinds': 'kinds'})
+            return JSONParser.from_container(cls, 'experiment')
 
         raise ValueError(f"Invalid format: {ext}")
 
@@ -630,7 +631,7 @@ class ExtraProtocol(BaseProtocol):
     def detector_data(self, attr: str, train_data: Dict, xp: ArrayNamespace=NumPy) -> Array:
         data = stack_detector_data(train_data, self.paths[attr], modules=self.modules,
                                    starts_at=self.starts_at, pattern=self.pattern)
-        return xp.asarray(data)
+        return xp.array(data)
 
     def find_proposal(self) -> str:
         """Find the proposal directory for a given proposal on Maxwell"""
@@ -649,17 +650,6 @@ class ExtraProtocol(BaseProtocol):
             files.extend(new_files)
         return files
 
-    def train_ids(self, run: int | List[int], include: str='*', processes: int=1,
-                  xp: ArrayNamespace=NumPy) -> IntArray:
-        files = self.find_files(self.find_proposal(), run, include)
-
-        tids = []
-        with Pool(processes=processes) as pool:
-            for tid in pool.imap_unordered(ExtraProtocol.get_index, files):
-                tids.append(tid)
-
-        return xp.unique(xp.concatenate(tids))
-
     def open_run(self, run: int) -> DataCollection:
         run_data: DataCollection = open_run(proposal=self.proposal, run=run, data=self.folder,
                                             parallelize=False)
@@ -669,45 +659,58 @@ class ExtraProtocol(BaseProtocol):
         return self.detector_geometry().output_array_for_position().shape
 
     def read_indices(self, run: int | List[int], include: str='*', xp: ArrayNamespace=NumPy
-                     ) -> IntArray:
+                     ) -> ExtraIndices:
         files = self.find_files(self.find_proposal(), run, include)
 
         tids = [self.get_index_and_run(file, xp) for file in files]
-        return xp.unique(xp.concatenate(tids), axis=0)
+        indices = xp.unique(xp.concatenate(tids), axis=0)
+        return ExtraIndices(indices[..., 0], indices[..., 1])
+
+extra_worker : Callable[[ExtraIndices,], ReadOut]
+
+@dataclass
+class ExtraReadWorker():
+    protocol    : ExtraProtocol
+    geom        : JUNGFRAUGeometry
+    attr        : str
+    ss_indices  : Indices
+    fs_indices  : Indices
+    proc        : Processor | None = None
+
+    def __call__(self, index: ExtraIndices) -> ReadOut:
+        run = self.protocol.open_run(int(index.run[0]))
+        _, train_data = run.train_from_id(index.train_id[0])
+        data = self.protocol.detector_data(self.attr, train_data)
+        xp = array_namespace(data)
+        data = xp.nan_to_num(data, nan=0, posinf=0, neginf=0)
+        data = xp.nan_to_num(xp.squeeze(self.geom.position_modules(data)[0]))
+        data = data[..., self.ss_indices, self.fs_indices]
+        if self.proc is not None:
+            data = self.proc(data)
+        return data
+
+    @classmethod
+    def initializer(cls, protocol: ExtraProtocol, geom: JUNGFRAUGeometry, attr: str, ss_indices,
+                    fs_indices, proc: Processor | None=None):
+        global extra_worker
+        extra_worker = cls(protocol, geom, attr, ss_indices, fs_indices, proc)
+
+    @staticmethod
+    def run(index: ExtraIndices) -> ReadOut:
+        return extra_worker(index)
 
 @dataclass
 class ExtraReader():
-    protocol : ExtraProtocol
-    geom : JUNGFRAUGeometry
+    protocol    : ExtraProtocol
+    geom        : JUNGFRAUGeometry
 
-    @staticmethod
-    def initializer(protocol: ExtraProtocol, attr: str, ss_idxs: Indices, fs_idxs: Indices,
-                    proc: Optional[Processor], xp: ArrayNamespace):
-        global extra_worker
-        extra_worker = partial(ExtraReader(protocol, protocol.detector_geometry()).read_frame,
-                               attr=attr, ss_idxs=ss_idxs, fs_idxs=fs_idxs, proc=proc, xp=xp)
-
-    @staticmethod
-    def read_worker(index: Array) -> ReadOut:
-        return extra_worker(index)
-
-    def read_frame(self, index: Array, attr: str, ss_idxs: Indices, fs_idxs: Indices,
-                   proc: Optional[Processor], xp: ArrayNamespace) -> ReadOut:
-        run = self.protocol.open_run(int(index[0]))
-        _, train_data = run.train_from_id(index[1])
-        data = self.protocol.detector_data(attr, train_data, xp)
-        data = xp.nan_to_num(data, nan=0, posinf=0, neginf=0)
-        data = xp.nan_to_num(xp.squeeze(self.geom.position_modules(data)[0]))[..., ss_idxs, fs_idxs]
-        if proc is not None:
-            data = proc(data)
-        return data
-
-    def load(self, attr: str, idxs: Array, ss_idxs: Indices, fs_idxs: Indices, processes: int,
-             proc: Optional[Processor], verbose: bool, xp: ArrayNamespace) -> Array:
+    def load(self, attr: str, idxs: ExtraIndices, ss_idxs: Indices, fs_idxs: Indices,
+             processes: int, proc: Processor | None, verbose: bool, xp: ArrayNamespace
+             ) -> Array:
         stack = []
-        with Pool(processes=processes, initializer=type(self).initializer,
-                  initargs=(self.protocol, attr, ss_idxs, fs_idxs, proc, xp)) as pool:
-            for frame in tqdm(pool.imap(ExtraReader.read_worker, idxs), total=idxs.shape[0],
+        with Pool(processes=processes, initializer=ExtraReadWorker.initializer,
+                  initargs=(self.protocol, self.geom, attr, ss_idxs, fs_idxs, proc)) as pool:
+            for frame in tqdm(pool.imap(ExtraReadWorker.run, iter(idxs)), total=len(idxs),
                               disable=not verbose, desc=f'Loading {attr:s}'):
                 stack.append(frame)
 
@@ -717,24 +720,24 @@ class ExtraReader():
 class ExtraStore(FileStore):
     runs : int | List[int]
     protocol : ExtraProtocol
-    indices : IntArray = field(default_factory=lambda: np.array([], dtype=int))
+    indices : ExtraIndices = ExtraIndices()
 
     @property
     def size(self) -> int:
-        return self.indices.shape[0]
+        return len(self.indices)
 
     def attributes(self) -> List[str]:
         return list(self.protocol.paths)
 
-    def load(self, attr: str, idxs: Optional[Indices]=None, ss_idxs: Indices=slice(None),
-             fs_idxs: Indices=slice(None), proc: Optional[Processor]=None, processes: int=1,
+    def load(self, attr: str, idxs: Indices | None=None, ss_idxs: Indices=slice(None),
+             fs_idxs: Indices=slice(None), proc: Processor | None=None, processes: int=1,
              verbose: bool=True, xp: ArrayNamespace=NumPy) -> Array:
         if idxs is None:
             idxs = xp.arange(self.size)
 
         reader = ExtraReader(self.protocol, self.protocol.detector_geometry())
-        return reader.load(attr, self.indices[idxs], ss_idxs, fs_idxs, processes,
-                           proc, verbose, xp)
+        return reader.load(attr, self.indices[idxs], ss_idxs, fs_idxs,
+                           processes, proc, verbose, xp)
 
     def read_frame_shape(self) -> Shape:
         return self.protocol.read_frame_shape()

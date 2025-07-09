@@ -1,6 +1,6 @@
 from __future__ import annotations
-from typing import Iterable, Iterator, List, Optional, overload
-from ..annotations import Array, BoolArray, IntSequence, RealSequence, NDRealArray
+from typing import Iterable, Iterator, List, overload
+from ..annotations import Array, BoolArray, IntSequence, NDRealArray, RealSequence
 
 class PointSet2D:
     x : List[int]
@@ -252,7 +252,7 @@ ListRegions = List[Regions2D] | List[Regions3D]
 
 def binary_dilation(input: BoolArray, structure: Structure,
                     seeds: ListPointSet | PointSet | None=None, iterations: int=1,
-                    mask: Optional[BoolArray]=None, axes: Optional[List[int]]=None,
+                    mask: BoolArray | None=None, axes: List[int] | None=None,
                     num_threads: int=1) -> BoolArray:
     ...
 
@@ -291,69 +291,69 @@ def label(mask: Array, structure: Structure, seeds: ListPointSet | PointSet | No
     ...
 
 @overload
-def total_mass(regions: Regions, data: Array, axes: Optional[List[int]]=None) -> NDRealArray:
+def total_mass(regions: Regions, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...
 
 @overload
-def total_mass(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+def total_mass(regions: ListRegions, data: Array, axes: List[int] | None=None
                ) -> List[NDRealArray]:
     ...
 
-def total_mass(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+def total_mass(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
                ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
-def mean(regions: Regions, data: Array, axes: Optional[List[int]]=None) -> NDRealArray:
+def mean(regions: Regions, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...
 
 @overload
-def mean(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+def mean(regions: ListRegions, data: Array, axes: List[int] | None=None
          ) -> List[NDRealArray]:
     ...
 
-def mean(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+def mean(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
          ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
-def center_of_mass(regions: Regions, data: Array, axes: Optional[List[int]]=None
+def center_of_mass(regions: Regions, data: Array, axes: List[int] | None=None
                    ) -> NDRealArray:
     ...
 
 @overload
-def center_of_mass(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+def center_of_mass(regions: ListRegions, data: Array, axes: List[int] | None=None
                    ) -> List[NDRealArray]:
     ...
 
-def center_of_mass(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+def center_of_mass(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
                    ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
-def moment_of_inertia(regions: Regions, data: Array, axes: Optional[List[int]]=None
+def moment_of_inertia(regions: Regions, data: Array, axes: List[int] | None=None
                       ) -> NDRealArray:
     ...
 
 @overload
-def moment_of_inertia(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+def moment_of_inertia(regions: ListRegions, data: Array, axes: List[int] | None=None
                       ) -> List[NDRealArray]:
     ...
 
-def moment_of_inertia(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+def moment_of_inertia(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
                       ) -> NDRealArray | List[NDRealArray]:
     ...
 
 @overload
-def covariance_matrix(regions: Regions, data: Array, axes: Optional[List[int]]=None
+def covariance_matrix(regions: Regions, data: Array, axes: List[int] | None=None
                       ) -> NDRealArray:
     ...
 
 @overload
-def covariance_matrix(regions: ListRegions, data: Array, axes: Optional[List[int]]=None
+def covariance_matrix(regions: ListRegions, data: Array, axes: List[int] | None=None
                       ) -> List[NDRealArray]:
     ...
 
-def covariance_matrix(regions: Regions | ListRegions, data: Array, axes: Optional[List[int]]=None
+def covariance_matrix(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
                       ) -> NDRealArray | List[NDRealArray]:
     ...

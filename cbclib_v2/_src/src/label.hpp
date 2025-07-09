@@ -350,6 +350,38 @@ public:
         }
     }
 
+    template <typename Func, typename Stop, typename = std::enable_if_t<
+        std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>> &&
+        std::is_invocable_r_v<bool, std::remove_cvref_t<Stop>, const PointSetND<N> &>
+    >>
+    void dilate(Func && func, const StructureND<N> & structure, Stop && stop)
+    {
+        std::vector<PointND<long, N>> last_pixels {begin(), end()};
+        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
+
+        while (last_pixels.size() && std::forward<Stop>(stop)(*this))
+        {
+            for (const auto & point: last_pixels)
+            {
+                for (const auto & shift: structure)
+                {
+                    new_pixels.insert(point + shift);
+                }
+            }
+            last_pixels.clear();
+
+            for (auto && point: new_pixels)
+            {
+                if (std::forward<Func>(func)(point))
+                {
+                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
+                    if (is_added) last_pixels.push_back(*iter);
+                }
+            }
+            new_pixels.clear();
+        }
+    }
+
     template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
     void dilate(Func && func, const StructureND<N> & structure, size_t n_iter)
     {

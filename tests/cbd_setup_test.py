@@ -59,14 +59,14 @@ class TestCBDSetup():
         return model.xtal.hkl_to_q(miller, state.xtal, xp)
 
     @pytest.fixture
-    def laue(self, rlp: MillerWithRLP, model: CBDModel,
-             state: FixedState, xp: ArrayNamespace) -> LaueVectors:
+    def laue(self, rlp: MillerWithRLP, model: CBDModel, state: FixedState,
+             xp: ArrayNamespace) -> LaueVectors:
         return model.lens.source_lines(rlp, state.lens, xp)
 
     @pytest.fixture
-    def points(self, laue: LaueVectors, model: CBDModel,
-               state: FixedState) -> CBDPoints:
-        return model.kout_to_points(laue, state)
+    def points(self, laue: LaueVectors, model: CBDModel, state: FixedState,
+               xp: ArrayNamespace) -> CBDPoints:
+        return model.kout_to_points(laue, state, xp)
 
     def text_xtal_to_cell(self, xtal: XtalState, ormatrix: RotationState,
                           cell: XtalCell, xp: ArrayNamespace):
@@ -97,9 +97,9 @@ class TestCBDSetup():
         check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
         check_close(laue.kin, model.lens.project_to_pupil(laue.kin, state.lens, xp))
 
-    def test_points_and_kout(self, laue: LaueVectors, points: CBDPoints,
-                             model: CBDModel, state: FixedState):
-        check_close(model.points_to_kout(points, state).kout, laue.kout)
+    def test_points_and_kout(self, laue: LaueVectors, points: CBDPoints, model: CBDModel,
+                             state: FixedState, xp: ArrayNamespace):
+        check_close(model.points_to_kout(points, state, xp).kout, laue.kout)
 
     def test_rotation_to_tilt(self, ormatrix: RotationState, xp: ArrayNamespace):
         tilt = ormatrix.to_tilt()

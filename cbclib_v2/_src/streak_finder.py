@@ -1,10 +1,7 @@
-from dataclasses import dataclass, field
-from typing import List
-import numpy as np
-from .data_container import DataContainer
-from .annotations import Indices, NDBoolArray, NDRealArray, Shape
+from typing import List, overload
+from .annotations import NDBoolArray, NDRealArray
 from .src.label import Structure2D
-from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, StreakFinder,
+from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks,
                                 StreakFinderResultDouble, StreakFinderResultFloat, Peaks)
 from .src.streak_finder import StreakDouble, StreakFloat
 
@@ -14,40 +11,8 @@ StreakFinderResult = StreakFinderResultDouble | StreakFinderResultFloat
 class PatternStreakFinder:
     def __init__(self, data: NDRealArray, mask: NDBoolArray, structure: Structure2D,
                  min_size: int, lookahead: int=0, nfa: int=0):
-        self.finder = StreakFinder(structure, min_size, lookahead, nfa)
-        self.mask, self.data = mask, data
-
-    @property
-    def structure(self) -> Structure2D:
-        return self.finder.structure
-
-    def detect_peaks(self, vmin: float, npts: int,
-                     connectivity: Structure2D=Structure2D(1, 1)) -> Peaks:
-        peaks = detect_peaks(self.data, self.mask, self.finder.structure.rank, vmin)[0]
-        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts)
-
-    def detect_streaks(self, peaks: Peaks, xtol: float, vmin: float) -> StreakFinderResult:
-        return self.finder.detect_streaks(self.data, self.mask, peaks, xtol, vmin)
-
-@dataclass
-class PatternsStreakFinder(DataContainer):
-    data        : NDRealArray
-    structure   : Structure2D
-    mask        : NDBoolArray = field(default_factory=lambda: np.array([], dtype=bool))
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.data.ndim < 2:
-            raise ValueError(f"Invalid number of dimensions: {self.data.ndim} != 2")
-        if self.data.shape[-2:] != self.mask.shape:
-            self.mask = np.ones(self.data.shape[-2:], dtype=bool)
-
-    def __getitem__(self, idxs: Indices) -> 'PatternsStreakFinder':
-        return self.replace(data=self.data[idxs])
-
-    @property
-    def shape(self) -> Shape:
-        return self.data.shape
+        self.mask, self.data, self.structure = mask, data, structure
+        self.min_size, self.lookahead, self.nfa = min_size, lookahead, nfa
 
     def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
                      num_threads: int=1) -> List[Peaks]:
@@ -70,8 +35,16 @@ class PatternsStreakFinder(DataContainer):
         return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
                             num_threads=num_threads)
 
-    def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0, num_threads: int=1) -> List[NDRealArray]:
+    @overload
+    def detect_streaks(self, peaks: Peaks, xtol: float, vmin: float, num_threads: int=1
+                       ) -> StreakFinderResult: ...
+
+    @overload
+    def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, num_threads: int=1
+                       ) -> List[StreakFinderResult]: ...
+
+    def detect_streaks(self, peaks: Peaks | List[Peaks], xtol: float, vmin: float,
+                       num_threads: int=1) -> StreakFinderResult | List[StreakFinderResult]:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -88,8 +61,5 @@ class PatternsStreakFinder(DataContainer):
         Returns:
             A list of detected streaks.
         """
-        result = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
-                                lookahead, nfa, num_threads=num_threads)
-        if isinstance(result, list):
-            return [pattern.to_lines() for pattern in result]
-        return [result.to_lines(),]
+        return detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin,
+                              self.min_size, self.lookahead, self.nfa, num_threads=num_threads)

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Tuple, overload
+from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads
@@ -84,7 +84,7 @@ _rtol = {np.dtype(np.float32): 1e-3, np.dtype(np.float64): 1e-4,
 def default_tolerance() -> Dict[np.dtype, float]:
     return _atol
 
-def tolerance(dtype: np.dtype, tol: Optional[float]=None) -> float:
+def tolerance(dtype: np.dtype, tol: float | None=None) -> float:
     if tol is None:
         return default_tolerance()[dtype]
     return default_tolerance().get(dtype, tol)
@@ -92,13 +92,13 @@ def tolerance(dtype: np.dtype, tol: Optional[float]=None) -> float:
 def default_gradient_tolerance() -> Dict[np.dtype, float]:
     return _rtol
 
-def gradient_tolerance(dtype: np.dtype, tol: Optional[float]=None) -> float:
+def gradient_tolerance(dtype: np.dtype, tol: float | None=None) -> float:
     if tol is None:
         return default_gradient_tolerance()[dtype]
     return default_gradient_tolerance().get(dtype, tol)
 
 def check_close(a: RealArray | ComplexArray, b: RealArray | ComplexArray,
-                rtol: Optional[float]=None, atol: Optional[float]=None):
+                rtol: float | None=None, atol: float | None=None):
     if rtol is None:
         rtol = max(gradient_tolerance(a.dtype, rtol),
                    gradient_tolerance(b.dtype, rtol))
@@ -106,8 +106,8 @@ def check_close(a: RealArray | ComplexArray, b: RealArray | ComplexArray,
         atol = max(tolerance(a.dtype, atol), tolerance(b.dtype, atol))
     np.testing.assert_allclose(a, b, rtol=rtol, atol=atol)
 
-def check_gradient(f: Callable, args: Any, atol: Optional[float]=None, rtol: Optional[float]=None,
-                   eps: Optional[float]=None, **static_args: Any):
+def check_gradient(f: Callable, args: Any, atol: float | None=None, rtol: float | None=None,
+                   eps: float | None=None, **static_args: Any):
     def wrapper(*args):
         return f(*args, **static_args)
     check_grads(wrapper, args, order=1, modes='rev', atol=atol, rtol=rtol, eps=eps)
