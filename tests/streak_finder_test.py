@@ -108,7 +108,7 @@ class TestStreakFinder():
 
     @pytest.fixture
     def peaks(self, finder: PatternStreakFinder, vmin: float, npts: int) -> Peaks:
-        return finder.detect_peaks(vmin, npts)
+        return finder.detect_peaks(vmin, npts)[0]
 
     @pytest.fixture
     def result(self, finder: PatternStreakFinder, peaks: Peaks, vmin: float, xtol: float
@@ -117,7 +117,7 @@ class TestStreakFinder():
 
     @pytest.fixture
     def streak(self, rng: np.random.Generator, result: StreakFinderResult) -> Streak:
-        index = list(result.streaks)[rng.integers(0, len(result.streaks))]
+        index = int(rng.integers(0, len(result.streaks)))
         return result.streaks[index]
 
     def get_pixels(self, x: int, y: int, finder: PatternStreakFinder

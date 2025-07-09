@@ -178,6 +178,13 @@ class CrystData(DataContainer):
             attributes['snr'] = self.snr * self.mask
         return self.replace(**attributes)
 
+    def crop(self, roi: ROI) -> 'CrystData':
+        cropped = {}
+        for attr, data in self.contents().items():
+            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
+                cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
+        return self.replace(**cropped)
+
     def import_mask(self, mask: BoolArray, update: str='reset') -> 'CrystData':
         """Return a new :class:`CrystData` object with the new mask.
 
