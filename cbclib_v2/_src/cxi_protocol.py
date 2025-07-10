@@ -720,7 +720,7 @@ class ExtraReader():
 class ExtraStore(FileStore):
     runs : int | List[int]
     protocol : ExtraProtocol
-    indices : ExtraIndices = ExtraIndices()
+    indices : ExtraIndices = field(default_factory=ExtraIndices)
 
     @property
     def size(self) -> int:
