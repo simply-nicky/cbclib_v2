@@ -16,9 +16,9 @@ dependencies = [
     'extra_geom',
     'h5py',
     'jax',
-    'numpy',
+    'numpy>=2.1.0',
     'pandas',
-    'pybind11',
+    'pybind11>=2.10.0',
     'tqdm'
 ]
 license = {file = 'LICENSE'}
