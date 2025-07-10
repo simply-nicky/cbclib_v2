@@ -580,8 +580,8 @@ class CXIStore(FileStore):
 
 @dataclass
 class ExtraIndices(DataIndices):
-    run         : IntArray = np.array([], dtype=int)
-    train_id    : IntArray = np.array([], dtype=int)
+    run         : IntArray = field(default_factory=lambda: np.array([], dtype=int))
+    train_id    : IntArray = field(default_factory=lambda: np.array([], dtype=int))
 
 @dataclass
 class ExtraProtocol(BaseProtocol):

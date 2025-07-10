@@ -2,7 +2,7 @@ name: cbc
 channels:
   - conda-forge
 dependencies:
-  - cxx_compiler
+  - cxx-compiler
   - fftw
   - h5py
   - hdf5plugin
