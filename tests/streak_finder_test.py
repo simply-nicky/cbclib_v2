@@ -110,10 +110,18 @@ class TestStreakFinder():
     def peaks(self, finder: PatternStreakFinder, vmin: float, npts: int) -> PeaksList:
         return finder.detect_peaks(vmin, npts)
 
+    @pytest.mark.xfail(raises=IndexError)
+    def test_peaks_list(self, peaks: PeaksList):
+        return peaks[len(peaks)]
+
     @pytest.fixture
     def result(self, finder: PatternStreakFinder, peaks: PeaksList, vmin: float, xtol: float
                ) -> StreakList:
         return finder.detect_streaks(peaks, xtol, vmin)[0]
+
+    @pytest.mark.xfail(raises=IndexError)
+    def test_streak_list(self, result: StreakList):
+        return result[len(result)]
 
     @pytest.fixture
     def streak(self, rng: np.random.Generator, result: StreakList) -> Streak:

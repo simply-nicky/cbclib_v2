@@ -258,6 +258,7 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
         for (size_t i = 0; i < repeats; i++) results[i].insert(results[i].end(), locals[i].begin(), locals[i].end());
 
         // Streak filtering
+        #pragma omp barrier
         #pragma omp for
         for (size_t i = 0; i < repeats; i++)
         {
@@ -413,7 +414,11 @@ void declare_streak_list(py::module & m, const std::string & typestr)
 {
     py::class_<std::vector<Streak<T>>>(m, (std::string("Streak") + typestr + std::string("List")).c_str())
         .def(py::init<>())
-        .def("__delitem__", [](std::vector<Streak<T>> & streaks, size_t index){streaks.erase(std::next(streaks.begin(), index));}, py::arg("index"))
+        .def("__delitem__", [typestr](std::vector<Streak<T>> & streaks, size_t index)
+        {
+            if (index >= streaks.size()) throw std::out_of_range("Streak" + typestr + "List index out of range");
+            streaks.erase(std::next(streaks.begin(), index));
+        }, py::arg("index"))
         .def("__delitem__", [](std::vector<Streak<T>> & streaks, py::slice & slice)
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
@@ -422,7 +427,11 @@ void declare_streak_list(py::module & m, const std::string & typestr)
             auto iter = std::next(streaks.begin(), start);
             for (size_t i = 0; i < slicelength; ++i, iter += step - 1) iter = streaks.erase(iter);
         }, py::arg("index"))
-        .def("__getitem__", [](std::vector<Streak<T>> & streaks, size_t index){return streaks[index];}, py::arg("index"))
+        .def("__getitem__", [typestr](std::vector<Streak<T>> & streaks, size_t index)
+        {
+            if (index >= streaks.size()) throw std::out_of_range("Streak" + typestr + "List index out of range");
+            return streaks[index];
+        }, py::arg("index"))
         .def("__getitem__", [](std::vector<Streak<T>> & streaks, py::slice & slice)
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
@@ -432,8 +441,9 @@ void declare_streak_list(py::module & m, const std::string & typestr)
             for (size_t i = 0; i < slicelength; ++i, start += step) sliced.push_back(streaks[start]);
             return sliced;
         }, py::arg("index"))
-        .def("__setitem__", [](std::vector<Streak<T>> & streaks, size_t index, Streak<T> elem)
+        .def("__setitem__", [typestr](std::vector<Streak<T>> & streaks, size_t index, Streak<T> elem)
         {
+            if (index >= streaks.size()) throw std::out_of_range("Streak" + typestr + "List index out of range");
             streaks[index] = std::move(elem);
         }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__setitem__", [](std::vector<Streak<T>> & streaks, py::slice & slice, std::vector<Streak<T>> & elems)
@@ -522,7 +532,11 @@ PYBIND11_MODULE(streak_finder, m)
 
     py::class_<std::vector<Peaks>>(m, "PeaksList")
         .def(py::init<>())
-        .def("__delitem__", [](std::vector<Peaks> & peaks, size_t index){peaks.erase(std::next(peaks.begin(), index));}, py::arg("index"))
+        .def("__delitem__", [](std::vector<Peaks> & peaks, size_t index)
+        {
+            if (index >= peaks.size()) throw std::out_of_range("PeaksList index out of range");
+            peaks.erase(std::next(peaks.begin(), index));
+        }, py::arg("index"))
         .def("__delitem__", [](std::vector<Peaks> & peaks, py::slice & slice)
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
@@ -531,7 +545,11 @@ PYBIND11_MODULE(streak_finder, m)
             auto iter = std::next(peaks.begin(), start);
             for (size_t i = 0; i < slicelength; ++i, iter += step - 1) iter = peaks.erase(iter);
         }, py::arg("index"))
-        .def("__getitem__", [](std::vector<Peaks> & peaks, size_t index){return peaks[index];}, py::arg("index"))
+        .def("__getitem__", [](std::vector<Peaks> & peaks, size_t index)
+        {
+            if (index >= peaks.size()) throw std::out_of_range("PeaksList index out of range");
+            return peaks[index];
+        }, py::arg("index"))
         .def("__getitem__", [](std::vector<Peaks> & peaks, py::slice & slice)
         {
             size_t start = 0, stop = 0, step = 0, slicelength = 0;
@@ -543,6 +561,7 @@ PYBIND11_MODULE(streak_finder, m)
         }, py::arg("index"))
         .def("__setitem__", [](std::vector<Peaks> & peaks, size_t index, Peaks elem)
         {
+            if (index >= peaks.size()) throw std::out_of_range("PeaksList index out of range");
             peaks[index] = std::move(elem);
         }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__setitem__", [](std::vector<Peaks> & peaks, py::slice & slice, std::vector<Peaks> & elems)
