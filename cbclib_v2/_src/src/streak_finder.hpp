@@ -406,7 +406,7 @@ public:
 
     StreakMask(array<bool> mask) : m_mask(std::move(mask))
     {
-        clear();
+        m_flags = std::vector<int>(m_mask.size(), not_used);
     }
 
     template <typename T>
@@ -477,7 +477,7 @@ public:
 
     void clear()
     {
-        m_flags = std::vector<int>(m_mask.size(), not_used);
+        std::fill(m_flags.begin(), m_flags.end(), not_used);
     }
 
 protected:
