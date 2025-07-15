@@ -1,6 +1,10 @@
 #include "streak_finder.hpp"
 #include "zip.hpp"
 
+PYBIND11_MAKE_OPAQUE(std::vector<cbclib::Peaks>)
+PYBIND11_MAKE_OPAQUE(std::vector<cbclib::Streak<double>>)
+PYBIND11_MAKE_OPAQUE(std::vector<cbclib::Streak<float>>)
+
 namespace cbclib {
 
 #pragma omp declare reduction(                                                                      \
@@ -32,11 +36,11 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
     size_t y_size = darr.shape(data.ndim() - 2) / radius;
     size_t chunk_size = y_size / n_chunks;
 
-    std::vector<Peaks> result;
+    std::vector<Peaks> results;
     std::vector<PeaksData<T>> peak_data;
     for (size_t i = 0; i < repeats; i++)
     {
-        result.emplace_back(radius);
+        results.emplace_back(radius);
         peak_data.emplace_back(darr.slice_back(i, axes.size()), marr);
     }
 
@@ -74,19 +78,27 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
             });
         }
 
-        #pragma omp critical
-        for (size_t i = 0; i < repeats; i++) result[i].merge(buffer[i]);
+        if (n_chunks > 1)
+        {
+            #pragma omp critical
+            for (size_t i = 0; i < repeats; i++) results[i].merge(std::move(buffer[i]));
+        }
+        else
+        {
+            #pragma omp critical
+            for (size_t i = 0; i < repeats; i++) if (buffer[i].size()) results[i] = std::move(buffer[i]);
+        }
     }
 
     py::gil_scoped_acquire acquire;
 
     e.rethrow();
 
-    return result;
+    return results;
 }
 
 template <typename T>
-auto filter_peaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T vmin, size_t npts,
+void filter_peaks(std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T vmin, size_t npts,
                   std::optional<std::tuple<long, long>> ax, unsigned threads)
 {
     using PeakIterators = std::vector<Peaks::iterator>;
@@ -135,29 +147,28 @@ auto filter_peaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<boo
                 auto first = std::next(peaks[index].begin(), remainder * chunk_size);
                 auto last = (remainder == n_chunks - 1) ? peaks[index].end() : std::next(first, chunk_size);
                 peak_data[index].filter(first, last, buffers[index], structure, vmin, npts);
+
+                if (n_chunks == 1)
+                {
+                    for (auto iter : buffers[index]) peaks[i].erase(iter);
+                }
             });
         }
 
-        #pragma omp critical
-        for (size_t i = 0; i < repeats; i++) for (auto iter : buffers[i]) peaks[i].erase(iter);
+        if (n_chunks > 1)
+        {
+            #pragma omp critical
+            for (size_t i = 0; i < repeats; i++) for (auto iter : buffers[i]) peaks[i].erase(iter);
+        }
     }
 
     py::gil_scoped_acquire acquire;
 
     e.rethrow();
-
-    return peaks;
 }
 
 template <typename T>
-auto filter_peak(Peaks peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T vmin, size_t npts,
-                 py::none ax, unsigned threads)
-{
-    return filter_peaks(std::vector<Peaks>{peaks}, data, mask, structure, vmin, npts, std::make_tuple(data.ndim() - 2, data.ndim() - 1), threads)[0];
-}
-
-template <typename T>
-auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin, unsigned min_size,
+auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin, unsigned min_size,
                     unsigned lookahead, unsigned nfa, std::optional<std::tuple<long, long>> ax, unsigned threads)
 {
     Sequence<long> axes;
@@ -181,11 +192,10 @@ auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<b
 
     size_t n_chunks = threads / repeats + (threads % repeats > 0);
 
-    std::vector<StreakFinderResult<T>> results;
+    std::vector<std::vector<Streak<T>>> results (repeats);
     std::vector<StreakFinderInput<T>> inputs;
     for (size_t i = 0; i < repeats; i++)
     {
-        results.emplace_back(marr.shape());
         inputs.emplace_back(peaks[i], darr.slice_back(i, axes.size()), structure, lookahead, nfa);
     }
     std::vector<size_t> totals (repeats, 0);
@@ -197,8 +207,9 @@ auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<b
 
     #pragma omp parallel num_threads(threads)
     {
-        std::vector<StreakFinderResult<T>> locals;
-        for (size_t i = 0; i < repeats; i++) locals.emplace_back(marr.shape());
+        std::vector<std::vector<Streak<T>>> locals (repeats);
+        StreakMask buffer (marr);
+        auto compare = [](const Streak<T> & a, const Streak<T> & b){return a.pixels().size() < b.pixels().size();};
 
         // Initialisation phase
         #pragma omp for reduction(vector_plus : totals, lesses)
@@ -210,7 +221,6 @@ auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<b
                 totals[index]++;
                 if (darr[i] < vmin) lesses[index]++;
             }
-            else locals[index].mask(remainder) = results[index].mask(remainder) = StreakMask::bad;
         }
 
         // Streak detection
@@ -229,35 +239,40 @@ auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<b
 
                 for (const auto & seed : inputs[index].points(first, last - first))
                 {
-                    if (locals[index].mask().is_free(seed))
+                    if (buffer.is_free(seed))
                     {
-                        auto streak = inputs[index].get_streak(seed, locals[index].mask(), xtol);
-                        if (locals[index].mask().p_value(streak, xtol, vmin, p, StreakMask::not_used) < log_eps)
+                        auto streak = inputs[index].get_streak(seed, buffer, xtol);
+                        if (buffer.p_value(streak, xtol, vmin, p, StreakMask::not_used) < log_eps)
                         {
-                            #pragma omp critical
-                            results[index].mask().add(streak);
-
-                            locals[index].insert(std::move(streak));
+                            buffer.add(streak);
+                            locals[index].push_back(streak);
                         }
                     }
                 }
+                buffer.clear();
             });
         }
 
-        // Streak filtering
+        // Streak assembly
         #pragma omp critical
+        for (size_t i = 0; i < repeats; i++) results[i].insert(results[i].end(), locals[i].begin(), locals[i].end());
+
+        // Streak filtering
+        #pragma omp for
         for (size_t i = 0; i < repeats; i++)
         {
+            std::sort(results[i].begin(), results[i].end(), compare);
+
+            for (const auto & streak : results[i]) buffer.add(streak);
+
             T p = T(1.0) - T(lesses[i]) / totals[i];
             T log_eps = std::log(p) * min_size;
-            for (auto iter = locals[i].streaks().rbegin(); iter != locals[i].streaks().rend(); ++iter)
+            for (auto iter = results[i].begin(); iter != results[i].end();)
             {
-                if (results[i].mask().p_value(*iter, xtol, vmin, p, iter->id()) < log_eps)
-                {
-                    results[i].streaks().push_back(*iter);
-                }
-                else results[i].mask().remove(*iter);
+                if (buffer.p_value(*iter, xtol, vmin, p, iter->id()) < log_eps) ++iter;
+                else iter = results[i].erase(iter);
             }
+            buffer.clear();
         }
     }
 
@@ -269,10 +284,39 @@ auto detect_streaks(std::vector<Peaks> peaks, py::array_t<T> data, py::array_t<b
 }
 
 template <typename T>
-auto detect_streak(Peaks peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin,
-                   unsigned min_size, unsigned lookahead, unsigned nfa, py::none ax, unsigned threads)
+std::tuple<py::array_t<T>, T> p_value(const std::vector<Streak<T>> & streaks, py::array_t<T> data, py::array_t<bool> mask, T xtol, T vmin)
 {
-    return detect_streaks(std::vector<Peaks>{peaks}, data, mask, structure, xtol, vmin, min_size, lookahead, nfa, std::make_tuple(data.ndim() - 2, data.ndim() - 1), threads)[0];
+    array<T> darr {data.request()};
+    array<bool> marr {mask.request()};
+    py::array_t<T> p_values (streaks.size());
+
+    check_equal("data and mask have incompatible shapes",
+                darr.shape().begin(), darr.shape().end(), marr.shape().begin(), marr.shape().end());
+    if (darr.ndim() != 2)
+        fail_container_check("wrong number of dimensions (" + std::to_string(darr.ndim()) + " < 2)", darr.shape());
+
+    size_t total = 0, less = 0;
+
+    for (size_t i = 0; i < darr.size(); i++)
+    {
+        if (marr[i])
+        {
+            total++;
+            if (darr[i] < vmin) less++;
+        }
+    }
+
+    T p = T(1.0) - T(less) / total;
+
+    StreakMask buffer (marr);
+    for (const auto & streak: streaks) buffer.add(streak);
+
+    for (size_t i = 0; const auto & streak : streaks)
+    {
+        p_values.mutable_at(i++) = buffer.p_value(streak, xtol, vmin, p, streak.id());
+    }
+
+    return std::make_tuple(p_values, p);
 }
 
 template <typename T>
@@ -365,64 +409,69 @@ py::array_t<T> result_to_lines(const std::vector<Streak<T>> & streaks, std::opti
 }
 
 template <typename T>
-void declare_streak_finder_result(py::module & m, const std::string & typestr)
+void declare_streak_list(py::module & m, const std::string & typestr)
 {
-    py::class_<StreakFinderResult<T>>(m, (std::string("StreakFinderResult") + typestr).c_str())
-        .def(py::init([](std::vector<size_t> shape)
+    py::class_<std::vector<Streak<T>>>(m, (std::string("Streak") + typestr + std::string("List")).c_str())
+        .def(py::init<>())
+        .def("__delitem__", [](std::vector<Streak<T>> & streaks, size_t index){streaks.erase(std::next(streaks.begin(), index));}, py::arg("index"))
+        .def("__delitem__", [](std::vector<Streak<T>> & streaks, py::slice & slice)
         {
-            return StreakFinderResult<T>(std::move(shape));
-        }), py::arg("shape"))
-        .def("p_value", [](const StreakFinderResult<T> & result, Streak<T> streak, T xtol, T vmin, T p)
+            size_t start = 0, stop = 0, step = 0, slicelength = 0;
+            if (!slice.compute(streaks.size(), &start, &stop, &step, &slicelength))
+                throw py::error_already_set();
+            auto iter = std::next(streaks.begin(), start);
+            for (size_t i = 0; i < slicelength; ++i, iter += step - 1) iter = streaks.erase(iter);
+        }, py::arg("index"))
+        .def("__getitem__", [](std::vector<Streak<T>> & streaks, size_t index){return streaks[index];}, py::arg("index"))
+        .def("__getitem__", [](std::vector<Streak<T>> & streaks, py::slice & slice)
         {
-            return result.mask().p_value(streak, xtol, vmin, p, streak.id());
-        }, py::arg("streak"), py::arg("xtol"), py::arg("vmin"), py::arg("probability"))
-        .def("probability", [](const StreakFinderResult<T> & result, py::array_t<T> data, T vmin, unsigned threads)
+            size_t start = 0, stop = 0, step = 0, slicelength = 0;
+            if (!slice.compute(streaks.size(), &start, &stop, &step, &slicelength))
+                throw py::error_already_set();
+            std::vector<Streak<T>> sliced;
+            for (size_t i = 0; i < slicelength; ++i, start += step) sliced.push_back(streaks[start]);
+            return sliced;
+        }, py::arg("index"))
+        .def("__setitem__", [](std::vector<Streak<T>> & streaks, size_t index, Streak<T> elem)
         {
-            array<T> darr {data.request()};
-            py::array_t<T> probs {py::ssize_t(darr.size() / result.mask().size())};
-            std::vector<size_t> totals (probs.size(), T());
-            std::vector<size_t> lesses (probs.size(), T());
-
-            #pragma omp parallel for reduction(vector_plus : totals, lesses) num_threads(threads)
-            for (size_t i = 0; i < darr.size(); i++)
-            {
-                size_t index = i / result.mask().size(), remainder = i - index * result.mask().size();
-                if (result.mask(remainder) != StreakMask::flags::bad)
-                {
-                    totals[index]++;
-                    if (darr[i] < vmin) lesses[index]++;
-                }
-            }
-
-            for (size_t i = 0; i < probs.size(); i++) probs.mutable_at(i) = T(1.0) - T(lesses[i]) / totals[i];
-            return probs;
-        }, py::arg("data"), py::arg("vmin"), py::arg("num_threads")=1)
-        .def("to_lines", [](const StreakFinderResult<T> & result, std::optional<T> width)
+            streaks[index] = std::move(elem);
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
+        .def("__setitem__", [](std::vector<Streak<T>> & streaks, py::slice & slice, std::vector<Streak<T>> & elems)
         {
-            return result_to_lines<T, T>(result.streaks(), width);
+            size_t start = 0, stop = 0, step = 0, slicelength = 0;
+            if (!slice.compute(streaks.size(), &start, &stop, &step, &slicelength))
+                throw py::error_already_set();
+            for (size_t i = 0; i < slicelength; ++i, start += step) streaks[start] = elems[i];
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
+        .def("__iter__", [](std::vector<Streak<T>> & streaks){return py::make_iterator(streaks.begin(), streaks.end());}, py::keep_alive<0, 1>())
+        .def("__len__", [](std::vector<Streak<T>> & streaks){return streaks.size();})
+        .def("__repr__", [typestr](const std::vector<Streak<T>> & streaks)
+        {
+            return "<Streak" + typestr + "List, size = " + std::to_string(streaks.size()) + ">";
+        })
+        .def("append", [](std::vector<Streak<T>> & streaks, Streak<T> elem){streaks.emplace_back(std::move(elem));}, py::arg("value"), py::keep_alive<1, 2>())
+        .def("extend", [](std::vector<Streak<T>> & streaks, const std::vector<Streak<T>> & elems)
+        {
+            for (const auto & elem : elems) streaks.push_back(elem);
+        }, py::arg("values"), py::keep_alive<1, 2>())
+        .def("to_lines", [](const std::vector<Streak<T>> & streaks, std::optional<T> width)
+        {
+            return result_to_lines<T, T>(streaks, width);
         }, py::arg("width") = std::nullopt)
-        .def("to_lines", [](const StreakFinderResult<T> & result, std::optional<std::vector<T>> width)
+        .def("to_lines", [](const std::vector<Streak<T>> & streaks, std::optional<std::vector<T>> width)
         {
-            return result_to_lines<T, std::vector<T>>(result.streaks(), width);
+            return result_to_lines<T, std::vector<T>>(streaks, width);
         }, py::arg("width") = std::nullopt)
-        .def("to_regions", [](const StreakFinderResult<T> & result)
+        .def("to_regions", [](const std::vector<Streak<T>> & streaks)
         {
             RegionsND<2> regions;
-            for (const auto & streak : result.streaks())
+            for (const auto & streak : streaks)
             {
                 PointSet points;
                 for (auto && [point, _] : streak.pixels()) points->emplace_hint(points.end(), std::forward<decltype(point)>(point));
                 regions->emplace_back(std::move(points));
             }
             return regions;
-        })
-        .def_property("mask", [](const StreakFinderResult<T> & result){return to_pyarray(result.mask(), result.mask().shape());}, nullptr)
-        .def_property("streaks", [](const StreakFinderResult<T> & result){return result.streaks();}, nullptr)
-        .def("__repr__", [typestr](const StreakFinderResult<T> & result)
-        {
-            return "<StreakFinderResult" + typestr + ", mask = <array, shape = {" + std::to_string(result.mask().shape(0)) + ", " +
-                   std::to_string(result.mask().shape(1)) + "}>, streaks = <Dict[int, Streak" + typestr + "], size = " +
-                   std::to_string(result.streaks().size()) + ">>";
         });
 }
 
@@ -471,22 +520,62 @@ PYBIND11_MODULE(streak_finder, m)
             peaks.erase(iter);
         }, py::arg("x"), py::arg("y"));
 
+    py::class_<std::vector<Peaks>>(m, "PeaksList")
+        .def(py::init<>())
+        .def("__delitem__", [](std::vector<Peaks> & peaks, size_t index){peaks.erase(std::next(peaks.begin(), index));}, py::arg("index"))
+        .def("__delitem__", [](std::vector<Peaks> & peaks, py::slice & slice)
+        {
+            size_t start = 0, stop = 0, step = 0, slicelength = 0;
+            if (!slice.compute(peaks.size(), &start, &stop, &step, &slicelength))
+                throw py::error_already_set();
+            auto iter = std::next(peaks.begin(), start);
+            for (size_t i = 0; i < slicelength; ++i, iter += step - 1) iter = peaks.erase(iter);
+        }, py::arg("index"))
+        .def("__getitem__", [](std::vector<Peaks> & peaks, size_t index){return peaks[index];}, py::arg("index"))
+        .def("__getitem__", [](std::vector<Peaks> & peaks, py::slice & slice)
+        {
+            size_t start = 0, stop = 0, step = 0, slicelength = 0;
+            if (!slice.compute(peaks.size(), &start, &stop, &step, &slicelength))
+                throw py::error_already_set();
+            std::vector<Peaks> sliced;
+            for (size_t i = 0; i < slicelength; ++i, start += step) sliced.push_back(peaks[start]);
+            return sliced;
+        }, py::arg("index"))
+        .def("__setitem__", [](std::vector<Peaks> & peaks, size_t index, Peaks elem)
+        {
+            peaks[index] = std::move(elem);
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
+        .def("__setitem__", [](std::vector<Peaks> & peaks, py::slice & slice, std::vector<Peaks> & elems)
+        {
+            size_t start = 0, stop = 0, step = 0, slicelength = 0;
+            if (!slice.compute(peaks.size(), &start, &stop, &step, &slicelength))
+                throw py::error_already_set();
+            for (size_t i = 0; i < slicelength; ++i, start += step) peaks[start] = elems[i];
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
+        .def("__iter__", [](std::vector<Peaks> & peaks){return py::make_iterator(peaks.begin(), peaks.end());}, py::keep_alive<0, 1>())
+        .def("__len__", [](std::vector<Peaks> & peaks){return peaks.size();})
+        .def("__repr__", [](std::vector<Peaks> & peaks){return "<PeaksList, size = " + std::to_string(peaks.size()) + ">";})
+        .def("append", [](std::vector<Peaks> & peaks, Peaks elem){peaks.emplace_back(std::move(elem));}, py::arg("value"), py::keep_alive<1, 2>())
+        .def("extend", [](std::vector<Peaks> & peaks, const std::vector<Peaks> & elems)
+        {
+            for (const auto & elem : elems) peaks.push_back(elem);
+        }, py::arg("values"), py::keep_alive<1, 2>());
+
     declare_streak<double>(m, "Double");
     declare_streak<float>(m, "Float");
 
-    declare_streak_finder_result<double>(m, "Double");
-    declare_streak_finder_result<float>(m, "Float");
+    declare_streak_list<double>(m, "Double");
+    declare_streak_list<float>(m, "Float");
 
     m.def("detect_peaks", &detect_peaks<double>, py::arg("data"), py::arg("mask"), py::arg("radius"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
     m.def("detect_peaks", &detect_peaks<float>, py::arg("data"), py::arg("mask"), py::arg("radius"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
 
-    m.def("filter_peaks", &filter_peak<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
     m.def("filter_peaks", &filter_peaks<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("filter_peaks", &filter_peak<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
     m.def("filter_peaks", &filter_peaks<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
 
     m.def("detect_streaks", &detect_streaks<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("detect_streaks", &detect_streak<double>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
     m.def("detect_streaks", &detect_streaks<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("detect_streaks", &detect_streak<float>, py::arg("peaks"), py::arg("data"), py::arg("mask"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
+
+    m.def("p_value", &p_value<double>, py::arg("streaks"), py::arg("data"), py::arg("mask"), py::arg("xtol"), py::arg("vmin"));
+    m.def("p_value", &p_value<float>, py::arg("streaks"), py::arg("data"), py::arg("mask"), py::arg("xtol"), py::arg("vmin"));
 }

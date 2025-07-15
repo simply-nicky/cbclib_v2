@@ -393,17 +393,9 @@ protected:
     }
 };
 
-class StreakMask : public vector_array<int>
+class StreakMask
 {
-protected:
-    using ShapeContainer = vector_array<int>::ShapeContainer;
-    using vector_array<int>::m_data;
-
 public:
-    using vector_array<int>::at;
-    using vector_array<int>::is_inbound;
-    using vector_array<int>::index_at;
-
     enum flags
     {
         bad = -1,
@@ -412,17 +404,20 @@ public:
 
     StreakMask() = default;
 
-    StreakMask(ShapeContainer shape) : vector_array<int>(std::move(shape), flags::not_used) {}
+    StreakMask(array<bool> mask) : m_mask(std::move(mask))
+    {
+        clear();
+    }
 
     template <typename T>
     void remove(const Streak<T> & streak)
     {
         for (auto [pt, _] : streak.pixels())
         {
-            if (is_inbound(pt.coordinate()))
+            if (m_mask.is_inbound(pt.coordinate()))
             {
-                auto index = index_at(pt.coordinate());
-                if (m_data[index] != flags::bad) m_data[index] -= streak.id();
+                auto index = m_mask.index_at(pt.coordinate());
+                if (m_mask[index]) m_flags[index] -= streak.id();
             }
         }
     }
@@ -432,28 +427,26 @@ public:
     {
         for (auto [pt, _] : streak.pixels())
         {
-            if (is_inbound(pt.coordinate()))
+            if (m_mask.is_inbound(pt.coordinate()))
             {
-                auto index = index_at(pt.coordinate());
-                if (m_data[index] != flags::bad) m_data[index] += streak.id();
+                auto index = m_mask.index_at(pt.coordinate());
+                if (m_mask[index]) m_flags[index] += streak.id();
             }
         }
     }
 
     bool is_bad(const Point<long> & point) const
     {
-        if (is_inbound(point.coordinate()))
-        {
-            return at(point.coordinate()) == flags::bad;
-        }
+        if (m_mask.is_inbound(point.coordinate())) return !m_mask.at(point.coordinate());
         return true;
     }
 
     bool is_free(const Point<long> & point) const
     {
-        if (is_inbound(point.coordinate()))
+        if (m_mask.is_inbound(point.coordinate()))
         {
-            return at(point.coordinate()) == flags::not_used;
+            size_t index = m_mask.index_at(point.coordinate());
+            if (m_mask[index]) return m_flags[index] == not_used;
         }
         return false;
     }
@@ -465,49 +458,31 @@ public:
         auto line = streak.line();
         for (auto [pt, val] : streak.pixels())
         {
-            if (is_inbound(pt.coordinate()))
+            if (m_mask.is_inbound(pt.coordinate()))
             {
-                if (val > T() && at(pt.coordinate()) == flag && line.distance(pt) < xtol)
+                size_t index = m_mask.index_at(pt.coordinate());
+                if (m_mask[index] && m_flags[index] == flag)
                 {
-                    n++;
-                    if (val > vmin) k++;
+                    if (val > T() && line.distance(pt) < xtol)
+                    {
+                        n++;
+                        if (val > vmin) k++;
+                    }
                 }
             }
         }
 
         return detail::logbinom(n, k, p);
     }
-};
 
-template <typename T>
-class StreakFinderResult
-{
-protected:
-    using ShapeContainer = AnyContainer<size_t>;
-    using container_type = std::vector<Streak<T>>;
-
-public:
-    StreakFinderResult() = default;
-
-    StreakFinderResult(ShapeContainer shape) : m_mask(std::move(shape)), m_streaks() {}
-
-    void insert(Streak<T> && elem)
+    void clear()
     {
-        m_mask.add(elem);
-        m_streaks.emplace_back(std::move(elem));
+        m_flags = std::vector<int>(m_mask.size(), not_used);
     }
 
-    const StreakMask & mask() const {return m_mask;}
-    const int & mask(size_t index) const {return m_mask[index];}
-    StreakMask & mask() {return m_mask;}
-    int & mask(size_t index) {return m_mask[index];}
-
-    const container_type & streaks() const {return m_streaks;}
-    container_type & streaks() {return m_streaks;}
-
 protected:
-    StreakMask m_mask;
-    container_type m_streaks;
+    array<bool> m_mask;
+    std::vector<int> m_flags;
 };
 
 template <typename T>

@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, FileStore, Kinds
 from .data_container import DataContainer, IndexArray
-from .streak_finder import Peaks, StreakFinderResult, detect_peaks, detect_streaks, filter_peaks
+from .streak_finder import PeaksList, StreakList, detect_peaks, detect_streaks, filter_peaks
 from .streaks import Streaks
 from .annotations import (ArrayLike, BoolArray, Indices, IntArray, IntSequence, RealArray,
                           RealSequence, ReferenceType, ROI, Shape)
@@ -296,7 +296,7 @@ class CrystData(DataContainer):
             raise ValueError('no whitefield in the container')
 
         xp = self.__array_namespace__()
-        mask = self.mask & (self.std > 0.0)
+        mask = self.mask & (self.std > 0.0) & xp.all(self.data > 0, axis=0)
         y: RealArray = xp.where(mask, self.data / self.std, 0.0)[:, mask]
         W: RealArray = xp.where(mask, self.whitefield / self.std, 0.0)[None, mask]
 
@@ -602,7 +602,7 @@ class StreakDetector(DetectorBase):
     scale           : float = 1.0
 
     def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
-                     num_threads: int=1) -> List[Peaks]:
+                     num_threads: int=1) -> PeaksList:
         """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
         ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
         between peaks is ``2 * structure.radius``.
@@ -619,12 +619,13 @@ class StreakDetector(DetectorBase):
         """
         peaks = detect_peaks(self.data, self.mask, self.structure.rank, vmin,
                              num_threads=num_threads)
-        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
-                            num_threads=num_threads)
+        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
+                     num_threads=num_threads)
+        return peaks
 
-    def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, min_size: int,
+    def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float, min_size: int,
                        lookahead: int=0, nfa: int=0, num_threads: int=1
-                       ) -> StreakFinderResult | List[StreakFinderResult]:
+                       ) -> List[StreakList]:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -644,12 +645,9 @@ class StreakDetector(DetectorBase):
         return detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
                               lookahead, nfa, num_threads=num_threads)
 
-    def to_streaks(self, result: StreakFinderResult | List[StreakFinderResult]) -> Streaks:
+    def to_streaks(self, result: List[StreakList]) -> Streaks:
         xp = self.__array_namespace__()
-        if isinstance(result, list):
-            streaks = [xp.asarray(pattern.to_lines()) for pattern in result]
-        else:
-            streaks = [xp.asarray(result.to_lines()),]
+        streaks = [xp.asarray(pattern.to_lines()) for pattern in result]
         idxs = xp.concatenate([xp.full((len(pattern),), idx)
                                 for idx, pattern in zip(self.indices, streaks)])
         lines = xp.concatenate(streaks)

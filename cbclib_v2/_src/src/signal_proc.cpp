@@ -25,7 +25,7 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
     }
 
     auto iarr = array<T>(ibuf);
-    auto out = py::array_t<T>(std::vector(carr.shape().begin(), std::prev(carr.shape().end())));
+    py::array_t<T> out (std::vector(carr.shape().begin(), std::prev(carr.shape().end())));
     auto oarr = array<T>(out.request());
 
     thread_exception e;

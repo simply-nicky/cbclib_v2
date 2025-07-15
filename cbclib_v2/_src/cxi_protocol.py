@@ -41,11 +41,13 @@ class DataIndices(DataContainer):
 
     def __len__(self) -> int:
         xp = self.__array_namespace__()
-        return min(xp.size(val) for val in self.to_dict().values())
+        sizes = [xp.size(val) for val in self.to_dict().values() if xp.size(val)]
+        return min(sizes) if len(sizes) else 0
 
     def __getitem__(self: I, indices: Indices) -> I:
         xp = self.__array_namespace__()
-        data = {attr: xp.atleast_1d(val[indices]) for attr, val in self.to_dict().items()}
+        data = {attr: xp.atleast_1d(val[indices])
+                for attr, val in self.to_dict().items() if xp.size(val)}
         return self.replace(**data)
 
     def __reduce__(self) -> Tuple:

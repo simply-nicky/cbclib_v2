@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
 from cbclib_v2.label import PointSet2D, Pixels2DDouble, Structure2D, label
-from cbclib_v2.streak_finder import Peaks, detect_peaks, filter_peaks
+from cbclib_v2.streak_finder import Peaks, PeaksList, detect_peaks, filter_peaks
 from cbclib_v2.test_util import check_close
 
 class TestPeaksAndMoments():
@@ -107,7 +107,10 @@ class TestPeaksAndMoments():
     @pytest.fixture
     def filtered(self, peaks: Peaks, image: NDRealArray, mask: NDBoolArray, connectivity: Structure2D,
                  threshold: float, npts: int) -> Peaks:
-        return filter_peaks(peaks, image, mask, connectivity, threshold, npts)
+        filtered = PeaksList()
+        filtered.append(peaks)
+        filter_peaks(filtered, image, mask, connectivity, threshold, npts)
+        return filtered[0]
 
     def test_filtered(self, peaks: Peaks, filtered: Peaks, image: NDRealArray, mask: NDBoolArray,
                       connectivity: Structure2D, threshold: float, npts: int):
