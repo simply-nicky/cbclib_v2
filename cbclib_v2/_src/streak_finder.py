@@ -1,12 +1,12 @@
-from typing import List, overload
+from typing import List
 from .annotations import NDBoolArray, NDRealArray
 from .src.label import Structure2D
-from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks,
-                                StreakFinderResultDouble, StreakFinderResultFloat, Peaks)
+from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, p_value, StreakDoubleList,
+                                StreakFloatList, Peaks, PeaksList)
 from .src.streak_finder import StreakDouble, StreakFloat
 
 Streak = StreakDouble | StreakFloat
-StreakFinderResult = StreakFinderResultDouble | StreakFinderResultFloat
+StreakList = StreakDoubleList | StreakFloatList
 
 class PatternStreakFinder:
     def __init__(self, data: NDRealArray, mask: NDBoolArray, structure: Structure2D,
@@ -15,7 +15,7 @@ class PatternStreakFinder:
         self.min_size, self.lookahead, self.nfa = min_size, lookahead, nfa
 
     def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
-                     num_threads: int=1) -> List[Peaks]:
+                     num_threads: int=1) -> PeaksList:
         """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
         ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
         between peaks is ``2 * structure.radius``.
@@ -32,19 +32,12 @@ class PatternStreakFinder:
         """
         peaks = detect_peaks(self.data, self.mask, self.structure.rank, vmin,
                              num_threads=num_threads)
-        return filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
-                            num_threads=num_threads)
+        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
+                     num_threads=num_threads)
+        return peaks
 
-    @overload
-    def detect_streaks(self, peaks: Peaks, xtol: float, vmin: float, num_threads: int=1
-                       ) -> StreakFinderResult: ...
-
-    @overload
-    def detect_streaks(self, peaks: List[Peaks], xtol: float, vmin: float, num_threads: int=1
-                       ) -> List[StreakFinderResult]: ...
-
-    def detect_streaks(self, peaks: Peaks | List[Peaks], xtol: float, vmin: float,
-                       num_threads: int=1) -> StreakFinderResult | List[StreakFinderResult]:
+    def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float,
+                       num_threads: int=1) -> List[StreakList]:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
