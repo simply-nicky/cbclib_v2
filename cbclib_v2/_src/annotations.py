@@ -504,6 +504,30 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def array_split(self, ary: ArrayLike, indices_or_sections: int | Sequence[int] | ArrayLike,
+                    axis: int = 0) -> List[Array]:
+        """Split an array into sub-arrays.
+
+        Array API implementation of :func:`numpy.array_split`.
+
+        Refer to the documentation of :func:`numpy.split` for details; ``array_split``
+        is equivalent to ``split``, but allows integer ``indices_or_sections`` which does
+        not evenly divide the split axis.
+
+        Examples:
+        >>> x = xp.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
+        >>> chunks = xp.array_split(x, 4)
+        >>> print(*chunks)
+        [1 2 3] [4 5] [6 7] [8 9]
+
+        See also:
+        - :func:`numpy.split`: split an array along any axis.
+        - :func:`numpy.vsplit`: split vertically, i.e. along axis=0
+        - :func:`numpy.hsplit`: split horizontally, i.e. along axis=1
+        - :func:`numpy.dsplit`: split depth-wise, i.e. along axis=2
+        """
+        ...
+
     def argsort(self, a: ArrayLike, axis: int | None = -1, *, kind: None = None,
                 order: None = None, stable: bool = True, descending: bool = False
                 ) -> Array:

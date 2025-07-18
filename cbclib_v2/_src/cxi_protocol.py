@@ -293,11 +293,17 @@ class CXIReader():
                    xp: ArrayNamespace) -> Array:
         stack = []
 
-        with Pool(processes=processes, initializer=CXIReadWorker.initializer,
-                  initargs=(ss_idxs, fs_idxs, proc)) as pool:
-            for frame in tqdm(pool.imap(CXIReadWorker.run, iter(indices)), total=len(indices),
-                              disable=not verbose, desc=f'Loading {attr:s}'):
-                stack.append(frame)
+        if processes > 1:
+            with Pool(processes=processes, initializer=CXIReadWorker.initializer,
+                    initargs=(ss_idxs, fs_idxs, proc)) as pool:
+                for frame in tqdm(pool.imap(CXIReadWorker.run, iter(indices)), total=len(indices),
+                                disable=not verbose, desc=f'Loading {attr:s}'):
+                    stack.append(frame)
+        else:
+            worker = CXIReadWorker(ss_idxs, fs_idxs, proc)
+            for index in tqdm(indices, total=len(indices), disable=not verbose,
+                              desc=f'Loading {attr:s}'):
+                stack.append(worker(index))
 
         return xp.stack(stack, axis=0)
 

@@ -170,9 +170,15 @@ class ArrayContainer(DataContainer):
         data = data | {attr: val[indices] for attr, val in self.contents().items()}
         return self.replace(**data)
 
-def split(containers: Iterable[A], size: int) -> Iterator[A]:
-    chunk: List[A] = []
-    types: Set[Type[A]] = set()
+@overload
+def split(containers: Iterable[A], size: int) -> Iterator[A]: ...
+
+@overload
+def split(containers: Iterable[Array], size: int) -> Iterator[Array]: ...
+
+def split(containers: Iterable[A | Array], size: int) -> Iterator[A | Array]:
+    chunk: List = []
+    types: Set[Type[A | Array]] = set()
 
     for container in containers:
         chunk.append(container)
@@ -182,19 +188,29 @@ def split(containers: Iterable[A], size: int) -> Iterator[A]:
             if len(types) != 1:
                 raise ValueError("Containers must have the same type")
             t = types.pop()
-            if not issubclass(t, ArrayContainer):
+            if issubclass(t, ArrayContainer):
+                yield t.concatenate(chunk)
+            elif issubclass(t, np.ndarray):
+                yield np.stack(chunk)
+            elif issubclass(t, JaxArray):
+                yield jnp.stack(chunk)
+            else:
                 raise ValueError(f"Containers have an invalid type: {t}")
-            yield t.concatenate(chunk)
 
             chunk.clear()
 
-    if len(chunk):
+    if len(chunk) > 0:
         if len(types) != 1:
             raise ValueError("Containers must have the same type")
         t = types.pop()
-        if not issubclass(t, ArrayContainer):
+        if issubclass(t, ArrayContainer):
+            yield t.concatenate(chunk)
+        elif issubclass(t, np.ndarray):
+            yield np.stack(chunk)
+        elif issubclass(t, JaxArray):
+            yield jnp.stack(chunk)
+        else:
             raise ValueError(f"Containers have an invalid type: {t}")
-        yield t.concatenate(chunk)
 
 I = TypeVar("I", bound="Indexed")
 IC = TypeVar("IC", bound="IndexedContainer")

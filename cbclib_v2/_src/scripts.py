@@ -2,9 +2,8 @@ from multiprocessing import Pool
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Tuple, Type, TypeVar, overload
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
-from .annotations import (ArrayNamespace, BoolArray, IntArray, NDArray, NDRealArray, NumPy,
-                          ReadOut, RealArray, ROI)
-from .data_container import ArrayContainer, Container, D, array_namespace, split
+from .annotations import Array, ArrayNamespace, BoolArray, IntArray, NumPy, ReadOut, RealArray, ROI
+from .data_container import ArrayContainer, Container, D, IndexArray, array_namespace, split
 from .data_processing import CrystData, RegionDetector, StreakDetector, Streaks
 from .label import Structure2D, Structure3D, Regions2D
 from .parser import JSONParser, INIParser, Parser
@@ -88,7 +87,7 @@ class MetadataParameters(BaseParameters):
     roi         : ROIParameters = field(default_factory=ROIParameters)
     num_threads : int = 1
 
-def create_metadata(frames: NDRealArray, params: MetadataParameters) -> CrystMetadata:
+def create_metadata(frames: RealArray, params: MetadataParameters) -> CrystMetadata:
     xp = array_namespace(frames)
     data = CrystData(data=frames)
 
@@ -138,7 +137,7 @@ class RegionFinderParameters(BaseParameters):
     regions     : RegionParameters
     num_threads : int
 
-def find_regions(frames: NDArray, metadata: CrystMetadata, params: RegionFinderParameters
+def find_regions(frames: Array, metadata: CrystMetadata, params: RegionFinderParameters
                  ) -> Tuple[RegionDetector, List[Regions2D]]:
     if frames.ndim < 2:
         raise ValueError("Frame array must be at least 2 dimensional")
@@ -155,8 +154,8 @@ class PatternRecognitionParameters(RegionFinderParameters):
     threshold   : float
 
 def pattern_recognition(metadata: CrystMetadata, params: PatternRecognitionParameters,
-                        xp: ArrayNamespace=NumPy) -> Callable[[NDArray], ReadOut]:
-    def pattern_goodness(frames: NDArray) -> Tuple[float, float]:
+                        xp: ArrayNamespace=NumPy) -> Callable[[Array], ReadOut]:
+    def pattern_goodness(frames: Array) -> Tuple[float, float]:
         det_obj, regions = find_regions(frames, metadata, params)
         masses = det_obj.total_mass(regions)[0]
         fits = det_obj.ellipse_fit(regions)[0]
@@ -185,8 +184,10 @@ class StreakFinderParameters(BaseParameters):
     scale_whitefield    : bool = False
     num_threads         : int = 1
 
-def find_streaks(frames: NDArray, metadata: CrystMetadata, params: StreakFinderParameters
-                 ) -> Tuple[Streaks, List[StreakList], PeaksList, StreakDetector]:
+def detect_streaks(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters,
+                   parallel: bool=True
+                   ) -> Tuple[Streaks, List[StreakList], PeaksList, StreakDetector]:
+    num_threads = params.num_threads if parallel else 1
     if frames.ndim < 2:
         raise ValueError("Frame array must be at least 2 dimensional")
     data = CrystData(data=frames.reshape((-1,) + frames.shape[-2:]), mask=metadata.mask,
@@ -194,19 +195,61 @@ def find_streaks(frames: NDArray, metadata: CrystMetadata, params: StreakFinderP
     if params.roi.size():
         data = data.crop(params.roi.to_roi())
     if params.scale_whitefield:
-        data = data.scale_whitefield(method='median', num_threads=params.num_threads)
+        data = data.scale_whitefield(method='median', num_threads=num_threads)
     data = data.update_snr()
     det_obj = data.streak_detector(params.streaks.structure.to_structure('2d'))
     peaks = det_obj.detect_peaks(params.peaks.vmin, params.peaks.npts,
-                                 params.peaks.structure.to_structure('2d'), params.num_threads)
+                                 params.peaks.structure.to_structure('2d'), num_threads)
     detected = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
                                       params.streaks.min_size, nfa=params.streaks.nfa,
-                                      num_threads=params.num_threads)
+                                      num_threads=num_threads)
     streaks = det_obj.to_streaks(detected)
     if params.center is not None:
         mask = streaks.concentric_only(params.center[0], params.center[1])
         streaks = streaks[mask]
     return streaks, detected, peaks, det_obj
+
+def run_detect_streaks(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters,
+                       chunksize: int=1) -> Streaks:
+    xp = array_namespace(frames, metadata)
+    streaks = []
+    for index, frame in tqdm(zip(xp.arange(0, frames.shape[0], chunksize),
+                                 split(frames, chunksize)),
+                             total=int(xp.rint(frames.shape[0] / chunksize))):
+        pattern = detect_streaks(frame, metadata, params)[0]
+        streaks.append(pattern.replace(index=pattern.index + index))
+    return Streaks.concatenate(streaks)
+
+detect_worker : 'DetectionWorker'
+
+@dataclass
+class DetectionWorker():
+    metadata    : CrystMetadata
+    params      : StreakFinderParameters
+
+    def __call__(self, args: Array) -> RealArray:
+        streaks = detect_streaks(args, self.metadata, self.params, False)[0]
+        return streaks.to_lines()
+
+    @classmethod
+    def initializer(cls, metadata: CrystMetadata, params: StreakFinderParameters):
+        global detect_worker
+        detect_worker = cls(metadata, params)
+
+    @staticmethod
+    def run(args: Array) -> RealArray:
+        return detect_worker(args)
+
+def run_detect_streaks_pool(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters
+                            ) -> Streaks:
+    xp = array_namespace(frames, metadata)
+    streaks = []
+    with Pool(processes=params.num_threads, initializer=DetectionWorker.initializer,
+              initargs=(metadata, params)) as pool:
+        for index, lines in tqdm(enumerate(pool.imap(DetectionWorker.run, frames)),
+                                 total=frames.shape[0]):
+            streaks.append(Streaks(index=IndexArray(xp.full(lines.shape[0], index)), lines=lines))
+    return Streaks.concatenate(streaks)
 
 @dataclass
 class CBDIndexingParameters(BaseParameters):
@@ -273,7 +316,7 @@ def run_pre_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup,
 
     return XtalList.concatenate(solutions)
 
-worker : 'IndexingWorker'
+indexing_worker : 'IndexingWorker'
 
 @dataclass
 class IndexingWorker():
@@ -292,12 +335,12 @@ class IndexingWorker():
     @classmethod
     def initializer(cls, state: BaseSetup, params: CBDIndexingParameters, xtal: XtalState,
                     indexer: CBDIndexer):
-        global worker
-        worker = cls(state, params, xtal, indexer)
+        global indexing_worker
+        indexing_worker = cls(state, params, xtal, indexer)
 
     @staticmethod
     def run(args: Tuple[Dict[str, Any], Dict[str, Any]]) -> XtalList:
-        return worker(args)
+        return indexing_worker(args)
 
 def dict_range(containers: Iterable[D]) -> Iterator[Dict[str, Any]]:
     for container in containers:
