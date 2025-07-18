@@ -217,13 +217,15 @@ I = TypeVar("I", bound="Indexed")
 IC = TypeVar("IC", bound="IndexedContainer")
 
 @dataclass
-class IndexArray(DataContainer):
+class IndexArray():
     array       : InitVar[IntArray]
 
     def __post_init__(self, array: IntArray):
-        self.__namespace__ = array_namespace(array)
-        xp = self.__array_namespace__()
+        xp = self.__namespace__ = array_namespace(array)
         self.index = Indexer(xp.atleast_1d(array))
+
+    def __array_namespace__(self) -> ArrayNamespace:
+        return self.__namespace__
 
     # Comparisons
 
