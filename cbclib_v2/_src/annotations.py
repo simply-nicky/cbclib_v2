@@ -24,10 +24,6 @@ class ReferenceType(Generic[T]):
         ...
 
 @runtime_checkable
-class Sized(Protocol):
-    def __len__(self) -> int: ...
-
-@runtime_checkable
 class SupportsNamespace(Protocol):
     def __array_namespace__(self) -> 'ModuleType | ArrayNamespace': ...
 

@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from .src.index import Indexer
 from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, DType, Indices,
                           IntArray, IntSequence, JaxArray, JaxNumPy, NumPy, RealSequence, Scalar,
-                          Shape, Sized, SupportsNamespace)
+                          Shape, SupportsNamespace)
 
 def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
            xp: ArrayNamespace=JaxNumPy) -> Array:
@@ -98,7 +98,7 @@ class Container(DataclassInstance):
 
     @staticmethod
     def is_empty(data: Any) -> bool:
-        return isinstance(data, Sized) and len(data) == 0
+        return hasattr(data, 'size') and len(data) == 0
 
     def contents(self) -> Dict[str, Any]:
         """Return a list of the attributes stored in the container that are initialised.
@@ -159,15 +159,16 @@ class ArrayContainer(DataContainer):
     @classmethod
     def concatenate(cls: Type[A], containers: Iterable[A]) -> A:
         xp = array_namespace(*containers)
-        result : DefaultDict[str, List] = defaultdict(list)
+        concatenated : DefaultDict[str, List] = defaultdict(list)
         for container in containers:
             for key, val in container.contents().items():
-                result[key].append(val)
-        return cls(**{key: xp.concatenate(val) for key, val in result.items()})
+                concatenated[key].append(val)
+        result = {key: xp.concatenate(val) for key, val in concatenated.items()}
+        result = {key: xp.array([]) for key in container.to_dict()} | result
+        return cls(**result)
 
     def __getitem__(self: A, indices: Indices | BoolArray) -> A:
-        data = {attr: None for attr in self.to_dict()}
-        data = data | {attr: val[indices] for attr, val in self.contents().items()}
+        data = self.to_dict() | {attr: val[indices] for attr, val in self.contents().items()}
         return self.replace(**data)
 
 @overload
@@ -327,7 +328,10 @@ class IndexArray(DataContainer):
         return IndexArray(xp.asarray(self)[idxs])
 
     def __iter__(self) -> Iterator[np.integer[Any]]:
-        return self.index.array.__iter__()
+        return iter(self.index.array)
+
+    def __len__(self) -> int:
+        return len(self.index.array)
 
     def __repr__(self) -> str:
         return self.index.array.__repr__()

@@ -245,7 +245,7 @@ class DetectionWorker():
             data = self.pre_processor(data)
         streaks = detect_streaks(data, self.metadata, self.params, False)[0]
         xp = array_namespace(streaks)
-        return (xp.asarray(streaks.index), streaks.lines)
+        return (xp.full(streaks.shape[0], args), streaks.lines)
 
     @classmethod
     def initializer(cls, input_file: FileStore, metadata: CrystMetadata,
