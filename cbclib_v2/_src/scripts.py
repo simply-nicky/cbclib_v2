@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Tuple
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
 from .annotations import Array, ArrayNamespace, BoolArray, IntArray, NumPy, ReadOut, RealArray, ROI
+from .cxi_protocol import FileStore
 from .data_container import ArrayContainer, Container, D, IndexArray, array_namespace, split
 from .data_processing import CrystData, RegionDetector, StreakDetector, Streaks
 from .label import Structure2D, Structure3D, Regions2D
@@ -209,46 +210,67 @@ def detect_streaks(frames: Array, metadata: CrystMetadata, params: StreakFinderP
         streaks = streaks[mask]
     return streaks, detected, peaks, det_obj
 
-def run_detect_streaks(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters,
-                       chunksize: int=1) -> Streaks:
+PreProcessor = Callable[[Array,], Array]
+
+def run_detect_streaks(file: FileStore, metadata: CrystMetadata, params: StreakFinderParameters,
+                       frames: IntArray | None=None, chunksize: int=1,
+                       pre_processor: PreProcessor | None=None) -> Streaks:
     xp = array_namespace(frames, metadata)
+    if 'data' not in file.attributes():
+        raise ValueError("No data found in the files")
+    if frames is None:
+        frames = xp.arange(file.size)
+
     streaks = []
-    for index, frame in tqdm(zip(xp.arange(0, frames.shape[0], chunksize),
-                                 split(frames, chunksize)),
-                             total=int(xp.rint(frames.shape[0] / chunksize))):
-        pattern = detect_streaks(frame, metadata, params)[0]
-        streaks.append(pattern.replace(index=pattern.index + index))
+    for frame in tqdm(split(frames, chunksize), total=int(xp.ceil(frames.shape[0] / chunksize))):
+        data = file.load('data', idxs=frame, verbose=False)
+        if pre_processor is not None:
+            data = pre_processor(data)
+        pattern = detect_streaks(data, metadata, params)[0]
+        streaks.append(pattern.replace(index=pattern.index + frame[0]))
     return Streaks.concatenate(streaks)
 
 detect_worker : 'DetectionWorker'
 
 @dataclass
 class DetectionWorker():
-    metadata    : CrystMetadata
-    params      : StreakFinderParameters
+    input_file      : FileStore
+    metadata        : CrystMetadata
+    params          : StreakFinderParameters
+    pre_processor   : PreProcessor | None = None
 
-    def __call__(self, args: Array) -> RealArray:
-        streaks = detect_streaks(args, self.metadata, self.params, False)[0]
-        return streaks.to_lines()
+    def __call__(self, args: IntArray) -> Tuple[IntArray, RealArray]:
+        data = self.input_file.load('data', idxs=args, verbose=False)
+        if self.pre_processor is not None:
+            data = self.pre_processor(data)
+        streaks = detect_streaks(data, self.metadata, self.params, False)[0]
+        xp = array_namespace(streaks)
+        return (xp.asarray(streaks.index), streaks.lines)
 
     @classmethod
-    def initializer(cls, metadata: CrystMetadata, params: StreakFinderParameters):
+    def initializer(cls, input_file: FileStore, metadata: CrystMetadata,
+                    params: StreakFinderParameters, pre_processor: PreProcessor | None=None):
         global detect_worker
-        detect_worker = cls(metadata, params)
+        detect_worker = cls(input_file, metadata, params, pre_processor)
 
     @staticmethod
-    def run(args: Array) -> RealArray:
+    def run(args: Array) -> Tuple[IntArray, RealArray]:
         return detect_worker(args)
 
-def run_detect_streaks_pool(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters
-                            ) -> Streaks:
+def run_detect_streaks_pool(file: FileStore, metadata: CrystMetadata,
+                            params: StreakFinderParameters, frames: IntArray | None=None,
+                            pre_processor: PreProcessor | None=None) -> Streaks:
     xp = array_namespace(frames, metadata)
+    if 'data' not in file.attributes():
+        raise ValueError("No data found in the files")
+    if frames is None:
+        frames = xp.arange(file.size)
+
     streaks = []
     with Pool(processes=params.num_threads, initializer=DetectionWorker.initializer,
-              initargs=(metadata, params)) as pool:
-        for index, lines in tqdm(enumerate(pool.imap(DetectionWorker.run, frames)),
-                                 total=frames.shape[0]):
-            streaks.append(Streaks(index=IndexArray(xp.full(lines.shape[0], index)), lines=lines))
+              initargs=(file, metadata, params, pre_processor)) as pool:
+        for index, lines in tqdm(pool.imap(DetectionWorker.run, frames), total=frames.shape[0]):
+            streaks.append(Streaks(index=IndexArray(index), lines=lines))
     return Streaks.concatenate(streaks)
 
 @dataclass

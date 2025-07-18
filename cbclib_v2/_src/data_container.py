@@ -190,7 +190,7 @@ def split(containers: Iterable[A | Array], size: int) -> Iterator[A | Array]:
             t = types.pop()
             if issubclass(t, ArrayContainer):
                 yield t.concatenate(chunk)
-            elif issubclass(t, np.ndarray):
+            elif issubclass(t, (np.ndarray, np.number)):
                 yield np.stack(chunk)
             elif issubclass(t, JaxArray):
                 yield jnp.stack(chunk)
@@ -205,7 +205,7 @@ def split(containers: Iterable[A | Array], size: int) -> Iterator[A | Array]:
         t = types.pop()
         if issubclass(t, ArrayContainer):
             yield t.concatenate(chunk)
-        elif issubclass(t, np.ndarray):
+        elif issubclass(t, (np.ndarray, np.number)):
             yield np.stack(chunk)
         elif issubclass(t, JaxArray):
             yield jnp.stack(chunk)
