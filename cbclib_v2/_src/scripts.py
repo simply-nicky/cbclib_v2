@@ -267,7 +267,7 @@ def run_detect_streaks_pool(file: FileStore, metadata: CrystMetadata,
     streaks = []
     if params.num_threads > 1:
         with Pool(processes=params.num_threads, initializer=DetectionWorker.initializer,
-                initargs=(file, metadata, params, pre_processor)) as pool:
+                  initargs=(file, metadata, params, pre_processor)) as pool:
             for index, lines in tqdm(pool.imap(DetectionWorker.run, frames),
                                      total=frames.shape[0]):
                 streaks.append(Streaks(index=IndexArray(index), lines=lines))
