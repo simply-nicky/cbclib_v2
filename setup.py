@@ -49,5 +49,4 @@ extensions = [
 setup(version=__version__,
       packages=find_namespace_packages(),
       include_package_data=True,
-      install_requires=['numpy', 'pybind11'],
       ext_modules=extensions)
