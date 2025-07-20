@@ -5,10 +5,9 @@ from tqdm.auto import tqdm
 from .annotations import Array, ArrayNamespace, BoolArray, IntArray, NumPy, ReadOut, RealArray, ROI
 from .cxi_protocol import FileStore
 from .data_container import ArrayContainer, Container, D, IndexArray, array_namespace, split
-from .data_processing import CrystData, RegionDetector, StreakDetector, Streaks
+from .data_processing import CrystData, RegionDetector, Streaks
 from .label import Structure2D, Structure3D, Regions2D
 from .parser import JSONParser, INIParser, Parser
-from .streak_finder import PeaksList, StreakList
 from ..indexer.cbc_data import MillerWithRLP, Patterns
 from ..indexer.cbc_indexing import CBDIndexer
 from ..indexer.cbc_setup import BaseSetup, TiltOverAxisState, XtalList, XtalState
@@ -185,9 +184,8 @@ class StreakFinderParameters(BaseParameters):
     scale_whitefield    : bool = False
     num_threads         : int = 1
 
-def detect_streaks(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters,
-                   parallel: bool=True
-                   ) -> Tuple[Streaks, List[StreakList], PeaksList, StreakDetector]:
+def detect_streaks_script(frames: Array, metadata: CrystMetadata, params: StreakFinderParameters,
+                          parallel: bool=True) -> Streaks:
     num_threads = params.num_threads if parallel else 1
     if frames.ndim < 2:
         raise ValueError("Frame array must be at least 2 dimensional")
@@ -208,7 +206,7 @@ def detect_streaks(frames: Array, metadata: CrystMetadata, params: StreakFinderP
     if params.center is not None:
         mask = streaks.concentric_only(params.center[0], params.center[1])
         streaks = streaks[mask]
-    return streaks, detected, peaks, det_obj
+    return streaks
 
 PreProcessor = Callable[[Array,], Array]
 
@@ -226,7 +224,7 @@ def run_detect_streaks(file: FileStore, metadata: CrystMetadata, params: StreakF
         data = file.load('data', idxs=frame, verbose=False)
         if pre_processor is not None:
             data = pre_processor(data)
-        pattern = detect_streaks(data, metadata, params)[0]
+        pattern = detect_streaks_script(data, metadata, params)
         streaks.append(pattern.replace(index=pattern.index + frame[0]))
     return Streaks.concatenate(streaks)
 
@@ -243,7 +241,7 @@ class DetectionWorker():
         data = self.input_file.load('data', idxs=args, verbose=False)
         if self.pre_processor is not None:
             data = self.pre_processor(data)
-        streaks = detect_streaks(data, self.metadata, self.params, False)[0]
+        streaks = detect_streaks_script(data, self.metadata, self.params, False)
         xp = array_namespace(streaks)
         return (xp.full(streaks.shape[0], args), streaks.lines)
 
@@ -267,9 +265,16 @@ def run_detect_streaks_pool(file: FileStore, metadata: CrystMetadata,
         frames = xp.arange(file.size)
 
     streaks = []
-    with Pool(processes=params.num_threads, initializer=DetectionWorker.initializer,
-              initargs=(file, metadata, params, pre_processor)) as pool:
-        for index, lines in tqdm(pool.imap(DetectionWorker.run, frames), total=frames.shape[0]):
+    if params.num_threads > 1:
+        with Pool(processes=params.num_threads, initializer=DetectionWorker.initializer,
+                initargs=(file, metadata, params, pre_processor)) as pool:
+            for index, lines in tqdm(pool.imap(DetectionWorker.run, frames),
+                                     total=frames.shape[0]):
+                streaks.append(Streaks(index=IndexArray(index), lines=lines))
+    else:
+        worker = DetectionWorker(file, metadata, params, pre_processor)
+        for frame in tqdm(frames, total=frames.size):
+            index, lines = worker(frame)
             streaks.append(Streaks(index=IndexArray(index), lines=lines))
     return Streaks.concatenate(streaks)
 

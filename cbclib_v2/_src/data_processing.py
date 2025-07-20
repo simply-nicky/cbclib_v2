@@ -229,7 +229,8 @@ class CrystData(DataContainer):
         if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
 
-        mask = np.copy(self.mask)
+        xp = self.__array_namespace__()
+        mask = xp.copy(self.mask)
         mask[roi[0]:roi[1], roi[2]:roi[3]] = False
         return self.replace(mask=mask).apply_mask()
 
@@ -239,8 +240,9 @@ class CrystData(DataContainer):
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
+        xp = self.__array_namespace__()
         parent = cast(ReferenceType[CrystData], ref(self))
-        idxs = np.arange(self.shape[0])
+        idxs = xp.arange(self.shape[0])
         return RegionDetector(indices=idxs, data=self.snr, mask=self.mask, structure=structure,
                               parent=parent)
 
@@ -710,13 +712,14 @@ class RegionDetector(DetectorBase):
         return regions
 
     def export_table(self, regions: List[Regions2D]) -> pd.DataFrame:
+        xp = self.__array_namespace__()
         frames, y, x = [], [], []
         for frame, pattern in zip(self.indices, regions):
             size = sum(len(region.x) for region in pattern)
             frames.extend(size * [frame,])
             y.extend(pattern.y)
             x.extend(pattern.x)
-        return self.export_coordinates(np.array(frames), np.array(y), np.array(x))
+        return self.export_coordinates(xp.array(frames), xp.array(y), xp.array(x))
 
     def ellipse_fit(self, regions: List[Regions2D]) -> List[RealArray]:
         return ellipse_fit(regions, self.data)

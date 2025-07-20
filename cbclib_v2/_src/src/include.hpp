@@ -272,7 +272,8 @@ public:
         {
             if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end())
             {
-                auto obj = reinterpret_cast<PyArrayObject *>(arr.release().ptr());
+                // DON'T use release(), it leads to a memory leak
+                auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
                 arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, counter++, i));
             }
         }
@@ -280,6 +281,7 @@ public:
         // If the swapped array is not c-style contiguous we need to change the data buffer
         if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
         {
+            // DON'T use release(), it leads to a memory leak
             auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
             arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
         }
@@ -298,7 +300,8 @@ public:
         {
             if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end())
             {
-                auto obj = reinterpret_cast<PyArrayObject *>(arr.release().ptr());
+                // DON'T use release(), it leads to a memory leak
+                auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
                 arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, --counter, i));
             }
         }
@@ -306,6 +309,7 @@ public:
         // If the swapped array is not c-style contiguous we need to change the data buffer
         if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
         {
+            // DON't use release(), it leads to a memory leak
             auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
             arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
         }

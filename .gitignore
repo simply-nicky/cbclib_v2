@@ -1,7 +1,9 @@
 # Diffraction pattern results and temporary development files
 figures/
-results/
+hpx/
 notebooks/
+results/
+scripts/
 
 # JAX profiling results
 trace/

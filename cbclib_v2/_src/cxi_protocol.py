@@ -716,11 +716,17 @@ class ExtraReader():
              processes: int, proc: Processor | None, verbose: bool, xp: ArrayNamespace
              ) -> Array:
         stack = []
-        with Pool(processes=processes, initializer=ExtraReadWorker.initializer,
-                  initargs=(self.protocol, self.geom, attr, ss_idxs, fs_idxs, proc)) as pool:
-            for frame in tqdm(pool.imap(ExtraReadWorker.run, iter(idxs)), total=len(idxs),
+        if processes > 1:
+            with Pool(processes=processes, initializer=ExtraReadWorker.initializer,
+                    initargs=(self.protocol, self.geom, attr, ss_idxs, fs_idxs, proc)) as pool:
+                for frame in tqdm(pool.imap(ExtraReadWorker.run, iter(idxs)), total=len(idxs),
+                                  disable=not verbose, desc=f'Loading {attr:s}'):
+                    stack.append(frame)
+        else:
+            worker = ExtraReadWorker(self.protocol, self.geom, attr, ss_idxs, fs_idxs, proc)
+            for index in tqdm(iter(idxs), total=len(idxs),
                               disable=not verbose, desc=f'Loading {attr:s}'):
-                stack.append(frame)
+                stack.append(worker(index))
 
         return xp.stack(stack, axis=0)
 
