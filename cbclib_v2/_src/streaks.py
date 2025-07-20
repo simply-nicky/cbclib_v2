@@ -97,6 +97,9 @@ class Streaks(IndexedContainer, BaseLines):
         return cls(index=IndexArray(xp.asarray(df['index'].to_numpy())),
                    lines=xp.asarray(lines))
 
+    def __reduce__(self) -> Tuple:
+        return (self.__class__, tuple(self.to_dict().values()))
+
     def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float=0.33) -> BoolArray:
         xp = self.__array_namespace__()
         centers = xp.mean(self.lines.reshape(-1, 2, 2), axis=1)

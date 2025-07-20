@@ -222,10 +222,13 @@ class IndexArray():
 
     def __post_init__(self, array: IntArray):
         xp = self.__namespace__ = array_namespace(array)
-        self.index = Indexer(xp.atleast_1d(array))
+        self.index = Indexer(xp.asarray(xp.atleast_1d(array), dtype=int))
 
     def __array_namespace__(self) -> ArrayNamespace:
         return self.__namespace__
+
+    def __reduce__(self) -> Tuple:
+        return (self.__class__, (self.index.array,))
 
     # Comparisons
 

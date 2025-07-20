@@ -237,13 +237,13 @@ class DetectionWorker():
     params          : StreakFinderParameters
     pre_processor   : PreProcessor | None = None
 
-    def __call__(self, args: IntArray) -> Tuple[IntArray, RealArray]:
+    def __call__(self, args: IntArray) -> Streaks:
         data = self.input_file.load('data', idxs=args, verbose=False)
+        xp = array_namespace(data)
         if self.pre_processor is not None:
             data = self.pre_processor(data)
         streaks = detect_streaks_script(data, self.metadata, self.params, False)
-        xp = array_namespace(streaks)
-        return (xp.full(streaks.shape[0], args), streaks.lines)
+        return streaks.replace(index=xp.full(streaks.shape[0], args))
 
     @classmethod
     def initializer(cls, input_file: FileStore, metadata: CrystMetadata,
@@ -252,7 +252,7 @@ class DetectionWorker():
         detect_worker = cls(input_file, metadata, params, pre_processor)
 
     @staticmethod
-    def run(args: Array) -> Tuple[IntArray, RealArray]:
+    def run(args: Array) -> Streaks:
         return detect_worker(args)
 
 def run_detect_streaks_pool(file: FileStore, metadata: CrystMetadata,
@@ -268,14 +268,12 @@ def run_detect_streaks_pool(file: FileStore, metadata: CrystMetadata,
     if params.num_threads > 1:
         with Pool(processes=params.num_threads, initializer=DetectionWorker.initializer,
                   initargs=(file, metadata, params, pre_processor)) as pool:
-            for index, lines in tqdm(pool.imap(DetectionWorker.run, frames),
-                                     total=frames.shape[0]):
-                streaks.append(Streaks(index=IndexArray(index), lines=lines))
+            for pattern in tqdm(pool.imap(DetectionWorker.run, frames), total=frames.shape[0]):
+                streaks.append(pattern)
     else:
         worker = DetectionWorker(file, metadata, params, pre_processor)
         for frame in tqdm(frames, total=frames.size):
-            index, lines = worker(frame)
-            streaks.append(Streaks(index=IndexArray(index), lines=lines))
+            streaks.append(worker(frame))
     return Streaks.concatenate(streaks)
 
 @dataclass
