@@ -475,6 +475,12 @@ public:
         return detail::logbinom(n, k, p);
     }
 
+    const array<bool> & mask() const {return m_mask;}
+    bool mask(size_t index) const {return m_mask[index];}
+
+    const std::vector<int> & flags() const {return m_flags;}
+    int flags(size_t index) const {return m_flags[index];}
+
     void clear()
     {
         std::fill(m_flags.begin(), m_flags.end(), not_used);

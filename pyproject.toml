@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.10.7'
+version = '0.11.0'
 dependencies = [
     'extra_data',
     'extra_geom',
@@ -21,8 +21,8 @@ dependencies = [
     'pybind11>=2.10.0',
     'tqdm'
 ]
-license = "GPL-3.0-or-later"
-license-files = ['LICENSE',]
+# license = "GPL-3.0-or-later"
+# license-files = ['LICENSE',]
 readme = 'README.md'
 requires-python = '>=3.10'
 classifiers = [

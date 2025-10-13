@@ -227,6 +227,13 @@ void check_optional(const std::string & name, ForwardIt first, ForwardIt last,
                 obuf.shape.begin(), obuf.shape.end(), first, last);
 }
 
+std::vector<py::ssize_t> inverse_permutation(const std::vector<py::ssize_t> & p)
+{
+    std::vector<py::ssize_t> q(p.size());
+    for (size_t i = 0; i < p.size(); i++) q[p[i]] = i;
+    return q;
+}
+
 template <typename T>
 struct Sequence : public AnyContainer<T>
 {
@@ -264,19 +271,47 @@ public:
     }
 
     template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
-    Array && swap_axes(Array && arr) const
+    Array && swap_back(Array && arr) const
     {
-        // First swap the axes, PyArray_SwapAxes changes the axis order but keeps the data buffer intact
-        size_t counter = 0;
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
         for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
-            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end())
-            {
-                // DON'T use release(), it leads to a memory leak
-                auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-                arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, counter++, i));
-            }
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
         }
+        for (auto i : m_ctr) perm.push_back(i);
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
+
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+
+        // If the swapped array is not c-style contiguous we need to change the data buffer
+        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
+        {
+            // DON'T use release(), it leads to a memory leak
+            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
+        }
+
+        return std::forward<Array>(arr);
+    }
+
+    template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
+    Array && swap_front(Array && arr) const
+    {
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
+        for (auto i : m_ctr) perm.push_back(i);
+        for (py::ssize_t i = 0; i < arr.ndim(); i++)
+        {
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
+        }
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
+
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         // If the swapped array is not c-style contiguous we need to change the data buffer
         if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
@@ -292,24 +327,56 @@ public:
     template <class Array, typename V = std::remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
         std::is_same_v<py::array_t<V>, std::remove_cvref_t<Array>>
     >>
-    Array && swap_axes_back(Array && arr) const
+    Array && swap_from_back(Array && arr) const
     {
-        // First swap the axes, PyArray_SwapAxes changes the axis order but keeps the data buffer intact
-        size_t counter = arr.ndim() - m_ctr.size();
-        for (py::ssize_t i = arr.ndim() - 1; i >= 0; i--)
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
+        for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
-            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end())
-            {
-                // DON'T use release(), it leads to a memory leak
-                auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-                arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, --counter, i));
-            }
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
         }
+        for (auto i : m_ctr) perm.push_back(i);
+        perm = inverse_permutation(perm);
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
+
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         // If the swapped array is not c-style contiguous we need to change the data buffer
         if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
         {
-            // DON't use release(), it leads to a memory leak
+            // DON'T use release(), it leads to a memory leak
+            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
+        }
+
+        return std::forward<Array>(arr);
+    }
+
+    template <class Array, typename V = std::remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
+        std::is_same_v<py::array_t<V>, std::remove_cvref_t<Array>>
+    >>
+    Array && swap_from_front(Array && arr) const
+    {
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
+        for (auto i : m_ctr) perm.push_back(i);
+        for (py::ssize_t i = 0; i < arr.ndim(); i++)
+        {
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
+        }
+        perm = inverse_permutation(perm);
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
+
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+
+        // If the swapped array is not c-style contiguous we need to change the data buffer
+        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
+        {
+            // DON'T use release(), it leads to a memory leak
             auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
             arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
         }

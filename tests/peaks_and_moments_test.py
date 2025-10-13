@@ -1,3 +1,4 @@
+from math import prod
 from typing import List, Tuple
 import numpy as np
 import pytest
@@ -48,7 +49,7 @@ class TestPeaksAndMoments():
 
     @pytest.fixture(params=[0.05])
     def num_bad(self, request: pytest.FixtureRequest, shape: Shape) -> int:
-        return int(np.prod(shape) * request.param)
+        return int(prod(shape) * request.param)
 
     @pytest.fixture
     def mask(self, shape: Shape, num_bad: int, rng: np.random.Generator) -> NDBoolArray:

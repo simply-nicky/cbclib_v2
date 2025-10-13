@@ -1,3 +1,4 @@
+from math import prod
 from typing import Callable
 import numpy as np
 from numpy.random import Generator
@@ -36,7 +37,7 @@ class TestJaxPrimitives():
 
     @pytest.fixture
     def idxs(self, n_samples: Shape, xp: ArrayNamespace) -> IntArray:
-        return xp.reshape(xp.arange(np.prod(n_samples)), n_samples)
+        return xp.reshape(xp.arange(prod(n_samples)), n_samples)
 
     def check_gradient(self, f, args, **static_args):
         check_gradient(f, args, atol=1e-1, rtol=1e-3, **static_args)

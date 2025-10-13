@@ -25,8 +25,8 @@ auto dilate(py::array_t<bool> input, StructureND<N> structure, py::none seeds, s
         fill_array(mask, true);
     }
 
-    output = axes.swap_axes(output);
-    mask = axes.swap_axes(mask);
+    output = axes.swap_back(output);
+    mask = axes.swap_back(mask);
     array<bool> out {output.request()};
     array<bool> marr {mask.request()};
 
@@ -67,7 +67,7 @@ auto dilate(py::array_t<bool> input, StructureND<N> structure, py::none seeds, s
 
     e.rethrow();
 
-    return axes.swap_axes_back(output);
+    return axes.swap_from_back(output);
 }
 
 template <size_t N>
@@ -127,8 +127,8 @@ auto dilate_seeded_vec(py::array_t<bool> input, StructureND<N> structure, std::v
         fill_array(mask, true);
     }
 
-    output = axes.swap_axes(output);
-    mask = axes.swap_axes(mask);
+    output = axes.swap_back(output);
+    mask = axes.swap_back(mask);
     array<bool> out {output.request()};
     array<bool> marr {mask.request()};
 
@@ -160,7 +160,7 @@ auto dilate_seeded_vec(py::array_t<bool> input, StructureND<N> structure, std::v
 
     e.rethrow();
 
-    return axes.swap_axes_back(output);
+    return axes.swap_from_back(output);
 }
 
 template <size_t N>
@@ -176,7 +176,7 @@ auto label(py::array_t<bool> mask, StructureND<N> structure, py::none seeds, siz
     }
     else for (long n = N; n > 0; n--) axes->push_back(mask.ndim() - n);
 
-    mask = axes.swap_axes(mask);
+    mask = axes.swap_back(mask);
     array<bool> marr {mask.request()};
 
     if (marr.ndim() < N)
@@ -288,7 +288,7 @@ auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vec
     }
     else for (long n = N; n > 0; n--) axes->push_back(mask.ndim() - n);
 
-    mask = axes.swap_axes(mask);
+    mask = axes.swap_back(mask);
     array<bool> marr {mask.request()};
 
     if (marr.ndim() < N)
@@ -378,7 +378,7 @@ std::vector<py::array_t<T>> apply_and_vectorise(const std::vector<RegionsND<N>> 
     }
     else for (long n = N; n > 0; n--) axes->push_back(data.ndim() - n);
 
-    data = axes.swap_axes(data);
+    data = axes.swap_back(data);
     auto dbuf = data.request();
     auto shape = normalise_shape<N>(dbuf.shape);
     check_dimensions("data", 0, shape, stack.size());

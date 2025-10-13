@@ -76,6 +76,9 @@ D = TypeVar("D", bound="DataContainer")
 A = TypeVar("A", bound="ArrayContainer")
 
 class Container(DataclassInstance):
+    def __reduce__(self) -> Tuple:
+        return (self.__class__, tuple(getattr(self, field.name) for field in fields(self)))
+
     @classmethod
     def from_dict(cls: Type[C], **values: Any) -> C:
         kwargs = {}
@@ -88,8 +91,7 @@ class Container(DataclassInstance):
                     for t in get_args(attr_type):
                         if not is_generic(t) and issubclass(t, Container):
                             kwargs[field.name] = t.from_dict(**value)
-                else:
-                    kwargs[field.name] = value
+                kwargs[field.name] = value
             elif not is_generic(attr_type) and issubclass(attr_type, Container):
                 kwargs[field.name] = attr_type.from_dict(**value)
             else:
@@ -177,7 +179,10 @@ def split(containers: Iterable[A], size: int) -> Iterator[A]: ...
 @overload
 def split(containers: Iterable[Array], size: int) -> Iterator[Array]: ...
 
-def split(containers: Iterable[A | Array], size: int) -> Iterator[A | Array]:
+@overload
+def split(containers: Iterable[Any], size: int) -> Iterator[List]: ...
+
+def split(containers: Iterable[A | Array | Any], size: int) -> Iterator[A | Array | List]:
     chunk: List = []
     types: Set[Type[A | Array]] = set()
 
@@ -196,7 +201,7 @@ def split(containers: Iterable[A | Array], size: int) -> Iterator[A | Array]:
             elif issubclass(t, JaxArray):
                 yield jnp.stack(chunk)
             else:
-                raise ValueError(f"Containers have an invalid type: {t}")
+                yield list(chunk)
 
             chunk.clear()
 
@@ -211,7 +216,7 @@ def split(containers: Iterable[A | Array], size: int) -> Iterator[A | Array]:
         elif issubclass(t, JaxArray):
             yield jnp.stack(chunk)
         else:
-            raise ValueError(f"Containers have an invalid type: {t}")
+            yield list(chunk)
 
 I = TypeVar("I", bound="Indexed")
 IC = TypeVar("IC", bound="IndexedContainer")
@@ -371,6 +376,9 @@ class IndexArray():
 
     def get_index(self, key: int | IntSequence) -> slice | Tuple[IntArray, IntArray]:
         return self.index[key]
+
+    def insert_index(self, key: IntSequence) -> Tuple[IntArray, IntArray]:
+        return self.index.insert_index(key)
 
     def unique(self) -> IntArray:
         return self.index.unique()

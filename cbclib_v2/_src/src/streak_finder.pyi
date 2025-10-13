@@ -1,5 +1,5 @@
 from typing import Iterator, List, Tuple, overload
-from ..annotations import BoolArray, IntSequence, NDRealArray, RealArray, RealSequence
+from ..annotations import BoolArray, IntArray, IntSequence, NDRealArray, RealArray, RealSequence
 from .label import Regions2D, Structure2D
 
 class Peaks:

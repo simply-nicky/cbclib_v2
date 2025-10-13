@@ -10,101 +10,160 @@ Examples:
     >>> data = cbc.CrystData(inp_file)
     >>> data = data.load()
 """
-from typing import Any, ClassVar, Dict, List, Literal, Tuple, TypeVar, cast
+from math import prod
+import os
+from typing import ClassVar, List, Literal, Tuple, TypeVar, cast
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
-from .cxi_protocol import CXIProtocol, FileStore, Kinds
+from .cxi_protocol import CXIProtocol, Kinds
 from .data_container import DataContainer, IndexArray
 from .streak_finder import PeaksList, StreakList, detect_peaks, detect_streaks, filter_peaks
 from .streaks import Streaks
-from .annotations import (ArrayLike, BoolArray, Indices, IntArray, IntSequence, RealArray,
-                          RealSequence, ReferenceType, ROI, Shape)
+from .annotations import (ArrayLike, BoolArray, Indices, IntArray, RealArray, RealSequence,
+                          ReferenceType, ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
                     covariance_matrix, Regions2D, Structure2D)
 from .src.signal_proc import binterpolate, kr_grid
 from .src.median import median, robust_mean, robust_lsq
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
+MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
 STDMethod = Literal['poisson', 'robust-scale']
 WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
 
-def read_hdf(input_file: FileStore, *attributes: str,
-             indices: IntSequence | Tuple[IntSequence, Indices, Indices] | None=None,
-             processes: int=1, verbose: bool=True) -> 'CrystData':
-    """Load data attributes from the input files in `files` file handler object.
+DATA_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cryst_data.ini')
+METADATA_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cryst_metadata.ini')
 
-    Args:
-        attributes : List of attributes to load. Loads all the data attributes contained in
-            the file(s) by default.
-        idxs : List of frame indices to load.
-        processes : Number of parallel workers used during the loading.
-        verbose : Set the verbosity of the loading process.
+@dataclass
+class CrystMetadata(DataContainer):
+    eigen_field : RealArray = field(default_factory=lambda: np.array([]))
+    eigen_value : RealArray = field(default_factory=lambda: np.array([]))
+    frames      : IntArray  = field(default_factory=lambda: np.array([], dtype=int))
+    data_frames : IntArray  = field(default_factory=lambda: np.array([], dtype=int))
+    mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
+    std         : RealArray = field(default_factory=lambda: np.array([]))
+    whitefield  : RealArray = field(default_factory=lambda: np.array([]))
 
-    Raises:
-        ValueError : If attribute is not existing in the input file(s).
-        ValueError : If attribute is invalid.
+    protocol    : ClassVar[CXIProtocol] = CXIProtocol.read(METADATA_PROTOCOL)
 
-    Returns:
-        New :class:`CrystData` object with the attributes loaded.
-    """
-    if not attributes:
-        attributes = tuple(input_file.attributes())
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.is_empty(self.mask):
+            if not self.is_empty(self.std):
+                self.std *= self.mask
+            if not self.is_empty(self.whitefield):
+                self.whitefield *= self.mask
 
-    if indices is None:
-        frames = list(range(input_file.size))
-        ss_idxs, fs_idxs = slice(None), slice(None)
-    elif isinstance(indices, (tuple, list)):
-        frames, ss_idxs, fs_idxs = indices
-    else:
-        frames = indices
-        ss_idxs, fs_idxs = slice(None), slice(None)
-    frames = np.atleast_1d(frames)
+    @property
+    def center_frames(self) -> IntArray:
+        if not self.is_empty(self.data_frames):
+            return np.asarray(median(self.data_frames, axis=-1), dtype=int)
+        return np.array([], dtype=int)
 
-    if input_file.protocol.has_kind(*attributes, kind=Kinds.stack):
-        data_dict: Dict[str, Any] = {'frames': frames}
-    else:
-        data_dict: Dict[str, Any] = {}
+    @property
+    def eigen_fields(self) -> RealArray:
+        xp = self.__array_namespace__()
+        num_frames = self.eigen_field.size // prod(self.eigen_field.shape[-2:])
+        return xp.reshape(self.eigen_field, (num_frames,) + self.eigen_field.shape[-2:])
 
-    for attr in attributes:
-        if attr not in input_file.attributes():
-            raise ValueError(f"No '{attr}' attribute in the input files")
+    @property
+    def whitefields(self) -> RealArray:
+        xp = self.__array_namespace__()
+        num_frames = self.whitefield.size // prod(self.whitefield.shape[-2:])
+        return xp.reshape(self.whitefield, (num_frames,) + self.whitefield.shape[-2:])
 
-        data = input_file.load(attr, idxs=frames, ss_idxs=ss_idxs, fs_idxs=fs_idxs,
-                               processes=processes, verbose=verbose)
+    def crop(self, roi: ROI) -> 'CrystMetadata':
+        cropped = {}
+        for attr, data in self.contents().items():
+            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
+                cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
+        return self.replace(**cropped)
 
-        data_dict[attr] = data
+    def import_data(self, data: RealArray, frames: IntArray | int=np.array([], dtype=int),
+                    whitefield: RealArray=np.array([])) -> 'CrystData':
+        xp = self.__array_namespace__()
+        if not whitefield.size:
+            whitefield = xp.mean(self.whitefields, axis=0)
+        return CrystData(data=data, frames=xp.atleast_1d(frames), mask=self.mask,
+                         std=self.std, whitefield=whitefield)
 
-    return CrystData(**data_dict)
+    def interpolate(self, frames: IntArray, num_threads: int=1) -> RealArray:
+        if self.is_empty(self.data_frames):
+            raise ValueError('no data_frames in the container')
+        if self.is_empty(self.whitefield):
+            raise ValueError('no whitefield in the container')
 
-def write_hdf(container: 'CrystData', output_file: FileStore, *attributes: str,
-              mode: str='overwrite', indices: Indices | None=None):
-    """Save data arrays of the data attributes contained in the container to an output file.
+        return binterpolate(self.whitefield, [self.center_frames,], frames, axis=0,
+                            num_threads=num_threads)
 
-    Args:
-        attributes : List of attributes to save. Saves all the data attributes contained in
-            the container by default.
-        apply_transform : Apply `transform` to the data arrays if True.
-        mode : Writing modes. The following keyword values are allowed:
+    def pca(self) -> 'CrystMetadata':
+        if self.is_empty(self.whitefield):
+            raise ValueError('no whitefield in the container')
+        if self.whitefields.shape[0] == 1:
+            raise ValueError('A stack of several whitefields is needed to perform PCA')
 
-            * `append` : Append the data array to already existing dataset.
-            * `insert` : Insert the data under the given indices `idxs`.
-            * `overwrite` : Overwrite the existing dataset.
+        xp = self.__array_namespace__()
+        whitefield = self.whitefields
+        mat_svd = xp.tensordot(whitefield, whitefield, axes=((1, 2), (1, 2)))
+        eig_vals, eig_vecs = xp.linalg.eig(mat_svd)
+        effs = xp.tensordot(eig_vecs, whitefield, axes=((0,), (0,)))
+        return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
-        idxs : Indices where the data is saved. Used only if ``mode`` is set to 'insert'.
+    def projection(self, data: RealArray, num_fields: int, method: str="robust-lsq",
+                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                   num_threads: int=1) -> RealArray:
+        """Return a new :class:`CrystData` object with a new set of whitefields. A set of
+        backgrounds is generated by robustly fitting a design matrix `W` to the measured
+        patterns.
 
-    Raises:
-        ValueError : If the ``output_file`` is not defined inside the container.
-    """
-    xp = container.__array_namespace__()
-    if not attributes:
-        attributes = tuple(container.contents())
+        Args:
+            method : Choose one of the following methods to scale the white-field:
 
-    for attr in attributes:
-        data = xp.asarray(getattr(container, attr))
-        if not container.is_empty(data):
-            output_file.save(attr, data, mode=mode, idxs=indices)
+                * "median" : By taking a median of data and whitefield.
+                * "robust-lsq" : By solving a least-squares problem with truncated
+                  with the fast least k-th order statistics (FLkOS) estimator.
+
+            r0 : A lower bound guess of ratio of inliers. We'd like to make a sample
+                out of worst inliers from data points that are between `r0` and `r1`
+                of sorted residuals.
+            r1 : An upper bound guess of ratio of inliers. Choose the `r0` to be as
+                high as you are sure the ratio of data is inlier.
+            n_iter : Number of iterations of fitting a gaussian with the FLkOS
+                algorithm.
+            lm : How far (normalized by STD of the Gaussian) from the mean of the
+                Gaussian, data is considered inlier.
+
+        Raises:
+            ValueError : If there is no ``data`` inside the container.
+            ValueError : If there is no ``whitefield`` inside the container.
+
+        Returns:
+            An array of scale factors for each frame in the container.
+        """
+        if self.is_empty(self.eigen_field):
+            raise ValueError('No eigen_field in the container')
+
+        xp = self.__array_namespace__()
+        y: RealArray = xp.reshape(data, (data.size // prod(self.eigen_field.shape[-2:]), -1))
+        W: RealArray = xp.reshape(self.eigen_fields[:num_fields], (num_fields, -1))
+
+        if method == "robust-lsq":
+            return robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
+                              num_threads=num_threads)
+
+        if method == "lsq":
+            return xp.mean(y[..., None, :] * W, axis=-1) / xp.mean(W * W, axis=-1)
+
+        raise ValueError(f"Invalid method argument: {method}")
+
+    def project(self, projection: RealArray) -> RealArray:
+        if self.is_empty(self.eigen_field):
+            raise ValueError('No eigen_field in the container')
+
+        xp = self.__array_namespace__()
+        return xp.tensordot(projection, self.eigen_fields[:projection.shape[-1]], ((-1,), (0,)))
 
 @dataclass
 class CrystData(DataContainer):
@@ -115,15 +174,11 @@ class CrystData(DataContainer):
     classes.
 
     Args:
-        input_file : Input file :class:`cbclib_v2.CXIStore` file handler.
-        transform : An image transform object.
-        output_file : On output file :class:`cbclib_v2.CXIStore` file handler.
         data : Detector raw data.
         mask : Bad pixels mask.
         frames : List of frame indices inside the container.
         whitefield : Measured frames' white-field.
         snr : Signal-to-noise ratio.
-        whitefields : A set of white-fields generated for each pattern separately.
     """
     data        : RealArray = field(default_factory=lambda: np.array([]))
 
@@ -133,9 +188,8 @@ class CrystData(DataContainer):
 
     frames      : IntArray = field(default_factory=lambda: np.array([], dtype=int))
     mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
-    scales      : RealArray = field(default_factory=lambda: np.array([]))
 
-    protocol    : ClassVar[CXIProtocol] = CXIProtocol.read()
+    protocol    : ClassVar[CXIProtocol] = CXIProtocol.read(DATA_PROTOCOL)
 
     def __post_init__(self):
         super().__post_init__()
@@ -144,8 +198,6 @@ class CrystData(DataContainer):
             self.frames = xp.arange(self.shape[0])
         if self.mask.shape != self.shape[1:]:
             self.mask = xp.ones(self.shape[1:], dtype=bool)
-        if self.scales.shape != (self.shape[0],):
-            self.scales = xp.ones(self.shape[0])
 
     @property
     def shape(self) -> Shape:
@@ -157,12 +209,12 @@ class CrystData(DataContainer):
 
         for attr, data in self.contents().items():
             if self.protocol.get_kind(attr) == Kinds.frame:
-                shape[1:] = data.shape
+                shape[1:] = data.shape[-2:]
                 break
 
         for attr, data in self.contents().items():
             if self.protocol.get_kind(attr) == Kinds.stack:
-                shape[0] = np.prod(data.shape[:-2])
+                shape[0] = prod(data.shape[:-2])
                 shape[1:] = data.shape[-2:]
                 break
 
@@ -204,7 +256,7 @@ class CrystData(DataContainer):
             raise ValueError('no mask in the container')
         if mask.shape != self.shape[1:]:
             raise ValueError('mask and data have incompatible shapes: '\
-                             f'{mask.shape:s} != {self.shape[1:]:s}')
+                             f'{mask.shape} != {self.shape[1:]}')
 
         if update == 'reset':
             return self.replace(mask=mask)
@@ -257,62 +309,6 @@ class CrystData(DataContainer):
         """
         xp = self.__array_namespace__()
         return self.replace(mask=xp.array([], dtype=bool))
-
-    def scale_whitefield(self, method: str="robust-lsq", r0: float=0.0, r1: float=0.5,
-                         n_iter: int=12, lm: float=9.0, num_threads: int=1) -> 'CrystData':
-        """Return a new :class:`CrystData` object with a new set of whitefields. A set of
-        backgrounds is generated by robustly fitting a design matrix `W` to the measured
-        patterns.
-
-        Args:
-            method : Choose one of the following methods to scale the white-field:
-
-                * "median" : By taking a median of data and whitefield.
-                * "robust-lsq" : By solving a least-squares problem with truncated
-                  with the fast least k-th order statistics (FLkOS) estimator.
-
-            r0 : A lower bound guess of ratio of inliers. We'd like to make a sample
-                out of worst inliers from data points that are between `r0` and `r1`
-                of sorted residuals.
-            r1 : An upper bound guess of ratio of inliers. Choose the `r0` to be as
-                high as you are sure the ratio of data is inlier.
-            n_iter : Number of iterations of fitting a gaussian with the FLkOS
-                algorithm.
-            lm : How far (normalized by STD of the Gaussian) from the mean of the
-                Gaussian, data is considered inlier.
-
-        Raises:
-            ValueError : If there is no ``data`` inside the container.
-            ValueError : If there is no ``whitefield`` inside the container.
-
-        Returns:
-            An array of scale factors for each frame in the container.
-        """
-        if self.is_empty(self.data):
-            raise ValueError('no data in the container')
-        if self.is_empty(self.mask):
-            raise ValueError('no mask in the container')
-        if self.is_empty(self.std):
-            raise ValueError('no std in the container')
-        if self.is_empty(self.whitefield):
-            raise ValueError('no whitefield in the container')
-
-        xp = self.__array_namespace__()
-        mask = self.mask & (self.std > 0.0) & xp.all(self.data > 0, axis=0)
-        y: RealArray = xp.where(mask, self.data / self.std, 0.0)[:, mask]
-        W: RealArray = xp.where(mask, self.whitefield / self.std, 0.0)[None, mask]
-
-        if method == "robust-lsq":
-            scales = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                                num_threads=num_threads)
-            return self.replace(scales=xp.ravel(scales))
-
-        if method == "median":
-            scales = median(y * W, axis=1, num_threads=num_threads)[:, None] / \
-                     median(W * W, axis=1, num_threads=num_threads)[:, None]
-            return self.replace(scales=xp.ravel(scales))
-
-        raise ValueError(f"Invalid method argument: {method}")
 
     def select(self, idxs: Indices | None=None):
         """Return a new :class:`CrystData` object with the new mask.
@@ -422,7 +418,7 @@ class CrystData(DataContainer):
         new_mask[roi[0]:roi[1], roi[2]:roi[3]] &= mask
         return self.replace(mask=new_mask)
 
-    def update_snr(self) -> 'CrystData':
+    def update_snr(self, std_min: float=0.0) -> 'CrystData':
         """Return a new :class:`CrystData` object with new background corrected detector
         images.
 
@@ -440,9 +436,32 @@ class CrystData(DataContainer):
             raise ValueError('no whitefield in the container')
 
         xp = self.__array_namespace__()
-        whitefields = self.scales[:, None, None] * self.whitefield
-        snr = xp.where(self.std, (self.data * self.mask - whitefields) / self.std, 0.0)
+        std = xp.clip(self.std, std_min, xp.inf)
+        snr = xp.where(std, (self.data * self.mask - self.whitefield) / std, 0.0)
         return self.replace(snr=snr)
+
+    def update_metadata(self, method: MDMethod='robust-mean-scale', frames: Indices | None=None,
+                        r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
+                        num_threads: int=1) -> 'CrystData':
+        if method == 'median-poisson':
+            data = self.update_whitefield('median', frames, num_threads=num_threads)
+            return data.update_std('poisson', frames)
+
+        if method == 'robust-mean-scale':
+            xp = self.__array_namespace__()
+            if frames is None:
+                frames = xp.arange(self.shape[0])
+
+            whitefield, std = robust_mean(inp=self.data[frames] * self.mask, axis=0,
+                                          r0=r0, r1=r1, n_iter=n_iter, lm=lm,
+                                          return_std=True, num_threads=num_threads)
+            return self.replace(whitefield=xp.asarray(whitefield), std=xp.asarray(std))
+
+        if method == 'robust-mean-poisson':
+            data = self.update_whitefield('robust-mean', frames, r0, r1, n_iter, lm, num_threads)
+            return data.update_std('poisson')
+
+        raise ValueError(f"Invalid method argument: {method}")
 
     def update_std(self, method: STDMethod='robust-scale', frames: Indices | None=None,
                    r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
@@ -465,7 +484,9 @@ class CrystData(DataContainer):
             if self.is_empty(self.whitefield):
                 raise ValueError('no whitefield in the container')
 
-            std = xp.sqrt(self.whitefield)
+            num_whitefields = self.whitefield.size // prod(self.shape[-2:])
+            whitefields = xp.reshape(self.whitefield, (num_whitefields,) + self.shape[-2:])
+            std = xp.sqrt(xp.mean(whitefields, axis=0))
         else:
             raise ValueError(f"Invalid method argument: {method}")
 
@@ -519,11 +540,6 @@ class CrystData(DataContainer):
                                      r1=r1, n_iter=n_iter, lm=lm,
                                      num_threads=num_threads)
             return self.replace(whitefield=xp.asarray(whitefield))
-        if method == 'robust-mean-scale':
-            whitefield, std = robust_mean(inp=self.data[frames] * self.mask, axis=0,
-                                          r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                                          return_std=True, num_threads=num_threads)
-            return self.replace(whitefield=xp.asarray(whitefield), std=xp.asarray(std))
 
         raise ValueError('Invalid method argument')
 
@@ -537,7 +553,7 @@ class ScaleTransform(DataContainer):
         xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
         yy = self.scale * xp.arange(0, data.shape[-2] / self.scale)
         pts = xp.stack(xp.meshgrid(xx, yy), axis=-1)
-        return xp.asarray(binterpolate(data, (x, y), pts))
+        return xp.asarray(binterpolate(data, (x, y), pts, (-1, -2)))
 
     def kernel_regression(self, data: RealArray, sigma: float, num_threads: int=1) -> RealArray:
         xp = self.__array_namespace__()
@@ -577,9 +593,9 @@ class DetectorBase(ScaleTransform):
         return self.replace(data=xp.clip(self.data, vmin, vmax))
 
     def export_coordinates(self, indices: IntArray, y: IntArray, x: IntArray) -> pd.DataFrame:
-        table = {'bgd': self.parent().scales[indices] * self.parent().whitefield[y, x],
-                 'frames': self.parent().frames[indices], 'snr': self.parent().snr[indices, y, x],
-                 'I_raw': self.parent().data[indices, y, x], 'x': x, 'y': y}
+        table = {'bgd': self.parent().whitefield[y, x], 'frames': self.parent().frames[indices],
+                 'snr': self.parent().snr[indices, y, x], 'I_raw': self.parent().data[indices, y, x],
+                 'x': x, 'y': y}
         return pd.DataFrame(table)
 
     def downscale(self: DetBase, scale: float, sigma: float, num_threads: int=1) -> DetBase:
@@ -604,7 +620,7 @@ class StreakDetector(DetectorBase):
     scale           : float = 1.0
 
     def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
-                     num_threads: int=1) -> PeaksList:
+                     rank: int | None=None, num_threads: int=1) -> PeaksList:
         """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
         ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
         between peaks is ``2 * structure.radius``.
@@ -619,7 +635,9 @@ class StreakDetector(DetectorBase):
         Returns:
             Set of detected peaks.
         """
-        peaks = detect_peaks(self.data, self.mask, self.structure.rank, vmin,
+        if rank is None:
+            rank = self.structure.rank
+        peaks = detect_peaks(self.data, self.mask, rank, vmin,
                              num_threads=num_threads)
         filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
                      num_threads=num_threads)

@@ -338,10 +338,10 @@ struct PairHasher
 }
 
 template <typename T, bool IsConst>
-struct IteratorTraits;
+struct StrideIteratorTraits;
 
 template <typename T>
-struct IteratorTraits<T, false>
+struct StrideIteratorTraits<T, false>
 {
     using value_type = T;
     using pointer = T *;
@@ -349,7 +349,7 @@ struct IteratorTraits<T, false>
 };
 
 template <typename T>
-struct IteratorTraits<T, true>
+struct StrideIteratorTraits<T, true>
 {
     using value_type = const T;
     using pointer = const T *;
@@ -360,12 +360,12 @@ template <typename T>
 class array;
 
 template <typename T, bool IsConst>
-class strided_iterator
+class StrideIterator
 {
 private:
-    friend class strided_iterator<T, !IsConst>;
+    friend class StrideIterator<T, !IsConst>;
     friend class array<T>;
-    using traits = IteratorTraits<T, IsConst>;
+    using traits = StrideIteratorTraits<T, IsConst>;
 
 public:
     using iterator_category = std::random_access_iterator_tag;
@@ -374,38 +374,38 @@ public:
     using pointer = typename traits::pointer;
     using reference = typename traits::reference;
 
-    strided_iterator() : ptr(nullptr), stride(1) {}
+    StrideIterator() : ptr(nullptr), stride(1) {}
 
     // This is templated so that we can allow constructing a const iterator from
     // a nonconst iterator...
     template <bool RHIsConst, typename = std::enable_if_t<IsConst || !RHIsConst>>
-    strided_iterator(const strided_iterator<T, RHIsConst> & rhs) : ptr(rhs.ptr), stride(rhs.stride) {}
+    StrideIterator(const StrideIterator<T, RHIsConst> & rhs) : ptr(rhs.ptr), stride(rhs.stride) {}
 
     operator bool() const {return bool(ptr);}
 
-    bool operator==(const strided_iterator & rhs) const {return ptr == rhs.ptr;}
-    bool operator!=(const strided_iterator & rhs) const {return ptr != rhs.ptr;}
-    bool operator<=(const strided_iterator & rhs) const {return ptr <= rhs.ptr;}
-    bool operator>=(const strided_iterator & rhs) const {return ptr >= rhs.ptr;}
-    bool operator<(const strided_iterator & rhs) const {return ptr < rhs.ptr;}
-    bool operator>(const strided_iterator & rhs) const {return ptr > rhs.ptr;}
+    bool operator==(const StrideIterator & rhs) const {return ptr == rhs.ptr;}
+    bool operator!=(const StrideIterator & rhs) const {return ptr != rhs.ptr;}
+    bool operator<=(const StrideIterator & rhs) const {return ptr <= rhs.ptr;}
+    bool operator>=(const StrideIterator & rhs) const {return ptr >= rhs.ptr;}
+    bool operator<(const StrideIterator & rhs) const {return ptr < rhs.ptr;}
+    bool operator>(const StrideIterator & rhs) const {return ptr > rhs.ptr;}
 
-    strided_iterator & operator+=(const difference_type & step) {ptr += step * stride; return *this;}
-    strided_iterator & operator-=(const difference_type & step) {ptr -= step * stride; return *this;}
-    strided_iterator & operator++() {ptr += stride; return *this;}
-    strided_iterator & operator--() {ptr -= stride; return *this;}
-    strided_iterator operator++(int) {strided_iterator temp = *this; ++(*this); return temp;}
-    strided_iterator operator--(int) {strided_iterator temp = *this; --(*this); return temp;}
-    strided_iterator operator+(const difference_type & step) const
+    StrideIterator & operator+=(const difference_type & step) {ptr += step * stride; return *this;}
+    StrideIterator & operator-=(const difference_type & step) {ptr -= step * stride; return *this;}
+    StrideIterator & operator++() {ptr += stride; return *this;}
+    StrideIterator & operator--() {ptr -= stride; return *this;}
+    StrideIterator operator++(int) {StrideIterator temp = *this; ++(*this); return temp;}
+    StrideIterator operator--(int) {StrideIterator temp = *this; --(*this); return temp;}
+    StrideIterator operator+(const difference_type & step) const
     {
         return {ptr + step * stride, stride};
     }
-    strided_iterator operator-(const difference_type & step) const
+    StrideIterator operator-(const difference_type & step) const
     {
         return {ptr - step * stride, stride};
     }
 
-    difference_type operator-(const strided_iterator & rhs) const {return (ptr - rhs.ptr) / stride;}
+    difference_type operator-(const StrideIterator & rhs) const {return (ptr - rhs.ptr) / stride;}
 
     reference operator[] (size_t index) const {return *(ptr + index * stride);}
     reference operator*() const {return *ptr;}
@@ -415,7 +415,7 @@ private:
     T * ptr;
     size_t stride;
 
-    strided_iterator(T * ptr, size_t stride = 1) : ptr(ptr), stride(stride) {}
+    StrideIterator(T * ptr, size_t stride = 1) : ptr(ptr), stride(stride) {}
 };
 
 template <typename T>
@@ -424,8 +424,8 @@ class array : public detail::shape_handler
 public:
     using value_type = T;
     using size_type = typename detail::shape_handler::size_type;
-    using iterator = strided_iterator<T, false>;
-    using const_iterator = strided_iterator<T, true>;
+    using iterator = StrideIterator<T, false>;
+    using const_iterator = StrideIterator<T, true>;
 
     operator py::array_t<T>() const {return {m_shape, m_strides, ptr};}
 

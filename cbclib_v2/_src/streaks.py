@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from math import prod
 from typing import Tuple, TypeVar
 import numpy as np
 import pandas as pd
-from .annotations import BoolArray, RealArray, RealSequence, Shape
-from .data_container import ArrayContainer, ArrayNamespace, IndexArray, IndexedContainer, NumPy
+from .annotations import BoolArray, IntArray, RealArray, RealSequence, Shape
+from .data_container import (ArrayContainer, ArrayNamespace, IndexArray, IndexedContainer, NumPy,
+                             array_namespace)
 from .src.bresenham import draw_lines, write_lines
 
 L = TypeVar("L", bound='BaseLines')
@@ -97,8 +99,13 @@ class Streaks(IndexedContainer, BaseLines):
         return cls(index=IndexArray(xp.asarray(df['index'].to_numpy())),
                    lines=xp.asarray(lines))
 
-    def __reduce__(self) -> Tuple:
-        return (self.__class__, tuple(self.to_dict().values()))
+    @classmethod
+    def import_xy(cls, index: IntArray | IndexArray, x: RealArray, y: RealArray) -> 'Streaks':
+        if not isinstance(index, IndexArray):
+            index = IndexArray(index)
+        xp = array_namespace(x, y)
+        lines = xp.stack((x[..., 0], y[..., 0], x[..., 1], y[..., 1]), axis=-1)
+        return cls(index=index, lines=lines)
 
     def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float=0.33) -> BoolArray:
         xp = self.__array_namespace__()
@@ -134,7 +141,7 @@ class Streaks(IndexedContainer, BaseLines):
         idxs, ids, values = write_lines(lines=self.to_lines(width=width), shape=shape,
                                         idxs=xp.asarray(self.index), kernel=kernel,
                                         num_threads=num_threads)
-        normalised_shape = (np.prod(shape[:-2], dtype=int),) + shape[-2:]
+        normalised_shape = (prod(shape[:-2]),) + shape[-2:]
         frames, y, x = xp.unravel_index(idxs, normalised_shape)
 
         data = {'index': ids, 'frames': frames, 'y': y, 'x': x, 'value': values}

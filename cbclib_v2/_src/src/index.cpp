@@ -83,7 +83,63 @@ public:
                 new_index.push_back(idx);
             }
         }
+
         return std::make_tuple(as_pyarray(std::move(indexer)), as_pyarray(std::move(new_index)));
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    std::tuple<py::array_t<py::ssize_t>, py::array_t<py::ssize_t>> insert_index(py::array_t<I> idxs) const
+    {
+        auto index = py::array_t<I>::ensure(m_index);
+        if (!index) throw std::invalid_argument("array and indices have incompatible dtypes");
+
+        std::vector<py::ssize_t> to, from;
+        const I * first = index.data();
+        const I * last = index.data() + index.size();
+
+        py::ssize_t idx = py::ssize_t();
+        for (const I * ptr = idxs.data(); ptr != idxs.data() + idxs.size(); ptr++, idx++)
+        {
+            const I * start;
+            const I * end;
+            if (is_increasing)
+            {
+                start = std::lower_bound(first, last, *ptr, std::less());
+                end = std::upper_bound(first, last, *ptr, std::less());
+            }
+            else
+            {
+                start = std::lower_bound(first, last, *ptr, std::greater());
+                end = std::upper_bound(first, last, *ptr, std::greater());
+            }
+
+            if (start == last)
+            {
+                if (!first)
+                {
+                    to.push_back(py::ssize_t());
+                    from.push_back(idx);
+                }
+                else if (*ptr < *first)
+                {
+                    to.push_back(py::ssize_t());
+                    from.push_back(idx);
+                }
+                else
+                {
+                    to.push_back(py::ssize_t(index.size()));
+                    from.push_back(idx);
+                }
+            }
+
+            else if (start == end)
+            {
+                to.push_back(std::distance(first, start));
+                from.push_back(idx);
+            }
+        }
+
+        return std::make_tuple(as_pyarray(std::move(to)), as_pyarray(std::move(from)));
     }
 
 protected:
@@ -168,5 +224,9 @@ PYBIND11_MODULE(index, m)
         .def("__getitem__", [](Indexer & indexer, py::array_t<unsigned> idxs){return indexer.get_index(idxs);}, py::arg("indices"))
         .def("__getitem__", [](Indexer & indexer, py::array_t<long> idxs){return indexer.get_index(idxs);}, py::arg("indices"))
         .def("__getitem__", [](Indexer & indexer, py::array_t<size_t> idxs){return indexer.get_index(idxs);}, py::arg("indices"))
+        .def("insert_index", [](Indexer & indexer, py::array_t<int> idxs){return indexer.insert_index(idxs);}, py::arg("indices"))
+        .def("insert_index", [](Indexer & indexer, py::array_t<unsigned> idxs){return indexer.insert_index(idxs);}, py::arg("indices"))
+        .def("insert_index", [](Indexer & indexer, py::array_t<long> idxs){return indexer.insert_index(idxs);}, py::arg("indices"))
+        .def("insert_index", [](Indexer & indexer, py::array_t<size_t> idxs){return indexer.insert_index(idxs);}, py::arg("indices"))
         .def("unique", [](Indexer & indexer){return indexer.m_unique;});
 }

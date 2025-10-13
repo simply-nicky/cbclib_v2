@@ -24,7 +24,7 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
     }
     else axes = {data.ndim() - 2, data.ndim() - 1};
 
-    data = axes.swap_axes(data);
+    data = axes.swap_back(data);
     array<T> darr {data.request()};
     array<bool> marr {mask.request()};
 
@@ -111,7 +111,7 @@ void filter_peaks(std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<b
     }
     else axes = {data.ndim() - 2, data.ndim() - 1};
 
-    data = axes.swap_axes(data);
+    data = axes.swap_back(data);
     array<T> darr {data.request()};
     array<bool> marr {mask.request()};
 
@@ -179,7 +179,7 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
     }
     else axes = {data.ndim() - 2, data.ndim() - 1};
 
-    data = axes.swap_axes(data);
+    data = axes.swap_back(data);
     array<T> darr {data.request()};
     array<bool> marr {mask.request()};
 
@@ -271,7 +271,11 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
             for (auto iter = results[i].begin(); iter != results[i].end();)
             {
                 if (buffer.p_value(*iter, xtol, vmin, p, iter->id()) < log_eps) ++iter;
-                else iter = results[i].erase(iter);
+                else
+                {
+                    buffer.remove(*iter);
+                    iter = results[i].erase(iter);
+                }
             }
             buffer.clear();
         }

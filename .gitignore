@@ -4,6 +4,7 @@ hpx/
 notebooks/
 results/
 scripts/
+slurm/
 
 # JAX profiling results
 trace/

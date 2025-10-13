@@ -7,7 +7,7 @@ py::array_t<double> median(py::array_t<T> inp, py::none mask, U axis, unsigned t
 {
     Sequence<long> seq (axis);
     seq = seq.unwrap(inp.ndim());
-    inp = seq.swap_axes(inp);
+    inp = seq.swap_back(inp);
 
     auto ibuf = inp.request();
     auto ax = ibuf.ndim - seq.size();
@@ -59,8 +59,8 @@ py::array_t<double> median_with_mask(py::array_t<T> inp, py::array_t<bool> mask,
 
     Sequence<long> seq (axis);
     seq = seq.unwrap(inp.ndim());
-    inp = seq.swap_axes(inp);
-    mask = seq.swap_axes(mask);
+    inp = seq.swap_back(inp);
+    mask = seq.swap_back(mask);
 
     auto ibuf = inp.request();
     auto ax = ibuf.ndim - seq.size();
@@ -227,7 +227,7 @@ auto robust_mean(py::array_t<T> inp, py::none mask, U axis, double r0, double r1
 {
     Sequence<long> seq (axis);
     seq = seq.unwrap(inp.ndim());
-    inp = seq.swap_axes(inp);
+    inp = seq.swap_back(inp);
 
     auto ibuf = inp.request();
     auto ax = ibuf.ndim - seq.size();
@@ -334,8 +334,8 @@ auto robust_mean_with_mask(py::array_t<T> inp, py::array_t<bool> mask, U axis, d
 
     Sequence<long> seq (axis);
     seq = seq.unwrap(inp.ndim());
-    inp = seq.swap_axes(inp);
-    mask = seq.swap_axes(mask);
+    inp = seq.swap_back(inp);
+    mask = seq.swap_back(mask);
 
     auto ibuf = inp.request();
     auto ax = ibuf.ndim - seq.size();
@@ -445,7 +445,7 @@ auto robust_lsq(py::array_t<T> W, py::array_t<T> y, py::none mask,
 {
     Sequence<long> seq (axis);
     seq = seq.unwrap(y.ndim());
-    y = seq.swap_axes(y);
+    y = seq.swap_back(y);
 
     py::buffer_info Wbuf = W.request();
     py::buffer_info ybuf = y.request();
@@ -541,15 +541,17 @@ auto robust_lsq(py::array_t<T> W, py::array_t<T> y, py::none mask,
                 for (size_t k = 0; k < fits.size(); k++)
                 {
                     D sum = D(), weight = D(), cumsum = D();
+                    size_t counter = 0;
                     for (size_t j = 0; j < yslice.size(); j++)
                     {
-                        if (lm * cumsum > j * errors[idxs[j]])
+                        if (lm * cumsum > counter * errors[idxs[j]])
                         {
                             auto Wval = Warr.at(k, idxs[j]);
                             sum += yslice[idxs[j]] * Wval;
                             weight += Wval * Wval;
                         }
                         cumsum += errors[idxs[j]];
+                        if (errors[idxs[j]] > D()) counter++;
                     }
                     oslice[k] = (weight > D()) ? sum / weight : D();
                 }
@@ -571,8 +573,8 @@ auto robust_lsq_with_mask(py::array_t<T> W, py::array_t<T> y, py::array_t<bool> 
 
     Sequence<long> seq (axis);
     seq = seq.unwrap(y.ndim());
-    y = seq.swap_axes(y);
-    mask = seq.swap_axes(mask);
+    y = seq.swap_back(y);
+    mask = seq.swap_back(mask);
 
     py::buffer_info Wbuf = W.request();
     py::buffer_info ybuf = y.request();
@@ -670,15 +672,17 @@ auto robust_lsq_with_mask(py::array_t<T> W, py::array_t<T> y, py::array_t<bool> 
                 for (size_t k = 0; k < fits.size(); k++)
                 {
                     D sum = D(), weight = D(), cumsum = D();
+                    size_t counter = 0;
                     for (size_t j = 0; j < yslice.size(); j++)
                     {
-                        if (lm * cumsum > j * errors[idxs[j]])
+                        if (lm * cumsum > counter * errors[idxs[j]])
                         {
                             auto Wval = Warr.at(k, idxs[j]);
                             sum += mslice[idxs[j]] * yslice[idxs[j]] * Wval;
                             weight += Wval * Wval;
                         }
                         cumsum += errors[idxs[j]];
+                        if (errors[idxs[j]] > D()) counter++;
                     }
                     oslice[k] = (weight > D()) ? sum / weight : D();
                 }
@@ -709,23 +713,23 @@ PYBIND11_MODULE(median, m)
     }
 
     m.def("median", &median<double, int>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = -1, py::arg("num_threads") = 1);
-    m.def("median", &median_with_mask<double, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threadas") = 1);
+    m.def("median", &median_with_mask<double, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threads") = 1);
     m.def("median", &median<double, std::vector<int>>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median_with_mask<double, std::vector<int>>, py::arg("inp"), py::arg("mask"), py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median<float, int>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = -1, py::arg("num_threads") = 1);
-    m.def("median", &median_with_mask<float, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threadas") = 1);
+    m.def("median", &median_with_mask<float, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threads") = 1);
     m.def("median", &median<float, std::vector<int>>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median_with_mask<float, std::vector<int>>, py::arg("inp"), py::arg("mask"), py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median<int, int>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = -1, py::arg("num_threads") = 1);
-    m.def("median", &median_with_mask<int, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threadas") = 1);
+    m.def("median", &median_with_mask<int, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threads") = 1);
     m.def("median", &median<int, std::vector<int>>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median_with_mask<int, std::vector<int>>, py::arg("inp"), py::arg("mask"), py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median<long, int>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = -1, py::arg("num_threads") = 1);
-    m.def("median", &median_with_mask<long, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threadas") = 1);
+    m.def("median", &median_with_mask<long, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threads") = 1);
     m.def("median", &median<long, std::vector<int>>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median_with_mask<long, std::vector<int>>, py::arg("inp"), py::arg("mask"), py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median<size_t, int>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = -1, py::arg("num_threads") = 1);
-    m.def("median", &median_with_mask<size_t, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threadas") = 1);
+    m.def("median", &median_with_mask<size_t, int>, py::arg("inp"), py::arg("mask"), py::arg("axis") = -1, py::arg("num_threads") = 1);
     m.def("median", &median<size_t, std::vector<int>>, py::arg("inp"), py::arg("mask") = nullptr, py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
     m.def("median", &median_with_mask<size_t, std::vector<int>>, py::arg("inp"), py::arg("mask"), py::arg("axis") = std::vector<int>{-1}, py::arg("num_threads") = 1);
 

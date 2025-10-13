@@ -96,7 +96,7 @@ auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> 
     }
 
     seq = seq.unwrap(inp.ndim());
-    inp = seq.swap_axes(inp);
+    inp = seq.swap_back(inp);
     auto iarr = array<Inp>(inp.request());
 
     auto ax = iarr.ndim() - seq.size();
@@ -165,7 +165,7 @@ auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> 
 
     e.rethrow();
 
-    return seq.swap_axes_back(out);
+    return seq.swap_from_back(out);
 }
 
 template <typename Inp, typename Krn, typename Seq>
@@ -191,7 +191,7 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
                                     "), must be " + std::to_string(kernel.ndim()));
 
     seq = seq.unwrap(inp.ndim());
-    inp = seq.swap_axes(inp);
+    inp = seq.swap_back(inp);
 
     auto iarr = array<Inp>(inp.request());
     auto karr = array<Krn>(kernel.request());
@@ -259,7 +259,7 @@ auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<S
 
     e.rethrow();
 
-    return seq.swap_axes_back(out);
+    return seq.swap_from_back(out);
 }
 
 template <typename T>

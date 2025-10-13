@@ -1,3 +1,4 @@
+from math import prod
 from typing import Tuple
 import numpy as np
 import pytest
@@ -79,7 +80,7 @@ class TestStreakFinder():
 
     @pytest.fixture(params=[0.05])
     def num_bad(self, request: pytest.FixtureRequest, shape: Shape) -> int:
-        return int(request.param * np.prod(shape))
+        return int(request.param * prod(shape))
 
     @pytest.fixture
     def mask(self, shape: Shape, num_bad: int, rng: np.random.Generator) -> NDBoolArray:
@@ -157,7 +158,7 @@ class TestStreakFinder():
 
     def test_p_values(self, result: StreakList, image: NDRealArray,
                      mask: NDBoolArray, xtol: float, vmin: float, min_size: int):
-        p_values, prob = p_value(result, image, mask ,xtol, vmin)
+        p_values, prob = p_value(result, image, mask, xtol, vmin)
         assert np.all(p_values < np.log(prob) * min_size)
 
     def test_result_probability(self, result: StreakList, image: NDRealArray,

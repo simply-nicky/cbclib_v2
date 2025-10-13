@@ -1,10 +1,10 @@
 from typing import Tuple
-import numpy as np
+from math import prod
 from .._src.annotations import (Array, ArrayNamespace, BoolArray, IntArray, JaxNumPy, RealArray,
                                 Shape)
 
 def arange(shape: Shape, xp: ArrayNamespace = JaxNumPy) -> IntArray:
-    return xp.reshape(xp.arange(np.prod(shape), dtype=int), shape)
+    return xp.reshape(xp.arange(prod(shape), dtype=int), shape)
 
 def safe_sqrt(x: Array, xp: ArrayNamespace = JaxNumPy) -> Array:
     _x = xp.where(x <= 0.0, 0.0, x)
