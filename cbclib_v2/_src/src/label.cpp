@@ -584,44 +584,33 @@ PYBIND11_MODULE(label, m)
             }
             return y;
         }, nullptr)
-        .def("__delitem__", [](RegionsND<2> & regions, size_t i)
+        .def("__delitem__", [](RegionsND<2> & regions, py::ssize_t index)
         {
-            if (i >= regions.size()) throw py::index_error();
-            regions->erase(std::next(regions.begin(), i));
+            regions->erase(std::next(regions.begin(), compute_index(index, regions.size(), "Regions2D")));
         }, py::arg("index"))
-        .def("__getitem__", [](const RegionsND<2> & regions, size_t i)
-        {
-            if (i >= regions.size()) throw py::index_error();
-            return (*regions)[i];
-        }, py::arg("index"))
-        .def("__setitem__", [](RegionsND<2> & regions, size_t i, PointSetND<2> region)
-        {
-            if (i >= regions.size()) throw py::index_error();
-            (*regions)[i] = std::move(region);
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__delitem__", [](RegionsND<2> & regions, const py::slice & slice)
         {
-            size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
-                throw py::error_already_set();
-            auto iter = std::next(regions.begin(), start);
-            for (size_t i = 0; i < slicelength; ++i, iter += step - 1) iter = regions->erase(iter);
+            auto range = slice_range(slice, regions.size());
+            auto iter = std::next(regions.begin(), range.start());
+            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = regions->erase(iter);
+        }, py::arg("index"))
+        .def("__getitem__", [](const RegionsND<2> & regions, py::ssize_t index)
+        {
+            return (*regions)[compute_index(index, regions.size(), "Regions2D")];
         }, py::arg("index"))
         .def("__getitem__", [](const RegionsND<2> & regions, const py::slice & slice) -> RegionsND<2>
         {
-            size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
-                throw py::error_already_set();
             RegionsND<2> new_regions {};
-            for (size_t i = 0; i < slicelength; ++i, start += step) new_regions->push_back((*regions)[start]);
+            for (auto [_, py_index] : slice_range(slice, regions.size())) new_regions->push_back((*regions)[py_index]);
             return new_regions;
         }, py::arg("index"))
+        .def("__setitem__", [](RegionsND<2> & regions, py::ssize_t index, PointSetND<2> region)
+        {
+            (*regions)[compute_index(index, regions.size(), "Regions2D")] = std::move(region);
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__setitem__", [](RegionsND<2> & regions, const py::slice & slice, const RegionsND<2> & value)
         {
-            size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
-                throw py::error_already_set();
-            for (size_t i = 0; i < slicelength; ++i, start += step) (*regions)[start] = (*value)[i];
+            for (auto [index, py_index] : slice_range(slice, regions.size())) (*regions)[py_index] = (*value)[index];
         }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__iter__", [](RegionsND<2> & regions)
         {
@@ -673,48 +662,33 @@ PYBIND11_MODULE(label, m)
             }
             return z;
         }, nullptr)
-        .def("__delitem__", [](RegionsND<3> & regions, size_t i)
+        .def("__delitem__", [](RegionsND<3> & regions, py::ssize_t index)
         {
-            if (i >= regions.size()) throw py::index_error();
-            regions->erase(std::next(regions.begin(), i));
+            regions->erase(std::next(regions.begin(), compute_index(index, regions.size(), "Regions3D")));
         }, py::arg("index"))
-        .def("__getitem__", [](const RegionsND<3> & regions, size_t i)
-        {
-            if (i >= regions.size()) throw py::index_error();
-            return (*regions)[i];
-        }, py::arg("index"))
-        .def("__setitem__", [](RegionsND<3> & regions, size_t i, PointSetND<3> region)
-        {
-            if (i >= regions.size()) throw py::index_error();
-            (*regions)[i] = std::move(region);
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__delitem__", [](RegionsND<3> & regions, const py::slice & slice)
         {
-            size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
-                throw py::error_already_set();
-            auto iter = std::next(regions.begin(), start);
-            for (size_t i = 0; i < slicelength; ++i, iter += step - 1) iter = regions->erase(iter);
+            auto range = slice_range(slice, regions.size());
+            auto iter = std::next(regions.begin(), range.start());
+            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = regions->erase(iter);
+        }, py::arg("index"))
+        .def("__getitem__", [](const RegionsND<3> & regions, py::ssize_t index)
+        {
+            return (*regions)[compute_index(index, regions.size(), "Regions3D")];
         }, py::arg("index"))
         .def("__getitem__", [](const RegionsND<3> & regions, const py::slice & slice) -> RegionsND<3>
         {
-            size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
-                throw py::error_already_set();
             RegionsND<3> new_regions {};
-            for (size_t i = 0; i < slicelength; ++i, start += step) new_regions->push_back((*regions)[start]);
+            for (auto [_, py_index] : slice_range(slice, regions.size())) new_regions->push_back((*regions)[py_index]);
             return new_regions;
         }, py::arg("index"))
+        .def("__setitem__", [](RegionsND<3> & regions, py::ssize_t index, PointSetND<3> region)
+        {
+            (*regions)[compute_index(index, regions.size(), "Regions3D")] = std::move(region);
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__setitem__", [](RegionsND<3> & regions, const py::slice & slice, const RegionsND<3> & value)
         {
-            size_t start = 0, stop = 0, step = 0, slicelength = 0;
-            if (!slice.compute(regions.size(), &start, &stop, &step, &slicelength))
-                throw py::error_already_set();
-            for (size_t i = 0; i < slicelength; ++i)
-            {
-                (*regions)[start] = (*value)[i];
-                start += step;
-            }
+            for (auto [index, py_index] : slice_range(slice, regions.size())) (*regions)[py_index] = (*value)[index];
         }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
         .def("__iter__", [](RegionsND<3> & regions)
         {

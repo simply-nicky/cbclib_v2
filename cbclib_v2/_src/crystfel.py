@@ -1,14 +1,14 @@
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from io import TextIOWrapper
-from math import isnan
+from math import isnan, prod
 import re
 from types import TracebackType
-from typing import (Any, ClassVar, Dict, Generic, Iterator, List,
+from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import Array, ArrayNamespace, DataclassInstance, IntArray, NumPy, RealArray
+from .annotations import Array, ArrayNamespace, DataclassInstance, IntArray, NumPy, RealArray, Shape
 from .data_container import array_namespace
 
 Value = TypeVar("Value")
@@ -176,7 +176,7 @@ class Direction(Attribute[Tuple[float, float, float] | None], SimpleParser):
         if not items:
             raise RuntimeError(f"Invalid direction: {value}")
 
-        x, y, z = None, None, None
+        x, y, z = None, None, 0.0
         for item in items:
             axis = item[-1]
 
@@ -196,7 +196,7 @@ class Direction(Attribute[Tuple[float, float, float] | None], SimpleParser):
             else:
                 raise RuntimeError(f"Invalid symbol: {axis} (must be x, y, or z)")
 
-        if x is None or y is None or z is None:
+        if x is None or y is None:
             raise RuntimeError(f'Invalid direction: {value}')
 
         self.__value__ = (x, y, z)
@@ -271,9 +271,17 @@ class PixelRegion(ParsingContainer):
     max_ss              : Int = Int()
 
     @property
+    def fs_slice(self) -> slice:
+        return slice(self.min_fs.value(), self.max_fs.value())
+
+    @property
     def roi(self) -> Tuple[int, int, int, int]:
         return (self.min_ss.value(), self.max_ss.value() + 1,
                 self.min_fs.value(), self.max_fs.value() + 1)
+
+    @property
+    def ss_slice(self) -> slice:
+        return slice(self.min_ss.value(), self.max_ss.value())
 
 @dataclass
 class Corner(ParsingContainer):
@@ -376,9 +384,8 @@ class Panel(ParsingContainer):
         return super().__bool__() and all(self.masks)
 
     @property
-    def shape(self) -> Tuple[int, int]:
-        return (self.region.roi[1] - self.region.roi[0],
-                self.region.roi[3] - self.region.roi[2])
+    def shape(self) -> Tuple[int, ...]:
+        return tuple(slice.stop - slice.start for slice in self.roi())
 
     @property
     def z_offset(self) -> float:
@@ -390,11 +397,22 @@ class Panel(ParsingContainer):
         x1, y1, _ = self.to_detector(self.shape[0] - 1, self.shape[1] - 1)
         return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
-    def distance(self, ss: RealArray, fs: RealArray) -> RealArray:
-        xp = array_namespace(ss, fs)
+    def distance(self, *coordinates: IntArray | RealArray) -> RealArray:
+        if len(coordinates) != len(self.shape):
+            raise ValueError(f"The number of coordinates ({len(coordinates)}) "
+                             f"must be equal to the number of dimensions ({len(self.shape)})")
+        xp = array_namespace(*coordinates)
+        ss, fs = coordinates[-2:]
         dss = ss - xp.clip(ss, self.region.roi[0], self.region.roi[1])
         dfs = fs - xp.clip(fs, self.region.roi[2], self.region.roi[3])
-        return xp.sqrt(dss**2 + dfs**2)
+        dist = xp.sqrt(dss**2 + dfs**2)
+
+        roi = self.roi()
+        if len(roi) == 3:
+            index = xp.expand_dims(coordinates[-3], list(range(1, dist.ndim)))
+            dist = xp.where(index == roi[0].start, dist, xp.inf)
+
+        return dist
 
     def parse(self, key: str, value: str):
         if key.startswith('dim'):
@@ -414,6 +432,26 @@ class Panel(ParsingContainer):
                 self.masks[index].parse('mask_' + m.group(2), value)
         else:
             super().parse(key, value)
+
+    def roi(self) -> Tuple[slice, ...]:
+        dims = self.dim.value()
+        if not dims:
+            raise ValueError('No panel dimension in the geometry data')
+
+        rois = []
+        for key in dims:
+            if key == '%':
+                continue
+
+            if key == 'ss':
+                rois.append(slice(self.region.roi[0], self.region.roi[1]))
+            elif key == 'fs':
+                rois.append(slice(self.region.roi[2], self.region.roi[3]))
+            elif isinstance(key, int):
+                rois.append(slice(key, key + 1))
+            else:
+                raise ValueError(f'Invalid panel dimension key: {key}')
+        return tuple(rois)
 
     @overload
     def to_detector(self, ss: float, fs: float, half_pixel_shift: bool=True
@@ -445,7 +483,7 @@ class PixelIndices():
 
     def __call__(self, frames: Array) -> Array:
         xp = array_namespace(frames)
-        result = xp.zeros(frames.shape[:-2] + self.shape)
+        result = xp.zeros(frames.shape[:-self.ss.ndim] + self.shape)
         result[..., self.ss, self.fs] = frames
         return result
 
@@ -465,14 +503,17 @@ class Detector():
         return (min(x), min(y), max(x), max(y))
 
     @property
-    def shape(self) -> Tuple[int, int]:
-        max_ss, max_fs = [], []
-        for name, panel in self.panels.items():
-            if not panel.region:
-                raise ValueError(f'No panel data locations in the geometry data for panel {name}')
-            max_ss.append(panel.region.roi[1])
-            max_fs.append(panel.region.roi[3])
-        return (max(max_ss), max(max_fs))
+    def shape(self) -> Shape:
+        shape : DefaultDict[int, List] = defaultdict(list)
+
+        for panel in self.panels.values():
+            for index, roi in enumerate(panel.roi()):
+                shape[index].append(roi.stop)
+        return tuple(max(shape[index]) for index in range(len(shape)))
+
+    @property
+    def n_modules(self) -> int:
+        return prod(self.shape) // prod(self.shape[-2:])
 
     def indices(self, xp: ArrayNamespace=NumPy) -> PixelIndices:
         pix_x, pix_y, _ = self.pixel_map(xp=xp)
@@ -480,30 +521,30 @@ class Detector():
         pix_y = xp.asarray(xp.round(pix_y - pix_y.min()), dtype=int)
         return PixelIndices(pix_y, pix_x)
 
+    def panel(self, module_id: int) -> Panel:
+        return self.panels[list(self.panels.keys())[module_id]]
+
     def pixel_map(self, half_pixel_shift: bool=True, xp: ArrayNamespace=NumPy):
         pixel_map = xp.zeros((3,) + self.shape)
-        for name, panel in self.panels.items():
-            if not panel.region:
-                raise ValueError(f'No panel data locations in the geometry data for panel {name}')
-            roi = panel.region.roi
-            ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[0]),
-                                           xp.arange(panel.shape[1]), indexing='ij')
+        for panel in self.panels.values():
+            roi = panel.roi()
+            ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[-2]),
+                                           xp.arange(panel.shape[-1]), indexing='ij')
 
             x, y, z = panel.to_detector(ss_grid, fs_grid, half_pixel_shift)
-            pixel_map[0, roi[0]:roi[1], roi[2]:roi[3]] = x
-            pixel_map[1, roi[0]:roi[1], roi[2]:roi[3]] = y
-            pixel_map[2, roi[0]:roi[1], roi[2]:roi[3]] = z
+            pixel_map[(0, ...) + roi] = x
+            pixel_map[(1, ...) + roi] = y
+            pixel_map[(2, ...) + roi] = z
         return pixel_map
 
-    def to_detector(self, ss: RealArray, fs: RealArray, half_pixel_shift: bool=True,
+    def to_detector(self, *coordinates: IntArray | RealArray, half_pixel_shift: bool=True,
                     tolerance: float=1.0) -> Tuple[RealArray, RealArray, RealArray]:
         x_min, y_min = self.bounds[:2]
-        xp = array_namespace(ss, fs)
-        if ss.shape != fs.shape:
-            raise ValueError('ss and fs have incompatible shapes')
+        xp = array_namespace(*coordinates)
+        ss, fs = coordinates[-2:]
         x, y, z = xp.zeros(ss.shape), xp.zeros(ss.shape), xp.zeros(ss.shape)
         for panel in self.panels.values():
-            mask = panel.distance(ss, fs) < tolerance
+            mask = panel.distance(*coordinates) < tolerance
             mask = xp.all(mask, axis=tuple(range(1, mask.ndim)))
             x[mask], y[mask], z[mask] = panel.to_detector(ss[mask] - panel.region.roi[0],
                                                           fs[mask] - panel.region.roi[2],
@@ -559,7 +600,7 @@ def read_crystfel(filename: str) -> Detector:
         for attr, value in file:
             path = [item for item in re.split("(/)", attr) if item != "/"]
             if len(path) == 1:
-                if attr.startswith('group'):
+                if attr.startswith(('group', 'rigid_group')):
                     pass
                 else:
                     default_panel.parse(attr, value)

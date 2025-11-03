@@ -7,8 +7,8 @@ import re
 from typing import Any, Callable, ClassVar, Dict, List, Tuple, Type, get_args, get_origin, overload
 import numpy as np
 from .data_container import Container
-from .annotations import (AnyType, Array, ArrayNamespace, DataclassInstance, ExpandedType, NumPy,
-                          UnionType)
+from .annotations import (AnyType, Array, ArrayNamespace, DataclassInstance, ExpandedType, NDArray,
+                          NumPy, UnionType)
 
 class BaseFormatter:
     aliases : ClassVar[Tuple[Type, ...]]
@@ -69,7 +69,7 @@ class TupleFormatter(Formatter):
         raise ValueError(f"Invalid string: '{string}'")
 
 class ArrayFormatter(Formatter):
-    aliases = (np.ndarray,)
+    aliases = (NDArray,)
 
     @classmethod
     def format_string(cls, string: str, dtype: Type, xp: ArrayNamespace) -> Array:
@@ -183,7 +183,7 @@ class StringFormatting:
             return {k: cls.to_string(v) for k, v in node.items()}
         if isinstance(node, list):
             return [cls.to_string(v) for v in node]
-        if isinstance(node, np.ndarray):
+        if isinstance(node, NDArray):
             return np.array2string(np.array(node), separator=',')
         if isinstance(node, Enum):
             return str(node.value)
@@ -342,7 +342,7 @@ class JSONParser(Parser, Container):
             for key, val in values.items():
                 if isinstance(val, dict):
                     result[key] = array_to_list(**val)
-                elif isinstance(val, np.ndarray):
+                elif isinstance(val, NDArray):
                     result[key] = val.tolist()
                 else:
                     result[key] = val

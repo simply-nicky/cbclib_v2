@@ -12,20 +12,20 @@ Examples:
 """
 from math import prod
 import os
-from typing import ClassVar, List, Literal, Tuple, TypeVar, cast
+from typing import List, Literal, NamedTuple, Sequence, TypeVar, cast
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, Kinds
-from .data_container import DataContainer, IndexArray
-from .streak_finder import PeaksList, StreakList, detect_peaks, detect_streaks, filter_peaks
-from .streaks import Streaks
-from .annotations import (ArrayLike, BoolArray, Indices, IntArray, RealArray, RealSequence,
-                          ReferenceType, ROI, Shape)
+from .data_container import DataContainer
+from .streak_finder import PeaksList, PatternList, detect_peaks, detect_streaks, filter_peaks
+from .streaks import StackedStreaks, Streaks
+from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
+                          ROI, Shape)
 from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
                     covariance_matrix, Regions2D, Structure2D)
-from .src.signal_proc import binterpolate, kr_grid
+from .src.signal_proc import binterpolate
 from .src.median import median, robust_mean, robust_lsq
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
@@ -36,17 +36,56 @@ WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
 DATA_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cryst_data.ini')
 METADATA_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cryst_metadata.ini')
 
+C = TypeVar("C", bound='CrystBase')
+
+class CrystBase(DataContainer):
+    protocol    : CXIProtocol
+
+    @property
+    def frame_shape(self) -> Shape:
+        current, old = tuple(), tuple()
+        for attr, data in self.contents().items():
+            kind = self.protocol.get_kind(attr)
+            if isinstance(data, Array):
+                if kind == Kinds.frame:
+                    current = data.shape
+                elif kind == Kinds.stack:
+                    current = data.shape[1:]
+                else:
+                    continue
+
+                if old and current != old:
+                    raise ValueError(f"Attribute {attr} has an incompatible shape: {current}")
+
+        return current
+
+    @property
+    def n_modules(self) -> int:
+        return prod(self.frame_shape) // prod(self.frame_shape[-2:])
+
+    def crop(self: C, roi: ROI) -> C:
+        cropped = {}
+        for attr, data in self.contents().items():
+            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
+                cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
+        return self.replace(**cropped)
+
+class PCAProjection(NamedTuple):
+    good_fields : Sequence[int] | IntArray
+    projection  : RealArray
+
 @dataclass
-class CrystMetadata(DataContainer):
+class CrystMetadata(CrystBase):
     eigen_field : RealArray = field(default_factory=lambda: np.array([]))
     eigen_value : RealArray = field(default_factory=lambda: np.array([]))
+    flatfield   : RealArray = field(default_factory=lambda: np.array([]))
     frames      : IntArray  = field(default_factory=lambda: np.array([], dtype=int))
     data_frames : IntArray  = field(default_factory=lambda: np.array([], dtype=int))
     mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
     std         : RealArray = field(default_factory=lambda: np.array([]))
     whitefield  : RealArray = field(default_factory=lambda: np.array([]))
 
-    protocol    : ClassVar[CXIProtocol] = CXIProtocol.read(METADATA_PROTOCOL)
+    protocol    : CXIProtocol = field(default_factory=lambda: CXIProtocol.read(METADATA_PROTOCOL))
 
     def __post_init__(self):
         super().__post_init__()
@@ -56,38 +95,37 @@ class CrystMetadata(DataContainer):
             if not self.is_empty(self.whitefield):
                 self.whitefield *= self.mask
 
+        if self.is_empty(self.flatfield) and not self.is_empty(self.whitefield):
+            self.flatfield = self.whitefield.mean(axis=0)
+
     @property
     def center_frames(self) -> IntArray:
         if not self.is_empty(self.data_frames):
             return np.asarray(median(self.data_frames, axis=-1), dtype=int)
         return np.array([], dtype=int)
 
-    @property
-    def eigen_fields(self) -> RealArray:
-        xp = self.__array_namespace__()
-        num_frames = self.eigen_field.size // prod(self.eigen_field.shape[-2:])
-        return xp.reshape(self.eigen_field, (num_frames,) + self.eigen_field.shape[-2:])
-
-    @property
-    def whitefields(self) -> RealArray:
-        xp = self.__array_namespace__()
-        num_frames = self.whitefield.size // prod(self.whitefield.shape[-2:])
-        return xp.reshape(self.whitefield, (num_frames,) + self.whitefield.shape[-2:])
-
-    def crop(self, roi: ROI) -> 'CrystMetadata':
-        cropped = {}
-        for attr, data in self.contents().items():
-            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
-                cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
-        return self.replace(**cropped)
+    @classmethod
+    def default_protocol(cls) -> CXIProtocol:
+        return CXIProtocol.read(METADATA_PROTOCOL)
 
     def import_data(self, data: RealArray, frames: IntArray | int=np.array([], dtype=int),
                     whitefield: RealArray=np.array([])) -> 'CrystData':
         xp = self.__array_namespace__()
+        frames = xp.atleast_1d(frames)
+
         if not whitefield.size:
-            whitefield = xp.mean(self.whitefields, axis=0)
-        return CrystData(data=data, frames=xp.atleast_1d(frames), mask=self.mask,
-                         std=self.std, whitefield=whitefield)
+            if self.is_empty(self.flatfield):
+                raise ValueError('no flatfield in the container')
+            return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
+                             whitefield=self.flatfield)
+
+        if whitefield.shape != data.shape:
+            raise ValueError(f'whitefield shape {whitefield.shape} is incompatible with data '
+                             f'{data.shape}')
+        protocol = CrystData.default_protocol()
+        protocol.kinds['whitefield'] = 'stack'
+        return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
+                         whitefield=whitefield, protocol=protocol)
 
     def interpolate(self, frames: IntArray, num_threads: int=1) -> RealArray:
         if self.is_empty(self.data_frames):
@@ -101,19 +139,20 @@ class CrystMetadata(DataContainer):
     def pca(self) -> 'CrystMetadata':
         if self.is_empty(self.whitefield):
             raise ValueError('no whitefield in the container')
-        if self.whitefields.shape[0] == 1:
+        if self.whitefield.shape[0] == 1:
             raise ValueError('A stack of several whitefields is needed to perform PCA')
 
         xp = self.__array_namespace__()
-        whitefield = self.whitefields
-        mat_svd = xp.tensordot(whitefield, whitefield, axes=((1, 2), (1, 2)))
+        fields = self.whitefield - self.flatfield
+        axes = tuple(range(1, len(self.frame_shape) + 1))
+        mat_svd = xp.tensordot(fields, fields, axes=(axes, axes))
         eig_vals, eig_vecs = xp.linalg.eig(mat_svd)
-        effs = xp.tensordot(eig_vecs, whitefield, axes=((0,), (0,)))
+        effs = xp.tensordot(eig_vecs, fields, axes=((0,), (0,)))
         return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
-    def projection(self, data: RealArray, num_fields: int, method: str="robust-lsq",
-                   r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-                   num_threads: int=1) -> RealArray:
+    def projection(self, data: RealArray, good_fields: Indices=slice(None),
+                   method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
+                   lm: float=9.0, num_threads: int=1) -> PCAProjection:
         """Return a new :class:`CrystData` object with a new set of whitefields. A set of
         backgrounds is generated by robustly fitting a design matrix `W` to the measured
         patterns.
@@ -142,31 +181,43 @@ class CrystMetadata(DataContainer):
         Returns:
             An array of scale factors for each frame in the container.
         """
+        if self.is_empty(self.flatfield):
+            raise ValueError('No flatfield in the container')
         if self.is_empty(self.eigen_field):
             raise ValueError('No eigen_field in the container')
+        if isinstance(good_fields, int):
+            good_fields = [good_fields,]
+        if isinstance(good_fields, slice):
+            start, stop, step = good_fields.indices(self.eigen_field.shape[0])
+            good_fields = list(range(start, stop, step))
+
+        fields = self.eigen_field[good_fields]
 
         xp = self.__array_namespace__()
-        y: RealArray = xp.reshape(data, (data.size // prod(self.eigen_field.shape[-2:]), -1))
-        W: RealArray = xp.reshape(self.eigen_fields[:num_fields], (num_fields, -1))
+        y: RealArray = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
+        W: RealArray = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
 
         if method == "robust-lsq":
-            return robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                              num_threads=num_threads)
+            projection = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
+                                    num_threads=num_threads)
+        elif method == "lsq":
+            projection = xp.mean(y[..., None, :] * W, axis=-1) / xp.mean(W * W, axis=-1)
+        else:
+            raise ValueError(f"Invalid method argument: {method}")
 
-        if method == "lsq":
-            return xp.mean(y[..., None, :] * W, axis=-1) / xp.mean(W * W, axis=-1)
+        return PCAProjection(good_fields=good_fields, projection=projection)
 
-        raise ValueError(f"Invalid method argument: {method}")
-
-    def project(self, projection: RealArray) -> RealArray:
+    def project(self, projection: PCAProjection) -> RealArray:
         if self.is_empty(self.eigen_field):
             raise ValueError('No eigen_field in the container')
 
         xp = self.__array_namespace__()
-        return xp.tensordot(projection, self.eigen_fields[:projection.shape[-1]], ((-1,), (0,)))
+        fields = xp.tensordot(projection.projection, self.eigen_field[projection.good_fields],
+                              ((-1,), (0,)))
+        return self.flatfield + fields
 
 @dataclass
-class CrystData(DataContainer):
+class CrystData(CrystBase):
     """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.CXIStore`
     file handler. Provides an interface to work with the detector images and detect the diffraction
     streaks. Also provides an interface to load from a file and save to a file any of the data
@@ -189,36 +240,36 @@ class CrystData(DataContainer):
     frames      : IntArray = field(default_factory=lambda: np.array([], dtype=int))
     mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
 
-    protocol    : ClassVar[CXIProtocol] = CXIProtocol.read(DATA_PROTOCOL)
+    protocol    : CXIProtocol = field(default_factory=lambda: CXIProtocol.read(DATA_PROTOCOL))
 
     def __post_init__(self):
         super().__post_init__()
         xp = self.__array_namespace__()
-        if self.frames.size != self.shape[0]:
-            self.frames = xp.arange(self.shape[0])
-        if self.mask.shape != self.shape[1:]:
-            self.mask = xp.ones(self.shape[1:], dtype=bool)
+        if self.frames.size != self.num_frames:
+            self.frames = xp.arange(self.num_frames)
+        if self.mask.shape != self.frame_shape:
+            self.mask = xp.ones(self.frame_shape, dtype=bool)
+
+    @property
+    def num_frames(self) -> int:
+        current, old = 0, 0
+        for attr, data in self.contents().items():
+            kind = self.protocol.get_kind(attr)
+            if kind == Kinds.stack and isinstance(data, Array):
+                current = data.shape[0]
+
+            if old and current != old:
+                raise ValueError(f"Attribute {attr} has an incompatible shape: {data.shape}")
+
+        return current
 
     @property
     def shape(self) -> Shape:
-        shape = [0, 0, 0]
-        for attr, data in self.contents().items():
-            if self.protocol.get_kind(attr) == Kinds.sequence:
-                shape[0] = data.shape[0]
-                break
+        return (self.num_frames,) + self.frame_shape
 
-        for attr, data in self.contents().items():
-            if self.protocol.get_kind(attr) == Kinds.frame:
-                shape[1:] = data.shape[-2:]
-                break
-
-        for attr, data in self.contents().items():
-            if self.protocol.get_kind(attr) == Kinds.stack:
-                shape[0] = prod(data.shape[:-2])
-                shape[1:] = data.shape[-2:]
-                break
-
-        return tuple(shape)
+    @classmethod
+    def default_protocol(cls) -> CXIProtocol:
+        return CXIProtocol.read(DATA_PROTOCOL)
 
     def apply_mask(self) -> 'CrystData':
         attributes = {}
@@ -229,13 +280,6 @@ class CrystData(DataContainer):
         if not self.is_empty(self.snr):
             attributes['snr'] = self.snr * self.mask
         return self.replace(**attributes)
-
-    def crop(self, roi: ROI) -> 'CrystData':
-        cropped = {}
-        for attr, data in self.contents().items():
-            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
-                cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
-        return self.replace(**cropped)
 
     def import_mask(self, mask: BoolArray, update: str='reset') -> 'CrystData':
         """Return a new :class:`CrystData` object with the new mask.
@@ -254,9 +298,9 @@ class CrystData(DataContainer):
         """
         if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
-        if mask.shape != self.shape[1:]:
+        if mask.shape != self.frame_shape:
             raise ValueError('mask and data have incompatible shapes: '\
-                             f'{mask.shape} != {self.shape[1:]}')
+                             f'{mask.shape} != {self.frame_shape}')
 
         if update == 'reset':
             return self.replace(mask=mask)
@@ -292,11 +336,8 @@ class CrystData(DataContainer):
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
-        xp = self.__array_namespace__()
         parent = cast(ReferenceType[CrystData], ref(self))
-        idxs = xp.arange(self.shape[0])
-        return RegionDetector(indices=idxs, data=self.snr, mask=self.mask, structure=structure,
-                              parent=parent)
+        return RegionDetector(data=self.snr, mask=self.mask, structure=structure, parent=parent)
 
     def reset_mask(self) -> 'CrystData':
         """Reset bad pixel mask. Every pixel is assumed to be good by default.
@@ -349,11 +390,8 @@ class CrystData(DataContainer):
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
-        xp = self.__array_namespace__()
         parent = cast(ReferenceType[CrystData], ref(self))
-        idxs = xp.arange(self.shape[0])
-        return StreakDetector(indices=idxs, data=self.snr, mask=self.mask, structure=structure,
-                              parent=parent)
+        return StreakDetector(data=self.snr, mask=self.mask, structure=structure, parent=parent)
 
     def update_mask(self, method: MaskMethod='no-bad', vmin: int=0, vmax: int=65535,
                     snr_max: float=3.0, roi: ROI | None=None) -> 'CrystData':
@@ -395,27 +433,27 @@ class CrystData(DataContainer):
         if vmin >= vmax:
             raise ValueError('vmin must be less than vmax')
         if roi is None:
-            roi = (0, self.shape[1], 0, self.shape[2])
+            roi = (0, self.shape[-2], 0, self.shape[-1])
 
-        data = (self.data * self.mask)[:, roi[0]:roi[1], roi[2]:roi[3]]
+        data = (self.data * self.mask)[..., roi[0]:roi[1], roi[2]:roi[3]]
 
         if method == 'all-bad':
-            mask = xp.zeros(self.shape[1:], dtype=bool)
+            mask = xp.zeros(self.frame_shape, dtype=bool)
         elif method == 'no-bad':
-            mask = xp.ones(self.shape[1:], dtype=bool)
+            mask = xp.ones(self.frame_shape, dtype=bool)
         elif method == 'range':
             mask = xp.all((data >= vmin) & (data < vmax), axis=0)
         elif method == 'snr':
             if self.snr is None:
                 raise ValueError('No snr in the container')
 
-            snr = self.snr[:, roi[0]:roi[1], roi[2]:roi[3]]
+            snr = self.snr[..., roi[0]:roi[1], roi[2]:roi[3]]
             mask = xp.mean(xp.abs(snr), axis=0) < snr_max
         else:
             raise ValueError(f'Invalid method argument: {method:s}')
 
         new_mask = xp.copy(self.mask)
-        new_mask[roi[0]:roi[1], roi[2]:roi[3]] &= mask
+        new_mask[..., roi[0]:roi[1], roi[2]:roi[3]] &= mask
         return self.replace(mask=new_mask)
 
     def update_snr(self, std_min: float=0.0) -> 'CrystData':
@@ -450,7 +488,7 @@ class CrystData(DataContainer):
         if method == 'robust-mean-scale':
             xp = self.__array_namespace__()
             if frames is None:
-                frames = xp.arange(self.shape[0])
+                frames = xp.arange(self.num_frames)
 
             whitefield, std = robust_mean(inp=self.data[frames] * self.mask, axis=0,
                                           r0=r0, r1=r1, n_iter=n_iter, lm=lm,
@@ -468,7 +506,7 @@ class CrystData(DataContainer):
                    num_threads: int=1) -> 'CrystData':
         xp = self.__array_namespace__()
         if frames is None:
-            frames = xp.arange(self.shape[0])
+            frames = xp.arange(self.num_frames)
 
         if method == 'robust-scale':
             if self.is_empty(self.data):
@@ -484,8 +522,8 @@ class CrystData(DataContainer):
             if self.is_empty(self.whitefield):
                 raise ValueError('no whitefield in the container')
 
-            num_whitefields = self.whitefield.size // prod(self.shape[-2:])
-            whitefields = xp.reshape(self.whitefield, (num_whitefields,) + self.shape[-2:])
+            num_whitefields = self.whitefield.size // prod(self.frame_shape)
+            whitefields = xp.reshape(self.whitefield, (num_whitefields,) + self.frame_shape)
             std = xp.sqrt(xp.mean(whitefields, axis=0))
         else:
             raise ValueError(f"Invalid method argument: {method}")
@@ -527,97 +565,52 @@ class CrystData(DataContainer):
         if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
 
-        xp = self.__array_namespace__()
         if frames is None:
-            frames = xp.arange(self.shape[0])
+            xp = self.__array_namespace__()
+            frames = xp.arange(self.num_frames)
 
         if method == 'median':
             whitefield = median(inp=self.data[frames] * self.mask, axis=0,
                                 num_threads=num_threads)
-            return self.replace(whitefield=xp.asarray(whitefield))
-        if method == 'robust-mean':
+        elif method == 'robust-mean':
             whitefield = robust_mean(inp=self.data[frames] * self.mask, axis=0, r0=r0,
                                      r1=r1, n_iter=n_iter, lm=lm,
                                      num_threads=num_threads)
-            return self.replace(whitefield=xp.asarray(whitefield))
+        else:
+            raise ValueError('Invalid method argument')
 
-        raise ValueError('Invalid method argument')
+        return self.replace(whitefield=whitefield, protocol=self.default_protocol())
 
-class ScaleTransform(DataContainer):
-    scale   : float
+D = TypeVar("D", bound="DetectorBase")
 
-    def interpolate(self, data: RealArray) -> RealArray:
-        xp = self.__array_namespace__()
-        x, y = xp.arange(0, data.shape[-1]), xp.arange(0, data.shape[-2])
-
-        xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
-        yy = self.scale * xp.arange(0, data.shape[-2] / self.scale)
-        pts = xp.stack(xp.meshgrid(xx, yy), axis=-1)
-        return xp.asarray(binterpolate(data, (x, y), pts, (-1, -2)))
-
-    def kernel_regression(self, data: RealArray, sigma: float, num_threads: int=1) -> RealArray:
-        xp = self.__array_namespace__()
-        x, y = xp.arange(0, data.shape[-1]), xp.arange(0, data.shape[-2])
-        pts = xp.stack(xp.meshgrid(x, y), axis=-1)
-
-        xx = self.scale * xp.arange(0, data.shape[-1] / self.scale)
-        yy = self.scale * xp.arange(0, data.shape[-2] / self.scale)
-        return xp.asarray(kr_grid(data, pts, (xx, yy), sigma=sigma, num_threads=num_threads)[0])
-
-    def to_detector(self, x: RealSequence, y: RealSequence) -> Tuple[RealArray, RealArray]:
-        xp = self.__array_namespace__()
-        return self.scale * xp.asarray(x), self.scale * xp.asarray(y)
-
-    def to_scaled(self, x: RealSequence, y: RealSequence) -> Tuple[RealArray, RealArray]:
-        xp = self.__array_namespace__()
-        return xp.asarray(x) / self.scale, xp.asarray(y) / self.scale
-
-DetBase = TypeVar("DetBase", bound="DetectorBase")
-
-class DetectorBase(ScaleTransform):
-    indices         : IntArray
+class DetectorBase(DataContainer):
     data            : RealArray
     mask            : BoolArray
-    scale           : float
     parent          : ReferenceType[CrystData]
 
     @property
     def shape(self) -> Shape:
         return self.data.shape
 
-    def __getitem__(self: DetBase, idxs: Indices) -> DetBase:
-        return self.replace(data=self.data[idxs], mask=self.mask[idxs], indices=self.indices[idxs])
+    def __getitem__(self: D, idxs: Indices) -> D:
+        return self.replace(data=self.data[idxs], mask=self.mask[idxs])
 
-    def clip(self: DetBase, vmin: ArrayLike, vmax: ArrayLike) -> DetBase:
+    def clip(self: D, vmin: ArrayLike, vmax: ArrayLike) -> D:
         xp = self.__array_namespace__()
         return self.replace(data=xp.clip(self.data, vmin, vmax))
 
     def export_coordinates(self, indices: IntArray, y: IntArray, x: IntArray) -> pd.DataFrame:
-        table = {'bgd': self.parent().whitefield[y, x], 'frames': self.parent().frames[indices],
-                 'snr': self.parent().snr[indices, y, x], 'I_raw': self.parent().data[indices, y, x],
+        table = {'bgd': self.parent().whitefield[y, x], 'I_raw': self.parent().data[indices, y, x],
+                 'frames': self.parent().frames[indices], 'snr': self.parent().snr[indices, y, x],
                  'x': x, 'y': y}
         return pd.DataFrame(table)
 
-    def downscale(self: DetBase, scale: float, sigma: float, num_threads: int=1) -> DetBase:
-        xp = self.__array_namespace__()
-        data = self.kernel_regression(self.data, sigma, num_threads)
-        mask = self.interpolate(xp.asarray(self.mask, dtype=float))
-        return self.replace(data=data, mask=xp.asarray(mask, dtype=bool),
-                            scale=scale)
-
-    def to_detector(self, streaks: Streaks) -> Streaks:
-        xp = self.__array_namespace__()
-        pts = xp.stack(super().to_detector(streaks.x, streaks.y), axis=-1)
-        return Streaks(streaks.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
-
 @dataclass
 class StreakDetector(DetectorBase):
-    indices         : IntArray
     data            : RealArray
     mask            : BoolArray
     structure       : Structure2D
     parent          : ReferenceType[CrystData]
-    scale           : float = 1.0
 
     def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
                      rank: int | None=None, num_threads: int=1) -> PeaksList:
@@ -644,8 +637,7 @@ class StreakDetector(DetectorBase):
         return peaks
 
     def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0, num_threads: int=1
-                       ) -> List[StreakList]:
+                       lookahead: int=0, nfa: int=0, num_threads: int=1) -> PatternList:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -665,15 +657,7 @@ class StreakDetector(DetectorBase):
         return detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
                               lookahead, nfa, num_threads=num_threads)
 
-    def to_streaks(self, result: List[StreakList]) -> Streaks:
-        xp = self.__array_namespace__()
-        streaks = [xp.asarray(pattern.to_lines()) for pattern in result]
-        idxs = xp.concatenate([xp.full((len(pattern),), idx)
-                                for idx, pattern in zip(self.indices, streaks)])
-        lines = xp.concatenate(streaks)
-        return Streaks(index=IndexArray(idxs), lines=lines)
-
-    def export_table(self, streaks: Streaks, width: float,
+    def export_table(self, streaks: StackedStreaks | Streaks, width: float,
                      kernel: str='rectangular') -> pd.DataFrame:
         """Export normalised pattern into a :class:`pandas.DataFrame` table.
 
@@ -715,12 +699,10 @@ class StreakDetector(DetectorBase):
 
 @dataclass
 class RegionDetector(DetectorBase):
-    indices         : IntArray
     data            : RealArray
     mask            : BoolArray
     structure       : Structure2D
     parent          : ReferenceType[CrystData]
-    scale           : float = 1.0
 
     def detect_regions(self, vmin: float, npts: int, num_threads: int=1) -> List[Regions2D]:
         regions = label((self.data > vmin) & self.mask, structure=self.structure, npts=npts,
@@ -731,13 +713,13 @@ class RegionDetector(DetectorBase):
 
     def export_table(self, regions: List[Regions2D]) -> pd.DataFrame:
         xp = self.__array_namespace__()
-        frames, y, x = [], [], []
-        for frame, pattern in zip(self.indices, regions):
+        indices, y, x = [], [], []
+        for index, pattern in enumerate(regions):
             size = sum(len(region.x) for region in pattern)
-            frames.extend(size * [frame,])
+            indices.extend(size * [index,])
             y.extend(pattern.y)
             x.extend(pattern.x)
-        return self.export_coordinates(xp.array(frames), xp.array(y), xp.array(x))
+        return self.export_coordinates(xp.array(indices), xp.array(y), xp.array(x))
 
     def ellipse_fit(self, regions: List[Regions2D]) -> List[RealArray]:
         return ellipse_fit(regions, self.data)

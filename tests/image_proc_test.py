@@ -45,7 +45,7 @@ class TestImageProcessing():
         return request.param
 
     @pytest.fixture()
-    def input(self, rng: np.random.Generator, shape: Shape) -> NDRealArray:
+    def array(self, rng: np.random.Generator, shape: Shape) -> NDRealArray:
         return rng.random(shape)
 
     @pytest.fixture()
@@ -65,48 +65,68 @@ class TestImageProcessing():
     def footprint(self, request: pytest.FixtureRequest, size: Shape) -> NDBoolArray:
         return np.broadcast_to(np.asarray(request.param, dtype=bool), size)
 
-    def test_median(self, input: NDRealArray, mask: NDBoolArray):
-        axes = list(range(input.ndim))
-        out = median(input, axis=axes)
-        out2 = np.median(input, axis=axes)
+    def test_median(self, array: NDRealArray, mask: NDBoolArray):
+        axes = list(range(array.ndim))
+        out = median(array, axis=axes)
+        out2 = np.median(array, axis=axes)
 
         assert np.all(out == out2)
 
-        for axis in range(input.ndim):
-            out = median(input, axis=axis)
-            out2 = np.median(input, axis=axis)
+        out = median(array, axis=(axes[0], axes[-1]))
+        out2 = np.median(array, axis=(axes[0], axes[-1]))
+
+        assert np.all(out == out2)
+
+        for axis in range(array.ndim):
+            out = median(array, axis=axis)
+            out2 = np.median(array, axis=axis)
 
             assert np.all(out == out2)
 
-        out = median(input, mask, axis=axes)
-        out2 = median(input.ravel(), mask.ravel())
+        out = median(array, mask, axis=axes)
+        out2 = median(array.ravel(), mask.ravel())
 
         assert np.all(out == out2)
 
-    def test_median_filter(self, input: NDRealArray, size: Shape,
+    def test_median_filter(self, array: NDRealArray, size: Shape,
                            footprint: NDBoolArray, mode: Mode):
-        out = median_filter(input, size=size, mode=mode)
-        out2 = ndimage.median_filter(input, size=size, mode=mode)
+        out = median_filter(array, size=size, mode=mode)
+        out2 = ndimage.median_filter(array, size=size, mode=mode)
 
         assert np.all(out == out2)
 
-        out = median_filter(input, footprint=footprint, mode=mode)
-        out2 = ndimage.median_filter(input, footprint=footprint, mode=mode)
+        out = median_filter(array, footprint=footprint, mode=mode)
+        out2 = ndimage.median_filter(array, footprint=footprint, mode=mode)
 
         assert np.all(out == out2)
 
     @pytest.mark.parametrize('axis,lm', [(-1, 9.0)])
-    def test_robust_mean(self, input: NDRealArray, axis: int, lm: float):
-        mean = np.median(input, axis=axis, keepdims=True)
-        errors = (input - mean)**2
-        indices = np.lexsort((input, errors), axis=axis)
+    def test_robust_mean(self, array: NDRealArray, axis: int, lm: float):
+        mean = np.median(array, axis=axis, keepdims=True)
+        errors = (array - mean)**2
+        indices = np.lexsort((np.indices(array.shape)[axis], errors), axis=axis)
+
         errors = np.take_along_axis(errors, indices, axis=axis)
         cumsum = np.cumsum(errors, axis=axis)
         cumsum = np.delete(np.insert(cumsum, 0, 0, axis=axis), -1, axis=axis)
-        threshold = np.arange(input.shape[axis]) * errors
+        threshold = np.arange(array.shape[axis]) * errors
         mask = lm * cumsum > threshold
-        mean = np.mean(np.take_along_axis(input, indices, axis=axis), where=mask, axis=axis)
-        check_close(mean, robust_mean(input, axis=axis, n_iter=0, lm=lm))
+        mean = np.mean(np.take_along_axis(array, indices, axis=axis), where=mask, axis=axis)
+        mean = np.nan_to_num(mean)
+        check_close(mean, robust_mean(array, axis=axis, n_iter=0, lm=lm))
+
+    @pytest.mark.parametrize('axis,lm', [(1, 9.0)])
+    def test_robust_mean_with_mask(self, array: NDRealArray, axis: int, lm: float):
+        out = robust_mean(array, array > 0.5, axis=axis, lm=lm)
+
+        permutation = tuple(i for i in range(array.ndim) if i != axis) + (axis,)
+        array = np.transpose(array, permutation)
+        mean_values = []
+        for index in range(array.size // array.shape[-1]):
+            batch = array[np.unravel_index(index, array.shape[:-1])]
+            mean_values.append(robust_mean(batch[batch > 0.5], lm=lm))
+
+        check_close(out, np.array(mean_values).reshape(out.shape))
 
     @pytest.fixture(params=[(-2, -1),])
     def axes(self, request: pytest.FixtureRequest) -> Tuple[int, int]:
@@ -128,8 +148,8 @@ class TestImageProcessing():
     def grid(self, shape: Shape, axes: Tuple[int, int]) -> Tuple[IntArray, IntArray]:
         return (np.arange(shape[axes[0]]), np.arange(shape[axes[1]]))
 
-    def test_binterpolate(self, input: NDRealArray, grid: Tuple[IntArray, IntArray],
+    def test_binterpolate(self, array: NDRealArray, grid: Tuple[IntArray, IntArray],
                           coords: RealArray, axes: Tuple[int, int]):
-        out = binterpolate(input, grid, coords, axes)
-        out2 = self.binterpolate(input, grid, coords, axes)
+        out = binterpolate(array, grid, coords, axes)
+        out2 = self.binterpolate(array, grid, coords, axes)
         check_close(out, out2)

@@ -38,8 +38,8 @@ OutputIt wrap(InputIt1 first, InputIt1 last, OutputIt d_first, InputIt2 min, Inp
 
 }
 
-template <typename RandomIt, typename Compare>
-double median_1d(RandomIt first, RandomIt last, Compare comp)
+template <typename RandomIt, typename Compare, typename T = typename std::iterator_traits<RandomIt>::value_type>
+std::common_type_t<T, decltype(0.5 * std::declval<T &>())> median_1d(RandomIt first, RandomIt last, Compare comp)
 {
     auto n = std::distance(first, last);
     if (n & 1)

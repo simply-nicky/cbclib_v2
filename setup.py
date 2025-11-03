@@ -4,7 +4,7 @@ from setuptools import setup, find_namespace_packages
 from pybind11.setup_helpers import Pybind11Extension
 import numpy
 
-__version__ = '0.11.0'
+__version__ = '0.11.1'
 
 extension_args = {'extra_compile_args': ['-fopenmp', '-std=c++20', '-g'],
                   'extra_link_args': ['-lgomp'],

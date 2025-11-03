@@ -1,12 +1,12 @@
-from typing import List
 from .annotations import NDBoolArray, NDRealArray
 from .src.label import Structure2D
-from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, p_value, StreakDoubleList,
-                                StreakFloatList, Peaks, PeaksList)
-from .src.streak_finder import StreakDouble, StreakFloat
+from .src.streak_finder import (detect_peaks, detect_streaks, filter_peaks, p_value, PatternDouble,
+                                PatternDoubleList, PatternFloat, PatternFloatList, Peaks, PeaksList,
+                                StreakDouble, StreakFloat)
 
 Streak = StreakDouble | StreakFloat
-StreakList = StreakDoubleList | StreakFloatList
+Pattern = PatternDouble | PatternFloat
+PatternList = PatternDoubleList | PatternFloatList
 
 class PatternStreakFinder:
     def __init__(self, data: NDRealArray, mask: NDBoolArray, structure: Structure2D,
@@ -37,7 +37,7 @@ class PatternStreakFinder:
         return peaks
 
     def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float,
-                       num_threads: int=1) -> List[StreakList]:
+                       num_threads: int=1) -> PatternList:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 

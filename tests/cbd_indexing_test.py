@@ -2,7 +2,6 @@ import pytest
 import jax.numpy as jnp
 from jax import random
 import cbclib_v2 as cbc
-from cbclib_v2 import IndexArray
 from cbclib_v2.annotations import ArrayNamespace, KeyArray, RealArray, NumPy
 from cbclib_v2.indexer import (CBData, CBDIndexer, CBDLoss, CBDModel, CircleState, MillerWithRLP,
                                Patterns, PointsWithK, TiltOverAxis, TiltOverAxisState, UCA,
@@ -54,7 +53,7 @@ class TestCBDIndexer():
                          axis=-1)
         index = xp.concatenate((xp.full((num_lines // 2), 0),
                                 xp.full((num_lines - num_lines // 2), 1)))
-        return Patterns(lines=lines, index=IndexArray(index))
+        return Patterns(lines=lines, index=index)
 
     @pytest.fixture
     def points(self, indexer: CBDIndexer, patterns: Patterns, state: FixedState,
@@ -65,7 +64,7 @@ class TestCBDIndexer():
     def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, state: FixedState,
                 xp: ArrayNamespace) -> MillerWithRLP:
         hkl = indexer.xtal.hkl_in_ball(q_abs, state.xtal, xp)
-        iterator = indexer.xtal.hkl_range(patterns.index.unique(), hkl, state.xtal, xp)
+        iterator = indexer.xtal.hkl_range(patterns.index_array.unique(), hkl, state.xtal, xp)
         return MillerWithRLP.concatenate(list(iterator))
 
     @pytest.fixture

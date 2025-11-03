@@ -404,10 +404,9 @@ public:
 
     StreakMask() = default;
 
-    StreakMask(array<bool> mask) : m_mask(std::move(mask))
-    {
-        m_flags = std::vector<int>(m_mask.size(), not_used);
-    }
+    StreakMask(size_t size) : m_flags(size, not_used), m_mask() {}
+
+    StreakMask(array<bool> mask) : m_flags(mask.size(), not_used), m_mask(std::move(mask)) {}
 
     template <typename T>
     void remove(const Streak<T> & streak)
@@ -476,6 +475,7 @@ public:
     }
 
     const array<bool> & mask() const {return m_mask;}
+    array<bool> & mask() {return m_mask;}
     bool mask(size_t index) const {return m_mask[index];}
 
     const std::vector<int> & flags() const {return m_flags;}
@@ -487,8 +487,8 @@ public:
     }
 
 protected:
-    array<bool> m_mask;
     std::vector<int> m_flags;
+    array<bool> m_mask;
 };
 
 template <typename T>

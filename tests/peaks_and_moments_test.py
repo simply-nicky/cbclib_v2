@@ -26,7 +26,7 @@ class TestPeaksAndMoments():
         return np.sum((pts[..., None, :] * pts[..., None] - ctr[None, :] * ctr[:, None]) * \
                       val[..., None, None], axis=0) / np.sum(val)
 
-    @pytest.fixture(params=[(100, 100)])
+    @pytest.fixture(params=[(100, 100), (10, 10, 40, 40)])
     def shape(self, request: pytest.FixtureRequest) -> Shape:
         return request.param
 
@@ -43,24 +43,32 @@ class TestPeaksAndMoments():
         return 0.9 * (vmax - vmin) + vmin
 
     @pytest.fixture
-    def image(self, rng: np.random.Generator, shape: Shape, vmin: float, vmax: float
-              ) -> NDRealArray:
+    def images(self, rng: np.random.Generator, shape: Shape, vmin: float, vmax: float
+               ) -> NDRealArray:
         return (vmax - vmin) * rng.random(shape) + vmin
+
+    @pytest.fixture
+    def image(self, images: NDRealArray) -> NDRealArray:
+        return images.reshape((-1,) + images.shape[-2:])[0]
 
     @pytest.fixture(params=[0.05])
     def num_bad(self, request: pytest.FixtureRequest, shape: Shape) -> int:
         return int(prod(shape) * request.param)
 
     @pytest.fixture
-    def mask(self, shape: Shape, num_bad: int, rng: np.random.Generator) -> NDBoolArray:
+    def masks(self, shape: Shape, num_bad: int, rng: np.random.Generator) -> NDBoolArray:
         mask = np.ones(shape, dtype=bool)
         indices = np.unravel_index(rng.choice(mask.size, num_bad, replace=False), mask.shape)
         mask[indices] = False
         return mask
 
     @pytest.fixture
-    def peaks(self, image: NDRealArray, mask: NDBoolArray, threshold: float) -> Peaks:
-        return detect_peaks(image, mask, radius=3, vmin=threshold)[0]
+    def mask(self, masks: NDBoolArray) -> NDBoolArray:
+        return masks.reshape((-1,) + masks.shape[-2:])[0]
+
+    @pytest.fixture
+    def peaks(self, images: NDRealArray, masks: NDBoolArray, threshold: float) -> Peaks:
+        return detect_peaks(images, masks, radius=3, vmin=threshold)[0]
 
     @pytest.fixture(params=[100,])
     def n_keys(self, request: pytest.FixtureRequest) -> int:
@@ -124,7 +132,7 @@ class TestPeaksAndMoments():
         filtered_pts = filtered_pts[np.lexsort((filtered_pts[:, 1], filtered_pts[:, 0]))]
         assert np.all(filtered_pts == peak_pts)
 
-    @pytest.fixture(params=[10,])
+    @pytest.fixture(params=[4,])
     def rank(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
@@ -178,3 +186,27 @@ class TestPeaksAndMoments():
         ctr = self.center_of_mass(pts[..., 0], pts[..., 1], image[pts[..., 1], pts[..., 0]])
         mat = self.covariance_matrix(pts[..., 0], pts[..., 1], image[pts[..., 1], pts[..., 0]])
         check_close(self.central_moments(all_pixels), np.concatenate((ctr, mat.ravel())))
+
+    def test_3d_image(self, images: NDRealArray, masks: NDBoolArray, connectivity: Structure2D,
+                      threshold: float, npts: int):
+        if len(images.shape) <= 2:
+            pytest.skip(f"Skipping image with a shape {images.shape} because len(shape) <= 2")
+
+        all_peaks = detect_peaks(images, masks, radius=3, vmin=threshold)
+        filtered = PeaksList()
+        filtered.extend(all_peaks)
+        filter_peaks(filtered, images, masks, connectivity, threshold, npts)
+
+        for index, (image, mask) in enumerate(zip(images, masks)):
+            peaks = detect_peaks(image, mask, radius=3, vmin=threshold)
+            n_modules = image.size // prod(image.shape[-2:])
+            other_peaks = all_peaks[index * n_modules:(index + 1) * n_modules]
+            assert np.all(peaks.index() == other_peaks.index())
+            assert np.all(peaks.x() == other_peaks.x())
+            assert np.all(peaks.y() == other_peaks.y())
+
+            filter_peaks(peaks, image, mask, connectivity, threshold, npts)
+            other_peaks = filtered[index * n_modules:(index + 1) * n_modules]
+            assert np.all(peaks.index() == other_peaks.index())
+            assert np.all(peaks.x() == other_peaks.x())
+            assert np.all(peaks.y() == other_peaks.y())

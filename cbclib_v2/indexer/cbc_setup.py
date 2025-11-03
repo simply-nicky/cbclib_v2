@@ -5,8 +5,7 @@ from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .._src.state import State, dynamic_fields, field, static_fields
 from .._src.annotations import (ArrayNamespace, BoolArray, Indices, IntArray, JaxNumPy, KeyArray,
                                 NDRealArray, RealArray, RealSequence, Shape)
-from .._src.data_container import (ArrayContainer, Container, DataContainer, IndexArray, IndexedContainer,
-                                   array_namespace)
+from .._src.data_container import ArrayContainer, Container, DataContainer, IndexedContainer, array_namespace
 from .._src.parser import Parser, INIParser, JSONParser
 
 S = TypeVar('S', bound=State)
@@ -227,7 +226,7 @@ class XtalState(ArrayContainer, State):
                 xp.arctan2(self.basis[..., 1], self.basis[..., 0]))
 
 class XtalList(IndexedContainer, State):
-    index       : IndexArray
+    index       : IntArray
     basis       : RealArray
 
     def to_xtals(self) -> XtalState:
@@ -236,7 +235,7 @@ class XtalList(IndexedContainer, State):
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=JaxNumPy) -> 'XtalList':
         xtals = XtalState.import_dataframe(df, xp)
-        return cls(IndexArray(df['index'].to_numpy()), xtals.basis)
+        return cls(df['index'].to_numpy(), xtals.basis)
 
     def to_dataframe(self) -> pd.DataFrame:
         xp = self.__array_namespace__()

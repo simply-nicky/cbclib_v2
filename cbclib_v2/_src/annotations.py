@@ -59,7 +59,7 @@ JaxComplexArray = JaxArray
 JaxIntArray = JaxArray
 JaxRealArray = JaxArray
 
-NDArray = npt.NDArray[Any]
+NDArray = np.ndarray
 NDArrayLike = npt.ArrayLike
 NDBoolArray = npt.NDArray[np.bool_]
 NDComplexArray = npt.NDArray[np.floating[Any] | np.complexfloating[Any, Any]]
@@ -75,7 +75,8 @@ RealArray = JaxRealArray | NDRealArray
 
 KeyArray = JaxArray
 
-Indices = int | slice | IntArray | Sequence[int] | Tuple[IntArray, ...]
+Indices = int | slice | IntArray | Sequence[int]
+MultiIndices = Indices | Tuple[Indices, ...]
 
 AnyFloat = float | np.floating[Any] | RealArray
 
@@ -1366,6 +1367,37 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def cumprod(self, a: ArrayLike, axis: int | None = None,
+                dtype: DTypeLike | None = None) -> Array:
+        """Cumulative product of elements along an axis.
+
+        Array API implementation of :func:`numpy.cumprod`.
+
+        Args:
+            a: N-dimensional array to be accumulated.
+            axis: integer axis along which to accumulate. If None (default), then
+                array will be flattened and accumulated along the flattened axis.
+            dtype: optionally specify the dtype of the output. If not specified,
+                then the output dtype will match the input dtype.
+
+        Returns:
+            An array containing the accumulated product along the given axis.
+
+        See also:
+            - :func:`nancumprod`: cumulative product ignoring NaN values.
+            - :func:`prod`: product along axis
+
+        Examples:
+            >>> x = xp.array([[1, 2, 3],
+            ...               [4, 5, 6]])
+            >>> xp.cumprod(x)  # flattened cumulative product
+            Array([  1,   2,   6,  24, 120, 720], dtype=int32)
+            >>> xp.cumprod(x, axis=1)  # cumulative product along axis 1
+            Array([[  1,   2,   6],
+                   [  4,  20, 120]], dtype=int32)
+        """
+        ...
+
     def delete(self, arr: ArrayLike, obj: ArrayLike | slice, axis: int | None = None) -> Array:
         """Delete entry or entries from an array.
 
@@ -1468,6 +1500,36 @@ class ArrayNamespace(Protocol):
             (3, 2, 3, 1)
             >>> xp.matmul(a, b).shape
             (3, 2, 1)
+        """
+        ...
+
+    def empty(self, shape: Any, dtype: DTypeLike | None = None, *,
+              device: Device | None = None) -> Array:
+        """Create an empty array.
+
+        Array API implementation of :func:`numpy.empty`.
+
+        Args:
+            shape: int or sequence of ints specifying the shape of the created array.
+            dtype: optional dtype for the created array; defaults to floating point.
+            device: optional :class:`~xp.Device` to which the created array will be
+                committed.
+
+        Returns:
+            Array of the specified shape and dtype, on the specified device if specified.
+
+        See also:
+            - :func:`empty_like`
+            - :func:`zeros`
+            - :func:`ones`
+            - :func:`full`
+
+        Examples:
+            >>> xp.empty(4)
+            Array([0., 0., 0., 0.], dtype=float32)
+            >>> xp.empty((2, 3), dtype=bool)
+            Array([[False, False, False],
+                   [False, False, False]], dtype=bool)
         """
         ...
 
@@ -1885,6 +1947,37 @@ class ArrayNamespace(Protocol):
             >>> xp.isclose(xp.array([xp.nan, 1, 2]),
             ...            xp.array([xp.nan, 1, 2]), equal_nan=True)
             Array([ True,  True,  True], dtype=bool)
+        """
+        ...
+
+    def isnan(self, x: ArrayLike, /) -> Array:
+        """Returns a boolean array indicating whether each element of input is ``NaN``.
+
+        Array API implementation of :obj:`numpy.isnan`.
+
+        Args:
+            x: input array or scalar.
+
+        Returns:
+            A boolean array of same shape as ``x`` containing ``True`` where ``x`` is
+            not a number (i.e. ``NaN``) and ``False`` otherwise.
+
+        See also:
+            - :func:`isfinite`: Returns a boolean array indicating whether each
+                element of input is finite.
+            - :func:`isinf`: Returns a boolean array indicating whether each
+                element of input is either positive or negative infinity.
+            - :func:`isposinf`: Returns a boolean array indicating whether each
+                element of input is positive infinity.
+            - :func:`isneginf`: Returns a boolean array indicating whether each
+                element of input is negative infinity.
+
+        Examples:
+            >>> xp.isnan(6)
+            Array(False, dtype=bool, weak_type=True)
+            >>> x = xp.array([2, 1+4j, xp.inf, xp.nan])
+            >>> xp.isnan(x)
+            Array([False, False, False,  True], dtype=bool)
         """
         ...
 

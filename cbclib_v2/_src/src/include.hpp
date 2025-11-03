@@ -37,44 +37,6 @@ namespace cbclib {
 
 namespace py = pybind11;
 
-template <typename Container, typename Shape, typename = std::enable_if_t<
-    std::is_rvalue_reference_v<Container &&> && std::is_integral_v<typename std::remove_cvref_t<Shape>::value_type>
->>
-inline py::array_t<typename Container::value_type> as_pyarray(Container && seq, Shape && shape)
-{
-    Container * seq_ptr = new Container(std::move(seq));
-    auto capsule = py::capsule(seq_ptr, [](void * p) {delete reinterpret_cast<Container *>(p);});
-    return py::array(std::forward<Shape>(shape),  // shape of array
-                     seq_ptr->data(),  // c-style contiguous strides for Container
-                     capsule           // numpy array references this parent
-    );
-}
-
-template <typename Container, typename = std::enable_if_t<std::is_rvalue_reference_v<Container &&>>>
-inline py::array_t<typename Container::value_type> as_pyarray(Container && seq)
-{
-    Container * seq_ptr = new Container(std::move(seq));
-    auto capsule = py::capsule(seq_ptr, [](void * p) {delete reinterpret_cast<Container *>(p);});
-    return py::array(seq_ptr->size(),  // shape of array
-                     seq_ptr->data(),  // c-style contiguous strides for Container
-                     capsule           // numpy array references this parent
-    );
-}
-
-template <typename Container, typename Shape, typename = std::enable_if_t<
-    std::is_integral_v<typename std::remove_cvref_t<Shape>::value_type>
->>
-inline py::array_t<typename Container::value_type> to_pyarray(const Container & seq, Shape && shape)
-{
-    return py::array(std::forward<Shape>(shape), seq.data());
-}
-
-template <typename Container>
-inline py::array_t<typename Container::value_type> to_pyarray(const Container & seq)
-{
-    return py::array(seq.size(), seq.data());
-}
-
 template <template <typename ...> class R=std::vector, typename Top, typename Sub = typename Top::value_type>
 R<typename Sub::value_type> flatten(const Top & all)
 {
@@ -264,8 +226,8 @@ public:
         {
             m_ctr[i] = (m_ctr[i] >= 0) ? m_ctr[i] : max + m_ctr[i];
             if (m_ctr[i] >= max)
-                throw std::invalid_argument("axis " + std::to_string(m_ctr[i]) +
-                                            " is out of bounds (ndim = " + std::to_string(max) + ")");
+                throw std::out_of_range("axis " + std::to_string(m_ctr[i]) +
+                                        " is out of bounds (ndim = " + std::to_string(max) + ")");
         }
         return *this;
     }
@@ -286,14 +248,6 @@ public:
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
         arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
-        // If the swapped array is not c-style contiguous we need to change the data buffer
-        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
-        {
-            // DON'T use release(), it leads to a memory leak
-            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
-        }
-
         return std::forward<Array>(arr);
     }
 
@@ -312,14 +266,6 @@ public:
         // DON'T use release(), it leads to a memory leak
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
         arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
-
-        // If the swapped array is not c-style contiguous we need to change the data buffer
-        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
-        {
-            // DON'T use release(), it leads to a memory leak
-            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
-        }
 
         return std::forward<Array>(arr);
     }
@@ -343,14 +289,6 @@ public:
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
         arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
-        // If the swapped array is not c-style contiguous we need to change the data buffer
-        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
-        {
-            // DON'T use release(), it leads to a memory leak
-            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
-        }
-
         return std::forward<Array>(arr);
     }
 
@@ -372,14 +310,6 @@ public:
         // DON'T use release(), it leads to a memory leak
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
         arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
-
-        // If the swapped array is not c-style contiguous we need to change the data buffer
-        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
-        {
-            // DON'T use release(), it leads to a memory leak
-            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
-        }
 
         return std::forward<Array>(arr);
     }
