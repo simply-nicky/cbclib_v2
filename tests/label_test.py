@@ -38,10 +38,7 @@ class TestLabel():
 
     @pytest.fixture
     def regions(self, mask: NDBoolArray, structure: Structure) -> Regions:
-        regions = label(mask, structure)
-        if isinstance(regions, list):
-            return regions[0]
-        return regions
+        return label(mask, structure)[0]
 
     @pytest.fixture
     def seed(self, rng: np.random.Generator, mask: NDBoolArray) -> Tuple[int, ...]:

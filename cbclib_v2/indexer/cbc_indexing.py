@@ -8,7 +8,7 @@ from .cbc_setup import (EulerState, BaseLens, BaseSetup, BaseState, RotationStat
 from .geometry import (arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, project_to_rect,
                        safe_divide, source_lines)
 from .._src.annotations import ArrayNamespace, KeyArray, IntArray, JaxNumPy, NumPy, RealArray
-from .._src.data_container import IndexArray, add_at, array_namespace
+from .._src.data_container import add_at, array_namespace
 from .._src.src.bresenham import accumulate_lines
 from .._src.src.label import PointSet3D, Structure3D, binary_dilation, center_of_mass, label
 from .._src.state import State
@@ -382,7 +382,7 @@ class CBDIndexer(CBDSetup):
         lines = xp.concatenate((lines, xp.full(rotograms.lines.shape[:-1] + (1,), width)),
                                axis=-1)
         _, indices, counts = xp.unique(rotograms.streak_id, return_index=True, return_counts=True)
-        frames = xp.asarray(rotograms.index.reset())
+        frames = xp.asarray(rotograms.index_array.reset())
 
         rmap = accumulate_lines(lines, (len(rotograms),) + shape, lines.shape[-2] * counts,
                                 frames[indices], kernel='gaussian', in_overlap='max',
@@ -417,10 +417,10 @@ class CBDIndexer(CBDSetup):
     def solutions(self, initial: XtalState, indices: IntArray, tilts: TiltOverAxisState,
                   patterns: Patterns) -> XtalList:
         if len(initial) == 1:
-            return XtalList(IndexArray(patterns.index.unique()[indices]),
+            return XtalList(patterns.index_array.unique()[indices],
                             self.tilt.of_xtal(initial, tilts).basis)
         if len(initial) == len(patterns):
-            return XtalList(IndexArray(patterns.index.unique()[indices]),
+            return XtalList(patterns.index_array.unique()[indices],
                             self.tilt.of_xtal(initial[indices], tilts).basis)
         raise ValueError(f'Number of crystals ({len(initial):d}) and patterns ({len(patterns):d}) '\
                          'are inconsistent')

@@ -425,11 +425,11 @@ void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape
 {
     for (const auto & pt : rectangle_range(fshape))
     {
-        auto bindex = buffer.index_at(pt.begin(), pt.end());
+        auto bindex = buffer.index_at(pt);
 
-        if (data.is_inbound(pt.begin(), pt.end()))
+        if (data.is_inbound(pt))
         {
-            buffer[bindex] = data.at(pt.begin(), pt.end());
+            buffer[bindex] = data.at(pt);
         }
         else buffer[bindex] = T();
     }
@@ -442,11 +442,11 @@ void write_buffer(array<T> & buffer, const array<U> & data, const Shape & fshape
     for (const auto & pt : rectangle_range(fshape))
     {
         std::transform(pt.begin(), pt.end(), origin.begin(), temp.begin(), std::minus<long>());
-        auto bindex = buffer.index_at(pt.begin(), pt.end());
+        auto bindex = buffer.index_at(pt);
 
-        if (data.is_inbound(temp.begin(), temp.end()))
+        if (data.is_inbound(temp))
         {
-            buffer[bindex] = data.at(temp.begin(), temp.end());
+            buffer[bindex] = data.at(temp);
         }
         else buffer[bindex] = T();
     }
@@ -470,7 +470,7 @@ void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape)
     {
         std::transform(pt.begin(), pt.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
-        data[index++] = buffer.at(temp.begin(), temp.end());
+        data[index++] = buffer.at(temp);
     }
 }
 
@@ -483,7 +483,7 @@ void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape, c
         std::transform(origin.begin(), origin.end(), pt.begin(), temp.begin(), std::plus<long>());
         std::transform(temp.begin(), temp.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
-        data[index++] = buffer.at(temp.begin(), temp.end());
+        data[index++] = buffer.at(temp);
     }
 }
 
@@ -551,26 +551,6 @@ void read_line(const std::vector<T> & buffer, size_t flen, long origin, OutputIt
         *first = buffer[detail::modulo(std::plus<long>()(i, origin), flen)];
     }
 }
-
-size_t next_fast_len(size_t target);
-
-template <typename Inp, typename Shape, typename Axis>
-auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> axis, std::string norm, unsigned threads);
-
-template <typename Inp, typename Krn, typename Seq>
-auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<Seq> axis, unsigned threads);
-
-template <typename T>
-py::array_t<T> gaussian_kernel(T sigma, unsigned order, T truncate);
-
-template <typename T, typename U>
-py::array_t<T> gaussian_kernel_vec(std::vector<T> sigma, U order, T truncate);
-
-template <typename T, typename U, typename V>
-py::array_t<T> gaussian_filter(py::array_t<T> inp, U sigma, V order, remove_complex_t<T> truncate, std::string mode, unsigned threads);
-
-template <typename T, typename U>
-py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::string mode, remove_complex_t<T> truncate, unsigned threads);
 
 }
 

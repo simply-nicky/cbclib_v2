@@ -5,11 +5,11 @@ import scipy.ndimage
 import scipy.signal
 from cbclib_v2.fft import fftn, ifftn, fft_convolve
 from cbclib_v2.ndimage import gaussian_filter, gaussian_gradient_magnitude, gaussian_kernel
-from cbclib_v2.annotations import Norm, NDRealArray, Mode
+from cbclib_v2.annotations import Norm, NDArray, NDRealArray, Mode
 from cbclib_v2.test_util import check_close
 
 class TestPyBind11Functions:
-    ArrayGenerator = Callable[[Tuple[int, ...]], np.ndarray]
+    ArrayGenerator = Callable[[Tuple[int, ...]], NDArray]
     ShapeGenerator = Callable[[], Tuple[int, ...]]
 
     @pytest.fixture(params=[np.float32, np.float64])

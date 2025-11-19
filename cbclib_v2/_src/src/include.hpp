@@ -37,44 +37,6 @@ namespace cbclib {
 
 namespace py = pybind11;
 
-template <typename Container, typename Shape, typename = std::enable_if_t<
-    std::is_rvalue_reference_v<Container &&> && std::is_integral_v<typename std::remove_cvref_t<Shape>::value_type>
->>
-inline py::array_t<typename Container::value_type> as_pyarray(Container && seq, Shape && shape)
-{
-    Container * seq_ptr = new Container(std::move(seq));
-    auto capsule = py::capsule(seq_ptr, [](void * p) {delete reinterpret_cast<Container *>(p);});
-    return py::array(std::forward<Shape>(shape),  // shape of array
-                     seq_ptr->data(),  // c-style contiguous strides for Container
-                     capsule           // numpy array references this parent
-    );
-}
-
-template <typename Container, typename = std::enable_if_t<std::is_rvalue_reference_v<Container &&>>>
-inline py::array_t<typename Container::value_type> as_pyarray(Container && seq)
-{
-    Container * seq_ptr = new Container(std::move(seq));
-    auto capsule = py::capsule(seq_ptr, [](void * p) {delete reinterpret_cast<Container *>(p);});
-    return py::array(seq_ptr->size(),  // shape of array
-                     seq_ptr->data(),  // c-style contiguous strides for Container
-                     capsule           // numpy array references this parent
-    );
-}
-
-template <typename Container, typename Shape, typename = std::enable_if_t<
-    std::is_integral_v<typename std::remove_cvref_t<Shape>::value_type>
->>
-inline py::array_t<typename Container::value_type> to_pyarray(const Container & seq, Shape && shape)
-{
-    return py::array(std::forward<Shape>(shape), seq.data());
-}
-
-template <typename Container>
-inline py::array_t<typename Container::value_type> to_pyarray(const Container & seq)
-{
-    return py::array(seq.size(), seq.data());
-}
-
 template <template <typename ...> class R=std::vector, typename Top, typename Sub = typename Top::value_type>
 R<typename Sub::value_type> flatten(const Top & all)
 {
@@ -101,8 +63,8 @@ public:
     using container_type = Container;
     using value_type = Element;
     using size_type = typename Container::size_type;
-    using iterator = container_type::iterator;
-    using const_iterator = container_type::const_iterator;
+    using iterator = typename container_type::iterator;
+    using const_iterator = typename container_type::const_iterator;
 
     WrappedContainer() = default;
 
@@ -139,7 +101,7 @@ protected:
 
 public:
     using WrappedContainer<std::vector<T>>::WrappedContainer;
-    using size_type = WrappedContainer<std::vector<T>>::size_type;
+    using size_type = typename WrappedContainer<std::vector<T>>::size_type;
 
     template <typename InputIt, typename = std::enable_if_t<is_input_iterator_v<InputIt>>>
     AnyContainer(InputIt first, InputIt last) : WrappedContainer<std::vector<T>>(std::vector<T>(first, last)) {}
@@ -158,31 +120,15 @@ public:
     const T & operator[] (size_type index) const {return m_ctr[index];}
 };
 
-template <typename Container>
-void check_dimensions(const std::string & name, ssize_t axis, const Container & shape) {}
-
-template <typename Container, typename... Ix>
-void check_dimensions(const std::string & name, ssize_t axis, const Container & shape, ssize_t i, Ix... index)
+template <typename InputIt, typename = std::enable_if_t<std::is_integral_v<typename std::iter_value_t<InputIt>>>>
+void check_dimension(const std::string & name, ssize_t dim, InputIt first, ssize_t expected)
 {
-    if (axis < 0)
+    if (*(first + dim) != expected)
     {
-        auto text = name + " has the wrong number of dimensions: " + std::to_string(shape.size()) +
-                    " < " + std::to_string(shape.size() - axis);
+        auto text = name + " has an incompatible shape at axis " + std::to_string(dim) + ": " +
+                    std::to_string(*(first + dim)) + " != " + std::to_string(expected);
         throw std::invalid_argument(text);
     }
-    if (axis >= static_cast<ssize_t>(shape.size()))
-    {
-        auto text = name + " has the wrong number of dimensions: " + std::to_string(shape.size()) +
-                    " < " + std::to_string(axis + 1);
-        throw std::invalid_argument(text);
-    }
-    if (i != static_cast<ssize_t>(shape[axis]))
-    {
-        auto text = name + " has an incompatible shape at axis " + std::to_string(i) + ": " +
-                    std::to_string(shape[axis]) + " != " + std::to_string(i);
-        throw std::invalid_argument(text);
-    }
-    check_dimensions(name, axis + 1, shape, index...);
 }
 
 template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
@@ -227,6 +173,13 @@ void check_optional(const std::string & name, ForwardIt first, ForwardIt last,
                 obuf.shape.begin(), obuf.shape.end(), first, last);
 }
 
+std::vector<py::ssize_t> inverse_permutation(const std::vector<py::ssize_t> & p)
+{
+    std::vector<py::ssize_t> q(p.size());
+    for (size_t i = 0; i < p.size(); i++) q[p[i]] = i;
+    return q;
+}
+
 template <typename T>
 struct Sequence : public AnyContainer<T>
 {
@@ -257,32 +210,46 @@ public:
         {
             m_ctr[i] = (m_ctr[i] >= 0) ? m_ctr[i] : max + m_ctr[i];
             if (m_ctr[i] >= max)
-                throw std::invalid_argument("axis " + std::to_string(m_ctr[i]) +
-                                            " is out of bounds (ndim = " + std::to_string(max) + ")");
+                throw std::out_of_range("axis " + std::to_string(m_ctr[i]) +
+                                        " is out of bounds (ndim = " + std::to_string(max) + ")");
         }
         return *this;
     }
 
     template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
-    Array && swap_axes(Array && arr) const
+    Array && swap_back(Array && arr) const
     {
-        // First swap the axes, PyArray_SwapAxes changes the axis order but keeps the data buffer intact
-        size_t counter = 0;
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
         for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
-            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end())
-            {
-                auto obj = reinterpret_cast<PyArrayObject *>(arr.release().ptr());
-                arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, counter++, i));
-            }
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
         }
+        for (auto i : m_ctr) perm.push_back(i);
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
 
-        // If the swapped array is not c-style contiguous we need to change the data buffer
-        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+
+        return std::forward<Array>(arr);
+    }
+
+    template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
+    Array && swap_front(Array && arr) const
+    {
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
+        for (auto i : m_ctr) perm.push_back(i);
+        for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
-            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
         }
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
+
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         return std::forward<Array>(arr);
     }
@@ -290,25 +257,43 @@ public:
     template <class Array, typename V = std::remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
         std::is_same_v<py::array_t<V>, std::remove_cvref_t<Array>>
     >>
-    Array && swap_axes_back(Array && arr) const
+    Array && swap_from_back(Array && arr) const
     {
-        // First swap the axes, PyArray_SwapAxes changes the axis order but keeps the data buffer intact
-        size_t counter = arr.ndim() - m_ctr.size();
-        for (py::ssize_t i = arr.ndim() - 1; i >= 0; i--)
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
+        for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
-            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end())
-            {
-                auto obj = reinterpret_cast<PyArrayObject *>(arr.release().ptr());
-                arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_SwapAxes(obj, --counter, i));
-            }
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
         }
+        for (auto i : m_ctr) perm.push_back(i);
+        perm = inverse_permutation(perm);
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
 
-        // If the swapped array is not c-style contiguous we need to change the data buffer
-        if (!(arr.flags() & NPY_ARRAY_C_CONTIGUOUS))
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+
+        return std::forward<Array>(arr);
+    }
+
+    template <class Array, typename V = std::remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
+        std::is_same_v<py::array_t<V>, std::remove_cvref_t<Array>>
+    >>
+    Array && swap_from_front(Array && arr) const
+    {
+        // Create the permutation
+        std::vector<py::ssize_t> perm;
+        for (auto i : m_ctr) perm.push_back(i);
+        for (py::ssize_t i = 0; i < arr.ndim(); i++)
         {
-            auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-            arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_NewCopy(obj, NPY_CORDER));
+            if (std::find(m_ctr.begin(), m_ctr.end(), i) == m_ctr.end()) perm.push_back(i);
         }
+        perm = inverse_permutation(perm);
+        PyArray_Dims perm_dims {perm.data(), static_cast<int>(perm.size())};
+
+        // DON'T use release(), it leads to a memory leak
+        auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
+        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         return std::forward<Array>(arr);
     }

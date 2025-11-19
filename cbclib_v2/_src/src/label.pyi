@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Iterable, Iterator, List, overload
-from ..annotations import Array, BoolArray, IntSequence, NDRealArray, RealSequence
+from ..annotations import Array, BoolArray, IntSequence, NDIntArray, NDRealArray, RealSequence
 
 class PointSet2D:
     x : List[int]
@@ -91,7 +91,7 @@ class Regions2D:
     x : List[int]
     y : List[int]
 
-    def __init__(self, regions: List[PointSet2D]=[]): ...
+    def __init__(self): ...
 
     def __delitem__(self, idxs: int | slice): ...
 
@@ -120,7 +120,7 @@ class Regions3D:
     y : List[int]
     z : List[int]
 
-    def __init__(self, regions: List[PointSet3D]=[]): ...
+    def __init__(self): ...
 
     def __delitem__(self, idxs: int | slice): ...
 
@@ -143,6 +143,74 @@ class Regions3D:
     def append(self, value: PointSet3D): ...
 
     def extend(self, value: Regions3D): ...
+
+class RegionsList2D:
+    def __init__(self): ...
+
+    def __delitem__(self, index: int | slice): ...
+
+    @overload
+    def __getitem__(self, index: int) -> Regions2D: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> 'RegionsList2D': ...
+
+    @overload
+    def __setitem__(self, index: int, value: Regions2D): ...
+
+    @overload
+    def __setitem__(self, index: slice, value: 'RegionsList2D'): ...
+
+    def __iter__(self) -> Iterator[Regions2D]: ...
+
+    def __len__(self) -> int: ...
+
+    def append(self, elem: Regions2D) -> None: ...
+
+    def extend(self, elem: 'RegionsList2D') -> None: ...
+
+    def frames(self) -> NDIntArray: ...
+
+    def index(self) -> NDIntArray: ...
+
+    def x(self) -> NDIntArray: ...
+
+    def y(self) -> NDIntArray: ...
+
+class RegionsList3D:
+    def __init__(self): ...
+
+    def __delitem__(self, index: int | slice): ...
+
+    @overload
+    def __getitem__(self, index: int) -> Regions3D: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> 'RegionsList3D': ...
+
+    @overload
+    def __setitem__(self, index: int, value: Regions3D): ...
+
+    @overload
+    def __setitem__(self, index: slice, value: 'RegionsList3D'): ...
+
+    def __iter__(self) -> Iterator[Regions3D]: ...
+
+    def __len__(self) -> int: ...
+
+    def append(self, elem: Regions3D) -> None: ...
+
+    def extend(self, elem: 'RegionsList3D') -> None: ...
+
+    def frames(self) -> NDIntArray: ...
+
+    def index(self) -> NDIntArray: ...
+
+    def x(self) -> NDIntArray: ...
+
+    def y(self) -> NDIntArray: ...
+
+    def z(self) -> NDIntArray: ...
 
 class Pixels2DFloat:
     x : List[int]
@@ -190,114 +258,40 @@ class Pixels2DDouble:
 
 Structure = Structure2D | Structure3D
 PointSet = PointSet2D | PointSet3D
-ListPointSet = List[PointSet2D] | List[PointSet3D]
 Regions = Regions2D | Regions3D
-ListRegions = List[Regions2D] | List[Regions3D]
+RegionsList = RegionsList2D | RegionsList3D
 
 def binary_dilation(input: BoolArray, structure: Structure,
-                    seeds: ListPointSet | PointSet | None=None, iterations: int=1,
+                    seeds: Regions | PointSet | None=None, iterations: int=1,
                     mask: BoolArray | None=None, axes: List[int] | None=None,
                     num_threads: int=1) -> BoolArray:
     ...
 
 @overload
-def label(mask: Array, structure: Structure2D, seeds: None=None, npts: int=1,
-          axes: List[int] | None=None, num_threads: int=1) -> List[Regions2D] | Regions2D:
+def label(mask: Array, structure: Structure2D, seeds: Regions2D | PointSet2D | None=None, npts: int=1,
+          axes: List[int] | None=None, num_threads: int=1) -> RegionsList2D:
     ...
 
 @overload
-def label(mask: Array, structure: Structure3D, seeds: None=None, npts: int=1,
-          axes: List[int] | None=None, num_threads: int=1) -> List[Regions3D] | Regions3D:
+def label(mask: Array, structure: Structure3D, seeds: Regions3D | PointSet3D | None=None, npts: int=1,
+          axes: List[int] | None=None, num_threads: int=1) -> RegionsList3D:
     ...
 
-@overload
-def label(mask: Array, structure: Structure2D, seeds: List[PointSet2D], npts: int=1,
-          axes: List[int] | None=None, num_threads: int=1) -> List[Regions2D]:
+def label(mask: Array, structure: Structure, seeds: Regions | PointSet | None=None,
+          npts: int=1, axes: List[int] | None=None, num_threads: int=1) -> RegionsList:
     ...
 
-@overload
-def label(mask: Array, structure: Structure3D, seeds: List[PointSet3D], npts: int=1,
-          axes: List[int] | None=None, num_threads: int=1) -> List[Regions3D]:
+def total_mass(regions: RegionsList, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...
 
-@overload
-def label(mask: Array, structure: Structure2D, seeds: PointSet2D, npts: int=1,
-          axes: None=None, num_threads: int=1) -> Regions2D:
+def mean(regions: RegionsList, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...
 
-@overload
-def label(mask: Array, structure: Structure3D, seeds: PointSet3D, npts: int=1,
-          axes: None=None, num_threads: int=1) -> Regions3D:
+def center_of_mass(regions: RegionsList, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...
 
-def label(mask: Array, structure: Structure, seeds: ListPointSet | PointSet | None=None,
-          npts: int=1, axes: List[int] | None=None, num_threads: int=1) -> ListRegions | Regions:
+def moment_of_inertia(regions: RegionsList, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...
 
-@overload
-def total_mass(regions: Regions, data: Array, axes: List[int] | None=None) -> NDRealArray:
-    ...
-
-@overload
-def total_mass(regions: ListRegions, data: Array, axes: List[int] | None=None
-               ) -> List[NDRealArray]:
-    ...
-
-def total_mass(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
-               ) -> NDRealArray | List[NDRealArray]:
-    ...
-
-@overload
-def mean(regions: Regions, data: Array, axes: List[int] | None=None) -> NDRealArray:
-    ...
-
-@overload
-def mean(regions: ListRegions, data: Array, axes: List[int] | None=None
-         ) -> List[NDRealArray]:
-    ...
-
-def mean(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
-         ) -> NDRealArray | List[NDRealArray]:
-    ...
-
-@overload
-def center_of_mass(regions: Regions, data: Array, axes: List[int] | None=None
-                   ) -> NDRealArray:
-    ...
-
-@overload
-def center_of_mass(regions: ListRegions, data: Array, axes: List[int] | None=None
-                   ) -> List[NDRealArray]:
-    ...
-
-def center_of_mass(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
-                   ) -> NDRealArray | List[NDRealArray]:
-    ...
-
-@overload
-def moment_of_inertia(regions: Regions, data: Array, axes: List[int] | None=None
-                      ) -> NDRealArray:
-    ...
-
-@overload
-def moment_of_inertia(regions: ListRegions, data: Array, axes: List[int] | None=None
-                      ) -> List[NDRealArray]:
-    ...
-
-def moment_of_inertia(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
-                      ) -> NDRealArray | List[NDRealArray]:
-    ...
-
-@overload
-def covariance_matrix(regions: Regions, data: Array, axes: List[int] | None=None
-                      ) -> NDRealArray:
-    ...
-
-@overload
-def covariance_matrix(regions: ListRegions, data: Array, axes: List[int] | None=None
-                      ) -> List[NDRealArray]:
-    ...
-
-def covariance_matrix(regions: Regions | ListRegions, data: Array, axes: List[int] | None=None
-                      ) -> NDRealArray | List[NDRealArray]:
+def covariance_matrix(regions: RegionsList, data: Array, axes: List[int] | None=None) -> NDRealArray:
     ...

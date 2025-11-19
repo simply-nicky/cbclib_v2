@@ -1,3 +1,4 @@
+from math import prod
 from typing import Callable, Dict, Tuple
 import numpy as np
 import pytest
@@ -66,7 +67,7 @@ class TestDrawLine():
     @pytest.fixture
     def indices(self, rng: np.random.Generator, shape: Shape, ndim: int, n_lines: int,
                 xp: ArrayNamespace) -> IntArray:
-        return xp.sort(rng.integers(0, np.prod(shape[:-ndim]) - 1, size=n_lines))
+        return xp.sort(rng.integers(0, prod(shape[:-ndim]) - 1, size=n_lines))
 
     @pytest.fixture
     def lines(self, rng: np.random.Generator, shape: Shape, ndim: int, n_lines: int,
@@ -145,7 +146,7 @@ class TestDrawLine():
         pts = xp.stack(pts[::-1], axis=-1)[..., None, :]
 
         frames = []
-        for fnum in range(np.prod(shape[:-ndim])):
+        for fnum in range(prod(shape[:-ndim])):
             lns = lines[indices == fnum]
             dist = pts - lns.project(pts)
             frame = max_val * kernel_func(xp.sqrt(xp.sum(dist**2, axis=-1)), xp.asarray(width))

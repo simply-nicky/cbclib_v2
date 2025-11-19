@@ -24,10 +24,6 @@ class ReferenceType(Generic[T]):
         ...
 
 @runtime_checkable
-class Sized(Protocol):
-    def __len__(self) -> int: ...
-
-@runtime_checkable
 class SupportsNamespace(Protocol):
     def __array_namespace__(self) -> 'ModuleType | ArrayNamespace': ...
 
@@ -63,7 +59,7 @@ JaxComplexArray = JaxArray
 JaxIntArray = JaxArray
 JaxRealArray = JaxArray
 
-NDArray = npt.NDArray[Any]
+NDArray = np.ndarray
 NDArrayLike = npt.ArrayLike
 NDBoolArray = npt.NDArray[np.bool_]
 NDComplexArray = npt.NDArray[np.floating[Any] | np.complexfloating[Any, Any]]
@@ -79,7 +75,8 @@ RealArray = JaxRealArray | NDRealArray
 
 KeyArray = JaxArray
 
-Indices = int | slice | IntArray | Sequence[int] | Tuple[IntArray, ...]
+Indices = int | slice | IntArray | Sequence[int]
+MultiIndices = Indices | Tuple[Indices, ...]
 
 AnyFloat = float | np.floating[Any] | RealArray
 
@@ -92,6 +89,7 @@ ExpandedType = AnyType | Tuple[AnyType, List]
 
 Norm = Literal['backward', 'forward', 'ortho']
 Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
+FileMode = Literal['r', 'r+', 'w', 'w-', 'x', 'a']
 
 ReadOut = Array | int | float | Sequence[int] | Sequence[float]
 
@@ -130,6 +128,39 @@ class LinalgNamespace(Protocol):
             ...               [3, 4]])
             >>> xp.linalg.det(a)
             Array(-2., dtype=float32)
+        """
+        ...
+
+    def eig(self, a: ArrayLike) -> Tuple[Array, Array]:
+        """
+        Compute the eigenvalues and eigenvectors of a square array.
+
+        Array API implementation of :func:`numpy.linalg.eig`.
+
+        Args:
+        a: array of shape ``(..., M, M)`` for which to compute the eigenvalues and vectors.
+
+        Returns:
+        A tuple ``(eigenvalues, eigenvectors)`` with
+
+        - ``eigenvalues``: an array of shape ``(..., M)`` containing the eigenvalues.
+        - ``eigenvectors``: an array of shape ``(..., M, M)``, where column ``v[:, i]`` is the
+            eigenvector corresponding to the eigenvalue ``w[i]``.
+
+        See also:
+        - :func:`linalg.eigh`: eigenvectors and eigenvalues of a Hermitian matrix.
+        - :func:`linalg.eigvals`: compute eigenvalues only.
+
+        Examples:
+        >>> a = xp.array([[1., 2.],
+        ...               [2., 1.]])
+        >>> w, v = xp.linalg.eig(a)
+        >>> with jax.numpy.printoptions(precision=4):
+        ...   w
+        Array([ 3.+0.j, -1.+0.j], dtype=complex64)
+        >>> v
+        Array([[ 0.70710677+0.j, -0.70710677+0.j],
+               [ 0.70710677+0.j,  0.70710677+0.j]], dtype=complex64)
         """
         ...
 
@@ -501,6 +532,30 @@ class ArrayNamespace(Protocol):
             >>> pybuffer = array('i', [2, 3, 5, 7])
             >>> xp.array(pybuffer)
             Array([2, 3, 5, 7], dtype=int32)
+        """
+        ...
+
+    def array_split(self, ary: ArrayLike, indices_or_sections: int | Sequence[int] | ArrayLike,
+                    axis: int = 0) -> List[Array]:
+        """Split an array into sub-arrays.
+
+        Array API implementation of :func:`numpy.array_split`.
+
+        Refer to the documentation of :func:`numpy.split` for details; ``array_split``
+        is equivalent to ``split``, but allows integer ``indices_or_sections`` which does
+        not evenly divide the split axis.
+
+        Examples:
+        >>> x = xp.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
+        >>> chunks = xp.array_split(x, 4)
+        >>> print(*chunks)
+        [1 2 3] [4 5] [6 7] [8 9]
+
+        See also:
+        - :func:`numpy.split`: split an array along any axis.
+        - :func:`numpy.vsplit`: split vertically, i.e. along axis=0
+        - :func:`numpy.hsplit`: split horizontally, i.e. along axis=1
+        - :func:`numpy.dsplit`: split depth-wise, i.e. along axis=2
         """
         ...
 
@@ -1312,6 +1367,37 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def cumprod(self, a: ArrayLike, axis: int | None = None,
+                dtype: DTypeLike | None = None) -> Array:
+        """Cumulative product of elements along an axis.
+
+        Array API implementation of :func:`numpy.cumprod`.
+
+        Args:
+            a: N-dimensional array to be accumulated.
+            axis: integer axis along which to accumulate. If None (default), then
+                array will be flattened and accumulated along the flattened axis.
+            dtype: optionally specify the dtype of the output. If not specified,
+                then the output dtype will match the input dtype.
+
+        Returns:
+            An array containing the accumulated product along the given axis.
+
+        See also:
+            - :func:`nancumprod`: cumulative product ignoring NaN values.
+            - :func:`prod`: product along axis
+
+        Examples:
+            >>> x = xp.array([[1, 2, 3],
+            ...               [4, 5, 6]])
+            >>> xp.cumprod(x)  # flattened cumulative product
+            Array([  1,   2,   6,  24, 120, 720], dtype=int32)
+            >>> xp.cumprod(x, axis=1)  # cumulative product along axis 1
+            Array([[  1,   2,   6],
+                   [  4,  20, 120]], dtype=int32)
+        """
+        ...
+
     def delete(self, arr: ArrayLike, obj: ArrayLike | slice, axis: int | None = None) -> Array:
         """Delete entry or entries from an array.
 
@@ -1414,6 +1500,36 @@ class ArrayNamespace(Protocol):
             (3, 2, 3, 1)
             >>> xp.matmul(a, b).shape
             (3, 2, 1)
+        """
+        ...
+
+    def empty(self, shape: Any, dtype: DTypeLike | None = None, *,
+              device: Device | None = None) -> Array:
+        """Create an empty array.
+
+        Array API implementation of :func:`numpy.empty`.
+
+        Args:
+            shape: int or sequence of ints specifying the shape of the created array.
+            dtype: optional dtype for the created array; defaults to floating point.
+            device: optional :class:`~xp.Device` to which the created array will be
+                committed.
+
+        Returns:
+            Array of the specified shape and dtype, on the specified device if specified.
+
+        See also:
+            - :func:`empty_like`
+            - :func:`zeros`
+            - :func:`ones`
+            - :func:`full`
+
+        Examples:
+            >>> xp.empty(4)
+            Array([0., 0., 0., 0.], dtype=float32)
+            >>> xp.empty((2, 3), dtype=bool)
+            Array([[False, False, False],
+                   [False, False, False]], dtype=bool)
         """
         ...
 
@@ -1693,6 +1809,57 @@ class ArrayNamespace(Protocol):
             """
         ...
 
+    def insert(self, arr: ArrayLike, obj: ArrayLike | slice, values: ArrayLike,
+            axis: int | None = None) -> Array:
+        """Insert entries into an array at specified indices.
+
+        Array API implementation of :func:`numpy.insert`.
+
+        Args:
+            arr: array object into which values will be inserted.
+            obj: slice or array of indices specifying insertion locations.
+            values: array of values to be inserted.
+            axis: specify the insertion axis in the case of multi-dimensional
+                arrays. If unspecified, ``arr`` will be flattened.
+
+        Returns:
+            A copy of ``arr`` with values inserted at the specified locations.
+
+        See also:
+            - :func:`delete`: delete entries from an array.
+
+        Examples:
+            Inserting a single value:
+
+            >>> x = xp.arange(5)
+            >>> xp.insert(x, 2, 99)
+            Array([ 0,  1, 99,  2,  3,  4], dtype=int32)
+
+            Inserting multiple identical values using a slice:
+
+            >>> xp.insert(x, slice(None, None, 2), -1)
+            Array([-1,  0,  1, -1,  2,  3, -1,  4], dtype=int32)
+
+            Inserting multiple values using an index:
+
+            >>> indices = xp.array([4, 2, 5])
+            >>> values = xp.array([10, 11, 12])
+            >>> xp.insert(x, indices, values)
+            Array([ 0,  1, 11,  2,  3, 10,  4, 12], dtype=int32)
+
+            Inserting columns into a 2D array:
+
+            >>> x = xp.array([[1, 2, 3],
+            ...               [4, 5, 6]])
+            >>> indices = xp.array([1, 3])
+            >>> values = xp.array([[10, 11],
+            ...                    [12, 13]])
+            >>> xp.insert(x, indices, values, axis=1)
+            Array([[ 1, 10,  2,  3, 11],
+                   [ 4, 12,  5,  6, 13]], dtype=int32)
+        """
+        ...
+
     def invert(self, x: ArrayLike, /) -> Array:
         """Compute the bitwise inversion of an input.
 
@@ -1780,6 +1947,37 @@ class ArrayNamespace(Protocol):
             >>> xp.isclose(xp.array([xp.nan, 1, 2]),
             ...            xp.array([xp.nan, 1, 2]), equal_nan=True)
             Array([ True,  True,  True], dtype=bool)
+        """
+        ...
+
+    def isnan(self, x: ArrayLike, /) -> Array:
+        """Returns a boolean array indicating whether each element of input is ``NaN``.
+
+        Array API implementation of :obj:`numpy.isnan`.
+
+        Args:
+            x: input array or scalar.
+
+        Returns:
+            A boolean array of same shape as ``x`` containing ``True`` where ``x`` is
+            not a number (i.e. ``NaN``) and ``False`` otherwise.
+
+        See also:
+            - :func:`isfinite`: Returns a boolean array indicating whether each
+                element of input is finite.
+            - :func:`isinf`: Returns a boolean array indicating whether each
+                element of input is either positive or negative infinity.
+            - :func:`isposinf`: Returns a boolean array indicating whether each
+                element of input is positive infinity.
+            - :func:`isneginf`: Returns a boolean array indicating whether each
+                element of input is negative infinity.
+
+        Examples:
+            >>> xp.isnan(6)
+            Array(False, dtype=bool, weak_type=True)
+            >>> x = xp.array([2, 1+4j, xp.inf, xp.nan])
+            >>> xp.isnan(x)
+            Array([False, False, False,  True], dtype=bool)
         """
         ...
 
@@ -2425,6 +2623,45 @@ class ArrayNamespace(Protocol):
         """
         ...
 
+    def quantile(self, a: ArrayLike, q: ArrayLike, axis: int | Tuple[int, ...] | None = None,
+                 method: str = "linear", keepdims: bool = False) -> Array:
+        """Compute the quantile of the data along the specified axis.
+
+        Array API implementation of :func:`numpy.quantile`.
+
+        Args:
+            a: N-dimensional array input.
+            q: scalar or 1-dimensional array specifying the desired quantiles. ``q``
+                should contain floating-point values between ``0.0`` and ``1.0``.
+            axis: optional axis or tuple of axes along which to compute the quantile
+            method: specify the interpolation method to use. Options are one of
+                ``["linear", "lower", "higher", "midpoint", "nearest"]``.
+                default is ``linear``.
+            keepdims: if True, then the returned array will have the same number of
+                dimensions as the input. Default is False.
+
+        Returns:
+            An array containing the specified quantiles along the specified axes.
+
+        See also:
+            - :func:`nanquantile`: compute the quantile while ignoring NaNs
+            - :func:`percentile`: compute the percentile (0-100)
+
+        Examples:
+            Computing the median and quartiles of an array, with linear interpolation:
+
+            >>> x = xp.arange(10)
+            >>> q = xp.array([0.25, 0.5, 0.75])
+            >>> xp.quantile(x, q)
+            Array([2.25, 4.5 , 6.75], dtype=float32)
+
+            Computing the quartiles using nearest-value interpolation:
+
+            >>> xp.quantile(x, q, method='nearest')
+            Array([2., 4., 7.], dtype=float32)
+        """
+        ...
+
     def ravel(self, a: ArrayLike, order: str = "C") -> Array:
         """Flatten array into a 1-dimensional shape.
 
@@ -2600,6 +2837,56 @@ class ArrayNamespace(Protocol):
             >>> x1 = xp.array([10.5, 21.5, 12.5, 31.5])
             >>> xp.round(x1)
             Array([10., 22., 12., 32.], dtype=float32)
+        """
+        ...
+
+    def searchsorted(self, a: ArrayLike, v: ArrayLike, side: str = 'left',
+                    sorter: ArrayLike | None = None) -> Array:
+        """Perform a binary search within a sorted array.
+
+        Array API implementation of :func:`numpy.searchsorted`.
+
+        This will return the indices within a sorted array ``a`` where values in ``v``
+        can be inserted to maintain its sort order.
+
+        Args:
+            a: one-dimensional array, assumed to be in sorted order unless ``sorter`` is specified.
+            v: N-dimensional array of query values
+            side: ``'left'`` (default) or ``'right'``; specifies whether insertion indices will be
+                to the left or the right in case of ties.
+            sorter: optional array of indices specifying the sort order of ``a``. If specified,
+                then the algorithm assumes that ``a[sorter]`` is in sorted order.
+
+        Returns:
+            Array of insertion indices of shape ``v.shape``.
+
+        Examples:
+            Searching for a single value:
+
+            >>> a = xp.array([1, 2, 2, 3, 4, 5, 5])
+            >>> xp.searchsorted(a, 2)
+            Array(1, dtype=int32)
+            >>> xp.searchsorted(a, 2, side='right')
+            Array(3, dtype=int32)
+
+            Searching for a batch of values:
+
+            >>> vals = xp.array([0, 3, 8, 1.5, 2])
+            >>> xp.searchsorted(a, vals)
+            Array([0, 3, 7, 1, 1], dtype=int32)
+
+            Optionally, the ``sorter`` argument can be used to find insertion indices into
+            an array sorted via :func:`argsort`:
+
+            >>> a = xp.array([4, 3, 5, 1, 2])
+            >>> sorter = xp.argsort(a)
+            >>> xp.searchsorted(a, vals, sorter=sorter)
+            Array([0, 2, 5, 1, 1], dtype=int32)
+
+            The result is equivalent to passing the sorted array:
+
+            >>> xp.searchsorted(xp.sort(a), vals)
+            Array([0, 2, 5, 1, 1], dtype=int32)
         """
         ...
 
@@ -3146,6 +3433,72 @@ class ArrayNamespace(Protocol):
         >>> with xp.printoptions(precision=3, suppress=True):
         ...   -1j * xp.tan(1j * (2-5j))
         Array(1.031+0.021j, dtype=complex64, weak_type=True)
+        """
+        ...
+
+    def tensordot(self, a: ArrayLike, b: ArrayLike,
+                  axes: int | Sequence[int] | Sequence[Sequence[int]] = 2) -> Array:
+        """Compute the tensor dot product of two N-dimensional arrays.
+
+        Array API implementation of :func:`numpy.linalg.tensordot`.
+
+        Args:
+            a: N-dimensional array
+            b: M-dimensional array
+            axes: integer or tuple of sequences of integers. If an integer `k`, then
+                sum over the last `k` axes of ``a`` and the first `k` axes of ``b``,
+                in order. If a tuple, then ``axes[0]`` specifies the axes of ``a`` and
+                ``axes[1]`` specifies the axes of ``b``.
+
+        Returns:
+            array containing the tensor dot product of the inputs
+
+        See also:
+            - :func:`einsum`: NumPy API for more general tensor contractions.
+
+        Examples:
+            >>> x1 = xp.arange(24.).reshape(2, 3, 4)
+            >>> x2 = xp.ones((3, 4, 5))
+            >>> xp.tensordot(x1, x2)
+            Array([[ 66.,  66.,  66.,  66.,  66.],
+                   [210., 210., 210., 210., 210.]], dtype=float32)
+
+            Equivalent result when specifying the axes as explicit sequences:
+
+            >>> xp.tensordot(x1, x2, axes=([1, 2], [0, 1]))
+            Array([[ 66.,  66.,  66.,  66.,  66.],
+                   [210., 210., 210., 210., 210.]], dtype=float32)
+
+            Equivalent result via :func:`~einsum`:
+
+            >>> xp.einsum('ijk,jkm->im', x1, x2)
+            Array([[ 66.,  66.,  66.,  66.,  66.],
+                   [210., 210., 210., 210., 210.]], dtype=float32)
+
+            Setting ``axes=1`` for two-dimensional inputs is equivalent to a matrix
+            multiplication:
+
+            >>> x1 = xp.array([[1, 2],
+            ...                [3, 4]])
+            >>> x2 = xp.array([[1, 2, 3],
+            ...                [4, 5, 6]])
+            >>> xp.linalg.tensordot(x1, x2, axes=1)
+            Array([[ 9, 12, 15],
+                   [19, 26, 33]], dtype=int32)
+            >>> x1 @ x2
+            Array([[ 9, 12, 15],
+                   [19, 26, 33]], dtype=int32)
+
+            Setting ``axes=0`` for one-dimensional inputs is equivalent to :func:`~outer`:
+
+            >>> x1 = xp.array([1, 2])
+            >>> x2 = xp.array([1, 2, 3])
+            >>> xp.linalg.tensordot(x1, x2, axes=0)
+            Array([[1, 2, 3],
+                   [2, 4, 6]], dtype=int32)
+            >>> xp.outer(x1, x2)
+            Array([[1, 2, 3],
+                   [2, 4, 6]], dtype=int32)
         """
         ...
 

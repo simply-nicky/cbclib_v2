@@ -2,7 +2,8 @@ from typing import List, Optional, Sequence, Tuple, overload
 from ..annotations import IntArray, NDRealArray, RealArray, IntSequence
 
 def binterpolate(inp: RealArray, grid: Sequence[RealArray | IntArray],
-                 coords: RealArray | IntArray, num_threads: int=1) -> NDRealArray:
+                 coords: RealArray | IntArray, axis: IntSequence, num_threads: int=1
+                 ) -> NDRealArray:
     """Perform bilinear multidimensional interpolation on regular grids. The integer grid starting
     from ``(0, 0, ...)`` to ``(inp.shape[0] - 1, inp.shape[1] - 1, ...)`` is implied.
 

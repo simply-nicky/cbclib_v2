@@ -243,52 +243,57 @@ private:
     }
 };
 
+// Peaks generator class
+// m_data and m_mask are 2D arrays
 template <typename T>
 class PeaksData
 {
 public:
-    PeaksData(array<T> data, array<bool> mask) : m_data(std::move(data)), m_mask(std::move(mask)) {}
+    PeaksData(array<T> data, array<bool> mask) : m_finder(std::move(data), std::vector<size_t>{0, 1}), m_mask(std::move(mask)) {}
 
     template <typename InputIt, typename = std::enable_if_t<
-        std::is_base_of_v<typename array<T>::iterator, InputIt> || std::is_base_of_v<typename array<T>::const_iterator, InputIt>
+        std::is_base_of_v<typename array<T>::const_iterator, InputIt> ||
+        std::is_base_of_v<typename array<T>::iterator, InputIt>
     >>
-    void insert(InputIt first, InputIt last, Peaks & peaks, T vmin, size_t order)
+    void insert(InputIt first, InputIt last, size_t index, size_t axis, Peaks & peaks, T vmin)
     {
-        auto insert = [this, vmin, &peaks](size_t index)
-        {
-            long y = m_data.index_along_dim(index, 0);
-            long x = m_data.index_along_dim(index, 1);
+        m_finder.find(first, last, index, axis, inserter(peaks, vmin));
+    }
 
-            if (m_mask.at(y, x) && m_data.at(y, x) > vmin)
+    void insert(size_t index, size_t axis, Peaks & peaks, T vmin)
+    {
+        m_finder.find(index, axis, inserter(peaks, vmin));
+    }
+
+    const array<T> & data() const {return m_finder.data();}
+    const array<bool> & mask() const {return m_mask;}
+
+protected:
+    MaximaND<T> m_finder;
+    array<bool> m_mask;
+
+    auto inserter(Peaks & peaks, T vmin)
+    {
+        return [this, vmin, &peaks](size_t maximum)
+        {
+            long y = data().coord_along_dim(maximum, 0);
+            long x = data().coord_along_dim(maximum, 1);
+
+            if (m_mask.at(y, x) && data().at(y, x) > vmin)
             {
                 auto iter = peaks.find(Point<long>{x, y});
                 if (iter == peaks.end()) peaks.insert(Point<long>{x, y});
-                else if (m_data.at(y, x) > m_data.at(iter->coordinate())) peaks.insert(Point<long>{x, y});
+                else if (data().at(y, x) > data().at(iter->coordinate())) peaks.insert(Point<long>{x, y});
             }
         };
-
-        maxima_nd(first, last, insert, m_data, Axes, order);
     }
-
-    const array<T> & data() const {return m_data;}
-    const array<bool> & mask() const {return m_data;}
-
-protected:
-    constexpr static std::array<size_t, 2> Axes = {0, 1};
-
-    array<T> m_data;
-    array<bool> m_mask;
-
 };
 
 template <typename T>
-struct FilterData : PeaksData<T>
+struct FilterData
 {
 public:
-    FilterData(array<T> data, array<bool> mask) : PeaksData<T>(std::move(data), std::move(mask))
-    {
-        m_good = vector_array<unsigned char>{m_mask.shape(), 0};
-    }
+    FilterData(array<T> data, array<bool> mask) : m_good(mask.shape(), 0), m_data(std::move(data)), m_mask(std::move(mask)) {}
 
     template <typename InputIt, typename = std::enable_if_t<
         std::is_base_of_v<typename Peaks::iterator, InputIt>
@@ -324,9 +329,9 @@ public:
     }
 
 protected:
-    using PeaksData<T>::m_data;
-    using PeaksData<T>::m_mask;
     vector_array<unsigned char> m_good;
+    array<T> m_data;
+    array<bool> m_mask;
 };
 
 // Streak class
@@ -404,10 +409,9 @@ public:
 
     StreakMask() = default;
 
-    StreakMask(array<bool> mask) : m_mask(std::move(mask))
-    {
-        m_flags = std::vector<int>(m_mask.size(), not_used);
-    }
+    StreakMask(size_t size) : m_flags(size, not_used), m_mask() {}
+
+    StreakMask(array<bool> mask) : m_flags(mask.size(), not_used), m_mask(std::move(mask)) {}
 
     template <typename T>
     void remove(const Streak<T> & streak)
@@ -475,14 +479,21 @@ public:
         return detail::logbinom(n, k, p);
     }
 
+    const array<bool> & mask() const {return m_mask;}
+    array<bool> & mask() {return m_mask;}
+    bool mask(size_t index) const {return m_mask[index];}
+
+    const std::vector<int> & flags() const {return m_flags;}
+    int flags(size_t index) const {return m_flags[index];}
+
     void clear()
     {
         std::fill(m_flags.begin(), m_flags.end(), not_used);
     }
 
 protected:
-    array<bool> m_mask;
     std::vector<int> m_flags;
+    array<bool> m_mask;
 };
 
 template <typename T>

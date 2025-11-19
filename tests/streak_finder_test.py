@@ -1,10 +1,11 @@
+from math import prod
 from typing import Tuple
 import numpy as np
 import pytest
 from cbclib_v2.annotations import NDBoolArray, NDIntArray, NDRealArray, Shape
 from cbclib_v2.label import Structure2D
 from cbclib_v2.ndimage import draw_lines
-from cbclib_v2.streak_finder import PatternStreakFinder, PeaksList, Streak, StreakList, p_value
+from cbclib_v2.streak_finder import PatternStreakFinder, PeaksList, Streak, Pattern, p_value
 from cbclib_v2.test_util import check_close
 
 class TestStreakFinder():
@@ -79,7 +80,7 @@ class TestStreakFinder():
 
     @pytest.fixture(params=[0.05])
     def num_bad(self, request: pytest.FixtureRequest, shape: Shape) -> int:
-        return int(request.param * np.prod(shape))
+        return int(request.param * prod(shape))
 
     @pytest.fixture
     def mask(self, shape: Shape, num_bad: int, rng: np.random.Generator) -> NDBoolArray:
@@ -116,15 +117,15 @@ class TestStreakFinder():
 
     @pytest.fixture
     def result(self, finder: PatternStreakFinder, peaks: PeaksList, vmin: float, xtol: float
-               ) -> StreakList:
+               ) -> Pattern:
         return finder.detect_streaks(peaks, xtol, vmin)[0]
 
     @pytest.mark.xfail(raises=IndexError)
-    def test_streak_list(self, result: StreakList):
+    def test_streak_list(self, result: Pattern):
         return result[len(result)]
 
     @pytest.fixture
-    def streak(self, rng: np.random.Generator, result: StreakList) -> Streak:
+    def streak(self, rng: np.random.Generator, result: Pattern) -> Streak:
         index = int(rng.integers(0, len(result)))
         return result[index]
 
@@ -151,16 +152,16 @@ class TestStreakFinder():
         pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
         assert np.all(np.stack([streak.x, streak.y], axis=-1) == pts)
 
-    def test_mask(self, result: StreakList, finder: PatternStreakFinder):
+    def test_mask(self, result: Pattern, finder: PatternStreakFinder):
         for streak in result:
             assert np.all(finder.mask[streak.y, streak.x])
 
-    def test_p_values(self, result: StreakList, image: NDRealArray,
+    def test_p_values(self, result: Pattern, image: NDRealArray,
                      mask: NDBoolArray, xtol: float, vmin: float, min_size: int):
-        p_values, prob = p_value(result, image, mask ,xtol, vmin)
+        p_values, prob = p_value(result, image, mask, xtol, vmin)
         assert np.all(p_values < np.log(prob) * min_size)
 
-    def test_result_probability(self, result: StreakList, image: NDRealArray,
+    def test_result_probability(self, result: Pattern, image: NDRealArray,
                                 mask: NDBoolArray, xtol: float, vmin: float):
         _, prob = p_value(result, image, mask, xtol, vmin)
         index = np.searchsorted(np.sort(image[mask]), vmin)

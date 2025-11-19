@@ -4,11 +4,12 @@ import dataclasses
 import json
 import os
 import re
-from typing import Any, Callable, ClassVar, Dict, List, Tuple, Type, get_args, get_origin, overload
+from typing import (Any, Callable, ClassVar, Dict, List, Tuple, Type, TypeVar, get_args, get_origin,
+                    overload)
 import numpy as np
 from .data_container import Container
-from .annotations import (AnyType, Array, ArrayNamespace, DataclassInstance, ExpandedType, NumPy,
-                          UnionType)
+from .annotations import (AnyType, Array, ArrayNamespace, DataclassInstance, ExpandedType, NDArray,
+                          NumPy, UnionType)
 
 class BaseFormatter:
     aliases : ClassVar[Tuple[Type, ...]]
@@ -69,7 +70,7 @@ class TupleFormatter(Formatter):
         raise ValueError(f"Invalid string: '{string}'")
 
 class ArrayFormatter(Formatter):
-    aliases = (np.ndarray,)
+    aliases = (NDArray,)
 
     @classmethod
     def format_string(cls, string: str, dtype: Type, xp: ArrayNamespace) -> Array:
@@ -183,7 +184,7 @@ class StringFormatting:
             return {k: cls.to_string(v) for k, v in node.items()}
         if isinstance(node, list):
             return [cls.to_string(v) for v in node]
-        if isinstance(node, np.ndarray):
+        if isinstance(node, NDArray):
             return np.array2string(np.array(node), separator=',')
         if isinstance(node, Enum):
             return str(node.value)
@@ -229,8 +230,15 @@ def type_hints(cls: DataclassInstance | type[DataclassInstance]) -> Dict[str, Ty
             result[field.name] = field.type
     return result
 
+P = TypeVar('P', bound='Parser')
+
 class Parser():
     fields : Dict[str, FieldValues]
+
+    @classmethod
+    def from_container(cls: Type[P], container: DataclassInstance | type[DataclassInstance],
+                       default: str='default') -> P:
+        raise NotImplementedError
 
     def read_all(self, file: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -342,7 +350,7 @@ class JSONParser(Parser, Container):
             for key, val in values.items():
                 if isinstance(val, dict):
                     result[key] = array_to_list(**val)
-                elif isinstance(val, np.ndarray):
+                elif isinstance(val, NDArray):
                     result[key] = val.tolist()
                 else:
                     result[key] = val
@@ -353,3 +361,25 @@ class JSONParser(Parser, Container):
     def write(self, file: str, obj: Any):
         with open(file, 'w') as out_file:
             json.dump(self.to_dict(obj), out_file, sort_keys=True, ensure_ascii=False, indent=4)
+
+def get_extension(file_or_extension: str) -> str:
+    if file_or_extension == 'ini':
+        return 'ini'
+    if file_or_extension == 'json':
+        return 'json'
+
+    ext = os.path.splitext(file_or_extension)[1].lower()
+    if ext == '.ini':
+        return 'ini'
+    if ext == '.json':
+        return 'json'
+    raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
+
+def get_parser(file_or_extension: str, container: DataclassInstance | type[DataclassInstance],
+               default: str='default') -> Parser:
+    ext = get_extension(file_or_extension)
+    if ext == 'ini':
+        return INIParser.from_container(container, default)
+    if ext == 'json':
+        return JSONParser.from_container(container, default)
+    raise ValueError(f"Unsupported file or extension format: {file_or_extension}")

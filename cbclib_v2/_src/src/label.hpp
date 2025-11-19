@@ -163,7 +163,7 @@ public:
         insert(std::get<0>(pixel), std::get<1>(pixel));
     }
 
-    template <typename InputIt, typename Value = typename std::iterator_traits<InputIt>::value_type, typename V = typename Value::second_type,
+    template <typename InputIt, typename Value = typename std::iter_value_t<InputIt>, typename V = typename Value::second_type,
         typename = std::enable_if_t<std::is_same_v<PixelND<V, N>, Value> && std::is_convertible_v<T, V>>
     >
     void insert(InputIt first, InputIt last)
@@ -506,38 +506,38 @@ protected:
 template <typename T>
 using Pixels = PixelsND<T, 2>;
 
-template <size_t N>
-class RegionsND : public WrappedContainer<std::vector<PointSetND<N>>>
-{
-public:
-    using WrappedContainer<std::vector<PointSetND<N>>>::WrappedContainer;
-    using WrappedContainer<std::vector<PointSetND<N>>>::size;
+// template <size_t N>
+// class RegionsND : public WrappedContainer<std::vector<PointSetND<N>>>
+// {
+// public:
+//     using WrappedContainer<std::vector<PointSetND<N>>>::WrappedContainer;
+//     using WrappedContainer<std::vector<PointSetND<N>>>::size;
 
-    RegionsND() = default;
+//     RegionsND() = default;
 
-    std::string info() const
-    {
-        return "<RegionsND, regions = <List[PointSetND], size = " + std::to_string(size()) + ">>";
-    }
+//     std::string info() const
+//     {
+//         return "<RegionsND, regions = <List[PointSetND], size = " + std::to_string(size()) + ">>";
+//     }
 
-    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> & array, bool value) const
-    {
-        for (const auto & region: m_ctr) region.mask(array, value);
-    }
+//     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+//     void mask(array<I> & array, bool value) const
+//     {
+//         for (const auto & region: m_ctr) region.mask(array, value);
+//     }
 
-    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> && array, bool value) const
-    {
-        mask(array, value);
-    }
+//     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+//     void mask(array<I> && array, bool value) const
+//     {
+//         mask(array, value);
+//     }
 
-protected:
-    using WrappedContainer<std::vector<PointSetND<N>>>::m_ctr;
-};
+// protected:
+//     using WrappedContainer<std::vector<PointSetND<N>>>::m_ctr;
+// };
 
 template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-RegionsND<N> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
+std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
 {
     std::vector<PointSetND<N>> regions;
     auto func = [&mask](const PointND<long, N> & pt)
@@ -558,13 +558,60 @@ RegionsND<N> labelise(InputIt first, InputIt last, array<I> & mask, const Struct
         }
     }
 
-    return RegionsND<N>{std::move(regions)};
+    return regions;
 }
 
 template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-RegionsND<N> labelise(InputIt first, InputIt last, array<I> && mask, const StructureND<N> & structure, size_t npts)
+std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> && mask, const StructureND<N> & structure, size_t npts)
 {
     return labelise(first, last, mask, structure, npts);
+}
+
+// PyBind11 helper functions to wrap an std::vector derived classes
+
+template <typename List, typename Element = typename List::value_type, typename = std::enable_if_t<std::is_base_of_v<std::vector<Element>, List>>>
+void declare_list(py::class_<List> & cls, const std::string & str)
+{
+    cls.def(py::init<>())
+        .def("__delitem__", [str](List & list, py::ssize_t index)
+        {
+            list.erase(std::next(list.begin(), compute_index(index, list.size(), str)));
+        }, py::arg("index"))
+        .def("__delitem__", [](List & list, py::slice & slice)
+        {
+            auto range = slice_range(slice, list.size());
+            auto iter = std::next(list.begin(), range.start());
+            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = list.erase(iter);
+        }, py::arg("index"))
+        .def("__getitem__", [str](const List & list, py::ssize_t index)
+        {
+            return list[compute_index(index, list.size(), str)];
+        }, py::arg("index"))
+        .def("__getitem__", [](const List & list, py::slice & slice)
+        {
+            List sliced;
+            for (auto [_, py_index] : slice_range(slice, list.size())) sliced.push_back(list[py_index]);
+            return sliced;
+        }, py::arg("index"))
+        .def("__setitem__", [str](List & list, py::ssize_t index, Element elem)
+        {
+            list[compute_index(index, list.size(), str)] = std::move(elem);
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
+        .def("__setitem__", [](List & list, py::slice & slice, List & elems)
+        {
+            for (auto [index, py_index] : slice_range(slice, list.size())) list[py_index] = elems[index];
+        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
+        .def("__iter__", [](const List & list){return py::make_iterator(list.begin(), list.end());}, py::keep_alive<0, 1>())
+        .def("__len__", [](const List & list){return list.size();})
+        .def("__repr__", [str](const List & list)
+        {
+            return "<" + str + ", size = " + std::to_string(list.size()) + ">";
+        })
+        .def("append", [](List & list, Element elem){list.emplace_back(std::move(elem));}, py::arg("value"), py::keep_alive<1, 2>())
+        .def("extend", [](List & list, const List & elems)
+        {
+            for (const auto & elem : elems) list.push_back(elem);
+        }, py::arg("values"), py::keep_alive<1, 2>());
 }
 
 }

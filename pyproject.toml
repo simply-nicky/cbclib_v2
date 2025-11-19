@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "setuptools>=42",
+    "setuptools>=77.0.3",
     "pybind11>=2.10.0",
     "numpy>=2.1.0"
 ]
@@ -10,10 +10,8 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.10.6'
+version = '0.12.0'
 dependencies = [
-    'extra_data',
-    'extra_geom',
     'h5py',
     'jax',
     'numpy>=2.1.0',
@@ -21,17 +19,20 @@ dependencies = [
     'pybind11>=2.10.0',
     'tqdm'
 ]
-license = {file = 'LICENSE'}
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 readme = 'README.md'
 requires-python = '>=3.10'
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: OS Independent"
 ]
 
 [project.optional-dependencies]
-dev = ['jupyter', 'matplotlib', 'pytest', 'scipy']
+dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio', 'scipy']
+
+[project.scripts]
+cbclib_cli = 'cbclib_v2.slurm:main'
 
 [project.urls]
 Repository = "https://github.com/simply-nicky/cbclib_v2"
@@ -40,6 +41,7 @@ Repository = "https://github.com/simply-nicky/cbclib_v2"
 addopts = [
     "--import-mode=importlib",
 ]
-markers = ["slow: mark a test that takes a long time to run."]
+markers = ["slow: mark a test that takes a long time to run.",
+           "asyncio: mark a test as requiring asyncio."]
 testpaths = ["tests"]
 python_files = ["*_test.py", "test_*.py"]

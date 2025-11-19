@@ -3,11 +3,10 @@ import pandas as pd
 from jax import random
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .._src.state import State, dynamic_fields, field, static_fields
-from .._src.annotations import (ArrayNamespace, BoolArray, Indices, IntArray, JaxNumPy, KeyArray,
-                                NDRealArray, RealArray, RealSequence, Shape)
-from .._src.data_container import (ArrayContainer, Container, DataContainer, IndexArray, IndexedContainer,
-                                   array_namespace)
-from .._src.parser import Parser, INIParser, JSONParser
+from .._src.annotations import (ArrayNamespace, BoolArray, Indices, IntArray, JaxNumPy, KeyArray, NDRealArray, RealArray,
+                                RealSequence, Shape)
+from .._src.data_container import ArrayContainer, Container, DataContainer, IndexedContainer, array_namespace
+from .._src.parser import JSONParser, INIParser, Parser, get_extension, get_parser
 
 S = TypeVar('S', bound=State)
 
@@ -85,17 +84,12 @@ class XtalCell(ArrayContainer, State):
         return self.angles[..., 2]
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser.from_container(cls, default='unit_cell')
-        if ext == 'json':
-            return JSONParser.from_container(cls, default='unit_cell')
-
-        raise ValueError(f"Invalid format: {ext}")
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        return get_parser(file_or_extension, cls, 'unit_cell')
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'XtalCell':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'XtalCell':
+        data = cls.parser(file).read(file)
         return cls(xp.asarray(data['angles']), xp.asarray(data['lengths']))
 
     def to_basis(self) -> 'XtalState':
@@ -137,18 +131,19 @@ class XtalState(ArrayContainer, State):
             yield XtalState(basis[None])
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        ext = get_extension(file_or_extension)
         if ext == 'ini':
             return INIParser({'basis': {'a': 'a', 'b': 'b', 'c': 'c'}},
                              types={'a': NDRealArray, 'b': NDRealArray, 'c': NDRealArray})
         if ext == 'json':
             return JSONParser({'basis': {'a': 'a', 'b': 'b', 'c': 'c'}})
 
-        raise ValueError(f"Invalid format: {ext}")
+        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace = JaxNumPy) -> 'XtalState':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str, xp: ArrayNamespace = JaxNumPy) -> 'XtalState':
+        data = cls.parser(file).read(file)
         return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @classmethod
@@ -227,7 +222,7 @@ class XtalState(ArrayContainer, State):
                 xp.arctan2(self.basis[..., 1], self.basis[..., 0]))
 
 class XtalList(IndexedContainer, State):
-    index       : IndexArray
+    index       : IntArray
     basis       : RealArray
 
     def to_xtals(self) -> XtalState:
@@ -236,7 +231,7 @@ class XtalList(IndexedContainer, State):
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=JaxNumPy) -> 'XtalList':
         xtals = XtalState.import_dataframe(df, xp)
-        return cls(IndexArray(df['index'].to_numpy()), xtals.basis)
+        return cls(df['index'].to_numpy(), xtals.basis)
 
     def to_dataframe(self) -> pd.DataFrame:
         xp = self.__array_namespace__()
@@ -264,16 +259,11 @@ class BaseLens(Container):
                 0.5 * (self.pupil_min[1] + self.pupil_max[1]))
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser.from_container(cls, default='geometry')
-        if ext == 'json':
-            return JSONParser.from_container(cls, default='geometry')
-
-        raise ValueError(f"Invalid format: {ext}")
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        return get_parser(file_or_extension, cls, 'geometry')
 
     @classmethod
-    def read(cls: Type[L], file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> L:
+    def read(cls: Type[L], file: str, xp: ArrayNamespace=JaxNumPy) -> L:
         raise NotImplementedError
 
 class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
@@ -281,8 +271,8 @@ class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedLens':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedLens':
+        data = cls.parser(file).read(file)
         return cls(tuple(data['foc_pos']), tuple(data['pupil_roi']))
 
 class FixedPupilLens(DataContainer, FixedLens):
@@ -290,8 +280,8 @@ class FixedPupilLens(DataContainer, FixedLens):
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedPupilLens':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedPupilLens':
+        data = cls.parser(file).read(file)
         return cls(xp.asarray(data['foc_pos']), tuple(data['pupil_roi']))
 
 class FixedApertureLens(BaseLens, DataContainer, State):
@@ -314,18 +304,19 @@ class FixedApertureLens(BaseLens, DataContainer, State):
                     float(obj.pupil_max[1] - obj.pupil_min[1])))
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureLens':
-        return cls.from_roi(FixedLens.read(file, ext), xp)
+    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureLens':
+        return cls.from_roi(FixedLens.read(file), xp)
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        ext = get_extension(file_or_extension)
         if ext == 'ini':
             return INIParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}},
                              {'foc_pos': RealArray, 'pupil_roi': RealArray})
         if ext == 'json':
             return JSONParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}})
 
-        raise ValueError(f"Invalid format: {ext}")
+        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
 
 class RotationState(ArrayContainer, State):
     matrix : RealArray
@@ -487,8 +478,8 @@ class FixedPupilSetup(BaseSetup, DataContainer, State):
     z       : RealArray
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedPupilSetup':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedPupilSetup':
+        data = cls.parser(file).read(file)
         return cls(FixedPupilLens(xp.asarray(data['foc_pos']), tuple(data['pupil_roi'])),
                    xp.asarray(data['z']))
 
@@ -497,8 +488,8 @@ class FixedApertureSetup(BaseSetup, DataContainer, State):
     z       : RealArray
 
     @classmethod
-    def read(cls, file: str, ext: str='ini', xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureSetup':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureSetup':
+        data = cls.parser(file).read(file)
         lens = FixedLens(tuple(data['foc_pos']), tuple(data['pupil_roi']))
         return cls(FixedApertureLens.from_roi(lens), xp.asarray(data['z']))
 
@@ -507,8 +498,8 @@ class FixedSetup(BaseSetup, State, eq=True, unsafe_hash=True):
     z       : Tuple[float, ...] = field(static=True)
 
     @classmethod
-    def read(cls, file: str, ext: str='ini') -> 'FixedSetup':
-        data = cls.parser(ext).read(file)
+    def read(cls, file: str) -> 'FixedSetup':
+        data = cls.parser(file).read(file)
         return cls(FixedLens(tuple(data['foc_pos']), tuple(data['pupil_roi'])), tuple(data['z']))
 
 class BaseState(DataContainer, BaseSetup):

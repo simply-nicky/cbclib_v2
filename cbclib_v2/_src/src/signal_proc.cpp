@@ -2,31 +2,48 @@
 
 namespace cbclib {
 
-template <typename T, typename U>
-py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::forcecast> inp,
-                            std::vector<py::array_t<U, py::array::c_style | py::array::forcecast>> grid,
-                            py::array_t<U, py::array::c_style | py::array::forcecast> coords, unsigned threads)
+template <typename T, typename U, typename V>
+py::array_t<T> binterpolate(py::array_t<T> inp, std::vector<py::array_t<U>> grid, py::array_t<U> coords, V axis,
+                            unsigned threads)
 {
-    auto ndim = grid.size();
-    auto ibuf = inp.request();
-    if (ndim != static_cast<size_t>(ibuf.ndim))
-        throw std::invalid_argument("data number of dimensions (" + std::to_string(ibuf.ndim) + ")" +
-                                    " isn't equal to the number of grid arrays (" + std::to_string(ndim) + ")");
+    Sequence<long> seq (axis);
+    seq = seq.unwrap(inp.ndim());
+    inp = seq.swap_front(inp);
 
+    auto ndim = grid.size();
+    if (ndim != seq.size())
+    {
+        auto text = "number of axes (" + std::to_string(seq.size()) + ")" +
+                    " isn't equal to the number of grid arrays (" + std::to_string(ndim) + ")";
+        throw std::invalid_argument(text);
+    }
+
+    auto npts = coords.size() / ndim;
+    if (ndim > 1) check_dimension("coords", coords.ndim() - 1, coords.shape(), ndim);
+    else if (*(coords.shape() + coords.ndim() - 1) != ndim)
+    {
+        std::vector<size_t> shape {coords.shape(), coords.shape() + coords.ndim()};
+        shape.push_back(ndim);
+        coords = coords.reshape(shape);
+    }
     auto carr = array<U>(coords.request());
-    auto npts = carr.size() / ndim;
-    check_dimensions("coords", carr.ndim() - 1, carr.shape(), ndim);
 
     std::vector<array<U>> gvec;
     for (size_t n = 0; n < ndim; n++)
     {
-        auto & arr = gvec.emplace_back(grid[n].request());
-        check_dimensions("grid coordinates", arr.ndim() - 1, arr.shape(), ibuf.shape[ndim - 1 - n]);
+        check_dimension("grid coordinate at axis " + std::to_string(n),
+                        grid[n].ndim() - 1, grid[n].shape(), *(inp.shape() + n));
+        gvec.emplace_back(grid[n].request());
     }
 
-    auto iarr = array<T>(ibuf);
-    py::array_t<T> out (std::vector(carr.shape().begin(), std::prev(carr.shape().end())));
+    auto iarr = array<T>(inp.request());
+    std::vector<size_t> oshape (carr.shape().begin(), std::prev(carr.shape().end()));
+    for (size_t i = seq.size(); i < iarr.ndim(); i++) oshape.push_back(iarr.shape(i));
+    py::array_t<T> out (oshape);
+    fill_array(out, T());
     auto oarr = array<T>(out.request());
+
+    auto chunk_size = oarr.size() / npts;
 
     thread_exception e;
 
@@ -39,7 +56,19 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
     {
         e.run([&]
         {
-            oarr[i] = bilinear(iarr, gvec, carr.slice(i, carr.ndim() - 1));
+            auto values = bilinear<T>(gvec, carr.slice(i, carr.ndim() - 1));
+
+            for (const auto & [v_coord, v_factor] : values)
+            {
+                auto coord = v_coord;
+                for (size_t n = seq.size(); n < iarr.ndim(); n++) coord.push_back(0);
+                auto v_index = iarr.index_at(coord);
+
+                for (size_t j = 0; j < chunk_size; j++)
+                {
+                    oarr[i * chunk_size + j] += v_factor * iarr[v_index + j];
+                }
+            }
         });
     }
 
@@ -47,7 +76,7 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
 
     e.rethrow();
 
-    return out;
+    return seq.swap_from_front(out);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -55,26 +84,23 @@ py::array_t<T> binterpolate(py::array_t<T, py::array::c_style | py::array::force
 /*----------------------------------------------------------------------------*/
 
 template <typename T>
-py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forcecast> y,
-                          py::array_t<T, py::array::c_style | py::array::forcecast> x,
-                          py::array_t<T, py::array::c_style | py::array::forcecast> x_hat, T sigma, std::string kernel,
-                          std::optional<py::array_t<T, py::array::c_style | py::array::forcecast>> w, unsigned threads)
+py::array_t<T> kr_predict(py::array_t<T> y, py::array_t<T> x, py::array_t<T> x_hat, T sigma, std::string kernel,
+                          std::optional<py::array_t<T>> w, unsigned threads)
 {
     check_optional("w", y.shape(), y.shape() + y.ndim(), w, T(1));
 
     auto krn = kernels<T>::get_kernel(kernel);
 
-    auto ybuf = y.request(), xbuf = x.request(), xhbuf = x_hat.request();
-    size_t ndim = xhbuf.shape[xhbuf.ndim - 1], npts = ybuf.size;
-    check_dimensions("x", xbuf.ndim - 1, xbuf.shape, ndim);
+    size_t ndim = *(x_hat.shape() + x_hat.ndim() - 1), npts = y.size();
+    check_dimension("x", x.ndim() - 1, x.shape(), ndim);
     check_equal("y and x have incompatible shapes",
-                ybuf.shape.begin(), ybuf.shape.end(),
-                xbuf.shape.begin(), std::prev(xbuf.shape.end()));
+                y.shape(), y.shape() + y.ndim(),
+                x.shape(), x.shape() + x.ndim() - 1);
 
-    auto xarr = array<T>(xbuf);
-    auto yarr = array<T>(ybuf);
+    auto xarr = array<T>(x.request());
+    auto yarr = array<T>(y.request());
     auto warr = array<T>(w.value().request());
-    auto xharr = array<T>(xhbuf);
+    auto xharr = array<T>(x_hat.request());
 
     auto out_shape = std::vector<py::ssize_t>(xharr.shape().begin(), std::prev(xharr.shape().end()));
     auto out = py::array_t<T>(out_shape);
@@ -155,25 +181,28 @@ py::array_t<T> kr_predict(py::array_t<T, py::array::c_style | py::array::forceca
 }
 
 template <typename T>
-auto kr_grid(py::array_t<T, py::array::c_style | py::array::forcecast> y, py::array_t<T, py::array::c_style | py::array::forcecast> x,
-             std::vector<py::array_t<T, py::array::c_style | py::array::forcecast>> grid, T sigma, std::string kernel,
-             std::optional<py::array_t<T, py::array::c_style | py::array::forcecast>> w, unsigned threads)
+auto kr_grid(py::array_t<T> y, py::array_t<T> x, std::vector<py::array_t<T>> grid, T sigma, std::string kernel,
+             std::optional<py::array_t<T>> w, unsigned threads)
 {
     auto krn = kernels<T>::get_kernel(kernel);
 
     auto xbuf = x.request();
     auto ybuf = y.request();
 
-    size_t ndim = grid.size(), npts = xbuf.size / ndim, nf = ybuf.size / npts;
-    check_dimensions("x", xbuf.ndim - 1, xbuf.shape, ndim);
+    size_t ndim = grid.size(), npts = x.size() / ndim, nf = y.size() / npts;
+    check_dimension("x", x.ndim() - 1, x.shape(), ndim);
     check_equal("x and y have incompatible shapes",
-                xbuf.shape.begin(), std::prev(xbuf.shape.end()),
-                std::prev(ybuf.shape.end(), xbuf.ndim - 1), ybuf.shape.end());
-    check_optional("w", std::prev(ybuf.shape.end(), xbuf.ndim - 1), ybuf.shape.end(), w, T(1));
+                x.shape(), x.shape() + x.ndim() - 1,
+                y.shape() + y.ndim() - (x.ndim() - 1), y.shape() + y.ndim());
+    check_optional("w", y.shape() + y.ndim() - (x.ndim() - 1), y.shape() + y.ndim(), w, T(1));
 
-    auto xarr = array<T>(xbuf).reshape({npts, ndim});
-    auto yarr = array<T>(ybuf).reshape({nf, npts});
-    auto warr = array<T>(w.value().request()).reshape({npts});
+    x = x.reshape({npts, ndim});
+    y = y.reshape({nf, npts});
+    if (w) w = w->reshape({npts});
+
+    auto xarr = array<T>(x.request());
+    auto yarr = array<T>(y.request());
+    auto warr = array<T>(w.value().request());
 
     std::vector<array<T>> grid_arrs;
     for (auto coords : grid) grid_arrs.emplace_back(coords.request());
@@ -277,13 +306,15 @@ auto kr_grid(py::array_t<T, py::array::c_style | py::array::forcecast> y, py::ar
 }
 
 template <typename T, typename U>
-py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::forcecast> inp, U axis, unsigned threads)
+py::array_t<size_t> local_maxima(py::array_t<T> inp, U axis, unsigned threads)
 {
     array<T> iarr (inp.request());
 
     Sequence<long> seq (axis);
     seq.unwrap(iarr.ndim());
 
+    if (seq.size() < 1)
+        throw std::invalid_argument("at least one axis must be specified for local_maxima");
     for (auto ax : seq)
     {
         if (iarr.shape(ax) < 3)
@@ -301,15 +332,15 @@ py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::
     #pragma omp parallel num_threads(threads)
     {
         std::vector<size_t> buffer;
-        auto add_peak = [&buffer, &iarr](size_t index){iarr.unravel_index(std::back_inserter(buffer), index);};
+        MaximaND<T> finder (iarr, std::vector<size_t>(seq.begin() + 1, seq.end()));
+        auto add_peak = [&buffer, &iarr](size_t index){iarr.coord_at(std::back_inserter(buffer), index);};
 
         #pragma omp for schedule(static) nowait
         for (size_t i = 0; i < repeats; i++)
         {
             e.run([&]
             {
-                auto iline = iarr.slice(i, seq[0]);
-                maxima_nd(iline.begin(), iline.end(), add_peak, iarr, seq, seq.size());
+                finder.find(i, seq[0], std::forward<decltype(add_peak)>(add_peak));
             });
         }
 
@@ -317,7 +348,7 @@ py::array_t<size_t> local_maxima(py::array_t<T, py::array::c_style | py::array::
         for (unsigned i = 0; i < threads; i++)
         {
             #pragma omp ordered
-            peaks.insert(peaks.end(), std::make_move_iterator(buffer.begin()), std::make_move_iterator(buffer.end()));
+            peaks.insert(peaks.end(), buffer.begin(), buffer.end());
         }
     }
 
@@ -347,10 +378,14 @@ PYBIND11_MODULE(signal_proc, m)
         return;
     }
 
-    m.def("binterpolate", &binterpolate<float, float>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("num_threads") = 1);
-    m.def("binterpolate", &binterpolate<float, long>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("num_threads") = 1);
-    m.def("binterpolate", &binterpolate<double, double>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("num_threads") = 1);
-    m.def("binterpolate", &binterpolate<double, long>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<float, float, int>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<float, float, std::vector<int>>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<float, long, int>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<float, long, std::vector<int>>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<double, double, int>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<double, double, std::vector<int>>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<double, long, int>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
+    m.def("binterpolate", &binterpolate<double, long, std::vector<int>>, py::arg("inp"), py::arg("grid"), py::arg("coords"), py::arg("axis"), py::arg("num_threads") = 1);
 
     m.def("kr_predict", &kr_predict<float>, py::arg("y"), py::arg("x"), py::arg("x_hat"), py::arg("sigma"), py::arg("kernel") = "gaussian", py::arg("w") = nullptr, py::arg("num_threads") = 1);
     m.def("kr_predict", &kr_predict<double>, py::arg("y"), py::arg("x"), py::arg("x_hat"), py::arg("sigma"), py::arg("kernel") = "gaussian", py::arg("w") = nullptr, py::arg("num_threads") = 1);
