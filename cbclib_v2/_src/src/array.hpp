@@ -94,40 +94,85 @@ constexpr std::make_signed_t<T> wrap(T a, U min, V max)
     return modulo(val, period) + min;
 }
 
+// Compute C-contiguous strides from a shape sequence.
+
+template <typename Container>
+Container c_strides(const Container & shape, size_t itemsize)
+{
+    Container strides (shape);
+    if (shape.size() > 0)
+    {
+        strides.back() = itemsize;
+        for (size_t n = shape.size() - 1; n > 0; --n) strides[n - 1] = strides[n] * shape[n];
+    }
+    return strides;
+}
+
 // Compute a linear offset by summing coordinate * stride values. This is a
 // low-level inner-loop helper used by shape handling and indexing helpers.
 
-template <typename InputIt1, typename InputIt2>
-auto index_offset_impl(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst)
+template <typename InputIt1, typename InputIt2, typename I1 = typename std::iter_value_t<InputIt1>>
+I1 coord_to_offset(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst)
 {
-    using value_t = decltype(+*std::declval<InputIt1 &>());
-    value_t index = value_t();
-    for (; cfirst != clast; cfirst++, ++sfirst) index += *cfirst * *sfirst;
-    return index;
+    I1 offset = I1();
+    for (; cfirst != clast; cfirst++, ++sfirst) offset += *cfirst * *sfirst;
+    return offset;
 }
 
 template <size_t Dim = 0, typename Strides>
-size_t index_offset_unsafe(const Strides & strides)
+size_t coord_to_offset_var(const Strides & strides)
 {
     return 0;
 }
 
 template <size_t Dim = 0, typename Strides, typename... Ix>
-size_t index_offset_unsafe(const Strides & strides, size_t i, Ix... index)
+size_t coord_to_offset_var(const Strides & strides, size_t i, Ix... index)
 {
-    return i * strides[Dim] + index_offset_unsafe<Dim + 1>(strides, index...);
+    return i * strides[Dim] + coord_to_offset_var<Dim + 1>(strides, index...);
 }
 
-// Convert a flat index into multiple coordinates using a strides sequence.
-template <typename InputIt, typename OutputIt, typename T>
-OutputIt unravel_index_unsafe(InputIt sfirst, InputIt slast, size_t itemsize, T index, OutputIt cfirst)
+// Compute a flat index by summing coordinate * cumsum(shape) values. This is a
+// low-level inner-loop helper used by shape handling and indexing helpers.
+
+template <typename InputIt1, typename InputIt2,
+          typename I1 = typename std::iter_value_t<InputIt1>,
+          typename I2 = typename std::iter_value_t<InputIt2>>
+I1 coord_to_index(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst, I2 stride)
+{
+    I1 index = I1();
+    for (; cfirst != clast; ++cfirst, ++sfirst)
+    {
+        stride /= *sfirst;
+        index += *cfirst * stride;
+    }
+    return index;
+}
+
+template <size_t Dim = 0, typename Shape>
+std::pair<size_t, size_t> coord_to_index_var(const Shape & shape)
+{
+    return std::make_pair(0, 1);
+}
+
+template <size_t Dim = 0, typename Shape, typename... Ix>
+std::pair<size_t, size_t> coord_to_index_var(const Shape & shape, size_t i, Ix... index)
+{
+    auto [sub_index, sub_strides] = coord_to_index_var<Dim + 1>(shape, index...);
+    return std::make_pair(i * sub_strides + sub_index, sub_strides * shape[Dim]);
+}
+
+// Compute a coordinate sequence from a flat index and a shape sequence.
+
+template <typename InputIt, typename OutputIt, typename I = typename std::iter_value_t<InputIt>>
+OutputIt index_to_coord(InputIt sfirst, InputIt slast, I & index, I & stride, OutputIt cfirst)
 {
     for (; sfirst != slast; ++sfirst)
     {
         if (*sfirst)
         {
-            auto coord = index / (*sfirst / itemsize);
-            index -= coord * *sfirst;
+            stride /= *sfirst;
+            I coord = index / stride;
+            index -= coord * stride;
             *cfirst++ = coord;
         }
         else *cfirst++ = 0;
@@ -135,15 +180,23 @@ OutputIt unravel_index_unsafe(InputIt sfirst, InputIt slast, size_t itemsize, T 
     return cfirst;
 }
 
-// Calculate a byte offset along the given dimension from a linear offset and array strides
-template <typename Strides>
-size_t offset_along_dim(const Strides & strides, size_t index, size_t dim)
-{
-    if (dim == 0) return index;
-    if (dim >= strides.size()) return 0;
+// Convert a linear offset into multiple coordinates using a strides sequence.
+// WORKS ONLY FOR A C CONTIGUOUS ARRAY LAYOUT.
 
-    size_t offset = offset_along_dim(strides, index, dim - 1);
-    return offset - (offset / strides[dim - 1]) * strides[dim - 1];
+template <typename InputIt, typename OutputIt, typename I = typename std::iter_value_t<InputIt>>
+OutputIt offset_to_coord(InputIt sfirst, InputIt slast, I offset, OutputIt cfirst)
+{
+    for (; sfirst != slast; ++sfirst)
+    {
+        if (*sfirst)
+        {
+            auto coord = offset / *sfirst;
+            offset -= coord * *sfirst;
+            *cfirst++ = coord;
+        }
+        else *cfirst++ = 0;
+    }
+    return cfirst;
 }
 
 // ------------------------------------------------------------------
@@ -163,23 +216,13 @@ public:
 
     shape_handler() = default;
 
-    shape_handler(ShapeContainer sh, ShapeContainer st) : m_ndim(sh.size()), m_shape(std::move(sh))
-    {
-        for (size_t n = 0; n < m_ndim; n++) m_strides.push_back(st[n]);
-    }
+    shape_handler(ShapeContainer sh, ShapeContainer st, size_t itemsize) :
+        m_ndim(sh.size()), m_shape(std::move(sh)), m_strides(std::move(st)), m_itemsize(itemsize) {}
 
-    shape_handler(ShapeContainer sh) : m_ndim(sh.size()), m_shape(std::move(sh)), m_strides(m_ndim, 1)
+    shape_handler(ShapeContainer sh, size_t itemsize) :
+        m_ndim(sh.size()), m_shape(std::move(sh)), m_itemsize(itemsize)
     {
-        if (m_ndim)
-        {
-            for (size_t n = m_ndim - 1; n > 0; --n) m_strides[n - 1] = m_strides[n] * m_shape[n];
-        }
-    }
-
-    size_t index_along_dim(size_t index, size_t dim) const
-    {
-        if (dim >= m_ndim) fail_dim_check(dim, "invalid axis");
-        return offset_along_dim(m_strides, index, dim) / m_strides[dim];
+        m_strides = c_strides(m_shape, m_itemsize);
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
@@ -204,19 +247,19 @@ public:
     template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
     bool is_inbound(const std::initializer_list<T> & coord) const
     {
-        return is_inbound(coord.begin(), coord.end());
+        return is_inbound(coord.begin(), coord.end(), size());
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
     auto index_at(CoordIter first, CoordIter last) const
     {
-        return offset_at(first, last) / itemsize();
+        return coord_to_index(first, last, m_shape.begin(), size());
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
     auto index_at(const Container & coord) const
     {
-        return offset_at(coord) / itemsize();
+        return coord_to_index(coord.begin(), coord.end(), m_shape.begin(), size());
     }
 
     // initializer_list's aren't deducible, so don't get matched by the above template;
@@ -224,23 +267,72 @@ public:
     template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
     auto index_at(const std::initializer_list<T> & coord) const
     {
-        return offset_at(coord) / itemsize();
+        return coord_to_index(coord.begin(), coord.end(), m_shape.begin(), size());
     }
 
     template <typename ... Ix> requires is_all_integral<Ix ...>
     auto index_at(Ix... index) const
     {
-        return offset_at(index...) / itemsize();
+        return coord_to_index_var(m_shape, index...).first;
     }
 
-    template <typename OutputIt> requires std::output_iterator<OutputIt, size_t>
-    OutputIt unravel_index(OutputIt first, size_t index) const
+    template <typename OutputIt, typename I, typename = std::enable_if_t<std::is_integral_v<I>>> requires std::output_iterator<OutputIt, I>
+    OutputIt coord_at(OutputIt first, I index) const
     {
-        return unravel_index_unsafe(m_strides.begin(), m_strides.end(), itemsize(), index, first);
+        auto stride = size();
+        return index_to_coord(m_shape.begin(), m_shape.end(), index, stride, first);
+    }
+
+    template <typename OutputIt, typename I, typename = std::enable_if_t<std::is_integral_v<I>>> requires std::output_iterator<OutputIt, I>
+    std::pair<I, I> coord_at(OutputIt first, I index, I size, size_t n0, size_t n1) const
+    {
+        index_to_coord(std::next(m_shape.begin(), n0), std::next(m_shape.begin(), n1), index, size, first);
+        return std::make_pair(index, size);
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    I coord_along_dim(I index, size_t dim) const
+    {
+        if (dim >= m_ndim) fail_dim_check(dim, "invalid axis");
+        I coord = 0;
+        for (size_t n = m_shape.size(); n > dim; --n)
+        {
+            coord = index % m_shape[n - 1];
+            index /= m_shape[n - 1];
+        }
+        return coord;
+    }
+
+    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
+    auto offset_at(CoordIter first, CoordIter last) const
+    {
+        return coord_to_offset(first, last, m_strides.begin());
+    }
+
+    template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
+    auto offset_at(const Container & coord) const
+    {
+        return coord_to_offset(coord.begin(), coord.end(), m_strides.begin());
+    }
+
+    template <typename ... Ix> requires is_all_integral<Ix ...>
+    auto offset_at(Ix... index) const
+    {
+        if (sizeof...(index) > m_ndim) fail_dim_check(sizeof...(index), "too many indices for an array");
+
+        return coord_to_offset_var(m_strides, size_t(index)...);
+    }
+
+    // initializer_list's aren't deducible, so don't get matched by the above template;
+    // we need this to explicitly allow implicit conversion from one:
+    template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+    auto offset_at(const std::initializer_list<T> & coord) const
+    {
+        return coord_to_offset(coord.begin(), coord.end(), m_strides.begin());
     }
 
     size_t ndim() const {return m_ndim;}
-    size_t size() const {return std::reduce(m_shape.begin(), m_shape.end(), size_t(1), std::multiplies());}
+    size_t size() const {return partial_size(0, m_ndim);}
 
     const std::vector<size_t> & shape() const {return m_shape;}
     size_t shape(size_t dim) const
@@ -256,43 +348,29 @@ public:
         return m_strides[dim];
     }
 
+    size_t itemsize() const {return m_itemsize;}
+
 protected:
     size_t m_ndim;
     std::vector<size_t> m_shape;
     std::vector<size_t> m_strides;
+    size_t m_itemsize;
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
-    auto offset_at(CoordIter first, CoordIter last) const
+    size_t partial_size(size_t n0, size_t n1) const
     {
-        return index_offset_impl(first, last, m_strides.begin());
+        return std::reduce(std::next(m_shape.begin(), n0), std::next(m_shape.begin(), n1), size_t(1), std::multiplies());
     }
 
-    template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
-    auto offset_at(const Container & coord) const
+    size_t index_to_offset(size_t index, size_t n0, size_t n1) const
     {
-        return index_offset_impl(coord.begin(), coord.end(), m_strides.begin());
-    }
-
-    template <typename ... Ix> requires is_all_integral<Ix ...>
-    auto offset_at(Ix... index) const
-    {
-        if (sizeof...(index) > m_ndim) fail_dim_check(sizeof...(index), "too many indices for an array");
-
-        return index_offset_unsafe(m_strides, size_t(index)...);
-    }
-
-    // initializer_list's aren't deducible, so don't get matched by the above template;
-    // we need this to explicitly allow implicit conversion from one:
-    template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
-    auto offset_at(const std::initializer_list<T> & coord) const
-    {
-        return index_offset_impl(coord.begin(), coord.end(), m_strides.begin());
-    }
-
-    size_t itemsize() const
-    {
-        if (m_ndim) return strides(m_ndim - 1);
-        return size_t(1);
+        size_t offset = size_t();
+        for (size_t n = n1; n > n0; --n)
+        {
+            auto coord = index % m_shape[n - 1];
+            index /= m_shape[n - 1];
+            offset += m_strides[n - 1] * coord;
+        }
+        return offset;
     }
 
     void fail_dim_check(size_t dim, const std::string & msg) const
@@ -365,7 +443,7 @@ struct PairHasher
     }
 };
 
-}
+} // namespace detail
 
 template <typename T>
 class array;
@@ -449,6 +527,8 @@ public:
     reference operator*() const {return m_parent->operator[](m_index);}
     pointer operator->() const {return &(m_parent->operator[](m_index));}
 
+    size_t index() const {return m_index;}
+
 private:
     array_pointer m_parent;
     size_t m_index;
@@ -480,28 +560,25 @@ public:
     array() : shape_handler(), m_ptr(nullptr) {}
 
     array(ShapeContainer shape, ShapeContainer strides, T * ptr) :
-        shape_handler(std::move(shape), std::move(strides)), m_ptr(ptr) {}
+        shape_handler(std::move(shape), std::move(strides), sizeof(T)), m_ptr(ptr) {}
 
     array(shape_handler handler, T * ptr) : shape_handler(std::move(handler)), m_ptr(ptr) {}
 
-    array(ShapeContainer shape, T * ptr) : shape_handler(std::move(shape)), m_ptr(ptr) {}
+    array(ShapeContainer shape, T * ptr) : shape_handler(std::move(shape), sizeof(T)), m_ptr(ptr) {}
 
-    array(size_t count, T * ptr) : shape_handler({count}) , m_ptr(ptr) {}
+    array(size_t count, T * ptr) : shape_handler({count}, sizeof(T)), m_ptr(ptr) {}
 
-    array(const py::buffer_info & buf) : array(buf.shape, buf.strides, static_cast<T *>(buf.ptr))
-    {
-        for (auto i = 0; i < m_ndim; i++) m_strides[i] /= buf.itemsize;
-    }
+    array(const py::buffer_info & buf) : array(buf.shape, buf.strides, static_cast<T *>(buf.ptr)) {}
 
     operator bool() const {return bool(m_ptr);}
 
     T & operator[] (size_t index)
     {
-        return *(m_ptr + index_to_offset(index, 0, m_ndim));
+        return *(m_ptr + index_to_offset(index, 0, m_ndim) / m_itemsize);
     }
     const T & operator[] (size_t index) const
     {
-        return *(m_ptr + index_to_offset(index, 0, m_ndim));
+        return *(m_ptr + index_to_offset(index, 0, m_ndim) / m_itemsize);
     }
 
     iterator begin() {return {this, 0};}
@@ -519,9 +596,9 @@ public:
 
         axis = axis % m_ndim;
         size_t offset = size_t();
-        if (size())
+        if (size() && m_shape[axis])
         {
-            index = index % size();
+            index = index % (size() / m_shape[axis]);
             for (size_t n = m_ndim; n > 0; --n)
             {
                 if (n - 1 != axis)
@@ -534,7 +611,7 @@ public:
         }
         return array<T>{std::vector<size_t>{m_shape[axis]},
                         std::vector<size_t>{m_strides[axis]},
-                        m_ptr + offset};
+                        m_ptr + offset / m_itemsize};
     }
 
     /* Slice sub-array:
@@ -549,10 +626,10 @@ public:
         if (ndim < m_ndim)
         {
             size_t offset = size_t();
-            if (size()) offset = index_to_offset(index % size(), 0, m_ndim - ndim);
+            if (size()) offset = index_to_offset(index % partial_size(0, m_ndim - ndim), 0, m_ndim - ndim);
             return array<T>{std::vector<size_t>{std::prev(m_shape.end(), ndim), m_shape.end()},
                             std::vector<size_t>{std::prev(m_strides.end(), ndim), m_strides.end()},
-                            m_ptr + offset};
+                            m_ptr + offset / m_itemsize};
         }
         return *this;
     }
@@ -569,10 +646,10 @@ public:
         if (ndim < m_ndim)
         {
             size_t offset = size_t();
-            if (size()) offset = index_to_offset(index % size(), ndim, m_ndim);
+            if (size()) offset = index_to_offset(index % partial_size(ndim, m_ndim), ndim, m_ndim);
             return array<T>{std::vector<size_t>{m_shape.begin(), std::next(m_shape.begin(), ndim)},
                             std::vector<size_t>{m_strides.begin(), std::next(m_strides.begin(), ndim)},
-                            m_ptr + offset};
+                            m_ptr + offset / m_itemsize};
         }
         return *this;
     }
@@ -580,49 +657,49 @@ public:
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
     const T & at(CoordIter first, CoordIter last) const
     {
-        return *(m_ptr + offset_at(first, last));
+        return *(m_ptr + offset_at(first, last) / m_itemsize);
     }
 
     template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
     T & at(CoordIter first, CoordIter last)
     {
-        return *(m_ptr + offset_at(first, last));
+        return *(m_ptr + offset_at(first, last) / m_itemsize);
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
     const T & at(const Container & coord) const
     {
-        return *(m_ptr + offset_at(coord));
+        return *(m_ptr + offset_at(coord) / m_itemsize);
     }
 
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
     T & at(const Container & coord)
     {
-        return *(m_ptr + offset_at(coord));
+        return *(m_ptr + offset_at(coord) / m_itemsize);
     }
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     const T & at(const std::initializer_list<I> & coord) const
     {
-        return *(m_ptr + offset_at(coord));
+        return *(m_ptr + offset_at(coord) / m_itemsize);
     }
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     T & at(const std::initializer_list<I> & coord)
     {
-        return *(m_ptr + offset_at(coord));
+        return *(m_ptr + offset_at(coord) / m_itemsize);
     }
 
     template <typename ... Ix> requires is_all_integral<Ix ...>
     const T & at(Ix... index) const
     {
-        return *(m_ptr + offset_at(index...));
+        return *(m_ptr + offset_at(index...) / m_itemsize);
     }
 
     template <typename ... Ix> requires is_all_integral<Ix ...>
     T & at(Ix... index)
     {
-        return *(m_ptr + offset_at(index...));
+        return *(m_ptr + offset_at(index...) / m_itemsize);
     }
 
     const T * data() const {return m_ptr;}
@@ -632,18 +709,6 @@ protected:
     T * m_ptr;
 
     void set_data(T * ptr) {m_ptr = ptr;}
-
-    size_t index_to_offset(size_t index, size_t n0, size_t n1) const
-    {
-        size_t offset = size_t();
-        for (size_t n = n1; n > n0; --n)
-        {
-            auto coord = index % m_shape[n - 1];
-            index /= m_shape[n - 1];
-            offset += m_strides[n - 1] * coord;
-        }
-        return offset;
-    }
 };
 
 template <typename T>
@@ -781,11 +846,11 @@ public:
         {
             if constexpr(IsPoint)
             {
-                detail::unravel_index_unsafe(m_strides.begin(), m_strides.end(), 1, m_index, m_coord.rbegin());
+                detail::offset_to_coord(m_strides.begin(), m_strides.end(), m_index, m_coord.rbegin());
             }
             else
             {
-                detail::unravel_index_unsafe(m_strides.begin(), m_strides.end(), 1, m_index, m_coord.begin());
+                detail::offset_to_coord(m_strides.begin(), m_strides.end(), m_index, m_coord.begin());
             }
         }
 
@@ -795,26 +860,19 @@ public:
     using iterator = rectangle_iterator;
     using reverse_iterator = std::reverse_iterator<rectangle_iterator>;
 
-    rectangle_range(Container sh) : strides(sh), shape(std::move(sh)), size(1)
-    {
-        for (auto length : shape) size *= length;
+    rectangle_range(Container sh) : m_strides(detail::c_strides(sh, 1)), m_size(std::reduce(sh.begin(), sh.end(), size_t(1), std::multiplies())) {}
 
-        for (size_t stride = size, i = 0; i < shape.size(); i++)
-        {
-            stride = (shape[i]) ? stride / shape[i] : stride;
-            strides[i] = stride;
-        }
-    }
+    size_t size() const {return m_size;}
 
-    iterator begin() const {return iterator(strides, 0);}
-    iterator end() const {return iterator(strides, size);}
+    iterator begin() const {return iterator(m_strides, 0);}
+    iterator end() const {return iterator(m_strides, m_size);}
 
-    reverse_iterator rbegin() const {return reverse_iterator(strides, 0);}
-    reverse_iterator rend() const {return reverse_iterator(strides, size);}
+    reverse_iterator rbegin() const {return reverse_iterator(m_strides, m_size);}
+    reverse_iterator rend() const {return reverse_iterator(m_strides, 0);}
 
 private:
-    Container strides, shape;
-    size_t size;
+    Container m_strides;
+    size_t m_size;
 };
 
 /*----------------------------------------------------------------------------*/

@@ -17,4 +17,5 @@ from . import indexer
 from . import label
 from . import ndimage
 from . import scripts
+from . import slurm
 from . import streak_finder

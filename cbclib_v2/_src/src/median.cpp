@@ -9,12 +9,9 @@ py::array_t<double> median(py::array_t<T> inp, py::none mask, U axis, unsigned t
     seq = seq.unwrap(inp.ndim());
     inp = seq.swap_back(inp);
 
-    auto ibuf = inp.request();
-    auto ax = ibuf.ndim - seq.size();
-    auto out_shape = std::vector<py::ssize_t>(ibuf.shape.begin(), std::next(ibuf.shape.begin(), ax));
+    auto ax = inp.ndim() - seq.size();
+    auto out_shape = std::vector<py::ssize_t>(inp.shape(), inp.shape() + ax);
     auto out = py::array_t<double>(out_shape);
-
-    if (!out.size()) return out;
 
     auto oarr = array<double>(out.request());
     auto iarr = array<T>(inp.request());
@@ -39,7 +36,8 @@ py::array_t<double> median(py::array_t<T> inp, py::none mask, U axis, unsigned t
                 buffer.clear();
                 for (size_t index = 0; index < islice.size(); index++) buffer.push_back(islice[index]);
 
-                oarr[i] = median_1d(buffer.begin(), buffer.end(), std::less<T>());
+                if (buffer.size()) oarr[i] = median_1d(buffer.begin(), buffer.end(), std::less<T>());
+                else oarr[i] = NAN;
             });
         }
     }
@@ -62,12 +60,9 @@ py::array_t<double> median_with_mask(py::array_t<T> inp, py::array_t<bool> mask,
     inp = seq.swap_back(inp);
     mask = seq.swap_back(mask);
 
-    auto ibuf = inp.request();
-    auto ax = ibuf.ndim - seq.size();
-    auto out_shape = std::vector<py::ssize_t>(ibuf.shape.begin(), std::next(ibuf.shape.begin(), ax));
+    auto ax = inp.ndim() - seq.size();
+    auto out_shape = std::vector<py::ssize_t>(inp.shape(), inp.shape() + ax);
     auto out = py::array_t<double>(out_shape);
-
-    if (!out.size()) return out;
 
     auto oarr = array<double>(out.request());
     auto iarr = array<T>(inp.request());
@@ -98,7 +93,7 @@ py::array_t<double> median_with_mask(py::array_t<T> inp, py::array_t<bool> mask,
                 }
 
                 if (buffer.size()) oarr[i] = median_1d(buffer.begin(), buffer.end(), std::less<T>());
-                else oarr[i] = T();
+                else oarr[i] = NAN;
             });
         }
     }
@@ -119,8 +114,7 @@ extend get_mode(std::string mode)
 }
 
 template <typename T, typename U>
-array<bool> get_footprint(py::array_t<T, py::array::c_style | py::array::forcecast> & inp, std::optional<U> size,
-                          std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> & fprint)
+array<bool> get_footprint(py::array_t<T> & inp, std::optional<U> size, std::optional<py::array_t<bool>> & fprint)
 {
     if (!size && !fprint)
         throw std::invalid_argument("size or fprint must be provided");
@@ -161,7 +155,7 @@ py::array_t<T> filter_image(array<T> inp, size_t rank, array<bool> footprint, ex
         {
             e.run([&]
             {
-                inp.unravel_index(coord.begin(), i);
+                inp.coord_at(coord.begin(), i);
                 filter.update(coord, inp, mode, cval);
 
                 oarr[i] = filter.nth_element(rank);
@@ -177,8 +171,7 @@ py::array_t<T> filter_image(array<T> inp, size_t rank, array<bool> footprint, ex
 }
 
 template <typename T, typename U>
-py::array_t<T> rank_filter(py::array_t<T, py::array::c_style | py::array::forcecast> inp, size_t rank, std::optional<U> size,
-                           std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> fprint,
+py::array_t<T> rank_filter(py::array_t<T> inp, size_t rank, std::optional<U> size, std::optional<py::array_t<bool>> fprint,
                            std::string mode, const T & cval, unsigned threads)
 {
     assert(PyArray_API);
@@ -192,8 +185,7 @@ py::array_t<T> rank_filter(py::array_t<T, py::array::c_style | py::array::forcec
 }
 
 template <typename T, typename U>
-py::array_t<T> median_filter(py::array_t<T, py::array::c_style | py::array::forcecast> inp, std::optional<U> size,
-                             std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> fprint,
+py::array_t<T> median_filter(py::array_t<T> inp, std::optional<U> size, std::optional<py::array_t<bool>> fprint,
                              std::string mode, const T & cval, unsigned threads)
 {
     assert(PyArray_API);
@@ -207,15 +199,14 @@ py::array_t<T> median_filter(py::array_t<T, py::array::c_style | py::array::forc
 }
 
 template <typename T, typename U>
-py::array_t<T> maximum_filter(py::array_t<T, py::array::c_style | py::array::forcecast> inp, std::optional<U> size,
-                              std::optional<py::array_t<bool, py::array::c_style | py::array::forcecast>> fprint,
+py::array_t<T> maximum_filter(py::array_t<T> inp, std::optional<U> size, std::optional<py::array_t<bool>> fprint,
                               std::string mode, const T & cval, unsigned threads)
 {
     assert(PyArray_API);
 
     auto m = get_mode(mode);
     auto farr = get_footprint(inp, size, fprint);
-    size_t rank = std::reduce(farr.begin(), farr.end(), size_t(), std::plus());
+    size_t rank = std::reduce(farr.begin(), farr.end(), size_t(), std::plus()) - 1;
     auto iarr = array<T>(inp.request());
 
     return filter_image(iarr, rank, farr, m, cval, threads);
@@ -470,8 +461,8 @@ auto robust_mean_with_mask(py::array_t<T> inp, py::array_t<bool> mask, U axis, d
 
 
 template <typename T, typename U, typename D = std::common_type_t<T, float>>
-auto robust_lsq(py::array_t<T> W, py::array_t<T> y, py::none mask,
-                U axis, double r0, double r1, int n_iter, double lm, unsigned threads) -> py::array_t<D>
+auto robust_lsq(py::array_t<T> W, py::array_t<T> y, py::none mask, U axis, double r0, double r1,
+                int n_iter, double lm, unsigned threads) -> py::array_t<D>
 {
     Sequence<long> seq (axis);
     seq = seq.unwrap(y.ndim());

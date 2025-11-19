@@ -170,57 +170,123 @@ InterpValues<T> bilinear(const std::vector<array<U>> & grid, const Coord & coord
     return values;
 }
 
-template <typename InputIt, typename T, typename Axes, class UnaryFunction, typename = std::enable_if_t<
-    (std::is_base_of_v<typename array<T>::iterator, InputIt> || std::is_base_of_v<typename array<T>::const_iterator, InputIt>) &&
-    std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t> && std::is_integral_v<typename Axes::value_type>
->>
-UnaryFunction maxima_nd(InputIt first, InputIt last, UnaryFunction && unary_op, const array<T> & arr, const Axes & axes, size_t order)
+template <typename T>
+class MaximaND
 {
-    // First element can't be a maximum
-    auto iter = (first != last) ? std::next(first) : first;
-    last = (iter != last) ? std::prev(last) : last;
-
-    while (iter != last)
+public:
+    MaximaND(array<T> arr, std::vector<size_t> axes) : m_arr(std::move(arr))
     {
-        if (*std::prev(iter) < *iter)
+        for (auto axis : axes)
         {
-            // ahead can be last
-            auto ahead = std::next(iter);
-
-            while (ahead != last && *ahead == *iter) ++ahead;
-
-            if (*ahead < *iter)
+            auto & offset = m_offsets.emplace_back();
+            for (size_t n = 0; n < m_arr.ndim(); n++)
             {
-                // It will return an index relative to the arr.begin() since it's stride is smaller
-                auto index = std::addressof(*iter) - arr.data();
+                if (n == axis) offset.push_back(1);
+                else offset.push_back(0);
+            }
+        }
+    }
 
-                size_t n = 1;
-                for (; n < axes.size(); n++)
+    template <typename InputIt, typename UnaryFunction, typename = std::enable_if_t<
+        (std::is_base_of_v<typename array<T>::const_iterator, InputIt> ||
+         std::is_base_of_v<typename array<T>::iterator, InputIt>) &&
+        std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t>
+    >>
+    UnaryFunction find(InputIt first, InputIt last, size_t index, size_t axis, UnaryFunction && unary_op)
+    {
+        FindContext context {m_arr, index, axis};
+        return find_with_context(first, last, std::forward<UnaryFunction>(unary_op), context);
+    }
+
+    template <typename UnaryFunction, typename = std::enable_if_t<
+        std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t>
+    >>
+    UnaryFunction find(size_t index, size_t axis, UnaryFunction && unary_op)
+    {
+        FindContext context {m_arr, index, axis};
+        return find_with_context(context.first, context.last, std::forward<UnaryFunction>(unary_op), context);
+    }
+
+    const array<T> & data() const {return m_arr;}
+
+private:
+    array<T> m_arr;
+    std::vector<std::vector<long>> m_offsets;
+
+    std::vector<long> to_coord(long index, size_t axis) const
+    {
+        long size = m_arr.size() / m_arr.shape()[axis];
+        std::vector<long> coord;
+        std::tie(index, size) = m_arr.coord_at(std::back_inserter(coord), index, size, 0, axis);
+        coord.push_back(long());
+        m_arr.coord_at(std::back_inserter(coord), index, size, axis + 1, m_arr.ndim());
+        return coord;
+    }
+
+    struct FindContext
+    {
+        size_t index, axis;
+        array<T> line;
+        array<T>::const_iterator first, last;
+
+        FindContext(const array<T> & arr, size_t idx, size_t ax) : index(idx), axis(ax), line(arr.slice(idx, ax))
+        {
+            first = line.begin(); last = line.end();
+        }
+    };
+
+    template <typename InputIt, typename UnaryFunction, typename = std::enable_if_t<
+        (std::is_base_of_v<typename array<T>::const_iterator, InputIt> ||
+         std::is_base_of_v<typename array<T>::iterator, InputIt>) &&
+        std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t>
+    >>
+    UnaryFunction find_with_context(InputIt first, InputIt last, UnaryFunction && unary_op, const FindContext & context)
+    {
+        auto coord = to_coord(context.index, context.axis);
+        for (auto iter = first; iter < last; ++iter)
+        {
+            if (iter != context.first && *std::prev(iter) < *iter)
+            {
+                // ahead can be last, must not be end
+                auto ahead = std::next(iter);
+                if (ahead == context.last) break;
+
+                while (ahead != context.last && *ahead == *iter) ++ahead;
+
+                if (*ahead < *iter)
                 {
-                    auto coord = arr.index_along_dim(index, axes[n]);
-                    if (coord > 1 && coord < arr.shape(axes[n]) - 1)
+                    // It will return an offset relative to the arr.begin() since it's stride is smaller
+                    coord[context.axis] = iter.index();
+                    size_t maximum = m_arr.index_at(coord);
+
+                    size_t n = 0;
+                    std::vector<long> left, right;
+                    for (auto offset : m_offsets)
                     {
-                        if (arr[index - arr.strides(axes[n])] < *iter && arr[index + arr.strides(axes[n])] < *iter)
+                        left.clear(); right.clear();
+                        for (size_t n = 0; n < m_arr.ndim(); n++)
                         {
-                            continue;
+                            left.push_back(coord[n] + offset[n]);
+                            right.push_back(coord[n] - offset[n]);
+                        }
+
+                        if (m_arr.is_inbound(left) && m_arr.is_inbound(right))
+                        {
+                            if (*iter > m_arr.at(left) && *iter > m_arr.at(right)) n++;
                         }
                     }
 
-                    break;
+                    if (n == m_offsets.size()) std::forward<UnaryFunction>(unary_op)(maximum);
+
+                    // Skip samples that can't be maximum
+                    iter = ahead;
                 }
-
-                if (n >= order) std::forward<UnaryFunction>(unary_op)(index);
-
-                // Skip samples that can't be maximum, check if it's not last
-                if (ahead != last) iter = ahead;
             }
         }
 
-        iter = std::next(iter);
+        return std::forward<UnaryFunction>(unary_op);
     }
-
-    return std::forward<UnaryFunction>(unary_op);
-}
+};
 
 }
 

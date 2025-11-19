@@ -20,8 +20,8 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Seque
 import h5py, hdf5plugin
 import numpy as np
 from tqdm.auto import tqdm
-from .data_container import Container, DataContainer, IndexedContainer, array_namespace, to_list
-from .parser import Parser, INIParser, JSONParser
+from .data_container import Container, DataContainer, IndexedContainer, array_namespace, list_indices, to_list
+from .parser import Parser, get_parser
 from .annotations import (Array, ArrayNamespace, BoolArray, FileMode, Indices, IntArray, IntSequence,
                           IntTuple, MultiIndices, NumPy, ReadOut, Shape)
 
@@ -98,22 +98,17 @@ class CXIProtocol(BaseProtocol):
     kinds       : Dict[str, str]
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser.from_container(cls)
-        if ext == 'json':
-            return JSONParser.from_container(cls)
-
-        raise ValueError(f"Invalid format: {ext}")
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        return get_parser(file_or_extension, cls)
 
     @classmethod
-    def read(cls, file: str, ext: str='ini') -> 'CXIProtocol':
+    def read(cls, file: str) -> 'CXIProtocol':
         """Return the default :class:`CXIProtocol` object.
 
         Returns:
             A :class:`CXIProtocol` object with the default parameters.
         """
-        return cls(**cls.parser(ext).read(file))
+        return cls(**cls.parser(file).read(file))
 
     def add_attribute(self, attr: str, paths: List[str]) -> 'CXIProtocol':
         """Add a data attribute to the protocol.
@@ -568,10 +563,7 @@ class CXIStore(FileStore):
             elif mode == 'insert':
                 if idxs is None:
                     raise ValueError('idxs is required for insert mode')
-                if isinstance(idxs, slice):
-                    idxs = list(range(idxs.start, idxs.stop, idxs.step))
-                if isinstance(idxs, int):
-                    idxs = [idxs,]
+                idxs = list_indices(idxs, data.shape[0])
                 if len(idxs) != data.shape[0]:
                     if len(idxs) == 1:
                         data = data[None, ...]
@@ -672,7 +664,6 @@ def write_hdf(container: DataContainer, output_file: CXIStore, *attributes: str,
     Raises:
         ValueError : If the ``output_file`` is not defined inside the container.
     """
-    xp = container.__array_namespace__()
     if not attributes:
         attributes = tuple(container.contents())
 

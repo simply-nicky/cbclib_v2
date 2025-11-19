@@ -16,7 +16,7 @@ public:
     using const_iterator = typename std::vector<value_type>::const_iterator;
 
     ImageBuffer() : shape_handler(), data() {}
-    ImageBuffer(ShapeContainer shape) : shape_handler(std::move(shape)), data() {}
+    ImageBuffer(ShapeContainer shape) : shape_handler(std::move(shape), 1), data() {}
 
     iterator begin() {return data.begin();}
     const_iterator begin() const {return data.begin();}

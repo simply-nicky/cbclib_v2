@@ -1,14 +1,19 @@
-from typing import Sequence, Tuple
+from typing import ClassVar, Sequence, Tuple
 import numpy as np
 from scipy import ndimage
 import pytest
 from cbclib_v2 import to_list
-from cbclib_v2.annotations import IntArray, IntSequence, RealArray
-from cbclib_v2.ndimage import binterpolate, median, median_filter, robust_mean
-from cbclib_v2.annotations import Mode, NDBoolArray, NDRealArray, Shape
-from cbclib_v2.test_util import check_close
+from cbclib_v2.annotations import IntArray, IntSequence, RealArray, Mode, NDBoolArray, NDRealArray, Shape
+from cbclib_v2.ndimage import (binterpolate, local_maxima, median, maximum_filter, median_filter,
+                               robust_mean)
+from cbclib_v2.streak_finder import PeaksList, detect_peaks
+from cbclib_v2.test_util import check_close, compute_index
 
 class TestImageProcessing():
+    neighbours : ClassVar[NDBoolArray] = np.array([[False, True , False],
+                                                   [True , True , True ],
+                                                   [False, True , False]], dtype=bool)
+
     def binterpolate(self, inp: RealArray, grid: Sequence[IntArray | RealArray],
                      coords: RealArray, axes: IntSequence):
         ndim = len(to_list(axes))
@@ -50,7 +55,7 @@ class TestImageProcessing():
 
     @pytest.fixture()
     def mask(self, rng: np.random.Generator, shape: Shape) -> NDBoolArray:
-        return np.asarray(rng.integers(0, 1, size=shape), dtype=bool)
+        return np.asarray(rng.integers(0, 2, size=shape), dtype=bool)
 
     @pytest.fixture(params=["constant", "nearest", "mirror", "reflect", "wrap"])
     def mode(self, request: pytest.FixtureRequest) -> Mode:
@@ -64,6 +69,12 @@ class TestImageProcessing():
                              [True , True , False]]])
     def footprint(self, request: pytest.FixtureRequest, size: Shape) -> NDBoolArray:
         return np.broadcast_to(np.asarray(request.param, dtype=bool), size)
+
+    def test_median_empty(self):
+        out = median(np.zeros((0,)))
+        out2 = np.median(np.zeros((0,)))
+
+        assert np.all((out == out2) | (np.isnan(out) & np.isnan(out2)))
 
     def test_median(self, array: NDRealArray, mask: NDBoolArray):
         axes = list(range(array.ndim))
@@ -88,8 +99,8 @@ class TestImageProcessing():
 
         assert np.all(out == out2)
 
-    def test_median_filter(self, array: NDRealArray, size: Shape,
-                           footprint: NDBoolArray, mode: Mode):
+    def test_median_filter(self, array: NDRealArray, size: Shape, footprint: NDBoolArray,
+                           mode: Mode):
         out = median_filter(array, size=size, mode=mode)
         out2 = ndimage.median_filter(array, size=size, mode=mode)
 
@@ -97,6 +108,18 @@ class TestImageProcessing():
 
         out = median_filter(array, footprint=footprint, mode=mode)
         out2 = ndimage.median_filter(array, footprint=footprint, mode=mode)
+
+        assert np.all(out == out2)
+
+    def test_maximum_filter(self, array: NDRealArray, size: Shape, footprint: NDBoolArray,
+                            mode: Mode):
+        out = maximum_filter(array, size=size, mode=mode)
+        out2 = ndimage.maximum_filter(array, size=size, mode=mode)
+
+        assert np.all(out == out2)
+
+        out = maximum_filter(array, footprint=footprint, mode=mode)
+        out2 = ndimage.maximum_filter(array, footprint=footprint, mode=mode)
 
         assert np.all(out == out2)
 
@@ -129,8 +152,9 @@ class TestImageProcessing():
         check_close(out, np.array(mean_values).reshape(out.shape))
 
     @pytest.fixture(params=[(-2, -1),])
-    def axes(self, request: pytest.FixtureRequest) -> Tuple[int, int]:
-        return request.param
+    def axes(self, request: pytest.FixtureRequest, shape: Shape) -> Tuple[int, int]:
+        return (compute_index(request.param[0], len(shape)),
+                compute_index(request.param[1], len(shape)))
 
     @pytest.fixture(params=[(7, 12)])
     def out_shape(self, request: pytest.FixtureRequest) -> Shape:
@@ -153,3 +177,27 @@ class TestImageProcessing():
         out = binterpolate(array, grid, coords, axes)
         out2 = self.binterpolate(array, grid, coords, axes)
         check_close(out, out2)
+
+    @pytest.fixture
+    def vicinity(self, array: NDRealArray, axes: Tuple[int, int]) -> NDBoolArray:
+        return np.expand_dims(self.neighbours, tuple(i for i in range(array.ndim) if i not in axes))
+
+    def test_local_maxima(self, array: NDRealArray, vicinity: NDBoolArray, axes: Tuple[int, int]):
+        out = local_maxima(array, axis=axes)
+        filtered = maximum_filter(array, footprint=vicinity, mode='constant', cval=np.inf)
+        out2 = np.stack(np.where(array == filtered), axis=-1)
+
+        assert np.all(np.sort(out, axis=0) == np.sort(out2, axis=0))
+
+    @pytest.fixture
+    def peaks_list(self, array: NDRealArray) -> PeaksList:
+        return detect_peaks(array, np.ones_like(array, dtype=bool), radius=1, vmin=0.0,
+                            num_threads=8)
+
+    def test_detect_peaks(self, array: NDRealArray, peaks_list: PeaksList):
+        for image, peaks in zip(np.reshape(array, (-1,) + array.shape[-2:]), peaks_list):
+            filtered = maximum_filter(image, footprint=self.neighbours, mode='constant',
+                                      cval=np.inf)
+            expected_peaks = np.stack(np.where(image == filtered), axis=-1)
+            peaks_array = np.stack((peaks.y, peaks.x), axis=-1)
+            assert np.all(np.sort(peaks_array, axis=0) == np.sort(expected_peaks, axis=0))

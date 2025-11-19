@@ -6,6 +6,7 @@ from .indexer import (BaseState, CBData, Detector, FixedLens, FixedPupilLens,
                       FixedPupilSetup, FixedSetup, XtalState, random_state)
 from ._src.annotations import ArrayNamespace, ComplexArray, JaxNumPy, RealArray
 from ._src.state import State, field
+from ._src.src.test import ArrayView, RectangleRange
 
 REL_TOL = 0.025
 
@@ -111,3 +112,10 @@ def check_gradient(f: Callable, args: Any, atol: float | None=None, rtol: float 
     def wrapper(*args):
         return f(*args, **static_args)
     check_grads(wrapper, args, order=1, modes='rev', atol=atol, rtol=rtol, eps=eps)
+
+def compute_index(index: int, length: int) -> int:
+    if index < 0:
+        index = index + length
+    if index < 0 or index >= length:
+        raise ValueError(f'Index {index:d} is out of range [0, {length - 1:d}]')
+    return index

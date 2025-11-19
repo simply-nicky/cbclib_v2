@@ -4,14 +4,13 @@ from typing import (Any, Callable, Dict, Iterable, Iterator, List, Literal, Sequ
 from dataclasses import InitVar, dataclass, field
 import numpy as np
 from tqdm.auto import tqdm
-
 from .annotations import Array, ArrayNamespace, Indices, IntArray, NumPy, RealArray, ROI
 from .crystfel import Detector
 from .cxi_protocol import CXIIndices, CXIStore, Kinds
-from .data_container import Container, D, IndexArray, array_namespace, split
+from .data_container import Container, D, IndexArray, array_namespace, list_indices, split
 from .data_processing import CrystData, CrystMetadata, PCAProjection, RegionDetector
 from .label import Structure2D, Structure3D, Regions2D
-from .parser import JSONParser, INIParser, Parser
+from .parser import Parser, get_parser
 from .streaks import StackedStreaks, Streaks
 from .src.median import median
 from ..indexer.cbc_data import MillerWithRLP, Patterns
@@ -22,16 +21,12 @@ P = TypeVar("P", bound='BaseParameters')
 
 class BaseParameters(Container):
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser.from_container(cls, default='parameters')
-        if ext == 'json':
-            return JSONParser.from_container(cls, default='parameters')
-        raise ValueError(f"Invalid format: {ext}")
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        return get_parser(file_or_extension, cls, 'parameters')
 
     @classmethod
-    def read(cls: Type[P], file: str, ext: str='ini') -> P:
-        return cls.from_dict(**cls.parser(ext).read(file))
+    def read(cls: Type[P], file: str) -> P:
+        return cls.from_dict(**cls.parser(file).read(file))
 
 @dataclass
 class ROIParameters(BaseParameters):
@@ -162,55 +157,72 @@ class CrystMetafile(Container):
 
     def __post_init__(self, metapath: str):
         self.metafile = CXIStore(metapath, CrystMetadata.default_protocol())
-        self.center_frames = median(self.metafile.load('data_frames', verbose=False), axis=-1)
 
-    def load(self, attr: str, indices: int | slice | IntArray | Sequence[int]=slice(None)):
-        if self.metadata.protocol.get_kind(attr) in (Kinds.sequence, Kinds.stack):
-            xp = self.metadata.__array_namespace__()
+    @property
+    def center_frames(self) -> IntArray:
+        if self.metadata.is_empty(self.metadata.data_frames):
+            return np.array([], dtype=int)
+        return median(self.metadata.data_frames, axis=-1)
 
-            data_indices = self.metafile.indices(attr)
-            new_frames = xp.atleast_1d(data_indices.index[indices])
-            default = IndexArray(xp.zeros((0,) + (1,) * (new_frames.ndim - 1), dtype=int))
-            frames = self.frames.get(attr, default)
+    def load(self, attr: str, indices: Indices=slice(None)) -> List[int]:
+        xp = self.metadata.__array_namespace__()
 
-            to, where = frames.insert_index(new_frames)
+        data_indices = self.metafile.indices(attr)
+        if len(data_indices) == 0:
+            raise ValueError(f"No data found for attribute '{attr}' in the metafile")
 
-            if to.size * where.size > 0:
-                new_data = self.metafile.load(attr, data_indices[where], ss_idxs=self.ss_idxs,
-                                              fs_idxs=self.fs_idxs, verbose=False)
-                shape = (frames.size,) + new_data.shape[1:]
-                old_data = xp.reshape(getattr(self.metadata, attr), shape)
-                setattr(self.metadata, attr, xp.insert(old_data, to, new_data, axis=0))
+        indices = list_indices(indices, len(data_indices))
+        if len(indices) > len(data_indices):
+            indices = indices[:len(data_indices)]
+        new_frames = xp.atleast_1d(data_indices.index[indices])
+        default = IndexArray(xp.zeros((0,) + (1,) * (new_frames.ndim - 1), dtype=int))
+        frames = self.frames.get(attr, default)
 
-                frames = xp.insert(xp.asarray(frames), to, new_frames[where], axis=0)
-                self.frames[attr] = IndexArray(frames)
-        else:
+        to, where = frames.insert_index(new_frames)
+
+        if to.size * where.size > 0:
+            new_data = self.metafile.load(attr, data_indices[where], ss_idxs=self.ss_idxs,
+                                            fs_idxs=self.fs_idxs, verbose=False)
+            shape = (frames.size,) + new_data.shape[1:]
+            old_data = xp.reshape(getattr(self.metadata, attr), shape)
+            setattr(self.metadata, attr, xp.insert(old_data, to, new_data, axis=0))
+
+            frames = xp.insert(xp.asarray(frames), to, new_frames[where], axis=0)
+            self.frames[attr] = IndexArray(frames)
+
+        return indices
+
+    def load_all(self, attr: str):
+        if attr not in self.metadata.contents():
             data = self.metafile.load(attr, ss_idxs=self.ss_idxs, fs_idxs=self.fs_idxs,
                                       verbose=False)
             setattr(self.metadata, attr, data)
 
     def import_data(self, data: RealArray, frames: IntArray | int=np.array([], dtype=int),
                     whitefield: RealArray=np.array([])) -> CrystData:
-        self.load('mask')
-        self.load('std')
+        self.load_all('flatfield')
+        self.load_all('mask')
+        self.load_all('std')
 
         return self.metadata.import_data(data, frames, whitefield)
 
     def interpolate(self, frames: IntArray, num_threads: int=1) -> RealArray:
+        self.load('data_frames')
+
         xp = self.metadata.__array_namespace__()
         frames = xp.searchsorted(self.center_frames, frames)
         all_frames = xp.unique(xp.concatenate([frames, frames + 1]))
         all_frames = all_frames[all_frames < self.center_frames.shape[0]]
 
         self.load('whitefield', all_frames)
-        self.load('data_frames', all_frames)
         return self.metadata.interpolate(frames, num_threads)
 
     def projection(self, data: RealArray, good_fields: Sequence[int]=(0,),
                    method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
                    lm: float=9.0, num_threads: int=1) -> PCAProjection:
-        self.load('flatfield')
-        self.load('eigen_field', good_fields)
+        self.load_all('flatfield')
+        good_fields = self.load('eigen_field', good_fields)
+
         indices, _ = self.frames['eigen_field'].get_index(good_fields)
 
         projection = self.metadata.projection(data, indices, method, r0, r1, n_iter, lm,
@@ -219,6 +231,7 @@ class CrystMetafile(Container):
 
     def project(self, projection: PCAProjection) -> RealArray:
         self.load('eigen_field', (projection.good_fields))
+
         indices, _ = self.frames['eigen_field'].get_index(projection.good_fields)
 
         return self.metadata.project(PCAProjection(indices, projection.projection))

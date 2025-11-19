@@ -82,6 +82,14 @@ def is_generic(t: Any) -> bool:
 def is_union(t: Any) -> bool:
     return isinstance(t, (type(list | int), type(Union[list, int])))
 
+def list_indices(indices: Indices, size: int) -> List[int]:
+    if isinstance(indices, int):
+        return [indices,]
+    if isinstance(indices, slice):
+        start, stop, step = indices.indices(size)
+        return list(range(start, stop, step))
+    return list(indices)
+
 C = TypeVar("C", bound="Container")
 D = TypeVar("D", bound="DataContainer")
 A = TypeVar("A", bound="ArrayContainer")
@@ -757,12 +765,18 @@ class IndexedContainer(ArrayContainer):
             IC: A new container instance with reshaped data fields.
         """
         obj = super().reshape(shape)
+        if obj.shape[0] > prod(obj.shape):
+            raise ValueError("Cannot reshape IndexedContainer: invalid shape for index")
+
         xp = self.__array_namespace__()
         sizes = xp.cumprod(obj.shape)
-        new_shape = xp.asarray(obj.shape)[sizes <= self.index.size]
-        index = self.index.reshape((new_shape[0], -1))
-        new_index = index[:, 0]
-        if prod(index.shape[1:]) > 1 and not xp.all(index == xp.expand_dims(new_index, 1)):
+        index_shape = xp.asarray(obj.shape)[sizes <= self.index.size]
+        if prod(index_shape) != self.index.size:
+            raise ValueError("Cannot reshape IndexedContainer: incompatible index size")
+
+        old_index = self.index.reshape(index_shape)
+        new_index = old_index.reshape((index_shape[0], prod(index_shape[1:])))[:, 0]
+        if not xp.all(old_index == xp.expand_dims(new_index, list(range(1, len(index_shape))))):
             raise ValueError("Cannot reshape IndexedContainer: inconsistent index grouping")
         return type(self)(**(obj.to_dict() | {'index': new_index}))
 

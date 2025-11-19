@@ -52,7 +52,7 @@ py::array_t<T> draw_lines_nd(py::array_t<T> out, py::array_t<T> lines, std::opti
     auto n_frames = std::reduce(oarr.shape().begin(), std::prev(oarr.shape().end(), N), size_t(1), std::multiplies());
     std::vector<size_t> shape {std::prev(oarr.shape().end(), N), oarr.shape().end()};
 
-    check_dimensions("lines", larr.ndim() - 1, larr.shape(), L);
+    check_dimension("lines", larr.ndim() - 1, larr.shape().begin(), L);
     auto lsize = larr.size() / larr.shape(larr.ndim() - 1);
 
     if (!idxs) fill_indices("idxs", n_frames, lsize, idxs);
@@ -144,7 +144,7 @@ auto accumulate_lines_nd(py::array_t<T> out, py::array_t<T> lines, py::array_t<I
     auto n_frames = std::reduce(oarr.shape().begin(), std::prev(oarr.shape().end(), N), size_t(1), std::multiplies());
     std::vector<size_t> shape {std::prev(oarr.shape().end(), N), oarr.shape().end()};
 
-    check_dimensions("lines", larr.ndim() - 1, larr.shape(), L);
+    check_dimension("lines", larr.ndim() - 1, larr.shape().begin(), L);
     auto lsize = larr.size() / larr.shape(larr.ndim() - 1);
 
     check_indices("frames", n_frames, carr.size(), frames);
@@ -264,7 +264,7 @@ auto write_lines_nd(py::array_t<T> lines, std::vector<size_t> shape, std::option
     std::vector<size_t> fshape {std::prev(shape.end(), N), shape.end()};
 
     auto larr = array<T>(lines.request());
-    check_dimensions("lines", larr.ndim() - 1, larr.shape(), L);
+    check_dimension("lines", larr.ndim() - 1, larr.shape().begin(), L);
     auto lsize = larr.size() / larr.shape(larr.ndim() - 1);
 
     if (!idxs) fill_indices("idxs", n_frames, lsize, idxs);

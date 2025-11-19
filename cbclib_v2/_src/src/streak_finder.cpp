@@ -81,8 +81,7 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
 
                 for (size_t y = y_min * radius + radius / 2; y < y_max * radius; y += radius)
                 {
-                    auto line = peak_data[index].data().slice(y, 1);
-                    peak_data[index].insert(line.begin(), line.end(), buffer[index], vmin, 1);
+                    peak_data[index].insert(y, 1, buffer[index], vmin);
                 }
 
                 for (size_t x = radius / 2; x < peak_data[index].data().shape(1); x += radius)
@@ -90,7 +89,7 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
                     auto line = peak_data[index].data().slice(x, 0);
                     auto first = std::next(line.begin(), y_min * radius - (y_min > 0));
                     auto last = std::next(line.begin(), y_max * radius + (y_max < y_size));
-                    peak_data[index].insert(first, last, buffer[index], vmin, 1);
+                    peak_data[index].insert(first, last, x, 0, buffer[index], vmin);
                 }
             });
         }
@@ -371,51 +370,6 @@ std::tuple<py::array_t<T>, T> p_value(const std::vector<Streak<T>> & streaks, py
     return std::make_tuple(p_values, p);
 }
 
-template <typename Element>
-void declare_list(py::class_<std::vector<Element>> & cls, const std::string & str)
-{
-    cls.def(py::init<>())
-        .def("__delitem__", [str](std::vector<Element> & list, py::ssize_t index)
-        {
-            list.erase(std::next(list.begin(), compute_index(index, list.size(), str)));
-        }, py::arg("index"))
-        .def("__delitem__", [](std::vector<Element> & list, py::slice & slice)
-        {
-            auto range = slice_range(slice, list.size());
-            auto iter = std::next(list.begin(), range.start());
-            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = list.erase(iter);
-        }, py::arg("index"))
-        .def("__getitem__", [str](const std::vector<Element> & list, py::ssize_t index)
-        {
-            return list[compute_index(index, list.size(), str)];
-        }, py::arg("index"))
-        .def("__getitem__", [](const std::vector<Element> & list, py::slice & slice)
-        {
-            std::vector<Element> sliced;
-            for (auto [_, py_index] : slice_range(slice, list.size())) sliced.push_back(list[py_index]);
-            return sliced;
-        }, py::arg("index"))
-        .def("__setitem__", [str](std::vector<Element> & list, py::ssize_t index, Element elem)
-        {
-            list[compute_index(index, list.size(), str)] = std::move(elem);
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
-        .def("__setitem__", [](std::vector<Element> & list, py::slice & slice, std::vector<Element> & elems)
-        {
-            for (auto [index, py_index] : slice_range(slice, list.size())) list[py_index] = elems[index];
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
-        .def("__iter__", [](const std::vector<Element> & list){return py::make_iterator(list.begin(), list.end());}, py::keep_alive<0, 1>())
-        .def("__len__", [](const std::vector<Element> & list){return list.size();})
-        .def("__repr__", [str](const std::vector<Element> & list)
-        {
-            return "<" + str + ", size = " + std::to_string(list.size()) + ">";
-        })
-        .def("append", [](std::vector<Element> & list, Element elem){list.emplace_back(std::move(elem));}, py::arg("value"), py::keep_alive<1, 2>())
-        .def("extend", [](std::vector<Element> & list, const std::vector<Element> & elems)
-        {
-            for (const auto & elem : elems) list.push_back(elem);
-        }, py::arg("values"), py::keep_alive<1, 2>());
-}
-
 template <typename T>
 void declare_streak(py::module & m, const std::string & typestr)
 {
@@ -604,12 +558,11 @@ void declare_pattern(py::module & m, const std::string & typestr)
         }, py::arg("width") = std::nullopt)
         .def("to_regions", [](const std::vector<Streak<T>> & streaks)
         {
-            RegionsND<2> regions;
+            std::vector<PointSet> regions;
             for (const auto & streak : streaks)
             {
-                PointSet points;
+                PointSet & points = regions.emplace_back();
                 for (auto && [point, _] : streak.pixels()) points->emplace_hint(points.end(), std::forward<decltype(point)>(point));
-                regions->emplace_back(std::move(points));
             }
             return regions;
         });

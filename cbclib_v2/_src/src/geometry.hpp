@@ -210,9 +210,11 @@ struct PointND : public std::array<T, N>
 
     T & x() requires(N >= 1) {return this->operator[](0);}
     T & y() requires(N >= 2) {return this->operator[](1);}
+    T & z() requires(N >= 3) {return this->operator[](2);}
 
     const T & x() const requires(N >= 1) {return this->operator[](0);}
     const T & y() const requires(N >= 2) {return this->operator[](1);}
+    const T & z() const requires(N >= 3) {return this->operator[](2);}
 };
 
 template <template <typename, size_t> class Array, typename T, size_t ... sizes>

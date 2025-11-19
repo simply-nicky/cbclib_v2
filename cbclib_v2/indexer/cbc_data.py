@@ -3,7 +3,7 @@ from .cbc_setup import TiltOverAxisState
 from .geometry import safe_divide, kxy_to_k
 from .._src.annotations import ArrayNamespace, BoolArray, IntArray, RealArray, Shape
 from .._src.data_container import ArrayContainer, IndexedContainer, array_namespace
-from .._src.parser import INIParser, JSONParser, Parser
+from .._src.parser import Parser, get_parser
 from .._src.state import State
 from .._src.streaks import BaseLines, Streaks
 
@@ -77,17 +77,12 @@ class Detector(State):
         return Streaks(patterns.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
-        if ext == 'ini':
-            return INIParser.from_container(cls, default='geometry')
-        if ext == 'json':
-            return JSONParser.from_container(cls, default='geometry')
-
-        raise ValueError(f"Invalid format: {ext}")
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        return get_parser(file_or_extension, cls, 'geometry')
 
     @classmethod
-    def read(cls, file: str, ext: str='ini') -> 'Detector':
-        return cls(**cls.parser(ext).read(file))
+    def read(cls, file: str) -> 'Detector':
+        return cls(**cls.parser(file).read(file))
 
 class Points(State, ArrayContainer):
     index   : IntArray

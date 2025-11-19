@@ -18,7 +18,7 @@ from weakref import ref
 import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, Kinds
-from .data_container import DataContainer
+from .data_container import DataContainer, list_indices
 from .streak_finder import PeaksList, PatternList, detect_peaks, detect_streaks, filter_peaks
 from .streaks import StackedStreaks, Streaks
 from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
@@ -185,12 +185,8 @@ class CrystMetadata(CrystBase):
             raise ValueError('No flatfield in the container')
         if self.is_empty(self.eigen_field):
             raise ValueError('No eigen_field in the container')
-        if isinstance(good_fields, int):
-            good_fields = [good_fields,]
-        if isinstance(good_fields, slice):
-            start, stop, step = good_fields.indices(self.eigen_field.shape[0])
-            good_fields = list(range(start, stop, step))
 
+        good_fields = list_indices(good_fields, self.eigen_field.shape[0])
         fields = self.eigen_field[good_fields]
 
         xp = self.__array_namespace__()
@@ -630,10 +626,8 @@ class StreakDetector(DetectorBase):
         """
         if rank is None:
             rank = self.structure.rank
-        peaks = detect_peaks(self.data, self.mask, rank, vmin,
-                             num_threads=num_threads)
-        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts,
-                     num_threads=num_threads)
+        peaks = detect_peaks(self.data, self.mask, rank, vmin, num_threads=num_threads)
+        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts, num_threads=num_threads)
         return peaks
 
     def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float, min_size: int,

@@ -1,6 +1,11 @@
 #include "label.hpp"
 #include "zip.hpp"
 
+PYBIND11_MAKE_OPAQUE(std::vector<cbclib::PointSetND<2>>)
+PYBIND11_MAKE_OPAQUE(std::vector<cbclib::PointSetND<3>>)
+PYBIND11_MAKE_OPAQUE(std::vector<std::vector<cbclib::PointSetND<2>>>)
+PYBIND11_MAKE_OPAQUE(std::vector<std::vector<cbclib::PointSetND<3>>>)
+
 namespace cbclib {
 
 template <size_t N>
@@ -184,7 +189,7 @@ auto label(py::array_t<bool> mask, StructureND<N> structure, py::none seeds, siz
 
     size_t repeats = std::reduce(marr.shape().begin(), std::next(marr.shape().begin(), marr.ndim() - N), 1, std::multiplies());
 
-    std::vector<RegionsND<N>> result;
+    std::vector<std::vector<PointSetND<N>>> result;
 
     thread_exception e;
 
@@ -194,7 +199,7 @@ auto label(py::array_t<bool> mask, StructureND<N> structure, py::none seeds, siz
 
     #pragma omp parallel num_threads(threads)
     {
-        std::vector<RegionsND<N>> buffer;
+        std::vector<std::vector<PointSetND<N>>> buffer;
 
         #pragma omp for schedule(static) nowait
         for (size_t i = 0; i < repeats; i++)
@@ -217,7 +222,7 @@ auto label(py::array_t<bool> mask, StructureND<N> structure, py::none seeds, siz
                     points->insert(pt);
                     points.dilate(func, structure);
                     points.mask(frame, false);
-                    if (points.size() >= npts) regions->emplace_back(std::move(points));
+                    if (points.size() >= npts) regions.emplace_back(std::move(points));
                 }
             }
         }
@@ -247,7 +252,8 @@ auto label_seeded(py::array_t<bool> mask, StructureND<N> structure, PointSetND<N
     if (marr.ndim() != N)
         throw std::invalid_argument("mask array has wrong number of dimensions (" + std::to_string(marr.ndim()) + " < " + std::to_string(N) + ")");
 
-    RegionsND<N> result;
+    std::vector<std::vector<PointSetND<N>>> result;
+    auto & regions = result.emplace_back();
 
     py::gil_scoped_release release;
 
@@ -265,7 +271,7 @@ auto label_seeded(py::array_t<bool> mask, StructureND<N> structure, PointSetND<N
             points->insert(pt);
             points.dilate(func, structure);
             points.mask(marr, false);
-            if (points.size() >= npts) result->emplace_back(std::move(points));
+            if (points.size() >= npts) regions.emplace_back(std::move(points));
         }
     }
 
@@ -298,7 +304,7 @@ auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vec
     if (seeds.size() != repeats)
         throw std::invalid_argument("seeds length (" + std::to_string(seeds.size()) + ") is incompatible with mask shape");
 
-    std::vector<RegionsND<N>> result;
+    std::vector<std::vector<PointSetND<N>>> result;
 
     thread_exception e;
 
@@ -308,7 +314,7 @@ auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vec
 
     #pragma omp parallel num_threads(threads)
     {
-        std::vector<RegionsND<N>> buffer;
+        std::vector<std::vector<PointSetND<N>>> buffer;
 
         #pragma omp for schedule(static) nowait
         for (size_t i = 0; i < repeats; i++)
@@ -330,7 +336,7 @@ auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vec
                     points->insert(pt);
                     points.dilate(func, structure);
                     points.mask(frame, false);
-                    if (points.size() >= npts) regions->emplace_back(std::move(points));
+                    if (points.size() >= npts) regions.emplace_back(std::move(points));
                 }
             }
         }
@@ -353,22 +359,7 @@ auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vec
 template <typename T, size_t N, typename Func, typename... Ix, typename = std::enable_if_t<
     std::is_invocable_v<std::remove_cvref_t<Func>, PixelsND<T, N>>
 >> requires is_all_integral<Ix...>
-py::array_t<T> apply(const RegionsND<N> & regions, const array<T> & data, Func && func, Ix... sizes)
-{
-    std::vector<T> results;
-    for (const auto & region : regions)
-    {
-        auto result = std::forward<Func>(func)(PixelsND<T, N>{region, data});
-        results.insert(results.end(), result.begin(), result.end());
-    }
-
-    return as_pyarray(std::move(results), std::array<size_t, 1 + sizeof...(Ix)>{regions.size(), static_cast<size_t>(sizes)...});
-}
-
-template <typename T, size_t N, typename Func, typename... Ix, typename = std::enable_if_t<
-    std::is_invocable_v<std::remove_cvref_t<Func>, PixelsND<T, N>>
->> requires is_all_integral<Ix...>
-std::vector<py::array_t<T>> apply_and_vectorise(const std::vector<RegionsND<N>> & stack, py::array_t<T> data, Func && func, std::optional<std::array<long, N>> ax, Ix... sizes)
+py::array_t<T> apply(const std::vector<std::vector<PointSetND<N>>> & list, py::array_t<T> data, Func && func, std::optional<std::array<long, N>> ax, Ix... sizes)
 {
     Sequence<long> axes;
     if (ax)
@@ -379,19 +370,26 @@ std::vector<py::array_t<T>> apply_and_vectorise(const std::vector<RegionsND<N>> 
     else for (long n = N; n > 0; n--) axes->push_back(data.ndim() - n);
 
     data = axes.swap_back(data);
-    auto dbuf = data.request();
-    auto shape = normalise_shape<N>(dbuf.shape);
-    check_dimensions("data", 0, shape, stack.size());
+    auto shape = normalise_shape<N>(std::vector<py::ssize_t>{data.shape(), data.shape() + data.ndim()});
+    check_dimension("data", 0, shape.begin(), list.size());
 
-    array<T> darr {shape, static_cast<T *>(dbuf.ptr)};
-    std::vector<py::array_t<T>> results;
+    data = data.reshape(shape);
+    array<T> darr {data.request()};
 
-    for (size_t i = 0; i < stack.size(); i++)
+    size_t size = 0;
+    std::vector<T> results;
+    for (size_t i = 0; i < list.size(); i++)
     {
-        results.emplace_back(apply(stack[i], darr.slice_back(i, N), std::forward<Func>(func), sizes...));
+        auto frame = darr.slice_back(i, N);
+        for (const auto & region : list[i])
+        {
+            auto result = std::forward<Func>(func)(PixelsND<T, N>{region, frame});
+            results.insert(results.end(), result.begin(), result.end());
+        }
+        size += list[i].size();
     }
 
-    return results;
+    return as_pyarray(std::move(results), std::array<size_t, 1 + sizeof...(Ix)>{size, static_cast<size_t>(sizes)...});
 }
 
 template <typename T, size_t N, typename Func, typename... Ix, typename = std::enable_if_t<
@@ -399,13 +397,9 @@ template <typename T, size_t N, typename Func, typename... Ix, typename = std::e
 >> requires is_all_integral<Ix...>
 void declare_region_func(py::module & m, Func && func, const std::string & funcstr, Ix... sizes)
 {
-    m.def(funcstr.c_str(), [f = std::forward<Func>(func), sizes...](RegionsND<N> regions, py::array_t<T> data, std::optional<std::array<long, N>> ax)
+    m.def(funcstr.c_str(), [f = std::forward<Func>(func), sizes...](std::vector<std::vector<PointSetND<N>>> regions, py::array_t<T> data, std::optional<std::array<long, N>> ax)
     {
-        return apply(regions, array<T>{data.request()}, f, sizes...);
-    }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
-    m.def(funcstr.c_str(), [f = std::forward<Func>(func), sizes...](std::vector<RegionsND<N>> regions, py::array_t<T> data, std::optional<std::array<long, N>> ax)
-    {
-        return apply_and_vectorise(regions, data, f, ax, sizes...);
+        return apply(regions, std::move(data), f, ax, sizes...);
     }, py::arg("regions"), py::arg("data"), py::arg("axes")=std::nullopt);
 }
 
@@ -559,12 +553,9 @@ PYBIND11_MODULE(label, m)
         .def("__len__", [](const StructureND<3> & srt){return srt.size();})
         .def("__repr__", &StructureND<3>::info);
 
-    py::class_<RegionsND<2>>(m, "Regions2D")
-        .def(py::init([](std::vector<PointSetND<2>> regions)
-        {
-            return RegionsND<2>(std::move(regions));
-        }), py::arg("regions") = std::vector<PointSetND<2>>{}, py::keep_alive<1, 2>())
-        .def_property("x", [](const RegionsND<2> & regions)
+    py::class_<std::vector<PointSetND<2>>> regions_2d (m, "Regions2D");
+    declare_list(regions_2d, "Regions2D");
+    regions_2d.def_property("x", [](const std::vector<PointSetND<2>> & regions)
         {
             std::vector<long> x;
             for (auto region : regions)
@@ -574,7 +565,7 @@ PYBIND11_MODULE(label, m)
             }
             return x;
         }, nullptr)
-        .def_property("y", [](const RegionsND<2> & regions)
+        .def_property("y", [](const std::vector<PointSetND<2>> & regions)
         {
             std::vector<long> y;
             for (auto region : regions)
@@ -583,56 +574,11 @@ PYBIND11_MODULE(label, m)
                 y.insert(y.end(), y_vec.begin(), y_vec.end());
             }
             return y;
-        }, nullptr)
-        .def("__delitem__", [](RegionsND<2> & regions, py::ssize_t index)
-        {
-            regions->erase(std::next(regions.begin(), compute_index(index, regions.size(), "Regions2D")));
-        }, py::arg("index"))
-        .def("__delitem__", [](RegionsND<2> & regions, const py::slice & slice)
-        {
-            auto range = slice_range(slice, regions.size());
-            auto iter = std::next(regions.begin(), range.start());
-            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = regions->erase(iter);
-        }, py::arg("index"))
-        .def("__getitem__", [](const RegionsND<2> & regions, py::ssize_t index)
-        {
-            return (*regions)[compute_index(index, regions.size(), "Regions2D")];
-        }, py::arg("index"))
-        .def("__getitem__", [](const RegionsND<2> & regions, const py::slice & slice) -> RegionsND<2>
-        {
-            RegionsND<2> new_regions {};
-            for (auto [_, py_index] : slice_range(slice, regions.size())) new_regions->push_back((*regions)[py_index]);
-            return new_regions;
-        }, py::arg("index"))
-        .def("__setitem__", [](RegionsND<2> & regions, py::ssize_t index, PointSetND<2> region)
-        {
-            (*regions)[compute_index(index, regions.size(), "Regions2D")] = std::move(region);
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
-        .def("__setitem__", [](RegionsND<2> & regions, const py::slice & slice, const RegionsND<2> & value)
-        {
-            for (auto [index, py_index] : slice_range(slice, regions.size())) (*regions)[py_index] = (*value)[index];
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
-        .def("__iter__", [](RegionsND<2> & regions)
-        {
-            return py::make_iterator(regions.begin(), regions.end());
-        }, py::keep_alive<0, 1>())
-        .def("__len__", [](RegionsND<2> & regions){return regions.size();})
-        .def("__repr__", &RegionsND<2>::info)
-        .def("append", [](RegionsND<2> & regions, PointSetND<2> region)
-        {
-            regions->emplace_back(std::move(region));
-        }, py::arg("region"), py::keep_alive<1, 2>())
-        .def("extend", [](RegionsND<2> & regions, const RegionsND<2> & elems)
-        {
-            for (const auto & region : elems) regions->push_back(region);
-        }, py::arg("regions"), py::keep_alive<1, 2>());
+        }, nullptr);
 
-    py::class_<RegionsND<3>>(m, "Regions3D")
-        .def(py::init([](std::vector<PointSetND<3>> regions)
-        {
-            return RegionsND<3>(std::move(regions));
-        }), py::arg("regions") = std::vector<PointSetND<3>>{}, py::keep_alive<1, 2>())
-        .def_property("x", [](const RegionsND<3> & regions)
+    py::class_<std::vector<PointSetND<3>>> regions_3d (m, "Regions3D");
+    declare_list(regions_3d, "Regions3D");
+    regions_3d.def_property("x", [](const std::vector<PointSetND<3>> & regions)
         {
             std::vector<long> x;
             for (auto region : regions)
@@ -642,7 +588,7 @@ PYBIND11_MODULE(label, m)
             }
             return x;
         }, nullptr)
-        .def_property("y", [](const RegionsND<3> & regions)
+        .def_property("y", [](const std::vector<PointSetND<3>> & regions)
         {
             std::vector<long> y;
             for (auto region : regions)
@@ -652,7 +598,7 @@ PYBIND11_MODULE(label, m)
             }
             return y;
         }, nullptr)
-        .def_property("z", [](const RegionsND<3> & regions)
+        .def_property("z", [](const std::vector<PointSetND<3>> & regions)
         {
             std::vector<long> z;
             for (auto region : regions)
@@ -661,49 +607,117 @@ PYBIND11_MODULE(label, m)
                 z.insert(z.end(), z_vec.begin(), z_vec.end());
             }
             return z;
-        }, nullptr)
-        .def("__delitem__", [](RegionsND<3> & regions, py::ssize_t index)
+        }, nullptr);
+
+    py::class_<std::vector<std::vector<PointSetND<2>>>> regions_list_2d (m, "RegionsList2D");
+    declare_list(regions_list_2d, "RegionsList2D");
+    regions_list_2d.def("frames", [](const std::vector<std::vector<PointSetND<2>>> & list)
         {
-            regions->erase(std::next(regions.begin(), compute_index(index, regions.size(), "Regions3D")));
-        }, py::arg("index"))
-        .def("__delitem__", [](RegionsND<3> & regions, const py::slice & slice)
+            std::vector<py::ssize_t> indices;
+            for (size_t index = 0; index < list.size(); index++)
+            {
+                for (size_t i = 0; i < list[index].size(); i++) indices.push_back(index);
+            }
+            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
+        })
+        .def("index", [](const std::vector<std::vector<PointSetND<2>>> & list)
         {
-            auto range = slice_range(slice, regions.size());
-            auto iter = std::next(regions.begin(), range.start());
-            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = regions->erase(iter);
-        }, py::arg("index"))
-        .def("__getitem__", [](const RegionsND<3> & regions, py::ssize_t index)
+            std::vector<py::ssize_t> indices;
+            for (auto index = 0; const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (size_t i = 0; i < region.size(); i++) indices.push_back(index);
+                }
+                index++;
+            }
+            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
+        })
+        .def("x", [](const std::vector<std::vector<PointSetND<2>>> & list)
         {
-            return (*regions)[compute_index(index, regions.size(), "Regions3D")];
-        }, py::arg("index"))
-        .def("__getitem__", [](const RegionsND<3> & regions, const py::slice & slice) -> RegionsND<3>
+            std::vector<long> x;
+            for (const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (const auto & point : region) x.push_back(point.x());
+                }
+            }
+            return as_pyarray(std::move(x), std::array<size_t, 1>{x.size()});
+        })
+        .def("y", [](const std::vector<std::vector<PointSetND<2>>> & list)
         {
-            RegionsND<3> new_regions {};
-            for (auto [_, py_index] : slice_range(slice, regions.size())) new_regions->push_back((*regions)[py_index]);
-            return new_regions;
-        }, py::arg("index"))
-        .def("__setitem__", [](RegionsND<3> & regions, py::ssize_t index, PointSetND<3> region)
+            std::vector<long> y;
+            for (const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (const auto & point : region) y.push_back(point.y());
+                }
+            }
+            return as_pyarray(std::move(y), std::array<size_t, 1>{y.size()});
+        });
+
+    py::class_<std::vector<std::vector<PointSetND<3>>>> regions_list_3d (m, "RegionsList3D");
+    declare_list(regions_list_3d, "RegionsList3D");
+    regions_list_3d.def("frames", [](const std::vector<std::vector<PointSetND<3>>> & list)
         {
-            (*regions)[compute_index(index, regions.size(), "Regions3D")] = std::move(region);
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
-        .def("__setitem__", [](RegionsND<3> & regions, const py::slice & slice, const RegionsND<3> & value)
+            std::vector<py::ssize_t> indices;
+            for (size_t index = 0; index < list.size(); index++)
+            {
+                for (size_t i = 0; i < list[index].size(); i++) indices.push_back(index);
+            }
+            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
+        })
+        .def("index", [](const std::vector<std::vector<PointSetND<3>>> & list)
         {
-            for (auto [index, py_index] : slice_range(slice, regions.size())) (*regions)[py_index] = (*value)[index];
-        }, py::arg("index"), py::arg("value"), py::keep_alive<1, 3>())
-        .def("__iter__", [](RegionsND<3> & regions)
+            std::vector<py::ssize_t> indices;
+            for (auto index = 0; const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (size_t i = 0; i < region.size(); i++) indices.push_back(index);
+                }
+                index++;
+            }
+            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
+        })
+        .def("x", [](const std::vector<std::vector<PointSetND<3>>> & list)
         {
-            return py::make_iterator(regions.begin(), regions.end());
-        }, py::keep_alive<0, 1>())
-        .def("__len__", [](RegionsND<3> & regions){return regions.size();})
-        .def("__repr__", &RegionsND<3>::info)
-        .def("append", [](RegionsND<3> & regions, PointSetND<3> region)
+            std::vector<long> x;
+            for (const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (const auto & point : region) x.push_back(point.x());
+                }
+            }
+            return as_pyarray(std::move(x), std::array<size_t, 1>{x.size()});
+        })
+        .def("y", [](const std::vector<std::vector<PointSetND<3>>> & list)
         {
-            regions->emplace_back(std::move(region));
-        }, py::arg("region"), py::keep_alive<1, 2>())
-        .def("extend", [](RegionsND<3> & regions, const RegionsND<3> & elems)
+            std::vector<long> y;
+            for (const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (const auto & point : region) y.push_back(point.y());
+                }
+            }
+            return as_pyarray(std::move(y), std::array<size_t, 1>{y.size()});
+        })
+        .def("z", [](const std::vector<std::vector<PointSetND<3>>> & list)
         {
-            for (const auto & region : elems) regions->push_back(region);
-        }, py::arg("regions"), py::keep_alive<1, 2>());
+            std::vector<long> z;
+            for (const auto & regions : list)
+            {
+                for (const auto & region : regions)
+                {
+                    for (const auto & point : region) z.push_back(point.z());
+                }
+            }
+            return as_pyarray(std::move(z), std::array<size_t, 1>{z.size()});
+        });
 
     m.def("binary_dilation", &dilate<2>, py::arg("input"), py::arg("structure"), py::arg("seeds") = std::nullopt, py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);
     m.def("binary_dilation", &dilate_seeded<2>, py::arg("input"), py::arg("structure"), py::arg("seeds"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("axes") = std::nullopt, py::arg("num_threads") = 1);

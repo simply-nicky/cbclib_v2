@@ -2,7 +2,6 @@ import pytest
 from cbclib_v2 import CrystData, StackedStreaks
 from cbclib_v2.annotations import ArrayNamespace, NumPy
 
-
 class TestDataContainers:
     """Test data container functionality."""
     @pytest.fixture
@@ -12,8 +11,8 @@ class TestDataContainers:
     @pytest.fixture
     def streaks1(self, xp: ArrayNamespace) -> StackedStreaks:
         """First StackedStreaks with 10 elements."""
-        return StackedStreaks(index=xp.zeros(10), module_id=xp.zeros(10, dtype=int),
-                              lines=xp.ones((10, 4)), n_modules=2)
+        return StackedStreaks(index=xp.zeros(12), module_id=xp.zeros(12, dtype=int),
+                              lines=xp.ones((12, 4)), n_modules=2)
 
     @pytest.fixture
     def streaks2(self, xp: ArrayNamespace) -> StackedStreaks:
@@ -77,19 +76,30 @@ class TestDataContainers:
         assert streaks3.shape == (streaks3.index.shape[0],)
         assert data.shape == data.data.shape
 
+    def test_reshape_zero(self, streaks3: StackedStreaks):
+        """Test reshape method on empty StackedStreaks."""
+        reshaped = streaks3.reshape((0, 1))
+
+        assert reshaped.index.shape == (0,)
+        assert reshaped.module_id.shape == (0, 1)
+        assert reshaped.lines.shape == (0, 1, 4)
+
+        with pytest.raises(ValueError):
+            streaks3.reshape((1, 0))  # Invalid reshape for empty data
+
     def test_reshape(self, streaks1: StackedStreaks, xp: ArrayNamespace):
         """Test reshape method of StackedStreaks."""
-        new_shape = (5, 2)
+        new_shape = (3, 2, 2)
         reshaped = streaks1.reshape(new_shape)
 
         assert reshaped.index.shape == new_shape[:1]
         assert reshaped.module_id.shape == new_shape
-        assert reshaped.lines.shape == (5, 2, 4)
+        assert reshaped.lines.shape == (3, 2, 2, 4)
 
         # Verify data integrity after reshape
-        expected_index = xp.reshape(streaks1.index, new_shape)[:, 0]
+        expected_index = xp.reshape(streaks1.index, new_shape)[:, 0, 0]
         expected_module_id = xp.reshape(streaks1.module_id, new_shape)
-        expected_lines = xp.reshape(streaks1.lines, (5, 2, 4))
+        expected_lines = xp.reshape(streaks1.lines, (3, 2, 2, 4))
 
         assert xp.all(reshaped.index == expected_index)
         assert xp.all(reshaped.module_id == expected_module_id)

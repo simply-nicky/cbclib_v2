@@ -63,8 +63,8 @@ public:
     using container_type = Container;
     using value_type = Element;
     using size_type = typename Container::size_type;
-    using iterator = container_type::iterator;
-    using const_iterator = container_type::const_iterator;
+    using iterator = typename container_type::iterator;
+    using const_iterator = typename container_type::const_iterator;
 
     WrappedContainer() = default;
 
@@ -101,7 +101,7 @@ protected:
 
 public:
     using WrappedContainer<std::vector<T>>::WrappedContainer;
-    using size_type = WrappedContainer<std::vector<T>>::size_type;
+    using size_type = typename WrappedContainer<std::vector<T>>::size_type;
 
     template <typename InputIt, typename = std::enable_if_t<is_input_iterator_v<InputIt>>>
     AnyContainer(InputIt first, InputIt last) : WrappedContainer<std::vector<T>>(std::vector<T>(first, last)) {}
@@ -120,31 +120,15 @@ public:
     const T & operator[] (size_type index) const {return m_ctr[index];}
 };
 
-template <typename Container>
-void check_dimensions(const std::string & name, ssize_t axis, const Container & shape) {}
-
-template <typename Container, typename... Ix>
-void check_dimensions(const std::string & name, ssize_t axis, const Container & shape, ssize_t i, Ix... index)
+template <typename InputIt, typename = std::enable_if_t<std::is_integral_v<typename std::iter_value_t<InputIt>>>>
+void check_dimension(const std::string & name, ssize_t dim, InputIt first, ssize_t expected)
 {
-    if (axis < 0)
+    if (*(first + dim) != expected)
     {
-        auto text = name + " has the wrong number of dimensions: " + std::to_string(shape.size()) +
-                    " < " + std::to_string(shape.size() - axis);
+        auto text = name + " has an incompatible shape at axis " + std::to_string(dim) + ": " +
+                    std::to_string(*(first + dim)) + " != " + std::to_string(expected);
         throw std::invalid_argument(text);
     }
-    if (axis >= static_cast<ssize_t>(shape.size()))
-    {
-        auto text = name + " has the wrong number of dimensions: " + std::to_string(shape.size()) +
-                    " < " + std::to_string(axis + 1);
-        throw std::invalid_argument(text);
-    }
-    if (i != static_cast<ssize_t>(shape[axis]))
-    {
-        auto text = name + " has an incompatible shape at axis " + std::to_string(i) + ": " +
-                    std::to_string(shape[axis]) + " != " + std::to_string(i);
-        throw std::invalid_argument(text);
-    }
-    check_dimensions(name, axis + 1, shape, index...);
 }
 
 template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
