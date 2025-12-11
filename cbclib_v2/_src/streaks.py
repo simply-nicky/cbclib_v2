@@ -72,8 +72,8 @@ class BaseLines(ArrayContainer):
         if width is None:
             lines = self.lines
         else:
-            widths = xp.broadcast_to(xp.asarray(width), self.shape[:-1])
-            lines = xp.concatenate((self.lines, widths[..., None]), axis=-1)
+            widths = xp.broadcast_to(xp.asarray(width), self.lines.shape[:-1] + (1,))
+            lines = xp.concatenate((self.lines, widths), axis=-1)
 
         return lines
 
@@ -90,17 +90,11 @@ class BaseStreaks(IndexedContainer, BaseLines):
         return self.index
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, filename: str | None=None,
-                         xp: ArrayNamespace=NumPy) -> Tuple[IntArray, RealArray]:
-        if filename is None:
-            index = xp.asarray(df['index'].to_numpy())
-            lines = xp.stack((df['x_0'].to_numpy(), df['y_0'].to_numpy(),
-                              df['x_1'].to_numpy(), df['y_1'].to_numpy()), axis=-1)
-        else:
-            df = df[df['file'] == filename]
-            index = xp.asarray(df['frames'].to_numpy())
-            lines = xp.stack((df['x_0'].to_numpy(), df['y_0'].to_numpy(),
-                              df['x_1'].to_numpy(), df['y_1'].to_numpy()), axis=-1)
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=NumPy
+                         ) -> Tuple[IntArray, RealArray]:
+        index = xp.asarray(df['index'].to_numpy())
+        lines = xp.stack((df['x_0'].to_numpy(), df['y_0'].to_numpy(),
+                          df['x_1'].to_numpy(), df['y_1'].to_numpy()), axis=-1)
         return index, lines
 
     @classmethod
@@ -178,9 +172,8 @@ class Streaks(BaseStreaks):
     lines       : RealArray
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, filename: str | None=None,
-                         xp: ArrayNamespace=NumPy) -> 'Streaks':
-        index, lines = super(Streaks, cls).import_dataframe(df, filename, xp)
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=NumPy) -> 'Streaks':
+        index, lines = super(Streaks, cls).import_dataframe(df, xp)
         return cls(index=index, lines=lines)
 
     @classmethod
@@ -204,31 +197,29 @@ class StackedStreaks(BaseStreaks):
     index       : IntArray
     module_id   : IntArray
     lines       : RealArray
-    n_modules   : int = 1
+    num_modules : int = 1
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, n_modules: int=1, filename: str | None=None,
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, num_modules: int=1,
                          xp: ArrayNamespace=NumPy) -> 'StackedStreaks':
-        index, lines = super(StackedStreaks, cls).import_dataframe(df, filename, xp)
+        index, lines = super(StackedStreaks, cls).import_dataframe(df, xp)
         return cls(index=index, module_id=xp.asarray(df['module_id'].to_numpy()), lines=lines,
-                   n_modules=n_modules)
-
+                   num_modules=num_modules)
     @classmethod
     def import_xy(cls, index: IntArray, module_id: IntArray, x: RealArray, y: RealArray,
-                  n_modules: int=1) -> 'StackedStreaks':
+                  num_modules: int=1) -> 'StackedStreaks':
         index, lines = super(StackedStreaks, cls).import_xy(index, x, y)
-        return cls(index=index, module_id=module_id, lines=lines, n_modules=n_modules)
+        return cls(index=index, module_id=module_id, lines=lines, num_modules=num_modules)
 
     @property
     def flat_index(self) -> IntArray:
-        return self.n_modules * self.index + self.module_id
-
+        return self.num_modules * self.index + self.module_id
     def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
                           num_threads: int=1) -> pd.DataFrame:
         dataframe = super().pattern_dataframe(width, shape, kernel, num_threads)
-        if self.n_modules > 1:
-            dataframe['module_id'] = dataframe['frames'] % self.n_modules
-            dataframe['frames'] = dataframe['frames'] // self.n_modules
+        if self.num_modules > 1:
+            dataframe['module_id'] = dataframe['frames'] % self.num_modules
+            dataframe['frames'] = dataframe['frames'] // self.num_modules
             return dataframe.loc[:, ['index', 'frames', 'module_id', 'y', 'x', 'value']]
         return dataframe
 
@@ -239,6 +230,6 @@ class StackedStreaks(BaseStreaks):
             A dataframe with all the data specified in :class:`cbclib_v2.StackedStreaks`.
         """
         dataframe = super().to_dataframe()
-        if self.n_modules > 1:
+        if self.num_modules > 1:
             dataframe['module_id'] = self.module_id
         return dataframe

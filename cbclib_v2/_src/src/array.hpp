@@ -14,10 +14,22 @@
 namespace cbclib {
 
 template <typename T, typename ... Types>
-concept is_all_same = (... && std::is_same_v<T, Types>);
+struct is_all_same
+{
+    static constexpr bool value = (... && std::is_same_v<T, Types>);
+};
+
+template <typename T, typename ... Types>
+constexpr bool is_all_same_v = is_all_same<T, Types...>::value;
 
 template <typename ... Types>
-concept is_all_integral = (... && std::is_integral_v<Types>);
+struct is_all_integral
+{
+    static constexpr bool value = (... && std::is_integral_v<Types>);
+};
+
+template <typename ... Types>
+constexpr bool is_all_integral_v = is_all_integral<Types...>::value;
 
 // Internal helper utilities (implementation details).
 // Placed in the `detail` namespace to indicate they are not part of the
@@ -111,7 +123,7 @@ Container c_strides(const Container & shape, size_t itemsize)
 // Compute a linear offset by summing coordinate * stride values. This is a
 // low-level inner-loop helper used by shape handling and indexing helpers.
 
-template <typename InputIt1, typename InputIt2, typename I1 = typename std::iter_value_t<InputIt1>>
+template <typename InputIt1, typename InputIt2, typename I1 = iter_value_t<InputIt1>>
 I1 coord_to_offset(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst)
 {
     I1 offset = I1();
@@ -134,9 +146,8 @@ size_t coord_to_offset_var(const Strides & strides, size_t i, Ix... index)
 // Compute a flat index by summing coordinate * cumsum(shape) values. This is a
 // low-level inner-loop helper used by shape handling and indexing helpers.
 
-template <typename InputIt1, typename InputIt2,
-          typename I1 = typename std::iter_value_t<InputIt1>,
-          typename I2 = typename std::iter_value_t<InputIt2>>
+template <typename InputIt1, typename InputIt2, typename I1 = iter_value_t<InputIt1>,
+          typename I2 = iter_value_t<InputIt2>>
 I1 coord_to_index(InputIt1 cfirst, InputIt1 clast, InputIt2 sfirst, I2 stride)
 {
     I1 index = I1();
@@ -163,7 +174,7 @@ std::pair<size_t, size_t> coord_to_index_var(const Shape & shape, size_t i, Ix..
 
 // Compute a coordinate sequence from a flat index and a shape sequence.
 
-template <typename InputIt, typename OutputIt, typename I = typename std::iter_value_t<InputIt>>
+template <typename InputIt, typename OutputIt, typename I = iter_value_t<InputIt>>
 OutputIt index_to_coord(InputIt sfirst, InputIt slast, I & index, I & stride, OutputIt cfirst)
 {
     for (; sfirst != slast; ++sfirst)
@@ -183,7 +194,7 @@ OutputIt index_to_coord(InputIt sfirst, InputIt slast, I & index, I & stride, Ou
 // Convert a linear offset into multiple coordinates using a strides sequence.
 // WORKS ONLY FOR A C CONTIGUOUS ARRAY LAYOUT.
 
-template <typename InputIt, typename OutputIt, typename I = typename std::iter_value_t<InputIt>>
+template <typename InputIt, typename OutputIt, typename I = iter_value_t<InputIt>>
 OutputIt offset_to_coord(InputIt sfirst, InputIt slast, I offset, OutputIt cfirst)
 {
     for (; sfirst != slast; ++sfirst)
@@ -225,7 +236,7 @@ public:
         m_strides = c_strides(m_shape, m_itemsize);
     }
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
+    template <typename CoordIter, typename = std::enable_if_t<input_iterator_v<CoordIter>>>
     bool is_inbound(CoordIter first, CoordIter last) const
     {
         bool flag = true;
@@ -250,7 +261,7 @@ public:
         return is_inbound(coord.begin(), coord.end(), size());
     }
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
+    template <typename CoordIter, typename = std::enable_if_t<input_iterator_v<CoordIter>>>
     auto index_at(CoordIter first, CoordIter last) const
     {
         return coord_to_index(first, last, m_shape.begin(), size());
@@ -270,20 +281,24 @@ public:
         return coord_to_index(coord.begin(), coord.end(), m_shape.begin(), size());
     }
 
-    template <typename ... Ix> requires is_all_integral<Ix ...>
+    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
     auto index_at(Ix... index) const
     {
         return coord_to_index_var(m_shape, index...).first;
     }
 
-    template <typename OutputIt, typename I, typename = std::enable_if_t<std::is_integral_v<I>>> requires std::output_iterator<OutputIt, I>
+    template <typename OutputIt, typename I, typename = std::enable_if_t<
+        std::is_integral_v<I> && output_iterator_v<OutputIt, I>
+    >>
     OutputIt coord_at(OutputIt first, I index) const
     {
         auto stride = size();
         return index_to_coord(m_shape.begin(), m_shape.end(), index, stride, first);
     }
 
-    template <typename OutputIt, typename I, typename = std::enable_if_t<std::is_integral_v<I>>> requires std::output_iterator<OutputIt, I>
+    template <typename OutputIt, typename I, typename = std::enable_if_t<
+        std::is_integral_v<I> && output_iterator_v<OutputIt, I>
+    >>
     std::pair<I, I> coord_at(OutputIt first, I index, I size, size_t n0, size_t n1) const
     {
         index_to_coord(std::next(m_shape.begin(), n0), std::next(m_shape.begin(), n1), index, size, first);
@@ -303,7 +318,7 @@ public:
         return coord;
     }
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator<CoordIter>::value>>
+    template <typename CoordIter, typename = std::enable_if_t<input_iterator_v<CoordIter>>>
     auto offset_at(CoordIter first, CoordIter last) const
     {
         return coord_to_offset(first, last, m_strides.begin());
@@ -315,7 +330,7 @@ public:
         return coord_to_offset(coord.begin(), coord.end(), m_strides.begin());
     }
 
-    template <typename ... Ix> requires is_all_integral<Ix ...>
+    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
     auto offset_at(Ix... index) const
     {
         if (sizeof...(index) > m_ndim) fail_dim_check(sizeof...(index), "too many indices for an array");
@@ -654,13 +669,13 @@ public:
         return *this;
     }
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
+    template <typename CoordIter, typename = std::enable_if_t<input_iterator_v<CoordIter>>>
     const T & at(CoordIter first, CoordIter last) const
     {
         return *(m_ptr + offset_at(first, last) / m_itemsize);
     }
 
-    template <typename CoordIter, typename = std::enable_if_t<is_input_iterator_v<CoordIter>>>
+    template <typename CoordIter, typename = std::enable_if_t<input_iterator_v<CoordIter>>>
     T & at(CoordIter first, CoordIter last)
     {
         return *(m_ptr + offset_at(first, last) / m_itemsize);
@@ -690,13 +705,13 @@ public:
         return *(m_ptr + offset_at(coord) / m_itemsize);
     }
 
-    template <typename ... Ix> requires is_all_integral<Ix ...>
+    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
     const T & at(Ix... index) const
     {
         return *(m_ptr + offset_at(index...) / m_itemsize);
     }
 
-    template <typename ... Ix> requires is_all_integral<Ix ...>
+    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
     T & at(Ix... index)
     {
         return *(m_ptr + offset_at(index...) / m_itemsize);
@@ -725,7 +740,7 @@ public:
 
     vector_array() = default;
 
-    template <typename Vector, typename = std::enable_if_t<std::is_base_of_v<std::vector<T>, std::remove_cvref_t<Vector>>>>
+    template <typename Vector, typename = std::enable_if_t<std::is_base_of_v<std::vector<T>, remove_cvref_t<Vector>>>>
     vector_array(ShapeContainer shape, Vector && v) : array<T>(std::move(shape), v.data()), m_data(std::forward<Vector>(v))
     {
         if (m_data.size() != size()) m_data.resize(size());
@@ -888,7 +903,7 @@ class python_point_iterator
 public:
     using iterator_category = std::input_iterator_tag;
     using value_type = typename std::remove_reference_t<decltype(std::declval<Iterator &>()->to_array())>;
-    using difference_type = typename std::iter_difference_t<Iterator>;
+    using difference_type = iter_difference_t<Iterator>;
     using reference = const value_type &;
     using pointer = const value_type *;
 
@@ -896,83 +911,102 @@ public:
     python_point_iterator(Iterator && iter) : m_iter(std::move(iter)) {}
     python_point_iterator(const Iterator & iter) : m_iter(iter) {}
 
-    python_point_iterator & operator++() requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    python_point_iterator & operator++()
     {
         ++m_iter;
         return *this;
     }
 
-    python_point_iterator operator++(int) requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    python_point_iterator operator++(int)
     {
         return python_point_iterator(m_iter++);
     }
 
-    python_point_iterator & operator--() requires (std::bidirectional_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
+    python_point_iterator & operator--()
     {
         --m_iter;
         return *this;
     }
 
-    python_point_iterator operator--(int) requires (std::bidirectional_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
+    python_point_iterator operator--(int)
     {
         return python_point_iterator(m_iter--);
     }
 
-    python_point_iterator & operator+=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    python_point_iterator & operator+=(difference_type offset)
     {
         m_iter += offset;
         return *this;
     }
 
-    python_point_iterator operator+(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    python_point_iterator operator+(difference_type offset) const
     {
         return python_point_iterator(m_iter + offset);
     }
 
-    python_point_iterator & operator-=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    python_point_iterator & operator-=(difference_type offset)
     {
         m_iter -= offset;
         return *this;
     }
 
-    python_point_iterator operator-(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    python_point_iterator operator-(difference_type offset) const
     {
         return python_point_iterator(m_iter - offset);
     }
 
-    difference_type operator-(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    difference_type operator-(const python_point_iterator & rhs) const
     {
         return m_iter - rhs;
     }
 
-    reference operator[](difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    reference operator[](difference_type offset) const
     {
         return (m_iter + offset)->to_array();
     }
 
-    bool operator==(const python_point_iterator & rhs) const requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    bool operator==(const python_point_iterator & rhs) const
     {
         return m_iter == rhs.m_iter;
     }
-    bool operator!=(const python_point_iterator & rhs) const requires (std::forward_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    bool operator!=(const python_point_iterator & rhs) const
     {
         return !(*this == rhs);
     }
 
-    bool operator<(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator<(const python_point_iterator & rhs) const
     {
         return m_iter < rhs.m_iter;
     }
-    bool operator>(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator>(const python_point_iterator & rhs) const
     {
         return m_iter > rhs.m_iter;
     }
 
-    bool operator<=(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator<=(const python_point_iterator & rhs) const
     {
         return !(*this > rhs);
     }
-    bool operator>=(const python_point_iterator & rhs) const requires (std::random_access_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator>=(const python_point_iterator & rhs) const
     {
         return !(*this < rhs);
     }
@@ -993,7 +1027,7 @@ python_point_iterator<Iterator> make_python_iterator(Iterator && iterator)
 /* C++ container to NumPy array converters */
 
 template <typename Container, typename Shape, typename = std::enable_if_t<
-    std::is_rvalue_reference_v<Container &&> && std::is_integral_v<typename std::remove_cvref_t<Shape>::value_type>
+    std::is_rvalue_reference_v<Container &&> && std::is_integral_v<typename remove_cvref_t<Shape>::value_type>
 >>
 inline py::array_t<typename Container::value_type> as_pyarray(Container && seq, Shape && shape)
 {
@@ -1017,7 +1051,7 @@ inline py::array_t<typename Container::value_type> as_pyarray(Container && seq)
 }
 
 template <typename Container, typename Shape, typename = std::enable_if_t<
-    std::is_integral_v<typename std::remove_cvref_t<Shape>::value_type>
+    std::is_integral_v<typename remove_cvref_t<Shape>::value_type>
 >>
 inline py::array_t<typename Container::value_type> to_pyarray(const Container & seq, Shape && shape)
 {
@@ -1044,7 +1078,19 @@ py::ssize_t compute_index(py::ssize_t index, py::ssize_t length, std::string cls
 class slice_range
 {
 public:
-    class slice_sentinel;
+    class slice_iterator;
+
+    class slice_sentinel
+    {
+    private:
+        size_t m_index;
+
+        slice_sentinel(size_t index) : m_index(index) {}
+
+        friend bool operator==(const slice_iterator & lhs, const slice_sentinel & rhs);
+        friend bool operator!=(const slice_iterator & lhs, const slice_sentinel & rhs);
+        friend class slice_range;
+    };
 
     class slice_iterator
     {
@@ -1071,26 +1117,14 @@ public:
         reference operator*() const {return m_index;}
         pointer operator->() const {return &m_index;}
 
+        friend bool operator==(const slice_iterator & lhs, const slice_sentinel & rhs) {return lhs.m_index.first == rhs.m_index;}
+        friend bool operator!=(const slice_iterator & lhs, const slice_sentinel & rhs) {return lhs.m_index.first != rhs.m_index;}
+
     private:
         std::pair<size_t, py::ssize_t> m_index;
         py::ssize_t m_step;
 
         slice_iterator(size_t index, py::ssize_t py_index, py::ssize_t step) : m_index(index, py_index), m_step(step) {}
-
-        friend class slice_range;
-        friend class slice_sentinel;
-    };
-
-    class slice_sentinel
-    {
-    public:
-        friend bool operator==(const slice_iterator & lhs, const slice_sentinel & rhs) {return lhs.m_index.first == rhs.m_index;}
-        friend bool operator!=(const slice_iterator & lhs, const slice_sentinel & rhs) {return lhs.m_index.first != rhs.m_index;}
-
-    private:
-        size_t m_index;
-
-        slice_sentinel(size_t index) : m_index(index) {}
 
         friend class slice_range;
     };
@@ -1305,7 +1339,7 @@ constexpr decltype(auto) apply_to_sequence(Func && func)
     return std::apply(std::forward<Func>(func), integral_sequence<N>());
 }
 
-template <size_t N, class Container, typename T = Container::value_type>
+template <size_t N, class Container, typename T = typename Container::value_type>
 constexpr std::array<T, N> to_array(const Container & a, size_t start)
 {
     auto impl = [&a, start](auto... idxs) -> std::array<T, N> {return {{a[start + idxs]...}};};

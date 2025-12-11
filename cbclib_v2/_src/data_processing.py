@@ -12,19 +12,19 @@ Examples:
 """
 from math import prod
 import os
-from typing import List, Literal, NamedTuple, Sequence, TypeVar, cast
+from typing import Literal, NamedTuple, Sequence, TypeVar, cast
 from dataclasses import dataclass, field
 from weakref import ref
 import numpy as np
 import pandas as pd
 from .cxi_protocol import CXIProtocol, Kinds
 from .data_container import DataContainer, list_indices
-from .streak_finder import PeaksList, PatternList, detect_peaks, detect_streaks, filter_peaks
+from .streak_finder import PeaksList, detect_peaks, detect_streaks, filter_peaks
 from .streaks import StackedStreaks, Streaks
 from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
                           ROI, Shape)
-from .label import (label, ellipse_fit, total_mass, mean, center_of_mass, moment_of_inertia,
-                    covariance_matrix, Regions2D, Structure2D)
+from .label import (center_of_mass, covariance_matrix, ellipse_fit, label, line_fit, mean,
+                    moment_of_inertia, total_mass, RegionsList2D, Structure2D)
 from .src.signal_proc import binterpolate
 from .src.median import median, robust_mean, robust_lsq
 
@@ -57,10 +57,12 @@ class CrystBase(DataContainer):
                 if old and current != old:
                     raise ValueError(f"Attribute {attr} has an incompatible shape: {current}")
 
+            old = current
+
         return current
 
     @property
-    def n_modules(self) -> int:
+    def num_modules(self) -> int:
         return prod(self.frame_shape) // prod(self.frame_shape[-2:])
 
     def crop(self: C, roi: ROI) -> C:
@@ -257,7 +259,13 @@ class CrystData(CrystBase):
             if old and current != old:
                 raise ValueError(f"Attribute {attr} has an incompatible shape: {data.shape}")
 
+            old = current
+
         return current
+
+    @property
+    def num_whitefields(self) -> int:
+        return self.whitefield.size // prod(self.frame_shape)
 
     @property
     def shape(self) -> Shape:
@@ -326,7 +334,7 @@ class CrystData(CrystBase):
         mask[roi[0]:roi[1], roi[2]:roi[3]] = False
         return self.replace(mask=mask).apply_mask()
 
-    def region_detector(self, structure: Structure2D):
+    def region_detector(self, structure: Structure2D) -> 'RegionDetector':
         if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
         if self.is_empty(self.snr):
@@ -518,8 +526,7 @@ class CrystData(CrystBase):
             if self.is_empty(self.whitefield):
                 raise ValueError('no whitefield in the container')
 
-            num_whitefields = self.whitefield.size // prod(self.frame_shape)
-            whitefields = xp.reshape(self.whitefield, (num_whitefields,) + self.frame_shape)
+            whitefields = xp.reshape(self.whitefield, (self.num_whitefields,) + self.frame_shape)
             std = xp.sqrt(xp.mean(whitefields, axis=0))
         else:
             raise ValueError(f"Invalid method argument: {method}")
@@ -595,62 +602,6 @@ class DetectorBase(DataContainer):
         xp = self.__array_namespace__()
         return self.replace(data=xp.clip(self.data, vmin, vmax))
 
-    def export_coordinates(self, indices: IntArray, y: IntArray, x: IntArray) -> pd.DataFrame:
-        table = {'bgd': self.parent().whitefield[y, x], 'I_raw': self.parent().data[indices, y, x],
-                 'frames': self.parent().frames[indices], 'snr': self.parent().snr[indices, y, x],
-                 'x': x, 'y': y}
-        return pd.DataFrame(table)
-
-@dataclass
-class StreakDetector(DetectorBase):
-    data            : RealArray
-    mask            : BoolArray
-    structure       : Structure2D
-    parent          : ReferenceType[CrystData]
-
-    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
-                     rank: int | None=None, num_threads: int=1) -> PeaksList:
-        """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
-        ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
-        between peaks is ``2 * structure.radius``.
-
-        Args:
-            vmin : Peak threshold. All peaks with values lower than ``vmin`` are discarded.
-            npts : Support size threshold. The support structure is a connected set of pixels which
-                value is above the threshold ``vmin``. A peak is discarded is the size of support
-                set is lower than ``npts``.
-            connectivity : Connectivity structure used in finding a supporting set.
-
-        Returns:
-            Set of detected peaks.
-        """
-        if rank is None:
-            rank = self.structure.rank
-        peaks = detect_peaks(self.data, self.mask, rank, vmin, num_threads=num_threads)
-        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts, num_threads=num_threads)
-        return peaks
-
-    def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0, num_threads: int=1) -> PatternList:
-        """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
-        extended with a connectivity structure.
-
-        Args:
-            peaks : A set of peaks used as seed locations for the streak growing algorithm.
-            xtol : Distance threshold. A new linelet is added to a streak if it's distance to the
-                streak is no more than ``xtol``.
-            vmin : Value threshold. A new linelet is added to a streak if it's value at the center
-                of mass is above ``vmin``.
-            min_size : Minimum number of linelets required in a detected streak.
-            lookahead : Number of linelets considered at the ends of a streak to be added to the
-                streak.
-
-        Returns:
-            A list of detected streaks.
-        """
-        return detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
-                              lookahead, nfa, num_threads=num_threads)
-
     def export_table(self, streaks: StackedStreaks | Streaks, width: float,
                      kernel: str='rectangular') -> pd.DataFrame:
         """Export normalised pattern into a :class:`pandas.DataFrame` table.
@@ -686,10 +637,82 @@ class StreakDetector(DetectorBase):
             raise ValueError('Invalid parent: the parent data container was deleted')
 
         table = streaks.pattern_dataframe(width, shape=self.parent().shape, kernel=kernel)
-        table2 = self.export_coordinates(table['frames'].to_numpy(),
-                                         table['y'].to_numpy(), table['x'].to_numpy())
-        columns = set(table.columns) - {'frames', 'y', 'x'}
-        return table2.assign(**{key: table[key] for key in columns})
+        if self.parent().num_modules > 1:
+            index = table['frames'] * self.parent().num_modules + table['module_id']
+        else:
+            index = table['frames']
+
+        indices, x, y = index.to_numpy(), table['x'].to_numpy(), table['y'].to_numpy()
+        bgd = self.parent().whitefield.reshape((-1,)  + self.parent().frame_shape[-2:])
+        data = self.parent().data.reshape((-1,)  + self.parent().frame_shape[-2:])
+        snr = self.parent().snr.reshape((-1,)  + self.parent().frame_shape[-2:])
+        table = {'bgd': bgd[indices % bgd.shape[0], y, x], 'I_raw': data[indices, y, x],
+                 'frames': self.parent().frames[indices // self.parent().num_modules],
+                 'snr': snr[indices, y, x], 'x': x, 'y': y}
+
+        if self.parent().num_modules > 1:
+            table['module_id'] = indices % self.parent().num_modules
+            columns = ['frames', 'module_id', 'x', 'y', 'snr', 'I_raw', 'bgd']
+        else:
+            columns = ['frames', 'x', 'y', 'snr', 'I_raw', 'bgd']
+
+        return pd.DataFrame(table).loc[:, columns]
+
+@dataclass
+class StreakDetector(DetectorBase):
+    data            : RealArray
+    mask            : BoolArray
+    structure       : Structure2D
+    parent          : ReferenceType[CrystData]
+
+    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure2D=Structure2D(1, 1),
+                     rank: int | None=None, num_threads: int=1) -> PeaksList:
+        """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
+        ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
+        between peaks is ``2 * structure.radius``.
+
+        Args:
+            vmin : Peak threshold. All peaks with values lower than ``vmin`` are discarded.
+            npts : Support size threshold. The support structure is a connected set of pixels which
+                value is above the threshold ``vmin``. A peak is discarded is the size of support
+                set is lower than ``npts``.
+            connectivity : Connectivity structure used in finding a supporting set.
+
+        Returns:
+            Set of detected peaks.
+        """
+        if rank is None:
+            rank = self.structure.rank
+        peaks = detect_peaks(self.data, self.mask, rank, vmin, num_threads=num_threads)
+        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts, num_threads=num_threads)
+        return peaks
+
+    def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float, min_size: int,
+                       lookahead: int=0, nfa: int=0, num_threads: int=1
+                       ) -> StackedStreaks | Streaks:
+        """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
+        extended with a connectivity structure.
+
+        Args:
+            peaks : A set of peaks used as seed locations for the streak growing algorithm.
+            xtol : Distance threshold. A new linelet is added to a streak if it's distance to the
+                streak is no more than ``xtol``.
+            vmin : Value threshold. A new linelet is added to a streak if it's value at the center
+                of mass is above ``vmin``.
+            min_size : Minimum number of linelets required in a detected streak.
+            lookahead : Number of linelets considered at the ends of a streak to be added to the
+                streak.
+
+        Returns:
+            A list of detected streaks.
+        """
+        detected = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
+                                  lookahead, nfa, num_threads=num_threads)
+        if self.parent().num_modules > 1:
+            return StackedStreaks(detected.index() // self.parent().num_modules,
+                                  detected.index() % self.parent().num_modules,
+                                  detected.to_lines(), self.parent().num_modules)
+        return Streaks(detected.index(), detected.to_lines())
 
 @dataclass
 class RegionDetector(DetectorBase):
@@ -698,47 +721,35 @@ class RegionDetector(DetectorBase):
     structure       : Structure2D
     parent          : ReferenceType[CrystData]
 
-    def detect_regions(self, vmin: float, npts: int, num_threads: int=1) -> List[Regions2D]:
-        regions = label((self.data > vmin) & self.mask, structure=self.structure, npts=npts,
-                        num_threads=num_threads)
-        if isinstance(regions, Regions2D):
-            return [regions,]
-        return regions
+    def detect_regions(self, vmin: float, npts: int, num_threads: int=1) -> RegionsList2D:
+        return label((self.data > vmin) & self.mask, structure=self.structure, npts=npts,
+                     num_threads=num_threads)
 
-    def export_table(self, regions: List[Regions2D]) -> pd.DataFrame:
-        xp = self.__array_namespace__()
-        indices, y, x = [], [], []
-        for index, pattern in enumerate(regions):
-            size = sum(len(region.x) for region in pattern)
-            indices.extend(size * [index,])
-            y.extend(pattern.y)
-            x.extend(pattern.x)
-        return self.export_coordinates(xp.array(indices), xp.array(y), xp.array(x))
+    def detect_streaks(self, regions: RegionsList2D) -> StackedStreaks | Streaks:
+        lines = self.line_fit(regions)
+        if self.parent().num_modules > 1:
+            return StackedStreaks(regions.frames() // self.parent().num_modules,
+                                  regions.frames() % self.parent().num_modules,
+                                  lines, self.parent().num_modules)
+        return Streaks(regions.frames(), lines)
 
-    def ellipse_fit(self, regions: List[Regions2D]) -> List[RealArray]:
+    def ellipse_fit(self, regions: RegionsList2D) -> RealArray:
         return ellipse_fit(regions, self.data)
 
-    def total_mass(self, regions: List[Regions2D]) -> List[RealArray]:
-        xp = self.__array_namespace__()
-        arrays = total_mass(regions, self.data)
-        return [xp.asarray(array) for array in arrays]
+    def line_fit(self, regions: RegionsList2D) -> RealArray:
+        return line_fit(regions, self.data)
 
-    def mean(self, regions: List[Regions2D]) -> List[RealArray]:
-        xp = self.__array_namespace__()
-        arrays = mean(regions, self.data)
-        return [xp.asarray(array) for array in arrays]
+    def total_mass(self, regions: RegionsList2D) -> RealArray:
+        return total_mass(regions, self.data)
 
-    def center_of_mass(self, regions: List[Regions2D]) -> List[RealArray]:
-        xp = self.__array_namespace__()
-        arrays = center_of_mass(regions, self.data)
-        return [xp.asarray(array) for array in arrays]
+    def mean(self, regions: RegionsList2D) -> RealArray:
+        return mean(regions, self.data)
 
-    def moment_of_inertia(self, regions: List[Regions2D]) -> List[RealArray]:
-        xp = self.__array_namespace__()
-        arrays = moment_of_inertia(regions, self.data)
-        return [xp.asarray(array) for array in arrays]
+    def center_of_mass(self, regions: RegionsList2D) -> RealArray:
+        return center_of_mass(regions, self.data)
 
-    def covariance_matrix(self, regions: List[Regions2D]) -> List[RealArray]:
-        xp = self.__array_namespace__()
-        arrays = covariance_matrix(regions, self.data)
-        return [xp.asarray(array) for array in arrays]
+    def moment_of_inertia(self, regions: RegionsList2D) -> RealArray:
+        return moment_of_inertia(regions, self.data)
+
+    def covariance_matrix(self, regions: RegionsList2D) -> RealArray:
+        return covariance_matrix(regions, self.data)

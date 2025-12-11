@@ -45,16 +45,100 @@ R<typename Sub::value_type> flatten(const Top & all)
     return accum;
 }
 
-template <typename T, typename = void>
-struct is_input_iterator : std::false_type {};
+// C++20 standard features
 
 template <typename T>
-struct is_input_iterator<T,
+struct remove_cvref
+{
+    using type = std::remove_cv_t<std::remove_reference_t<T>>;
+};
+
+template <typename T>
+using remove_cvref_t = typename remove_cvref<T>::type;
+
+template <typename, typename = void>
+struct iter_value {};
+
+template <typename T>
+struct iter_value<T, std::void_t<typename T::value_type>>
+{
+    using type = typename T::value_type;
+};
+
+template <typename T>
+struct iter_value<T *, void>
+{
+    using type = std::remove_cv_t<T>;
+};
+
+template <typename T>
+using iter_value_t = typename iter_value<T>::type;
+
+template <typename Iter>
+using iter_difference_t = typename std::iterator_traits<Iter>::difference_type;
+
+template <typename T, typename = void>
+struct input_iterator : std::false_type {};
+
+template <typename T>
+struct input_iterator<T,
     std::void_t<decltype(*std::declval<T &>()), decltype(++std::declval<T &>())>
 > : std::true_type {};
 
 template <typename T>
-constexpr bool is_input_iterator_v = is_input_iterator<T>::value;
+constexpr bool input_iterator_v = input_iterator<T>::value;
+
+template <typename Iter, typename T, typename = void>
+struct output_iterator : std::false_type {};
+
+template <typename Iter, typename T>
+struct output_iterator<
+    Iter, T, std::void_t<decltype(*std::declval<Iter &>() = std::declval<T>())>
+> : std::true_type {};
+
+template <typename Iter, typename T>
+constexpr bool output_iterator_v = output_iterator<Iter, T>::value;
+
+template <typename T>
+struct forward_iterator
+{
+private:
+    using Cat = typename std::iterator_traits<T>::iterator_category;
+
+public:
+    static constexpr bool value = std::is_base_of<std::forward_iterator_tag, Cat>::value;
+};
+
+template <typename T>
+constexpr bool forward_iterator_v = forward_iterator<T>::value;
+
+template <typename T>
+struct bidirectional_iterator
+{
+private:
+    using Cat = typename std::iterator_traits<T>::iterator_category;
+
+public:
+    static constexpr bool value = std::is_base_of<std::bidirectional_iterator_tag, Cat>::value;
+};
+
+template <typename T>
+constexpr bool bidirectional_iterator_v = bidirectional_iterator<T>::value;
+
+template <typename T>
+struct random_access_iterator
+{
+private:
+    using Cat = typename std::iterator_traits<T>::iterator_category;
+
+public:
+    static constexpr bool value = std::is_base_of<std::random_access_iterator_tag, Cat>::value;
+};
+
+template <typename T>
+constexpr bool random_access_iterator_v = random_access_iterator<T>::value;
+
+// Container wrappers and helpers
 
 template <class Container, class Element = typename Container::value_type>
 struct WrappedContainer
@@ -103,7 +187,7 @@ public:
     using WrappedContainer<std::vector<T>>::WrappedContainer;
     using size_type = typename WrappedContainer<std::vector<T>>::size_type;
 
-    template <typename InputIt, typename = std::enable_if_t<is_input_iterator_v<InputIt>>>
+    template <typename InputIt, typename = std::enable_if_t<input_iterator_v<InputIt>>>
     AnyContainer(InputIt first, InputIt last) : WrappedContainer<std::vector<T>>(std::vector<T>(first, last)) {}
 
     template <typename Container, typename = std::enable_if_t<
@@ -120,7 +204,7 @@ public:
     const T & operator[] (size_type index) const {return m_ctr[index];}
 };
 
-template <typename InputIt, typename = std::enable_if_t<std::is_integral_v<typename std::iter_value_t<InputIt>>>>
+template <typename InputIt, typename = std::enable_if_t<std::is_integral_v<typename std::iterator_traits<InputIt>::value_type>>>
 void check_dimension(const std::string & name, ssize_t dim, InputIt first, ssize_t expected)
 {
     if (*(first + dim) != expected)
@@ -216,7 +300,7 @@ public:
         return *this;
     }
 
-    template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
+    template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, remove_cvref_t<Array>>>>
     Array && swap_back(Array && arr) const
     {
         // Create the permutation
@@ -230,12 +314,12 @@ public:
 
         // DON'T use release(), it leads to a memory leak
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+        arr = py::reinterpret_steal<remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         return std::forward<Array>(arr);
     }
 
-    template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, std::remove_cvref_t<Array>>>>
+    template <class Array, typename = std::enable_if_t<std::is_base_of_v<py::array, remove_cvref_t<Array>>>>
     Array && swap_front(Array && arr) const
     {
         // Create the permutation
@@ -249,13 +333,13 @@ public:
 
         // DON'T use release(), it leads to a memory leak
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+        arr = py::reinterpret_steal<remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         return std::forward<Array>(arr);
     }
 
-    template <class Array, typename V = std::remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
-        std::is_same_v<py::array_t<V>, std::remove_cvref_t<Array>>
+    template <class Array, typename V = typename remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
+        std::is_same_v<py::array_t<V>, remove_cvref_t<Array>>
     >>
     Array && swap_from_back(Array && arr) const
     {
@@ -271,13 +355,13 @@ public:
 
         // DON'T use release(), it leads to a memory leak
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+        arr = py::reinterpret_steal<remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         return std::forward<Array>(arr);
     }
 
-    template <class Array, typename V = std::remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
-        std::is_same_v<py::array_t<V>, std::remove_cvref_t<Array>>
+    template <class Array, typename V = typename remove_cvref_t<Array>::value_type, typename = std::enable_if_t<
+        std::is_same_v<py::array_t<V>, remove_cvref_t<Array>>
     >>
     Array && swap_from_front(Array && arr) const
     {
@@ -293,7 +377,7 @@ public:
 
         // DON'T use release(), it leads to a memory leak
         auto obj = reinterpret_cast<PyArrayObject *>(arr.ptr());
-        arr = py::reinterpret_steal<std::remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
+        arr = py::reinterpret_steal<remove_cvref_t<Array>>(PyArray_Transpose(obj, &perm_dims));
 
         return std::forward<Array>(arr);
     }

@@ -72,6 +72,7 @@ public:
     }
 
     // Angle between the largest eigenvector of the covariance matrix and x-axis
+    // Can return nan if mu_xx[0] == mu_xx[1]
     T theta() const requires (N == 2)
     {
         T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
@@ -79,9 +80,12 @@ public:
         return detail::modulo(theta, M_PI);
     }
 
+    // Return line segment representing the major axis of the object
+    // Returns a zero-length line if mu_xx[0] == mu_xx[1]
     Line<T> line() const requires (N == 2)
     {
         T angle = theta();
+        if (std::isnan(angle)) return Line<T>{origin, origin};
         Point<T> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
@@ -573,6 +577,12 @@ template <typename List, typename Element = typename List::value_type, typename 
 void declare_list(py::class_<List> & cls, const std::string & str)
 {
     cls.def(py::init<>())
+        .def(py::init([](py::iterable elems)
+        {
+            List list;
+            for (auto item : elems) list.push_back(item.cast<Element>());
+            return list;
+        }), py::arg("elements"))
         .def("__delitem__", [str](List & list, py::ssize_t index)
         {
             list.erase(std::next(list.begin(), compute_index(index, list.size(), str)));

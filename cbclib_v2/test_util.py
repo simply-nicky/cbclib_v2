@@ -2,11 +2,12 @@ from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads
-from .indexer import (BaseState, CBData, Detector, FixedLens, FixedPupilLens,
-                      FixedPupilSetup, FixedSetup, XtalState, random_state)
-from ._src.annotations import ArrayNamespace, ComplexArray, JaxNumPy, RealArray
+from .indexer import (BaseState, CBData, FixedLens, FixedPupilLens, FixedPupilSetup,
+                      FixedSetup, XtalState, random_state)
+from ._src.annotations import Array, ArrayNamespace, ComplexArray, JaxNumPy, RealArray
 from ._src.state import State, field
 from ._src.src.test import ArrayView, RectangleRange
+from ._src.crystfel import parse_crystfel_file
 
 REL_TOL = 0.025
 
@@ -27,10 +28,6 @@ class TestSetup():
     @classmethod
     def xtal(cls, xp: ArrayNamespace) -> XtalState:
         return XtalState(xp.array(cls.basis))
-
-    @classmethod
-    def detector(cls) -> Detector:
-        return Detector(cls.x_pixel_size, cls.y_pixel_size)
 
     @classmethod
     def fixed_lens(cls) -> FixedLens:
@@ -98,13 +95,19 @@ def gradient_tolerance(dtype: np.dtype, tol: float | None=None) -> float:
         return default_gradient_tolerance()[dtype]
     return default_gradient_tolerance().get(dtype, tol)
 
-def check_close(a: RealArray | ComplexArray, b: RealArray | ComplexArray,
+def check_close(a: float | RealArray | ComplexArray, b: float | RealArray | ComplexArray,
                 rtol: float | None=None, atol: float | None=None):
+    if not isinstance(a, Array):
+        a = np.asarray(a)
+    if not isinstance(b, Array):
+        b = np.asarray(b)
+
     if rtol is None:
         rtol = max(gradient_tolerance(a.dtype, rtol),
                    gradient_tolerance(b.dtype, rtol))
     if atol is None:
         atol = max(tolerance(a.dtype, atol), tolerance(b.dtype, atol))
+
     np.testing.assert_allclose(a, b, rtol=rtol, atol=atol)
 
 def check_gradient(f: Callable, args: Any, atol: float | None=None, rtol: float | None=None,

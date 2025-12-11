@@ -255,6 +255,9 @@ class Parser():
         def read_fields(flds: Dict, data: Dict) -> Dict:
             result: Dict[str, Any] = {}
             for section, attrs in flds.items():
+                if section not in data:
+                    raise ValueError(f"Section '{section}' not found in the file '{file}'")
+
                 if isinstance(attrs, str):
                     result[attrs] = data[section]
                 elif isinstance(attrs, dict):

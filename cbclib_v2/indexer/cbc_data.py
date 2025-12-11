@@ -1,11 +1,10 @@
-from typing import Tuple, Union
+from typing import Union
 from .cbc_setup import TiltOverAxisState
 from .geometry import safe_divide, kxy_to_k
-from .._src.annotations import ArrayNamespace, BoolArray, IntArray, RealArray, Shape
+from .._src.annotations import ArrayNamespace, BoolArray, IntArray, RealArray
 from .._src.data_container import ArrayContainer, IndexedContainer, array_namespace
-from .._src.parser import Parser, get_parser
 from .._src.state import State
-from .._src.streaks import BaseLines, Streaks
+from .._src.streaks import BaseLines
 
 AnyPoints = Union['Points', 'PointsWithK', 'CBDPoints']
 
@@ -30,8 +29,14 @@ class Patterns(State, IndexedContainer, BaseLines):
     @classmethod
     def from_points(cls, points: AnyPoints) -> 'Patterns':
         xp = array_namespace(points)
-        lines = xp.reshape(points.points, points.shape[:-1] + (4,))
+        lines = xp.reshape(points.points, points.shape + (4,))
         index = xp.reshape(points.index, lines.shape[:-1])
+        return cls(index=index, lines=lines)
+
+    @classmethod
+    def import_xy(cls, index: IntArray, x: RealArray, y: RealArray) -> 'Patterns':
+        xp = array_namespace(x, y, index)
+        lines = xp.stack((x[..., 0], y[..., 0], x[..., 1], y[..., 1]), axis=-1)
         return cls(index=index, lines=lines)
 
     @property
@@ -56,41 +61,9 @@ class Patterns(State, IndexedContainer, BaseLines):
         pts = super().pt0[..., None, :] + x * (super().pt1 - super().pt0)[..., None, :]
         return Points(points=xp.reshape(pts, shape), index=xp.asarray(self.index))
 
-class Detector(State):
-    x_pixel_size : float
-    y_pixel_size : float
-
-    def to_indices(self, x: RealArray, y: RealArray) -> Tuple[RealArray, RealArray]:
-        return x / self.x_pixel_size, y / self.y_pixel_size
-
-    def to_coordinates(self, i: RealArray, j: RealArray) -> Tuple[RealArray, RealArray]:
-        return i * self.x_pixel_size, j * self.y_pixel_size
-
-    def to_patterns(self, streaks: Streaks) -> Patterns:
-        xp = array_namespace(streaks)
-        pts = xp.stack(self.to_coordinates(xp.asarray(streaks.x), xp.asarray(streaks.y)), axis=-1)
-        return Patterns(streaks.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
-
-    def to_streaks(self, patterns: Patterns) -> Streaks:
-        xp = array_namespace(patterns)
-        pts = xp.stack(self.to_indices(xp.asarray(patterns.x), xp.asarray(patterns.y)), axis=-1)
-        return Streaks(patterns.index, xp.reshape(pts, pts.shape[:-2] + (4,)))
-
-    @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        return get_parser(file_or_extension, cls, 'geometry')
-
-    @classmethod
-    def read(cls, file: str) -> 'Detector':
-        return cls(**cls.parser(file).read(file))
-
 class Points(State, ArrayContainer):
     index   : IntArray
     points  : RealArray
-
-    @property
-    def shape(self) -> Shape:
-        return self.points.shape[:-1]
 
     @property
     def x(self) -> RealArray:
@@ -141,6 +114,11 @@ class CircleState(State, ArrayContainer):
     axis1   : RealArray
     axis2   : RealArray
     radius  : RealArray
+
+    def points(self, theta: RealArray) -> RealArray:
+        xp = array_namespace(theta)
+        return (self.radius * xp.cos(theta))[..., None] * self.axis1 \
+             + (self.radius * xp.sin(theta))[..., None] * self.axis2 + self.center
 
 class Rotograms(State, IndexedContainer, BaseLines):
     index       : IntArray

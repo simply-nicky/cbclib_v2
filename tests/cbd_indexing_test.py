@@ -4,8 +4,7 @@ from jax import random
 import cbclib_v2 as cbc
 from cbclib_v2.annotations import ArrayNamespace, KeyArray, RealArray, NumPy
 from cbclib_v2.indexer import (CBData, CBDIndexer, CBDLoss, CBDModel, CircleState, MillerWithRLP,
-                               Patterns, PointsWithK, TiltOverAxis, TiltOverAxisState, UCA,
-                               project_to_rect)
+                               Patterns, PointsWithK, TiltOverAxisState, UCA, project_to_rect)
 from cbclib_v2.test_util import FixedState, TestSetup, check_close
 
 class TestCBDIndexer():
@@ -114,10 +113,10 @@ class TestCBDIndexer():
                 xp: ArrayNamespace) -> CircleState:
         return indexer.intersection(candidates, uca, xp)
 
-    def test_intersection(self, indexer: CBDIndexer, circles: CircleState,
-                          candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):
+    def test_intersection(self, circles: CircleState, candidates: MillerWithRLP, uca: UCA,
+                          xp: ArrayNamespace):
         theta = xp.linspace(0, 2 * xp.pi)[:, None]
-        pts = indexer.circle(theta, circles)
+        pts = circles.points(theta)
         resolution = xp.broadcast_to(xp.sum(candidates.q**2, axis=-1), pts.shape[:-1])
         check_close(xp.sum(pts**2, axis=-1), resolution)
         check_close(xp.sum((pts - uca.kout)**2, axis=-1), xp.ones(pts.shape[:-1]))
@@ -127,9 +126,9 @@ class TestCBDIndexer():
                   xp: ArrayNamespace) -> RealArray:
         return indexer.uca_endpoints(circles, uca, xp)
 
-    def test_endpoints(self, indexer: CBDIndexer, circles: CircleState, endpoints: RealArray,
-                       candidates: MillerWithRLP, uca: UCA, xp: ArrayNamespace):
-        pts = indexer.circle(endpoints, circles)
+    def test_endpoints(self, circles: CircleState, endpoints: RealArray, candidates: MillerWithRLP,
+                       uca: UCA, xp: ArrayNamespace):
+        pts = circles.points(endpoints)
         check_close(xp.sum(pts**2, axis=-1),
                     xp.broadcast_to(xp.sum(candidates.q**2, axis=-1), pts.shape[:-1]))
         check_close(xp.sum((pts - uca.kout)**2, axis=-1), xp.ones(pts.shape[:-1]))
@@ -137,9 +136,9 @@ class TestCBDIndexer():
         check_close(pts[..., :2], proj)
 
     @pytest.fixture
-    def midpoints(self, indexer: CBDIndexer, circles: CircleState, endpoints: RealArray,
-                  xp: ArrayNamespace) -> RealArray:
-        return indexer.circle(xp.mean(endpoints, axis=0), circles)
+    def midpoints(self, circles: CircleState, endpoints: RealArray, xp: ArrayNamespace
+                  ) -> RealArray:
+        return circles.points(xp.mean(endpoints, axis=0))
 
     @pytest.fixture
     def tilts(self, indexer: CBDIndexer, candidates: MillerWithRLP, midpoints: RealArray,
@@ -148,5 +147,5 @@ class TestCBDIndexer():
 
     def test_rotations(self, tilts: TiltOverAxisState, candidates: MillerWithRLP,
                        midpoints: RealArray, xp: ArrayNamespace):
-        pts = TiltOverAxis()(candidates.q[..., None, None, :], tilts)[..., 0, :]
+        pts = (tilts.to_tilt().to_rotation() @ candidates.q[..., None, None, :])[..., 0, :]
         check_close(xp.broadcast_to(midpoints[..., None, :], pts.shape), pts)

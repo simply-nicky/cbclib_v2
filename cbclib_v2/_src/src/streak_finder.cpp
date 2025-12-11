@@ -232,7 +232,8 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
     size_t n_modules = marr.size() / module_size;
     size_t repeats = darr.size() / module_size;
     if (repeats != peaks.size())
-        throw std::invalid_argument("Size of peaks list (" + std::to_string(peaks.size()) + ") is incompatible with data");
+        throw std::invalid_argument("Size of peaks list (" + std::to_string(peaks.size()) + ") must be equal to the number of data modules (" +
+                                     std::to_string(repeats) + ")");
 
     size_t n_chunks = threads / repeats + (threads % repeats > 0);
 

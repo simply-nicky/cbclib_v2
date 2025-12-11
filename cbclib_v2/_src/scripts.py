@@ -1,15 +1,15 @@
 from multiprocessing import Pool
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Literal, Sequence, Tuple, Type,
-                    TypeVar, overload)
+                    TypeVar, cast, overload)
 from dataclasses import InitVar, dataclass, field
 import numpy as np
 from tqdm.auto import tqdm
 from .annotations import Array, ArrayNamespace, Indices, IntArray, NumPy, RealArray, ROI
 from .crystfel import Detector
-from .cxi_protocol import CXIIndices, CXIStore, Kinds
+from .cxi_protocol import CXIIndices, CXIStore
 from .data_container import Container, D, IndexArray, array_namespace, list_indices, split
-from .data_processing import CrystData, CrystMetadata, PCAProjection, RegionDetector
-from .label import Structure2D, Structure3D, Regions2D
+from .data_processing import CrystData, CrystMetadata, PCAProjection
+from .label import Structure2D, Structure3D
 from .parser import Parser, get_parser
 from .streaks import StackedStreaks, Streaks
 from .src.median import median
@@ -266,13 +266,15 @@ class RegionParameters(Container):
 class RegionFinderConfig(BaseParameters):
     regions     : RegionParameters
     scaling     : ScalingParameters
+    center      : Tuple[float, float] | None = None
     roi         : ROIParameters = field(default_factory=ROIParameters)
     std_min     : float = 0.0
     num_threads : int = 1
 
-def find_regions(frames: IntArray, images: Array, metafile: CrystMetafile,
-                 params: RegionFinderConfig, parallel: bool=True
-                 ) -> Tuple[RegionDetector, List[Regions2D]]:
+AllStreaks = StackedStreaks | Streaks
+
+def detect_regions(frames: IntArray, images: Array, metafile: CrystMetafile,
+                   params: RegionFinderConfig, parallel: bool=True) -> AllStreaks:
     num_threads = params.num_threads if parallel else 1
 
     data = scale_background(frames, images, metafile, params.scaling, num_threads)
@@ -280,11 +282,34 @@ def find_regions(frames: IntArray, images: Array, metafile: CrystMetafile,
     data = data.update_snr(params.std_min)
     det_obj = data.region_detector(params.regions.structure.to_structure('2d'))
     regions = det_obj.detect_regions(params.regions.vmin, params.regions.npts, num_threads)
-    return det_obj, regions
+    return det_obj.detect_streaks(regions)
+
+@overload
+def concentric_only(streaks: Streaks, center: Tuple[float, float],
+                    detector: Detector | None=None) -> Streaks: ...
+
+@overload
+def concentric_only(streaks: StackedStreaks, center: Tuple[float, float],
+                    detector: Detector | None=None) -> StackedStreaks: ...
+
+def concentric_only(streaks: StackedStreaks | Streaks, center: Tuple[float, float],
+                    detector: Detector | None=None) -> AllStreaks:
+    if isinstance(streaks, StackedStreaks):
+        if detector is None:
+            err_txt = "Detector geometry must be provided to filter out non-concentric streaks"
+            raise ValueError(err_txt)
+
+        if detector.num_modules > 1:
+            x, y, _ = detector.to_detector(streaks.module_id, streaks.y, streaks.x)
+        else:
+            x, y, _ = detector.to_detector(streaks.y, streaks.x)
+        mask = Streaks.import_xy(streaks.index, x, y).concentric_only(center[0], center[1])
+        return streaks[mask]
+    return streaks[streaks.concentric_only(center[0], center[1])]
 
 @dataclass
 class PeakParameters(RegionParameters):
-    rank        : int = 2
+    rank        : int | None = None
 
 @dataclass
 class StreakParameters(Container):
@@ -305,7 +330,7 @@ class StreakFinderConfig(BaseParameters):
     num_threads : int = 1
 
 def detect_streaks(frames: IntArray, images: Array, metafile: CrystMetafile,
-                   params: StreakFinderConfig, parallel: bool=True) -> Streaks:
+                   params: StreakFinderConfig, parallel: bool=True) -> StackedStreaks | Streaks:
     num_threads = params.num_threads if parallel else 1
 
     data = scale_background(frames, images, metafile, params.scaling, num_threads)
@@ -315,53 +340,48 @@ def detect_streaks(frames: IntArray, images: Array, metafile: CrystMetafile,
     peaks = det_obj.detect_peaks(params.peaks.vmin, params.peaks.npts,
                                  params.peaks.structure.to_structure('2d'),
                                  rank=params.peaks.rank, num_threads=num_threads)
-    detected = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
-                                      params.streaks.min_size, params.streaks.lookahead,
-                                      nfa=params.streaks.nfa, num_threads=num_threads)
-    streaks = Streaks(detected.index(), detected.to_lines())
-    if params.center is not None:
-        mask = streaks.concentric_only(params.center[0], params.center[1])
-        return streaks[mask]
-    return streaks
+    return det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
+                                  params.streaks.min_size, params.streaks.lookahead,
+                                  nfa=params.streaks.nfa, num_threads=num_threads)
 
-def detect_streaks_stacked(frames: IntArray, images: Array, metafile: CrystMetafile,
-                           params: StreakFinderConfig, detector: Detector | None=None,
-                           parallel: bool=True) -> StackedStreaks:
-    num_threads = params.num_threads if parallel else 1
+FinderConfig = RegionFinderConfig | StreakFinderConfig
+DetectionKind = Literal['regions', 'stacked-streaks', 'streaks']
+DetectorFunc = Callable[[IntArray, Array, CrystMetafile, FinderConfig], AllStreaks]
 
-    data = scale_background(frames, images, metafile, params.scaling, num_threads)
+@dataclass
+class Detectors:
+    detector : Detector | None = None
+    parallel : bool = True
 
-    data = data.update_snr(params.std_min)
-    det_obj = data.streak_detector(params.streaks.structure.to_structure('2d'))
-    peaks = det_obj.detect_peaks(params.peaks.vmin, params.peaks.npts,
-                                 params.peaks.structure.to_structure('2d'),
-                                 rank=params.peaks.rank, num_threads=num_threads)
-    detected = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
-                                      params.streaks.min_size, params.streaks.lookahead,
-                                      nfa=params.streaks.nfa, num_threads=num_threads)
-    streaks = StackedStreaks(detected.index() // data.n_modules,
-                             detected.index() % data.n_modules,
-                             detected.to_lines(), data.n_modules)
-    if params.center is not None and detector is not None:
-        if detector.n_modules > 1:
-            x, y, _ = detector.to_detector(streaks.module_id, streaks.y, streaks.x)
-        else:
-            x, y, _ = detector.to_detector(streaks.y, streaks.x)
-        mask = Streaks.import_xy(streaks.index, x, y).concentric_only(params.center[0],
-                                                                      params.center[1])
-        return streaks[mask]
-    return streaks
+    def detect_streaks(self, frames: IntArray, images: Array, metafile: CrystMetafile,
+                       params: StreakFinderConfig) -> AllStreaks:
+        streaks = detect_streaks(frames, images, metafile, params, self.parallel)
+        if params.center is not None:
+            streaks = concentric_only(streaks, params.center, self.detector)
+        return streaks
 
-PreProcessor = Callable[[Array,], Array]
+    def detect_regions(self, frames: IntArray, images: Array, metafile: CrystMetafile,
+                       params: RegionFinderConfig) -> AllStreaks:
+        streaks = detect_regions(frames, images, metafile, params, self.parallel)
+        if params.center is not None:
+            streaks = concentric_only(streaks, params.center, self.detector)
+        return streaks
+
+    def get_detector(self, kind: DetectionKind) -> DetectorFunc:
+        detectors : dict[DetectionKind, DetectorFunc] = {
+            'regions': cast(DetectorFunc, self.detect_regions),
+            'streaks': cast(DetectorFunc, self.detect_streaks),
+        }
+
+        if kind not in detectors:
+            raise ValueError(f'Invalid detection kind: {kind}')
+
+        return detectors[kind]
+
 OptIndices = CXIIndices | None
+AnyIndices = OptIndices | Tuple[OptIndices, Indices, Indices]
 
-def run_detection(file: CXIStore, metapath: str, params: StreakFinderConfig,
-                  indices: OptIndices | Tuple[OptIndices, Indices, Indices]=None,
-                  chunksize: int=1, pre_processor: PreProcessor | None=None,
-                  xp: ArrayNamespace=NumPy) -> Streaks:
-    if 'data' not in file.attributes():
-        raise ValueError("No data found in the files")
-
+def get_indices(file: CXIStore, indices: AnyIndices=None) -> Tuple[CXIIndices, Indices, Indices]:
     if indices is None:
         idxs, ss_idxs, fs_idxs = file.indices('data'), slice(None), slice(None)
     elif isinstance(indices, (list, tuple)):
@@ -374,45 +394,32 @@ def run_detection(file: CXIStore, metapath: str, params: StreakFinderConfig,
     else:
         ss_idxs, fs_idxs = slice(None), slice(None)
 
-    metafile = CrystMetafile(metapath, ss_idxs=ss_idxs, fs_idxs=fs_idxs)
+    return idxs, ss_idxs, fs_idxs
 
-    streaks = []
+PreProcessor = Callable[[Array], Array]
+
+def run_detection(file: CXIStore, metapath: str, params: FinderConfig,
+                  kind: DetectionKind, indices: AnyIndices=None, chunksize: int=1,
+                  detector: Detector | None=None, pre_processor: PreProcessor | None=None,
+                  xp: ArrayNamespace=NumPy) -> AllStreaks:
+    if 'data' not in file.attributes():
+        raise ValueError("No data found in the files")
+
+    idxs, ss_idxs, fs_idxs = get_indices(file, indices)
+    metafile = CrystMetafile(metapath, ss_idxs=ss_idxs, fs_idxs=fs_idxs)
+    detect = Detectors(detector).get_detector(kind)
+
+    streaks: List[AllStreaks] = []
     for index in tqdm(split(idxs, chunksize), total=int(xp.ceil(len(idxs) / chunksize))):
         data = file.load('data', idxs=index, ss_idxs=ss_idxs, fs_idxs=fs_idxs, verbose=False)
         if pre_processor is not None:
             data = pre_processor(data)
-        pattern = detect_streaks(xp.atleast_1d(index.index), data, metafile, params)
+        pattern = detect(xp.atleast_1d(index.index), data, metafile, params)
         streaks.append(pattern.replace(index=pattern.index + int(index.index)))
-    return Streaks.concatenate(streaks)
 
-def run_detection_stacked(file: CXIStore, metapath: str, params: StreakFinderConfig,
-                          indices: OptIndices | Tuple[OptIndices, Indices, Indices]=None,
-                          chunksize: int=1, detector: Detector | None=None,
-                          xp: ArrayNamespace=NumPy) -> StackedStreaks:
-    if 'data' not in file.attributes():
-        raise ValueError("No data found in the files")
-
-    if indices is None:
-        idxs, ss_idxs, fs_idxs = file.indices('data'), slice(None), slice(None)
-    elif isinstance(indices, (list, tuple)):
-        if len(indices) != 3:
-            raise ValueError(f'a tuple of indices has an invalid size: {len(indices)} != 3')
-
-        idxs, ss_idxs, fs_idxs = indices
-        if idxs is None:
-            idxs = file.indices('data')
-    else:
-        ss_idxs, fs_idxs = slice(None), slice(None)
-
-    metafile = CrystMetafile(metapath, ss_idxs=ss_idxs, fs_idxs=fs_idxs)
-
-    streaks = []
-    for index in tqdm(split(idxs, chunksize), total=int(xp.ceil(len(idxs) / chunksize))):
-        data = file.load('data', idxs=index, ss_idxs=ss_idxs, fs_idxs=fs_idxs, verbose=False)
-        pattern = detect_streaks_stacked(xp.atleast_1d(index.index), data, metafile, params,
-                                         detector)
-        streaks.append(pattern.replace(index=pattern.index + int(index.index)))
-    return StackedStreaks.concatenate(streaks)
+    if streaks and isinstance(streaks[0], StackedStreaks):
+        return StackedStreaks.concatenate(cast(List[StackedStreaks], streaks))
+    return Streaks.concatenate(cast(List[Streaks], streaks))
 
 streaks_worker : 'StreaksWorker'
 
@@ -420,62 +427,57 @@ streaks_worker : 'StreaksWorker'
 class StreaksWorker():
     data_file       : CXIStore
     metapath        : InitVar[str]
-    params          : StreakFinderConfig
+    params          : FinderConfig
+    kind            : DetectionKind
+    detector        : InitVar[Detector | None] = None
     ss_idxs         : Indices = slice(None)
     fs_idxs         : Indices = slice(None)
     pre_processor   : PreProcessor | None = None
 
-    def __post_init__(self, metapath):
+    def __post_init__(self, metapath, detector):
+        self.detect = Detectors(detector=detector, parallel=False).get_detector(self.kind)
         self.metafile = CrystMetafile(metapath, ss_idxs=self.ss_idxs, fs_idxs=self.fs_idxs)
 
-    def __call__(self, index: CXIIndices) -> Streaks:
+    def __call__(self, index: CXIIndices) -> AllStreaks:
         data = self.data_file.load('data', idxs=index, ss_idxs=self.ss_idxs,
                                     fs_idxs=self.fs_idxs, verbose=False)
         xp = array_namespace(data)
         if self.pre_processor is not None:
             data = self.pre_processor(data)
-        streaks = detect_streaks(xp.ravel(index.index), data, self.metafile, self.params,
-                                 False)
+        streaks = self.detect(xp.ravel(index.index), data, self.metafile, self.params)
         return streaks.replace(index=xp.full(streaks.shape[0], int(index.index)))
 
     @classmethod
-    def initialize(cls, data_file: CXIStore, metapath: str, params: StreakFinderConfig,
+    def initialize(cls, data_file: CXIStore, metapath: str, params: FinderConfig,
+                   kind: DetectionKind, detector: Detector | None = None,
                    ss_idxs: Indices=slice(None), fs_idxs: Indices=slice(None),
                    pre_processor: PreProcessor | None=None) -> 'StreaksWorker':
-        return cls(data_file, metapath, params, ss_idxs, fs_idxs, pre_processor)
+        return cls(data_file, metapath, params, kind, detector, ss_idxs, fs_idxs, pre_processor)
 
     @classmethod
     def initializer(cls, data_file: CXIStore, metapath: str, params: StreakFinderConfig,
+                    kind: DetectionKind, detector: Detector | None = None,
                     ss_idxs: Indices=slice(None), fs_idxs: Indices=slice(None),
                     pre_processor: PreProcessor | None=None):
         global streaks_worker
-        streaks_worker = cls.initialize(data_file, metapath, params, ss_idxs, fs_idxs,
-                                       pre_processor)
+        streaks_worker = cls.initialize(data_file, metapath, params, kind, detector,
+                                        ss_idxs, fs_idxs, pre_processor)
 
     @staticmethod
-    def run(index: CXIIndices) -> Streaks:
+    def run(index: CXIIndices) -> AllStreaks:
         return streaks_worker(index)
 
-def pool_detection(file: CXIStore, metapath: str, params: StreakFinderConfig,
-                   indices: OptIndices | Tuple[OptIndices, Indices, Indices]=None,
-                   pre_processor: PreProcessor | None=None) -> Streaks:
+def pool_detection(file: CXIStore, metapath: str, params: FinderConfig,
+                   kind: DetectionKind, indices: AnyIndices=None,
+                   detector: Detector | None=None, pre_processor: PreProcessor | None=None
+                   ) -> AllStreaks:
     if 'data' not in file.attributes():
         raise ValueError("No data found in the files")
 
-    if indices is None:
-        idxs, ss_idxs, fs_idxs = file.indices('data'), slice(None), slice(None)
-    elif isinstance(indices, (list, tuple)):
-        if len(indices) != 3:
-            raise ValueError(f'a tuple of indices has an invalid size: {len(indices)} != 3')
+    idxs, ss_idxs, fs_idxs = get_indices(file, indices)
+    initargs = (file, metapath, params, kind, detector, ss_idxs, fs_idxs, pre_processor)
 
-        idxs, ss_idxs, fs_idxs = indices
-        if idxs is None:
-            idxs = file.indices('data')
-    else:
-        ss_idxs, fs_idxs = slice(None), slice(None)
-
-    initargs = (file, metapath, params, ss_idxs, fs_idxs, pre_processor)
-    streaks = []
+    streaks : List[AllStreaks] = []
     if params.num_threads > 1:
         with Pool(processes=params.num_threads, initializer=StreaksWorker.initializer,
                   initargs=initargs) as pool:
@@ -485,82 +487,13 @@ def pool_detection(file: CXIStore, metapath: str, params: StreakFinderConfig,
         worker = StreaksWorker.initialize(*initargs)
         for args in tqdm(idxs, total=len(idxs)):
             streaks.append(worker(args))
-    return Streaks.concatenate(streaks)
 
-stacked_worker : 'StackedWorker'
-
-@dataclass
-class StackedWorker():
-    data_file       : CXIStore
-    metapath        : InitVar[str]
-    params          : StreakFinderConfig
-    ss_idxs         : Indices = slice(None)
-    fs_idxs         : Indices = slice(None)
-    detector        : Detector | None = None
-
-    def __post_init__(self, metapath):
-        self.metafile = CrystMetafile(metapath, ss_idxs=self.ss_idxs, fs_idxs=self.fs_idxs)
-
-    def __call__(self, index: CXIIndices) -> StackedStreaks:
-        data = self.data_file.load('data', idxs=index, ss_idxs=self.ss_idxs,
-                                    fs_idxs=self.fs_idxs, verbose=False)
-        xp = array_namespace(data)
-        streaks = detect_streaks_stacked(xp.ravel(index.index), data, self.metafile, self.params,
-                                         self.detector, False)
-        return streaks.replace(index=xp.full(streaks.shape[0], int(index.index)))
-
-    @classmethod
-    def initialize(cls, data_file: CXIStore, metapath: str, params: StreakFinderConfig,
-                   ss_idxs: Indices=slice(None), fs_idxs: Indices=slice(None),
-                   detector: Detector | None=None) -> 'StackedWorker':
-        return cls(data_file, metapath, params, ss_idxs, fs_idxs, detector)
-
-    @classmethod
-    def initializer(cls, data_file: CXIStore, metapath: str, params: StreakFinderConfig,
-                    ss_idxs: Indices=slice(None), fs_idxs: Indices=slice(None),
-                    detector: Detector | None=None):
-        global stacked_worker
-        stacked_worker = cls.initialize(data_file, metapath, params, ss_idxs, fs_idxs, detector)
-
-    @staticmethod
-    def run(index: CXIIndices) -> StackedStreaks:
-        return stacked_worker(index)
-
-def pool_detection_stacked(file: CXIStore, metapath: str, params: StreakFinderConfig,
-                           indices: OptIndices | Tuple[OptIndices, Indices, Indices]=None,
-                           detector: Detector | None=None) -> StackedStreaks:
-    if 'data' not in file.attributes():
-        raise ValueError("No data found in the files")
-
-    if indices is None:
-        idxs, ss_idxs, fs_idxs = file.indices('data'), slice(None), slice(None)
-    elif isinstance(indices, (list, tuple)):
-        if len(indices) != 3:
-            raise ValueError(f'a tuple of indices has an invalid size: {len(indices)} != 3')
-
-        idxs, ss_idxs, fs_idxs = indices
-        if idxs is None:
-            idxs = file.indices('data')
-    else:
-        ss_idxs, fs_idxs = slice(None), slice(None)
-
-    initargs = (file, metapath, params, ss_idxs, fs_idxs, detector)
-    streaks = []
-    if params.num_threads > 1:
-        with Pool(processes=params.num_threads, initializer=StackedWorker.initializer,
-                  initargs=initargs) as pool:
-            for pattern in tqdm(pool.imap(StackedWorker.run, idxs), total=len(idxs)):
-                streaks.append(pattern)
-    else:
-        worker = StackedWorker.initialize(*initargs)
-        for args in tqdm(idxs, total=len(idxs)):
-            streaks.append(worker(args))
-    return StackedStreaks.concatenate(streaks)
+    if streaks and isinstance(streaks[0], StackedStreaks):
+        return StackedStreaks.concatenate(cast(List[StackedStreaks], streaks))
+    return Streaks.concatenate(cast(List[Streaks], streaks))
 
 @dataclass
 class IndexingConfig(BaseParameters):
-    patterns_file   : str
-    output_file     : str
     shape           : Tuple[int, int, int]
     width           : float
     num_threads     : int
@@ -573,16 +506,16 @@ class IndexingConfig(BaseParameters):
         if not isinstance(self.shape, tuple):
             self.shape = (self.shape[0], self.shape[1], self.shape[2])
 
-def pre_indexing(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIndexer,
-                 params: IndexingConfig, state: BaseSetup, parallel: bool=True
-                 ) -> Tuple[IntArray, TiltOverAxisState]:
+def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIndexer,
+                  params: IndexingConfig, state: BaseSetup, parallel: bool=True
+                  ) -> Tuple[IntArray, TiltOverAxisState]:
     num_threads = params.num_threads if parallel else 1
     xp = array_namespace(candidates, patterns)
     centers = patterns.sample(xp.full(patterns.shape[0], 0.5))
     points = indexer.points_to_kout(centers, state, xp)
     rotograms = indexer.index(candidates, patterns, points, state)
     rotomap = indexer.rotomap(params.shape, rotograms, params.width, num_threads)
-    peaks = indexer.to_peaks(rotomap, params.threshold)
+    peaks = indexer.to_peaks(rotomap, params.threshold, params.n_max)
     return indexer.refine_peaks(peaks, rotomap, params.vicinity.to_structure('3d'),
                                 params.connectivity.to_structure('3d'), num_threads)
 
@@ -593,9 +526,8 @@ def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState
     hkl = indexer.xtal.hkl_in_ball(q_max, xtal, xp)
     return indexer.xtal.hkl_range(patterns.index_array.unique(), hkl, xtal, xp)
 
-def run_pre_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup,
-                     params: IndexingConfig, chunksize: int=1, xp: ArrayNamespace=NumPy
-                     ) -> XtalList:
+def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
+             chunksize: int=1, xp: ArrayNamespace=NumPy) -> XtalList:
     indexer = CBDIndexer()
     rlp_iterator = indexing_candidates(indexer, patterns, xtals, state, xp)
     solutions: List[XtalList] = []
@@ -605,7 +537,7 @@ def run_pre_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup,
         iterator = zip(split(patterns, chunksize), split(rlp_iterator, chunksize))
 
         for pattern, candidates in tqdm(iterator, total=total):
-            idxs, tilts = pre_indexing(candidates, pattern, indexer, params, state)
+            idxs, tilts = index_patterns(candidates, pattern, indexer, params, state)
             solution = indexer.solutions(xtals, idxs, tilts, pattern)
             solutions.append(solution)
     elif len(xtals) == len(patterns):
@@ -613,7 +545,7 @@ def run_pre_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup,
                        split(xtals, chunksize))
 
         for pattern, candidates, xtal in tqdm(iterator, total=total):
-            idxs, tilts = pre_indexing(candidates, pattern, indexer, params, state)
+            idxs, tilts = index_patterns(candidates, pattern, indexer, params, state)
             solution = indexer.solutions(xtal, idxs, tilts, pattern)
             solutions.append(solution)
     else:
@@ -633,8 +565,8 @@ class IndexingWorker():
 
     def __call__(self, args: Tuple[Dict[str, Any], Dict[str, Any]]) -> XtalList:
         candidates, patterns = MillerWithRLP(**args[0]), Patterns(**args[1])
-        idxs, tilts = pre_indexing(candidates, patterns, self.indexer, self.params, self.state,
-                                   False)
+        idxs, tilts = index_patterns(candidates, patterns, self.indexer, self.params, self.state,
+                                     False)
         initial = self.xtal if len(self.xtal) == 1 else self.xtal[idxs]
         return self.indexer.solutions(initial, idxs, tilts, patterns)
 
@@ -652,8 +584,8 @@ def dict_range(containers: Iterable[D]) -> Iterator[Dict[str, Any]]:
     for container in containers:
         yield container.to_dict()
 
-def run_pre_indexing_pool(patterns: Patterns, xtals: XtalState, state: BaseSetup,
-                          params: IndexingConfig, xp: ArrayNamespace=NumPy) -> XtalList:
+def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
+                  xp: ArrayNamespace=NumPy) -> XtalList:
     indexer = CBDIndexer()
     rlp_iterator = indexing_candidates(indexer, patterns, xtals, state, xp)
     solutions : List[XtalList] = []

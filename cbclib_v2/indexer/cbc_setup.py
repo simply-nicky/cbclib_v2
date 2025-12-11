@@ -1,4 +1,4 @@
-from typing import Callable, Iterator, Tuple, Type, TypeVar, get_type_hints
+from typing import Callable, Iterator, Tuple, Type, TypeVar, get_type_hints, overload
 import pandas as pd
 from jax import random
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
@@ -63,13 +63,47 @@ def random_rotation(shape: Shape=(), xp: ArrayNamespace = JaxNumPy
 
     return rnd
 
-class XtalCell(ArrayContainer, State):
+def random_euler(shape: Shape=(), xp: ArrayNamespace=JaxNumPy
+                 ) -> Callable[[KeyArray], 'EulerState']:
+    def rnd(key: KeyArray):
+        angles = random.uniform(key, shape=shape + (3,), minval=xp.array([0.0, 0.0, 0.0]),
+                                maxval=xp.array([2 * xp.pi, xp.pi, 2 * xp.pi]))
+        return EulerState(xp.asarray(angles))
+    return rnd
+
+class BaseCell(Container):
+    angles  : RealArray | Tuple[Tuple[float, float, float], ...]
+    lengths : RealArray | Tuple[Tuple[float, float, float], ...]
+
+    @classmethod
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        return get_parser(file_or_extension, cls, 'unit_cell')
+
+    def to_basis(self, xp: ArrayNamespace=JaxNumPy) -> 'XtalState':
+        gamma = xp.asarray(self.angles)[..., 2]
+        cos = xp.cos(xp.asarray(self.angles))
+        sin = xp.sin(gamma)
+        v_ratio = xp.sqrt(xp.ones(cos.shape[:-1]) - xp.sum(cos**2, axis=-1) + \
+                          2 * xp.prod(cos, axis=-1))
+        a_vec = xp.broadcast_to(xp.array([1.0, 0.0, 0.0]), cos.shape)
+        b_vec = xp.stack((cos[..., 2], sin, xp.zeros(cos.shape[:-1])), axis=-1)
+        c_vec = xp.stack((cos[..., 1], (cos[..., 0] - cos[..., 1] * cos[..., 2]) / sin,
+                           v_ratio / sin), axis=-1)
+        vectors = xp.stack((a_vec, b_vec, c_vec), axis=-2, dtype=float)
+        return XtalState(xp.asarray(xp.asarray(self.lengths)[..., None] * vectors, dtype=float))
+
+class FixedXtalCell(BaseCell, State, eq=True, unsafe_hash=True):
+    angles  : Tuple[Tuple[float, float, float], ...] = field(static=True)
+    lengths : Tuple[Tuple[float, float, float], ...] = field(static=True)
+
+    @classmethod
+    def read(cls, file: str) -> 'FixedXtalCell':
+        data = cls.parser(file).read(file)
+        return cls(tuple(data['angles']), tuple(data['lengths']))
+
+class XtalCell(BaseCell, ArrayContainer, State):
     angles  : RealArray
     lengths : RealArray
-
-    @property
-    def shape(self) -> Shape:
-        return self.angles.shape
 
     @property
     def alpha(self) -> RealArray:
@@ -84,25 +118,12 @@ class XtalCell(ArrayContainer, State):
         return self.angles[..., 2]
 
     @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        return get_parser(file_or_extension, cls, 'unit_cell')
-
-    @classmethod
     def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'XtalCell':
         data = cls.parser(file).read(file)
         return cls(xp.asarray(data['angles']), xp.asarray(data['lengths']))
 
     def to_basis(self) -> 'XtalState':
-        xp = self.__array_namespace__()
-        cos = xp.cos(self.angles)
-        sin = xp.sin(self.gamma)
-        v_ratio = xp.sqrt(xp.ones(self.shape[:-1]) - xp.sum(cos**2, axis=-1) + \
-                           2 * xp.prod(cos, axis=-1))
-        a_vec = xp.broadcast_to(xp.array([1.0, 0.0, 0.0]), self.shape)
-        b_vec = xp.stack((cos[..., 2], sin, xp.zeros(self.shape[:-1])), axis=-1)
-        c_vec = xp.stack((cos[..., 1], (cos[..., 0] - cos[..., 1] * cos[..., 2]) / sin,
-                           v_ratio / sin), axis=-1)
-        return XtalState(self.lengths[..., None] * xp.stack((a_vec, b_vec, c_vec), axis=-2))
+        return super().to_basis(self.__array_namespace__())
 
 class XtalState(ArrayContainer, State):
     basis : RealArray
@@ -147,7 +168,7 @@ class XtalState(ArrayContainer, State):
         return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=JaxNumPy) -> 'XtalState':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=JaxNumPy) -> 'XtalState':
         a = xp.stack((df['a_x'].to_numpy(), df['a_y'].to_numpy(), df['a_z'].to_numpy()), axis=-1)
         b = xp.stack((df['b_x'].to_numpy(), df['b_y'].to_numpy(), df['b_z'].to_numpy()), axis=-1)
         c = xp.stack((df['c_x'].to_numpy(), df['c_y'].to_numpy(), df['c_z'].to_numpy()), axis=-1)
@@ -229,7 +250,7 @@ class XtalList(IndexedContainer, State):
         return XtalState(self.basis)
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=JaxNumPy) -> 'XtalList':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=JaxNumPy) -> 'XtalList':
         xtals = XtalState.import_dataframe(df, xp)
         return cls(df['index'].to_numpy(), xtals.basis)
 
@@ -329,8 +350,37 @@ class RotationState(ArrayContainer, State):
         for matrix in xp.reshape(self.matrix, (-1, 3, 3)):
             yield RotationState(matrix[None])
 
+    @overload
+    def __matmul__(self, other: 'RotationState') -> 'RotationState': ...
+
+    @overload
+    def __matmul__(self, other: RealArray) -> RealArray: ...
+
+    @overload
+    def __matmul__(self, other: XtalState) -> XtalState: ...
+
+    def __matmul__(self, other: 'RotationState | RealArray | XtalState'
+                   ) -> 'RotationState | RealArray | XtalState':
+        if isinstance(other, RotationState):
+            return RotationState(self.matrix @ other.matrix)
+        if isinstance(other, XtalState):
+            return XtalState(other.basis @ self.matrix)
+        return other @ self.matrix
+
+    @overload
+    def __rmatmul__(self, other: RealArray) -> RealArray: ...
+
+    @overload
+    def __rmatmul__(self, other: XtalState) -> XtalState: ...
+
+    def __rmatmul__(self, other: RealArray | XtalState) -> RealArray | XtalState:
+        if isinstance(other, XtalState):
+            return XtalState(other.basis @ self.matrix)
+        return other @ self.matrix
+
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, xp: ArrayNamespace=JaxNumPy) -> 'RotationState':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=JaxNumPy
+                         ) -> 'RotationState':
         """Initialize a new :class:`Sample` object with a :class:`pandas.Series` array. The array
         must contain the following columns:
 
@@ -377,7 +427,7 @@ class RotationState(ArrayContainer, State):
         """
         xp = self.__array_namespace__()
         if xp.allclose(self.matrix, xp.swapaxes(self.matrix, -1, -2)):
-            eigw, eigv = xp.stack(xp.linalg.eigh(self.matrix))
+            eigw, eigv = xp.linalg.eigh(self.matrix)
             axis = eigv[xp.isclose(eigw, 1.0)]
             theta = xp.arccos(0.5 * (xp.trace(self.matrix) - 1.0))
             alpha = xp.arccos(axis[0, 2])
@@ -386,7 +436,46 @@ class RotationState(ArrayContainer, State):
         return TiltState(tilt_angles(self.matrix, xp))
 
 class EulerState(ArrayContainer, State):
+    """Represents rotation state using Euler angles (Bunge convention).
+
+    This class stores rotation information as Euler angles following the ZXZ
+    convention (also known as the Bunge convention) and provides conversion to
+    rotation matrix representation.
+
+    The Euler angles define a sequence of three elementary rotations:
+        1. Rotation around z-axis by phi1: (x,y,z) → (u,v,z)
+        2. Rotation around u-axis by Phi: (u,v,z) → (u,w,z1)
+        3. Rotation around z1-axis by phi2: (u,w,z1) → (x1,y1,z1)
+
+    Attributes:
+        angles (RealArray): Array of Euler angles [phi1, Phi, phi2] defining
+            the rotation, where:
+
+            - phi1: First rotation angle around z-axis, range [0, 2 * pi)
+            - Phi: Second rotation angle around u-axis, range [0, pi]
+            - phi2: Third rotation angle around z1-axis, range [0, 2 * pi)
+
+    Notes:
+        This class inherits from both ArrayContainer and State, providing
+        array-like functionality and state management capabilities.
+
+    Examples:
+        >>> euler = EulerState(angles=array([0.0, pi/2, pi/4]))
+        >>> rotation = euler.to_rotation()
+    """
     angles : RealArray
+
+    @property
+    def phi1(self) -> RealArray:
+        return self.angles[..., 0]
+
+    @property
+    def Phi(self) -> RealArray:
+        return self.angles[..., 1]
+
+    @property
+    def phi2(self) -> RealArray:
+        return self.angles[..., 2]
 
     def to_rotation(self) -> RotationState:
         xp = self.__array_namespace__()
@@ -462,7 +551,8 @@ class BaseSetup(Container):
         return self.lens.pupil_center
 
     @classmethod
-    def parser(cls, ext: str='ini') -> Parser:
+    def parser(cls, file_or_extension: str='ini') -> Parser:
+        ext = get_extension(file_or_extension)
         if ext == 'ini':
             return INIParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi',
                                            'z': 'z'}},

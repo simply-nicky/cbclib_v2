@@ -585,7 +585,9 @@ protected:
     template <bool IsForward>
     Point<long> find_next_step(const Streak<T> & streak, const Point<long> & point, int n_steps) const
     {
-        auto iter = BresenhamPlotter<T, 2, IsForward>{streak.line()}.begin(point);
+        auto line = streak.line();
+        if (line.pt0 == line.pt1) return point; // zero-length line
+        auto iter = BresenhamPlotter<T, 2, IsForward>{line}.begin(point);
         for (int i = 0; i < n_steps; i++) iter++;
         return *iter;
     }

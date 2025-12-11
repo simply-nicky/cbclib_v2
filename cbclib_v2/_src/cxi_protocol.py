@@ -38,7 +38,7 @@ class DataIndices(IndexedContainer):
         return len(self.index)
 
     def __getitem__(self: I, indices: MultiIndices | BoolArray) -> I:
-        if isinstance(indices, int):
+        if isinstance(indices, (int, np.integer)):
             indices = [indices,]
 
         return super().__getitem__(indices)

@@ -91,7 +91,11 @@ class Regions2D:
     x : List[int]
     y : List[int]
 
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[PointSet2D]): ...
 
     def __delitem__(self, idxs: int | slice): ...
 
@@ -120,7 +124,11 @@ class Regions3D:
     y : List[int]
     z : List[int]
 
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[PointSet3D]): ...
 
     def __delitem__(self, idxs: int | slice): ...
 
@@ -145,7 +153,11 @@ class Regions3D:
     def extend(self, value: Regions3D): ...
 
 class RegionsList2D:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[Regions2D]): ...
 
     def __delitem__(self, index: int | slice): ...
 
@@ -178,7 +190,11 @@ class RegionsList2D:
     def y(self) -> NDIntArray: ...
 
 class RegionsList3D:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[Regions3D]): ...
 
     def __delitem__(self, index: int | slice): ...
 

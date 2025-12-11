@@ -1,4 +1,4 @@
-from typing import Iterator, List, Tuple, overload
+from typing import Iterable, Iterator, List, Tuple, overload
 from ..annotations import BoolArray, IntSequence, NDIntArray, NDRealArray, RealArray, RealSequence
 from .label import Regions2D, Structure2D
 
@@ -39,7 +39,11 @@ class Peaks:
     def remove(self, x: int, y: int): ...
 
 class PeaksList:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[Peaks]): ...
 
     def __delitem__(self, index: int | slice): ...
 
@@ -126,7 +130,11 @@ class StreakFloat:
     def covariance_matrix(self) -> List[float]: ...
 
 class PatternDouble:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[StreakDouble]): ...
 
     def __delitem__(self, index: int | slice): ...
 
@@ -155,7 +163,11 @@ class PatternDouble:
     def to_regions(self) -> Regions2D: ...
 
 class PatternFloat:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[StreakFloat]): ...
 
     def __delitem__(self, index: int | slice): ...
 
@@ -186,7 +198,11 @@ class PatternFloat:
 Pattern = PatternDouble | PatternFloat
 
 class PatternFloatList:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[PatternFloat]): ...
 
     def __delitem__(self, index: int | slice): ...
 
@@ -211,7 +227,11 @@ class PatternFloatList:
     def to_lines(self, width: RealSequence | None=None) -> NDRealArray: ...
 
 class PatternDoubleList:
+    @overload
     def __init__(self): ...
+
+    @overload
+    def __init__(self, elements: Iterable[PatternDouble]): ...
 
     def __delitem__(self, index: int | slice): ...
 
