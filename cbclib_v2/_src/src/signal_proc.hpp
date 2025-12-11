@@ -143,7 +143,6 @@ InterpValues<T> bilinear(const std::vector<array<U>> & grid, const Coord & coord
         else dx.push_back(T());
     }
 
-    T out = T();
     InterpValues<T> values {coord.size()};
 
     // Iterating over a square around coord

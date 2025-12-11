@@ -346,7 +346,6 @@ auto robust_mean_with_mask(py::array_t<T> inp, py::array_t<bool> mask, U axis, d
     auto ax = ibuf.ndim - seq.size();
     auto out_shape = std::vector<py::ssize_t>(ibuf.shape.begin(), std::next(ibuf.shape.begin(), ax));
     size_t repeats = std::reduce(out_shape.begin(), out_shape.end(), 1, std::multiplies());
-    size_t size = ibuf.size / repeats;
 
     if (return_std) out_shape.insert(out_shape.begin(), 2);
     auto out = py::array_t<D>(out_shape);

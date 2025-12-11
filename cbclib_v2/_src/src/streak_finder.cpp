@@ -210,7 +210,7 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
     Sequence<long> axes;
     if (ax)
     {
-        if (ax.value().size() != mask.ndim())
+        if (static_cast<ssize_t>(ax.value().size()) != mask.ndim())
         {
             auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to the mask number of dimensions (" +
                            std::to_string(mask.ndim()) + ")";
@@ -501,11 +501,11 @@ std::array<size_t, 2> push_to_lines(std::vector<T> & lines, const std::vector<St
 template <typename T>
 std::array<size_t, 2> push_to_lines(std::vector<T> & lines, const std::vector<Streak<T>> & streaks, const std::optional<py::array_t<T>> & width, size_t index = 0)
 {
-    size_t n_pushed;
+    size_t n_pushed = 0;
 
     if (width)
     {
-        if (width.value().ndim() != 1 || width.value().size() != streaks.size())
+        if (width.value().ndim() != 1 || width.value().size() != static_cast<size_t>(streaks.size()))
         {
             std::ostringstream oss;
             std::copy(width.value().shape(), width.value().shape() + width.value().ndim(), std::experimental::make_ostream_joiner(oss, ", "));
@@ -672,7 +672,7 @@ PYBIND11_MODULE(streak_finder, m)
     list_cls.def("index", [](const std::vector<Peaks> & list)
         {
             std::vector<py::ssize_t> indices;
-            for (auto index = 0; index < list.size(); index++)
+            for (size_t index = 0; index < list.size(); index++)
             {
                 for (size_t i = 0; i < list[index].size(); i++) indices.push_back(index);
             }
@@ -681,7 +681,7 @@ PYBIND11_MODULE(streak_finder, m)
         .def("x", [](const std::vector<Peaks> & list)
         {
             std::vector<long> x;
-            for (auto index = 0; index < list.size(); index++)
+            for (size_t index = 0; index < list.size(); index++)
             {
                 for (const auto & point : list[index]) x.push_back(point.x());
             }
@@ -690,7 +690,7 @@ PYBIND11_MODULE(streak_finder, m)
         .def("y", [](const std::vector<Peaks> & list)
         {
             std::vector<long> y;
-            for (auto index = 0; index < list.size(); index++)
+            for (size_t index = 0; index < list.size(); index++)
             {
                 for (const auto & point : list[index]) y.push_back(point.y());
             }

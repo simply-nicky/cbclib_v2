@@ -207,7 +207,7 @@ public:
 template <typename InputIt, typename = std::enable_if_t<std::is_integral_v<typename std::iterator_traits<InputIt>::value_type>>>
 void check_dimension(const std::string & name, ssize_t dim, InputIt first, ssize_t expected)
 {
-    if (*(first + dim) != expected)
+    if (static_cast<ssize_t>(*(first + dim)) != expected)
     {
         auto text = name + " has an incompatible shape at axis " + std::to_string(dim) + ": " +
                     std::to_string(*(first + dim)) + " != " + std::to_string(expected);

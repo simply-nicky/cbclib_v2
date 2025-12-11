@@ -594,7 +594,7 @@ void declare_list(py::class_<List> & cls, const std::string & str)
         {
             auto range = slice_range(slice, list.size());
             auto iter = std::next(list.begin(), range.start());
-            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = list.erase(iter);
+            for (size_t i = 0; i < static_cast<size_t>(range.size()); ++i, iter += range.step() - 1) iter = list.erase(iter);
         }, py::arg("index"))
         .def("__getitem__", [str](const List & list, py::ssize_t index)
         {
