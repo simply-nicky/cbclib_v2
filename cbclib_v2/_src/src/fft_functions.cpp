@@ -298,7 +298,8 @@ py::array_t<T> gaussian_kernel_vec(std::vector<T> sigma, U order, T truncate)
     auto out = py::array_t<T>(shape);
     auto oarr = array<T>(out.request());
 
-    for (size_t index = 0; const auto & pt : rectangle_range(oarr.shape()))
+    size_t index = 0;
+    for (const auto & pt : rectangle_range(oarr.shape()))
     {
         T val = T(1.0);
         for (size_t i = 0; i < oarr.ndim(); i++) val *= gaussians[i][pt[i]];

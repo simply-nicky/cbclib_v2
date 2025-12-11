@@ -39,7 +39,7 @@ PixelND<T, N> make_pixel(PointND<I, N> && point, const array<T> & data)
     return std::make_pair(std::move(point), data.at(point.coordinate()));
 }
 
-template <typename... Ix, typename T> requires is_all_integral<Ix...>
+template <typename... Ix, typename T, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
 PixelND<T, sizeof...(Ix)> make_pixel(T value, Ix... xs)
 {
     return std::make_pair(PointND<long, sizeof...(Ix)>{xs...}, value);
@@ -73,7 +73,8 @@ public:
 
     // Angle between the largest eigenvector of the covariance matrix and x-axis
     // Can return nan if mu_xx[0] == mu_xx[1]
-    T theta() const requires (N == 2)
+    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    T theta() const
     {
         T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
         if (mu_xx[1] > mu_xx[0]) theta += M_PI_2;
@@ -82,7 +83,8 @@ public:
 
     // Return line segment representing the major axis of the object
     // Returns a zero-length line if mu_xx[0] == mu_xx[1]
-    Line<T> line() const requires (N == 2)
+    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    Line<T> line() const
     {
         T angle = theta();
         if (std::isnan(angle)) return Line<T>{origin, origin};
@@ -111,7 +113,7 @@ class MomentsND
 public:
     MomentsND() = default;
 
-    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt>>>>
+    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt>>>>
     MomentsND(Pt && pt) : org(std::forward<Pt>(pt)), mu(), mu_x(), mu_xx(), mu_xy() {}
 
     MomentsND(const PixelSetND<T, N> & pset) : MomentsND()
@@ -167,7 +169,7 @@ public:
         insert(std::get<0>(pixel), std::get<1>(pixel));
     }
 
-    template <typename InputIt, typename Value = typename std::iter_value_t<InputIt>, typename V = typename Value::second_type,
+    template <typename InputIt, typename Value = iter_value_t<InputIt>, typename V = typename Value::second_type,
         typename = std::enable_if_t<std::is_same_v<PixelND<V, N>, Value> && std::is_convertible_v<T, V>>
     >
     void insert(InputIt first, InputIt last)
@@ -325,7 +327,7 @@ public:
 
     PointSetND() = default;
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
     void dilate(Func && func, const StructureND<N> & structure)
     {
         std::vector<PointND<long, N>> last_pixels {begin(), end()};
@@ -355,8 +357,8 @@ public:
     }
 
     template <typename Func, typename Stop, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>> &&
-        std::is_invocable_r_v<bool, std::remove_cvref_t<Stop>, const PointSetND<N> &>
+        std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>> &&
+        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const PointSetND<N> &>
     >>
     void dilate(Func && func, const StructureND<N> & structure, Stop && stop)
     {
@@ -386,7 +388,7 @@ public:
         }
     }
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
     void dilate(Func && func, const StructureND<N> & structure, size_t n_iter)
     {
         std::vector<PointND<long, N>> last_pixels {begin(), end()};
@@ -493,7 +495,8 @@ public:
         merge(source);
     }
 
-    Line<T> line() const requires (N == 2)
+    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    Line<T> line() const
     {
         if (m_mnt.zeroth()) return m_mnt.central().line();
         return {m_mnt.origin(), m_mnt.origin()};

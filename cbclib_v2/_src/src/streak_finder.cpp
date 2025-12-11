@@ -363,7 +363,8 @@ std::tuple<py::array_t<T>, T> p_value(const std::vector<Streak<T>> & streaks, py
     StreakMask buffer (marr);
     for (const auto & streak: streaks) buffer.add(streak);
 
-    for (size_t i = 0; const auto & streak : streaks)
+    size_t i = 0;
+    for (const auto & streak : streaks)
     {
         p_values.mutable_at(i++) = buffer.p_value(streak, xtol, vmin, p, streak.id());
     }

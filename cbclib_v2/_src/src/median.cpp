@@ -298,8 +298,8 @@ auto robust_mean(py::array_t<T> inp, py::none mask, U axis, double r0, double r1
                 }
                 std::sort(buffer.begin(), buffer.end());
 
-                D cumsum = D(); D var = D(); D sum = D(); size_t n_inliers = 0;
-                for (size_t j = 0; auto [error, index] : buffer)
+                D cumsum = D(); D var = D(); D sum = D(); size_t n_inliers = 0, j = 0;
+                for (auto [error, index] : buffer)
                 {
                     if (lm * cumsum > j++ * error)
                     {
@@ -427,8 +427,8 @@ auto robust_mean_with_mask(py::array_t<T> inp, py::array_t<bool> mask, U axis, d
                 }
                 std::sort(buffer.begin(), buffer.end());
 
-                D cumsum = D(); D var = D(); D sum = D(); size_t n_inliers = 0;
-                for (size_t j = 0; auto [error, index]: buffer)
+                D cumsum = D(); D var = D(); D sum = D(); size_t n_inliers = 0, j = 0;
+                for (auto [error, index]: buffer)
                 {
                     if (lm * cumsum > j++ * error)
                     {
@@ -559,7 +559,8 @@ auto robust_lsq(py::array_t<T> W, py::array_t<T> y, py::none mask, U axis, doubl
                 for (size_t k = 0; k < fits.size(); k++)
                 {
                     D sum = D(), weight = D(), cumsum = D();
-                    for (size_t j = 0; auto [error, index] : buffer)
+                    size_t j = 0;
+                    for (auto [error, index] : buffer)
                     {
                         if (lm * cumsum > j++ * error)
                         {
@@ -696,7 +697,8 @@ auto robust_lsq_with_mask(py::array_t<T> W, py::array_t<T> y, py::array_t<bool> 
                 for (size_t k = 0; k < fits.size(); k++)
                 {
                     D sum = D(), weight = D(), cumsum = D();
-                    for (size_t j = 0; auto [error, index] : buffer)
+                    size_t j = 0;
+                    for (auto [error, index] : buffer)
                     {
                         if (lm * cumsum > j++ * error)
                         {

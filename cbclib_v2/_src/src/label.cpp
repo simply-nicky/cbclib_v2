@@ -55,7 +55,8 @@ auto dilate(py::array_t<bool> input, StructureND<N> structure, py::none seeds, s
         for (size_t n = 0; n < N; n++) shape[n] = frame.shape(n);
 
         PointSetND<N> pixels;
-        for (size_t index = 0; auto && pt : rectangle_range<PointND<long, N>, true>{std::move(shape)})
+        size_t index = 0;
+        for (auto && pt : rectangle_range<PointND<long, N>, true>{std::move(shape)})
         {
             if (frame[index++]) pixels->emplace_hint(pixels.end(), std::forward<decltype(pt)>(pt));
         }
@@ -214,7 +215,9 @@ auto label(py::array_t<bool> mask, StructureND<N> structure, py::none seeds, siz
 
             PointND<size_t, N> shape;
             for (size_t n = 0; n < N; n++) shape[n] = frame.shape(n);
-            for (size_t index = 0; auto pt : rectangle_range<PointND<long, N>, true>{std::move(shape)})
+
+            size_t index = 0;
+            for (auto pt : rectangle_range<PointND<long, N>, true>{std::move(shape)})
             {
                 if (frame[index++])
                 {
@@ -357,8 +360,8 @@ auto label_seeded_vec(py::array_t<bool> mask, StructureND<N> structure, std::vec
 }
 
 template <typename T, size_t N, typename Func, typename... Ix, typename = std::enable_if_t<
-    std::is_invocable_v<std::remove_cvref_t<Func>, PixelsND<T, N>>
->> requires is_all_integral<Ix...>
+    std::is_invocable_v<remove_cvref_t<Func>, PixelsND<T, N>> && is_all_integral_v<Ix ...>
+>>
 py::array_t<T> apply(const std::vector<std::vector<PointSetND<N>>> & list, py::array_t<T> data, Func && func, std::optional<std::array<long, N>> ax, Ix... sizes)
 {
     Sequence<long> axes;
@@ -393,8 +396,8 @@ py::array_t<T> apply(const std::vector<std::vector<PointSetND<N>>> & list, py::a
 }
 
 template <typename T, size_t N, typename Func, typename... Ix, typename = std::enable_if_t<
-    std::is_invocable_v<std::remove_cvref_t<Func>, const PixelsND<T, N> &>
->> requires is_all_integral<Ix...>
+    std::is_invocable_v<remove_cvref_t<Func>, const PixelsND<T, N> &> && is_all_integral_v<Ix...>
+>>
 void declare_region_func(py::module & m, Func && func, const std::string & funcstr, Ix... sizes)
 {
     m.def(funcstr.c_str(), [f = std::forward<Func>(func), sizes...](std::vector<std::vector<PointSetND<N>>> regions, py::array_t<T> data, std::optional<std::array<long, N>> ax)
@@ -490,7 +493,8 @@ PYBIND11_MODULE(label, m)
         .def_property("y", [](const PointSetND<2> & points){return detail::get_x(points, 1);}, nullptr)
         .def("__contains__", [](const PointSetND<2> & points, std::array<long, 2> point)
         {
-            return points->contains(PointND<long, 2>{point});
+            if (points->find(PointND<long, 2>{point}) != points.end()) return true;
+            return false;
         })
         .def("__iter__", [](const PointSetND<2> & points)
         {
@@ -517,7 +521,8 @@ PYBIND11_MODULE(label, m)
         .def_property("z", [](const PointSetND<3> & points){return detail::get_x(points, 2);}, nullptr)
         .def("__contains__", [](const PointSetND<3> & points, std::array<long, 3> point)
         {
-            return points->contains(PointND<long, 3>{point});
+            if (points->find(PointND<long, 3>{point}) != points.end()) return true;
+            return false;
         })
         .def("__iter__", [](const PointSetND<3> & points)
         {
@@ -623,7 +628,8 @@ PYBIND11_MODULE(label, m)
         .def("index", [](const std::vector<std::vector<PointSetND<2>>> & list)
         {
             std::vector<py::ssize_t> indices;
-            for (auto index = 0; const auto & regions : list)
+            auto index = 0;
+            for (const auto & regions : list)
             {
                 for (const auto & region : regions)
                 {
@@ -672,7 +678,8 @@ PYBIND11_MODULE(label, m)
         .def("index", [](const std::vector<std::vector<PointSetND<3>>> & list)
         {
             std::vector<py::ssize_t> indices;
-            for (auto index = 0; const auto & regions : list)
+            auto index = 0;
+            for (const auto & regions : list)
             {
                 for (const auto & region : regions)
                 {

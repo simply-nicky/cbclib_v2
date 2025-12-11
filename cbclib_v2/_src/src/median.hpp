@@ -118,7 +118,8 @@ public:
 
     ImageFilter(const array<bool> & footprint)
     {
-        for (size_t index = 0; const auto & pt : rectangle_range(footprint.shape()))
+        size_t index = 0;
+        for (const auto & pt : rectangle_range(footprint.shape()))
         {
             if (footprint[index++])
             {

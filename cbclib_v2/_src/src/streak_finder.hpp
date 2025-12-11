@@ -37,13 +37,13 @@ T logbinom(I n, I k, T p)
 
 struct Peaks;
 
-template <typename Iterator, typename = std::iterator_traits<Iterator>::value_type::second_type>
+template <typename Iterator, typename = typename std::iterator_traits<Iterator>::value_type::second_type>
 class ValueIterator
 {
 public:
-    using iterator_category = std::iterator_traits<Iterator>::iterator_category;
-    using value_type = std::iterator_traits<Iterator>::value_type::second_type;
-    using difference_type = typename std::iter_difference_t<Iterator>;
+    using iterator_category = typename std::iterator_traits<Iterator>::iterator_category;
+    using value_type = typename std::iterator_traits<Iterator>::value_type::second_type;
+    using difference_type = iter_difference_t<Iterator>;
     using reference = const value_type &;
     using pointer = const value_type *;
 
@@ -51,83 +51,102 @@ public:
     ValueIterator(Iterator && iter) : m_iter(std::move(iter)) {}
     ValueIterator(const Iterator & iter) : m_iter(iter) {}
 
-    ValueIterator & operator++() requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    ValueIterator & operator++()
     {
         ++m_iter;
         return *this;
     }
 
-    ValueIterator operator++(int) requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    ValueIterator operator++(int)
     {
         return ValueIterator(m_iter++);
     }
 
-    ValueIterator & operator--() requires (std::bidirectional_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
+    ValueIterator & operator--()
     {
         --m_iter;
         return *this;
     }
 
-    ValueIterator operator--(int) requires (std::bidirectional_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
+    ValueIterator operator--(int)
     {
         return ValueIterator(m_iter--);
     }
 
-    ValueIterator & operator+=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator & operator+=(difference_type offset)
     {
         m_iter += offset;
         return *this;
     }
 
-    ValueIterator operator+(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator operator+(difference_type offset) const
     {
         return ValueIterator(m_iter + offset);
     }
 
-    ValueIterator & operator-=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator & operator-=(difference_type offset)
     {
         m_iter -= offset;
         return *this;
     }
 
-    ValueIterator operator-(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator operator-(difference_type offset) const
     {
         return ValueIterator(m_iter - offset);
     }
 
-    difference_type operator-(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    difference_type operator-(const ValueIterator & rhs) const
     {
         return m_iter - rhs;
     }
 
-    reference operator[](difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    reference operator[](difference_type offset) const
     {
         return (m_iter + offset)->to_array();
     }
 
-    bool operator==(const ValueIterator & rhs) const requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    bool operator==(const ValueIterator & rhs) const
     {
         return m_iter == rhs.m_iter;
     }
-    bool operator!=(const ValueIterator & rhs) const requires (std::forward_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    bool operator!=(const ValueIterator & rhs) const
     {
         return !(*this == rhs);
     }
 
-    bool operator<(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator<(const ValueIterator & rhs) const
     {
         return m_iter < rhs.m_iter;
     }
-    bool operator>(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator>(const ValueIterator & rhs) const
     {
         return m_iter > rhs.m_iter;
     }
 
-    bool operator<=(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator<=(const ValueIterator & rhs) const
     {
         return !(*this > rhs);
     }
-    bool operator>=(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator>=(const ValueIterator & rhs) const
     {
         return !(*this < rhs);
     }
@@ -341,8 +360,8 @@ class Streak
 {
 public:
     template <typename PSet, typename Pt, typename = std::enable_if_t<
-        std::is_same_v<PixelSet<T>, std::remove_cvref_t<PSet>> &&
-        std::is_constructible_v<Point<long>, std::remove_cvref_t<Pt>>
+        std::is_same_v<PixelSet<T>, remove_cvref_t<PSet>> &&
+        std::is_constructible_v<Point<long>, remove_cvref_t<Pt>>
     >>
     Streak(PSet && pset, Pt && ctr) : m_pxls(std::forward<PSet>(pset))
     {
