@@ -1,6 +1,7 @@
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from typing import Iterable, Protocol
 from setuptools import setup, find_namespace_packages, Extension
@@ -35,6 +36,26 @@ def find_cuda_home() -> str | None:
 
 SKIP_CUDA = os.environ.get('CBCLIB_SKIP_CUDA', '0').lower() in ('1', 'true', 'yes')
 CUDA_HOME_FOUND = find_cuda_home() is not None and not SKIP_CUDA
+
+def find_fftw_paths() -> tuple[list[str], list[str]]:
+    """Find FFTW include and library directories using pkg-config."""
+    try:
+        include_dirs = subprocess.check_output(['pkg-config', '--cflags-only-I', 'fftw3'],
+                                               text=True).strip().split()
+        include_dirs = [d[2:] for d in include_dirs if d.startswith('-I')]
+
+        lib_dirs = subprocess.check_output(['pkg-config', '--libs-only-L', 'fftw3'],
+                                          text=True).strip().split()
+        lib_dirs = [d[2:] for d in lib_dirs if d.startswith('-L')]
+
+        return include_dirs, lib_dirs
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("ERROR: FFTW3 library not found. Install it with:")
+        print("  conda (recommended): conda install -c conda-forge fftw")
+        print("  Ubuntu/Debian: sudo apt-get install libfftw3-dev")
+        print("  macOS: brew install fftw")
+        print("  Fedora: sudo dnf install fftw-devel")
+        sys.exit(1)
 
 def cuda_include() -> str:
     """ Return the CUDA include path. """
@@ -216,9 +237,7 @@ class BuildCPPExp(build_ext):
                 if IS_LINUX:
                     self.add_cxx_extra_args(ext, ["-fvisibility=hidden", "-g0"])
 
-
-            ext.library_dirs += ['/usr/local/lib',
-                                 os.path.join(sys.prefix, 'lib')]
+            ext.library_dirs += [os.path.join(sys.prefix, 'lib')]
             ext.include_dirs += [os.path.join(sys.prefix, 'include')]
 
             ext.define_macros += [('VERSION_INFO', __version__)]
@@ -256,12 +275,17 @@ class BuildCPPExp(build_ext):
 openmp_flags = {'extra_compile_args': {'cxx': ['-std=c++20', '-fopenmp']},
                 'extra_link_args': ['-lgomp']}
 
+# Find FFTW paths
+fftw_includes, fftw_libs = find_fftw_paths()
+
 extensions = [
     CPPExtension("cbclib_v2._src.src.bresenham",
                  sources=["cbclib_v2/_src/src/bresenham.cpp"],
                  **openmp_flags),
     CPPExtension("cbclib_v2._src.src.fft_functions",
                  sources=["cbclib_v2/_src/src/fft_functions.cpp"],
+                 include_dirs=fftw_includes,
+                 library_dirs=fftw_libs,
                  libraries = ['fftw3', 'fftw3f', 'fftw3l', 'fftw3_omp',
                               'fftw3f_omp', 'fftw3l_omp'],
                  **openmp_flags),
