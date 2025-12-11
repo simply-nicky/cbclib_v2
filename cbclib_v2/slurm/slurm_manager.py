@@ -115,7 +115,7 @@ class SLURMScript:
     """
     command         : str
     job_name        : str
-    parameters      : ScriptSpec = ScriptSpec()
+    parameters      : ScriptSpec = field(default_factory=ScriptSpec)
 
     def script_header(self) -> List[str]:
         header = self.parameters.script_header()

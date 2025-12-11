@@ -61,7 +61,7 @@ class TestSetup():
 
 class FixedState(BaseState, State):
     xtal    : XtalState
-    setup   : FixedSetup = field(default=TestSetup.fixed_setup(), static=True)
+    setup   : FixedSetup = field(default_factory=TestSetup.fixed_setup, static=True)
 
 random_xtal = random_state(TestSetup.xtal(JaxNumPy),
                            tree.map(lambda val: REL_TOL * val, TestSetup.xtal(JaxNumPy)))
