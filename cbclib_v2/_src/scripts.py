@@ -152,8 +152,8 @@ class CrystMetafile(Container):
     metapath    : InitVar[str]
     metadata    : CrystMetadata = field(default_factory=CrystMetadata)
     frames      : Dict[str, IndexArray] = field(default_factory=dict)
-    ss_idxs     : Indices = slice(None)
-    fs_idxs     : Indices = slice(None)
+    ss_idxs     : Indices = field(default_factory=lambda: slice(None))
+    fs_idxs     : Indices = field(default_factory=lambda: slice(None))
 
     def __post_init__(self, metapath: str):
         self.metafile = CXIStore(metapath, CrystMetadata.default_protocol())
@@ -430,8 +430,8 @@ class StreaksWorker():
     params          : FinderConfig
     kind            : DetectionKind
     detector        : InitVar[Detector | None] = None
-    ss_idxs         : Indices = slice(None)
-    fs_idxs         : Indices = slice(None)
+    ss_idxs         : Indices = field(default_factory=lambda: slice(None))
+    fs_idxs         : Indices = field(default_factory=lambda: slice(None))
     pre_processor   : PreProcessor | None = None
 
     def __post_init__(self, metapath, detector):
