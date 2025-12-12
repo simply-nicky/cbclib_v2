@@ -19,7 +19,7 @@ class TestCBDModel():
     @pytest.fixture
     def patterns(self, key: KeyArray, model: CBDModel, state: FullState, num_lines: int,
                  xp: ArrayNamespace) -> Patterns:
-        keys = xp.asarray(random.split(key, 4))
+        keys = xp.asarray(random.key_data(random.split(key, 4)))
         center = model.lens.zero_order(state.lens, xp)
 
         length = xp.asarray(random.uniform(keys[0], (num_lines,), xp.float32, 1.5e-3, 1.5e-2))

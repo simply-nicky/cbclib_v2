@@ -145,14 +145,14 @@ class TestJobManager:
     async def test_stream_job(self, manager: SLURMJobManager, job_output: JobOutput,
                               monkeypatch: pytest.MonkeyPatch):
         """Test job output streaming."""
-        # Mock is_running to return True once then False
+        # Mock is_running_async to return True once then False
         states = [True, False]
-        async def mock_is_running(*args, **kwargs) -> bool:
+        async def mock_is_running_async(*args, **kwargs) -> bool:
             if states:
                 return states.pop(0)
             return False
 
-        monkeypatch.setattr(SLURMJobManager, "is_running", mock_is_running)
+        monkeypatch.setattr(SLURMJobManager, "is_running_async", mock_is_running_async)
 
         lines = []
         async for line in manager.stream_job(job_output, poll_interval=0.1):

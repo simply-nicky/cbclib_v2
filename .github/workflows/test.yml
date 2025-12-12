@@ -32,6 +32,8 @@ jobs:
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
         export PATH="/usr/lib/ccache:$PATH"
         echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+        echo "CC=/usr/lib/ccache/gcc" >> $GITHUB_ENV
+        echo "CXX=/usr/lib/ccache/g++" >> $GITHUB_ENV
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
@@ -45,6 +47,8 @@ jobs:
       run: pip install -v -e ".[dev]"
       env:
         MAKEFLAGS: "-j2"
+        CC: /usr/lib/ccache/gcc
+        CXX: /usr/lib/ccache/g++
 
     - name: Run tests
       run: pytest

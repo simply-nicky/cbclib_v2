@@ -28,7 +28,7 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
     Sequence<long> axes;
     if (ax)
     {
-        if (ax.value().size() != mask.ndim())
+        if (static_cast<ssize_t>(ax.value().size()) != mask.ndim())
         {
             auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to the mask number of dimensions (" +
                            std::to_string(mask.ndim()) + ")";
@@ -505,7 +505,7 @@ std::array<size_t, 2> push_to_lines(std::vector<T> & lines, const std::vector<St
 
     if (width)
     {
-        if (width.value().ndim() != 1 || width.value().size() != static_cast<size_t>(streaks.size()))
+        if (width.value().ndim() != 1 || width.value().size() != static_cast<ssize_t>(streaks.size()))
         {
             std::ostringstream oss;
             std::copy(width.value().shape(), width.value().shape() + width.value().ndim(), std::experimental::make_ostream_joiner(oss, ", "));
