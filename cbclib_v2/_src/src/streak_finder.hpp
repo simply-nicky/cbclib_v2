@@ -519,6 +519,8 @@ template <typename T>
 struct StreakFinderInput
 {
 public:
+    static constexpr size_t MAX_NUM_ITER = 1000;
+
     using const_iterator = std::vector<Point<long>>::const_iterator;
     using iterator = std::vector<Point<long>>::iterator;
 
@@ -547,13 +549,20 @@ public:
         auto streak = get_streak(seed, mask);
 
         Line<long> old_line = Line<long>{}, line = streak.central_line();
-        while (old_line != line)
+        size_t n_iter = 0;
+        while (old_line != line && n_iter < MAX_NUM_ITER)
         {
             old_line = line;
 
             streak = grow_streak<false>(std::move(streak), old_line.pt0, mask, xtol);
             streak = grow_streak<true>(std::move(streak), old_line.pt1, mask, xtol);
             line = streak.central_line();
+        }
+        if (n_iter == MAX_NUM_ITER)
+        {
+            auto err_txt = "Streak growth did not converge for seed point (" +
+                           std::to_string(seed.x()) + ", " + std::to_string(seed.y()) + ")";
+            throw std::runtime_error(err_txt);
         }
 
         return streak;

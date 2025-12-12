@@ -129,7 +129,7 @@ void filter_peaks(std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<b
     Sequence<long> axes;
     if (ax)
     {
-        if (ax.value().size() != mask.ndim())
+        if (static_cast<ssize_t>(ax.value().size()) != mask.ndim())
         {
             auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to the mask number of dimensions (" +
                            std::to_string(mask.ndim()) + ")";

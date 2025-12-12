@@ -272,8 +272,10 @@ class CBDIndexer(CBDSetup):
                       xy_min[..., 1] - circle.center[..., 1],
                       xy_max[..., 0] - circle.center[..., 0],
                       xy_max[..., 1] - circle.center[..., 1]))
-        theta = xp.concatenate((2.0 * xp.arctan((b - xp.sqrt(a**2 + b**2 - c**2)) / (a + c)),
-                                2.0 * xp.arctan((b + xp.sqrt(a**2 + b**2 - c**2)) / (a + c))))
+        delta_sq = a**2 + b**2 - c**2
+        delta = xp.where(delta_sq >= 0.0, xp.sqrt(delta_sq), xp.inf)
+        theta = xp.concatenate((2.0 * xp.arctan((b - delta) / (a + c)),
+                                2.0 * xp.arctan((b + delta) / (a + c))))
 
         points = circle.points(theta)
         proj = project_to_rect(points[..., :2], xy_min, xy_max, xp)
