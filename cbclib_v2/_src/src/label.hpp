@@ -2,10 +2,7 @@
 #define NEW_LABEL_H_
 #include "array.hpp"
 #include "geometry.hpp"
-
-#ifndef CBCLIB_DEBUG_LOG
-#  define CBCLIB_DEBUG_LOG(msg) do { if (std::getenv("DEBUG")) { std::cerr << msg; } } while(0)
-#endif
+#include "log.hpp"
 
 namespace cbclib {
 
@@ -519,36 +516,6 @@ protected:
 
 template <typename T>
 using Pixels = PixelsND<T, 2>;
-
-// template <size_t N>
-// class RegionsND : public WrappedContainer<std::vector<PointSetND<N>>>
-// {
-// public:
-//     using WrappedContainer<std::vector<PointSetND<N>>>::WrappedContainer;
-//     using WrappedContainer<std::vector<PointSetND<N>>>::size;
-
-//     RegionsND() = default;
-
-//     std::string info() const
-//     {
-//         return "<RegionsND, regions = <List[PointSetND], size = " + std::to_string(size()) + ">>";
-//     }
-
-//     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-//     void mask(array<I> & array, bool value) const
-//     {
-//         for (const auto & region: m_ctr) region.mask(array, value);
-//     }
-
-//     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-//     void mask(array<I> && array, bool value) const
-//     {
-//         mask(array, value);
-//     }
-
-// protected:
-//     using WrappedContainer<std::vector<PointSetND<N>>>::m_ctr;
-// };
 
 template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
 std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
