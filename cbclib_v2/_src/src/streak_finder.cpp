@@ -293,8 +293,8 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                     {
                         auto streak = inputs[index].get_streak(seed, buffer, xtol);
 
-                        LOG(DEBUG) << "Found streak with " << streak.pixels().size() << " points for seed point (" <<
-                                       seed.x() << ", " << seed.y() << ") and line = " << streak.line();
+                        LOG(DEBUG) << "Found streak with " << streak.pixels().size() << " points for seed point " <<
+                                       seed << " and line = " << streak.line();
 
                         auto streak_p = buffer.p_value(streak, xtol, vmin, p, StreakMask::not_used);
                         if (streak_p < log_eps)
@@ -302,7 +302,7 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                             buffer.add(streak);
                             locals[index].push_back(streak);
 
-                            LOG(DEBUG) << "Accepted streak for seed point (" << seed.x() << ", " << seed.y() << ") with p_value = " << streak_p;
+                            LOG(DEBUG) << "Accepted streak for seed point " << seed << " with p_value = " << streak_p;
                         }
                     }
                 }

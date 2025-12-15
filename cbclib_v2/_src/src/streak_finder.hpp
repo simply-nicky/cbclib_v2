@@ -548,6 +548,9 @@ public:
     {
         auto streak = get_streak(seed, mask);
 
+        LOG(DEBUG) << "Initial streak with " << streak.pixels().size() << " pixels for seed point " <<
+                      seed << " and line = " << streak.line();
+
         Line<long> old_line = Line<long>{}, line = streak.central_line();
         size_t n_iter = 0;
         while (old_line != line && n_iter++ < MAX_NUM_ITER)
@@ -557,6 +560,10 @@ public:
             streak = grow_streak<false>(std::move(streak), old_line.pt0, mask, xtol);
             streak = grow_streak<true>(std::move(streak), old_line.pt1, mask, xtol);
             line = streak.central_line();
+
+            LOG(DEBUG) << "Grown streak with " << streak.pixels().size() << " pixels at iteration " <<
+                          n_iter << " for seed point " << seed << ", central line = " << line <<
+                          ", and line = " << streak.line();
         }
         if (n_iter == MAX_NUM_ITER)
         {
