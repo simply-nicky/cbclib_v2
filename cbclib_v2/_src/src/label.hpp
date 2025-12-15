@@ -3,6 +3,10 @@
 #include "array.hpp"
 #include "geometry.hpp"
 
+#ifndef CBCLIB_DEBUG_LOG
+#  define CBCLIB_DEBUG_LOG(msg) do { if (std::getenv("DEBUG")) { std::cerr << msg; } } while(0)
+#endif
+
 namespace cbclib {
 
 // Image moments class
@@ -91,6 +95,13 @@ public:
         Point<T> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
+
+        CBCLIB_DEBUG_LOG(
+            "CentralMomentsND::line angle=" << angle
+            << " tau=" << tau
+            << " delta=" << delta
+            << " hw=" << hw << '\n'
+        );
         return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 

@@ -271,7 +271,7 @@ extensions = [
     CPPExtension("cbclib_v2._src.src.streak_finder",
                  sources=["cbclib_v2/_src/src/streak_finder.cpp"],
                  cxx_std=17,
-                 extra_compile_args=['-fopenmp'],
+                 extra_compile_args=['-fopenmp', '-DCPP_LOG'],
                  extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.test",
                  sources=["cbclib_v2/_src/src/test.cpp"],

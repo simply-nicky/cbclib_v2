@@ -51,4 +51,4 @@ jobs:
         CXX: /usr/lib/ccache/g++
 
     - name: Run tests
-      run: pytest
+      run: pytest -s tests/

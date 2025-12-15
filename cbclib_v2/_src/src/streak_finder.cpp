@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "streak_finder.hpp"
 #include "zip.hpp"
 
@@ -279,6 +280,9 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                 T p = T(1.0) - T(lesses[index]) / totals[index];
                 T log_eps = std::log(p) * min_size;
 
+                LOG(DEBUG) << "Processing frame " << index << ", chunk " << remainder <<
+                              "/" << n_chunks - 1 << ": log_eps = " << log_eps;
+
                 auto first = remainder * chunk_size;
                 auto last = (remainder == n_chunks - 1) ? inputs[index].peaks().size() : first + chunk_size;
                 buffer.mask() = marr.slice_back(index % n_modules, 2);
@@ -288,10 +292,17 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                     if (buffer.is_free(seed))
                     {
                         auto streak = inputs[index].get_streak(seed, buffer, xtol);
-                        if (buffer.p_value(streak, xtol, vmin, p, StreakMask::not_used) < log_eps)
+
+                        LOG(DEBUG) << "Found streak with " << streak.pixels().size() << " points for seed point (" <<
+                                       seed.x() << ", " << seed.y() << ") and line = " << streak.line();
+
+                        auto streak_p = buffer.p_value(streak, xtol, vmin, p, StreakMask::not_used);
+                        if (streak_p < log_eps)
                         {
                             buffer.add(streak);
                             locals[index].push_back(streak);
+
+                            LOG(DEBUG) << "Accepted streak for seed point (" << seed.x() << ", " << seed.y() << ") with p_value = " << streak_p;
                         }
                     }
                 }
@@ -322,6 +333,9 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                 {
                     buffer.remove(*iter);
                     iter = results[i].erase(iter);
+
+                    LOG(DEBUG) << "Rejected streak during filtering with seed " << iter->center()
+                               << " and line " << iter->line();
                 }
             }
             buffer.clear();

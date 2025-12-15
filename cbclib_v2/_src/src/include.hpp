@@ -2,8 +2,11 @@
 #define INCLUDE_
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <experimental/iterator>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>

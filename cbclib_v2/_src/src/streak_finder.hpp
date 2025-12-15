@@ -550,7 +550,7 @@ public:
 
         Line<long> old_line = Line<long>{}, line = streak.central_line();
         size_t n_iter = 0;
-        while (old_line != line && n_iter < MAX_NUM_ITER)
+        while (old_line != line && n_iter++ < MAX_NUM_ITER)
         {
             old_line = line;
 
