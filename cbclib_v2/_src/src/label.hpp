@@ -172,6 +172,9 @@ public:
             auto [i, j] = UniquePairs<N>::instance().pairs(n);
             mu_xy[n] += r[i] * r[j] * val;
         }
+        LOG(DEBUG) << "MomentsND::insert: Inserted pixel at " << point << " with value " << val
+                   << ", updated moments: mu = " << mu << ", mu_x = " << mu_x
+                   << ", mu_xx = " << mu_xx << ", mu_xy = " << mu_xy;
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
