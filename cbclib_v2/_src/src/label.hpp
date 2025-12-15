@@ -2,6 +2,7 @@
 #define NEW_LABEL_H_
 #include "array.hpp"
 #include "geometry.hpp"
+#include "log.hpp"
 
 namespace cbclib {
 
@@ -92,6 +93,13 @@ public:
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
         return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
+    }
+
+    friend std::ostream & operator<<(std::ostream & os, const CentralMomentsND & m)
+    {
+        os << "{origin = " << m.origin << ", mu_x = " << m.mu_x
+           << ", mu_xx = " << m.mu_xx << ", mu_xy = " << m.mu_xy << "}";
+        return os;
     }
 
 private:

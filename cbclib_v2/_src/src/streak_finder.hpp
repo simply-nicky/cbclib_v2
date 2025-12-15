@@ -549,7 +549,7 @@ public:
         auto streak = get_streak(seed, mask);
 
         LOG(DEBUG) << "get_streak: Initial streak with " << streak.pixels().size() << " pixels for seed point " <<
-                      seed << " and line = " << streak.line();
+                      seed << ", moments = " << streak.moments().central() << ", and line = " << streak.line();
 
         Line<long> old_line = Line<long>{}, line = streak.central_line();
         size_t n_iter = 0;
@@ -562,8 +562,8 @@ public:
             line = streak.central_line();
 
             LOG(DEBUG) << "get_streak: Grown streak with " << streak.pixels().size() << " pixels at iteration " <<
-                          n_iter << " for seed point " << seed << ", central line = " << line <<
-                          ", and line = " << streak.line();
+                          n_iter << " for seed point " << seed << ", moments = " << streak.moments().central() <<
+                          ", central line = " << line << ", and line = " << streak.line();
         }
         if (n_iter == MAX_NUM_ITER)
         {
@@ -605,14 +605,13 @@ protected:
 
         auto is_unaligned = [&new_line, xtol](const Point<T> & pt)
         {
-            auto dist = new_line.distance(pt);
-            LOG(DEBUG) << "add_point_to_streak: Checking end point " << pt << ", distance = " << dist;
-            return dist >= xtol;
+            return new_line.distance(pt) >= xtol;
         };
         auto num_unaligned = std::transform_reduce(new_streak.ends().begin(), new_streak.ends().end(), unsigned(), std::plus(), is_unaligned);
 
-        LOG(DEBUG) << "add_point_to_streak: Trying to add point " << pt << " to streak with line " << streak.line() << ", new line " <<
-                      new_line << ", and " << num_unaligned << " unaligned end points (xtol = " << xtol << ")";
+        LOG(DEBUG) << "add_point_to_streak: Trying to add point " << pt << " to streak with line " << streak.line() << ", new streak moments " <<
+                      new_streak.moments().central() << ", new line " << new_line << ", and " << num_unaligned << " unaligned end points (xtol = "
+                      << xtol << ")";
 
         if (num_unaligned <= m_nfa)
         {
