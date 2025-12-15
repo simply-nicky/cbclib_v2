@@ -31,18 +31,21 @@ std::vector<T> get_x(const Container & c, size_t index)
 template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
 PixelND<T, N> make_pixel(const PointND<I, N> & point, const array<T> & data)
 {
+    LOG(DEBUG) << "make_pixel: Creating pixel at point " << point << " with value " << data.at(point.coordinate());
     return std::make_pair(point, data.at(point.coordinate()));
 }
 
 template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
 PixelND<T, N> make_pixel(PointND<I, N> && point, const array<T> & data)
 {
+    LOG(DEBUG) << "make_pixel: Creating pixel at point " << point << " with value " << data.at(point.coordinate());
     return std::make_pair(std::move(point), data.at(point.coordinate()));
 }
 
 template <typename... Ix, typename T, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
 PixelND<T, sizeof...(Ix)> make_pixel(T value, Ix... xs)
 {
+    LOG(DEBUG) << "make_pixel: Creating pixel at point {" << ((std::to_string(xs) + ", ") + ...) << "} with value " << value;
     return std::make_pair(PointND<long, sizeof...(Ix)>{xs...}, value);
 }
 
