@@ -122,13 +122,14 @@ template <typename T, size_t N>
 class MomentsND
 {
 public:
-    MomentsND() = default;
+    MomentsND() : org{}, mu(T()), mu_x(), mu_xx(), mu_xy() {};
 
     template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt>>>>
     MomentsND(Pt && pt) : org(std::forward<Pt>(pt)), mu(), mu_x(), mu_xx(), mu_xy() {}
 
     MomentsND(const PixelSetND<T, N> & pset) : MomentsND()
     {
+        LOG(DEBUG) << "MomentsND::MomentsND: Initial moments = " << *this;
         if (pset.size())
         {
             org = std::next(pset.begin(), pset.size() / 2)->first;
