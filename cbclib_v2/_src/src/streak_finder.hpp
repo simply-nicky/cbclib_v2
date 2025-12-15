@@ -605,9 +605,14 @@ protected:
 
         auto is_unaligned = [&new_line, xtol](const Point<T> & pt)
         {
-            return new_line.distance(pt) >= xtol;
+            auto dist = new_line.distance(pt);
+            LOG(DEBUG) << "add_point_to_streak: Checking end point " << pt << ", distance = " << dist;
+            return dist >= xtol;
         };
         auto num_unaligned = std::transform_reduce(new_streak.ends().begin(), new_streak.ends().end(), unsigned(), std::plus(), is_unaligned);
+
+        LOG(DEBUG) << "add_point_to_streak: Trying to add point " << pt << " to streak with line " << streak.line() << ", new line " <<
+                      new_line << ", and " << num_unaligned << " unaligned end points (xtol = " << xtol << ")";
 
         if (num_unaligned <= m_nfa)
         {
