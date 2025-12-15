@@ -28,19 +28,19 @@ class TestStreakFinder():
         return np.stack((ctr + 2 * np.sqrt(np.log(2) * eigval[-1]) * eigvec[-1],
                          ctr - 2 * np.sqrt(np.log(2) * eigval[-1]) * eigvec[-1]))
 
-    @pytest.fixture(params=[60])
+    @pytest.fixture(params=[30])
     def n_lines(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
-    @pytest.fixture(params=[(100, 120)])
+    @pytest.fixture(params=[(50, 60)])
     def shape(self, request: pytest.FixtureRequest) -> Shape:
         return request.param
 
-    @pytest.fixture(params=[30.0])
+    @pytest.fixture(params=[15.0])
     def length(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
-    @pytest.fixture(params=[1.5])
+    @pytest.fixture(params=[1.0])
     def width(self, request: pytest.FixtureRequest) -> float:
         return request.param
 

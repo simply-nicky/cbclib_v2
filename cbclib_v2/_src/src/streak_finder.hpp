@@ -548,7 +548,7 @@ public:
     {
         auto streak = get_streak(seed, mask);
 
-        LOG(DEBUG) << "Initial streak with " << streak.pixels().size() << " pixels for seed point " <<
+        LOG(DEBUG) << "get_streak: Initial streak with " << streak.pixels().size() << " pixels for seed point " <<
                       seed << " and line = " << streak.line();
 
         Line<long> old_line = Line<long>{}, line = streak.central_line();
@@ -561,13 +561,13 @@ public:
             streak = grow_streak<true>(std::move(streak), old_line.pt1, mask, xtol);
             line = streak.central_line();
 
-            LOG(DEBUG) << "Grown streak with " << streak.pixels().size() << " pixels at iteration " <<
+            LOG(DEBUG) << "get_streak: Grown streak with " << streak.pixels().size() << " pixels at iteration " <<
                           n_iter << " for seed point " << seed << ", central line = " << line <<
                           ", and line = " << streak.line();
         }
         if (n_iter == MAX_NUM_ITER)
         {
-            auto err_txt = "Streak growth did not converge for seed point (" +
+            auto err_txt = "get_streak: Streak growth did not converge for seed point (" +
                            std::to_string(seed.x()) + ", " + std::to_string(seed.y()) + ")";
             throw std::runtime_error(err_txt);
         }
@@ -624,6 +624,8 @@ protected:
         if (line.pt0 == line.pt1) return point; // zero-length line
         auto iter = BresenhamPlotter<T, 2, IsForward>{line}.begin(point);
         for (int i = 0; i < n_steps; i++) iter++;
+
+        LOG(DEBUG) << "find_next_step: Next step for point " << point << " is " << *iter << " along line " << line;
         return *iter;
     }
 
@@ -637,7 +639,11 @@ protected:
 
             // Find the closest peak in structure vicinity
             auto iter = m_peaks.find_range(pt, m_structure.rank);
-            if (iter != m_peaks.end() && mask.is_free(*iter) && *iter != point) pt = *iter;
+            if (iter != m_peaks.end() && mask.is_free(*iter) && *iter != point)
+            {
+                pt = *iter;
+                LOG(DEBUG) << "grow_streak: Found peak point " << pt << " near predicted point " << point;
+            }
 
             if (!mask.is_bad(pt) && pt != point)
             {

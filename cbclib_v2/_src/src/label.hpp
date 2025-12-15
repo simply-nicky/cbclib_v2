@@ -95,6 +95,9 @@ public:
         Point<T> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
+
+        LOG(DEBUG) << "CentralMomentsND::line: Major axis line computation: angle = " << angle <<
+                      ", delta = " << delta << ", hw = " << hw;
         return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
