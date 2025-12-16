@@ -466,7 +466,8 @@ template <typename T, typename U, class Shape>
 void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape)
 {
     std::vector<long> temp (buffer.ndim(), 0);
-    for (size_t index = 0; const auto & pt : rectangle_range(data.shape()))
+    size_t index = 0;
+    for (const auto & pt : rectangle_range(data.shape()))
     {
         std::transform(pt.begin(), pt.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);
 
@@ -478,7 +479,8 @@ template <typename T, typename U, class Shape, class Origin>
 void read_buffer(const array<T> & buffer, array<U> data, const Shape & fshape, const Origin & origin)
 {
     std::vector<long> temp (buffer.ndim(), 0);
-    for (size_t index = 0; const auto & pt : rectangle_range(data.shape()))
+    size_t index = 0;
+    for (const auto & pt : rectangle_range(data.shape()))
     {
         std::transform(origin.begin(), origin.end(), pt.begin(), temp.begin(), std::plus<long>());
         std::transform(temp.begin(), temp.end(), fshape.begin(), temp.begin(), detail::modulo<long, size_t>);

@@ -199,14 +199,14 @@ class TestPeaksAndMoments():
 
         for index, (image, mask) in enumerate(zip(images, masks)):
             peaks = detect_peaks(image, mask, radius=3, vmin=threshold)
-            n_modules = image.size // prod(image.shape[-2:])
-            other_peaks = all_peaks[index * n_modules:(index + 1) * n_modules]
+            num_modules = image.size // prod(image.shape[-2:])
+            other_peaks = all_peaks[index * num_modules:(index + 1) * num_modules]
             assert np.all(peaks.index() == other_peaks.index())
             assert np.all(peaks.x() == other_peaks.x())
             assert np.all(peaks.y() == other_peaks.y())
 
             filter_peaks(peaks, image, mask, connectivity, threshold, npts)
-            other_peaks = filtered[index * n_modules:(index + 1) * n_modules]
+            other_peaks = filtered[index * num_modules:(index + 1) * num_modules]
             assert np.all(peaks.index() == other_peaks.index())
             assert np.all(peaks.x() == other_peaks.x())
             assert np.all(peaks.y() == other_peaks.y())

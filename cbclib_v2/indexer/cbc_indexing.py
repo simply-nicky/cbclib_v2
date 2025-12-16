@@ -1,75 +1,24 @@
-from typing import Callable, Iterator, List, Literal, Protocol, Sequence, Tuple
+from typing import Callable, Iterator, Literal, Protocol, Sequence, Tuple
 from dataclasses import dataclass
 from jax import random
 from .cbc_data import (AnyPoints, CBData, CBDPoints, CircleState, LaueVectors, Miller,
                        MillerWithRLP, Patterns, PointsWithK, RLP, Rotograms, UCA)
-from .cbc_setup import (EulerState, BaseLens, BaseSetup, BaseState, RotationState, TiltState,
-                        TiltOverAxisState, XtalList, XtalState)
+from .cbc_setup import BaseLens, BaseSetup, BaseState, TiltOverAxisState, XtalList, XtalState
 from .geometry import (arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, project_to_rect,
                        safe_divide, source_lines)
 from .._src.annotations import ArrayNamespace, KeyArray, IntArray, JaxNumPy, NumPy, RealArray
 from .._src.data_container import add_at, array_namespace
 from .._src.src.bresenham import accumulate_lines
-from .._src.src.label import PointSet3D, Structure3D, binary_dilation, center_of_mass, label
+from .._src.src.label import (PointSet3D, Regions3D, Structure3D, binary_dilation, center_of_mass,
+                              label)
 from .._src.state import State
 
-class Transform():
-    def __call__(self, argument: RealArray, state: State) -> RealArray:
-        raise NotImplementedError
-
-class Rotation(Transform):
-    def __call__(self, argument: RealArray, state: RotationState) -> RealArray:
-        return argument @ state.matrix
-
-    def of_xtal(self, argument: XtalState, state: RotationState) -> XtalState:
-        return XtalState(self(argument.basis, state))
-
-class EulerRotation(Rotation):
-    def __call__(self, argument: RealArray, state: EulerState) -> RealArray:
-        return super().__call__(argument, state.to_rotation())
-
-    def of_xtal(self, argument: XtalState, state: EulerState) -> XtalState:
-        return XtalState(self(argument.basis, state))
-
-class Tilt(Rotation):
-    def __call__(self, argument: RealArray, state: TiltState) -> RealArray:
-        return super().__call__(argument, state.to_rotation())
-
-    def of_xtal(self, argument: XtalState, state: TiltState) -> XtalState:
-        return XtalState(self(argument.basis, state))
-
-class TiltOverAxis(Tilt):
-    def __call__(self, argument: RealArray, state: TiltOverAxisState) -> RealArray:
-        return super().__call__(argument, state.to_tilt())
-
-    def of_xtal(self, argument: XtalState, state: TiltOverAxisState) -> XtalState:
-        return XtalState(self(argument.basis, state))
-
-class ChainRotations(Transform):
-    def __init__(self, transforms : Tuple[Rotation, ...]):
-        self.transforms = transforms
-
-    def __call__(self, argument: RealArray, state: Tuple[RotationState, ...]) -> RealArray:
-        for s, transform in zip(state, self.transforms):
-            argument = transform(argument, s)
-        return argument
-
-    def of_xtal(self, argument: XtalState, state: Tuple[RotationState, ...]) -> XtalState:
-        for s, transform in zip(state, self.transforms):
-            argument = transform.of_xtal(argument, s)
-        return argument
-
-    def combine(self, state: Tuple[RotationState, ...]) -> RotationState:
-        xp = array_namespace(*state)
-        return RotationState(self(xp.eye(3), state))
-
-class Circle(Transform):
-    def __call__(self, argument: RealArray, state: CircleState) -> RealArray:
-        xp = array_namespace(argument)
-        return (state.radius * xp.cos(argument))[..., None] * state.axis1 \
-             + (state.radius * xp.sin(argument))[..., None] * state.axis2 + state.center
-
 class Xtal():
+    def hkl_meshgrid(self, h_vals: IntArray, k_vals: IntArray, l_vals: IntArray,
+                     xp: ArrayNamespace) -> IntArray:
+        h_grid, k_grid, l_grid = xp.meshgrid(h_vals, k_vals, l_vals)
+        return xp.stack((xp.ravel(h_grid), xp.ravel(k_grid), xp.ravel(l_grid)), axis=1)
+
     def hkl_in_aperture(self, theta: float | RealArray, hkl: IntArray, state: XtalState,
                         xp: ArrayNamespace) -> Miller:
         index = xp.broadcast_to(xp.arange(len(state)), (hkl.size // hkl.shape[-1], len(state)))
@@ -87,11 +36,9 @@ class Xtal():
                     ) -> IntArray:
         lat_size = xp.asarray(xp.rint(q_abs / state.unit_cell.lengths), dtype=int)
         lat_size = xp.max(xp.reshape(lat_size, (-1, 3)), axis=0)
-        h_idxs = xp.arange(-lat_size[0], lat_size[0] + 1)
-        k_idxs = xp.arange(-lat_size[1], lat_size[1] + 1)
-        l_idxs = xp.arange(-lat_size[2], lat_size[2] + 1)
-        h_grid, k_grid, l_grid = xp.meshgrid(h_idxs, k_idxs, l_idxs)
-        hkl = xp.stack((xp.ravel(h_grid), xp.ravel(k_grid), xp.ravel(l_grid)), axis=1)
+        hkl = self.hkl_meshgrid(xp.arange(-lat_size[0], lat_size[0] + 1),
+                                xp.arange(-lat_size[1], lat_size[1] + 1),
+                                xp.arange(-lat_size[2], lat_size[2] + 1), xp)
         hkl = xp.compress(xp.any(hkl, axis=1), hkl, axis=0)
 
         rec_vec = xp.dot(hkl, state.basis)
@@ -271,8 +218,6 @@ class CBDSetup():
 @dataclass
 class CBDIndexer(CBDSetup):
     num_points  : int = 100
-    circle      : Circle = Circle()
-    tilt        : TiltOverAxis = TiltOverAxis()
 
     @classmethod
     def rho_map(cls) -> float:
@@ -327,10 +272,13 @@ class CBDIndexer(CBDSetup):
                       xy_min[..., 1] - circle.center[..., 1],
                       xy_max[..., 0] - circle.center[..., 0],
                       xy_max[..., 1] - circle.center[..., 1]))
-        theta = xp.concatenate((2.0 * xp.arctan((b - xp.sqrt(a**2 + b**2 - c**2)) / (a + c)),
-                                2.0 * xp.arctan((b + xp.sqrt(a**2 + b**2 - c**2)) / (a + c))))
 
-        points = self.circle(theta, circle)
+        delta_sq = a**2 + b**2 - c**2
+        delta_sq = xp.where(delta_sq < 0, xp.inf, delta_sq)
+        theta = xp.concatenate((2.0 * xp.arctan((b - xp.sqrt(delta_sq)) / (a + c)),
+                                2.0 * xp.arctan((b + xp.sqrt(delta_sq)) / (a + c))))
+
+        points = circle.points(theta)
         proj = project_to_rect(points[..., :2], xy_min, xy_max, xp)
         dist = xp.sqrt(xp.sum((points[..., :2] - proj)**2, axis=-1))
         return xp.take_along_axis(theta, xp.argsort(dist, axis=0)[:2], axis=0)
@@ -354,7 +302,7 @@ class CBDIndexer(CBDSetup):
     def rotograms(self, rlp: MillerWithRLP, circle: CircleState, uca: UCA,
                   xp: ArrayNamespace) -> Rotograms:
         endpoints = self.uca_endpoints(circle, uca, xp)
-        midpoints = self.circle(xp.mean(endpoints, axis=0), circle)
+        midpoints = circle.points(xp.mean(endpoints, axis=0))
         tilts = self.rotations(rlp, midpoints, xp)
         return Rotograms.from_tilts(tilts, uca.index, uca.streak_id, xp)
 
@@ -389,7 +337,7 @@ class CBDIndexer(CBDSetup):
                                 out_overlap='sum', num_threads=num_threads)
         return xp.asarray(rmap)
 
-    def to_peaks(self, rotomap: RealArray, threshold: float, n_max: int=30) -> List[PointSet3D]:
+    def to_peaks(self, rotomap: RealArray, threshold: float, n_max: int=30) -> Regions3D:
         xp = array_namespace(rotomap)
 
         rotomap = rotomap / xp.max(rotomap, axis=(-3, -2, -1), keepdims=True)
@@ -399,29 +347,29 @@ class CBDIndexer(CBDSetup):
         mask = xp.concatenate([xp.arange(size - 1, -1, -1) < n_max for size in counts])
 
         f, z, y, x = f[indices[mask]], z[indices[mask]], y[indices[mask]], x[indices[mask]]
-        return [PointSet3D(x[f == frame], y[f == frame], z[f == frame]) for frame in frames]
+        return Regions3D(
+            (PointSet3D(x[f == frame], y[f == frame], z[f == frame]) for frame in frames)
+        )
 
-    def refine_peaks(self, peaks: List[PointSet3D], rotomap: RealArray, vicinity: Structure3D,
+    def refine_peaks(self, peaks: Regions3D, rotomap: RealArray, vicinity: Structure3D,
                      connectivity: Structure3D=Structure3D(1, 1), num_threads: int=1
                      ) -> Tuple[IntArray, TiltOverAxisState]:
         xp = array_namespace(rotomap)
         mask = binary_dilation(xp.zeros(rotomap.shape, dtype=bool), vicinity, peaks,
                                num_threads=num_threads)
-        regions = label(mask, connectivity, peaks, num_threads=num_threads)
-        frames = xp.concatenate([xp.full(len(region), index)
-                                 for index, region in enumerate(regions)])
-        centers = xp.concatenate(center_of_mass(regions, rotomap))
+        regions_list = label(mask, connectivity, peaks, num_threads=num_threads)
+        centers = center_of_mass(regions_list, rotomap)
         centers = centers * self.step(rotomap.shape, xp) - self.rho_map()
-        return frames, TiltOverAxisState.from_point(centers)
+        return regions_list.frames(), TiltOverAxisState.from_point(centers)
 
     def solutions(self, initial: XtalState, indices: IntArray, tilts: TiltOverAxisState,
                   patterns: Patterns) -> XtalList:
         if len(initial) == 1:
             return XtalList(patterns.index_array.unique()[indices],
-                            self.tilt.of_xtal(initial, tilts).basis)
+                            (tilts.to_tilt().to_rotation() @ initial).basis)
         if len(initial) == len(patterns):
             return XtalList(patterns.index_array.unique()[indices],
-                            self.tilt.of_xtal(initial[indices], tilts).basis)
+                            (tilts.to_tilt().to_rotation() @ initial[indices]).basis)
         raise ValueError(f'Number of crystals ({len(initial):d}) and patterns ({len(patterns):d}) '\
                          'are inconsistent')
 

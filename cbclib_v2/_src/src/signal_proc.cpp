@@ -20,7 +20,7 @@ py::array_t<T> binterpolate(py::array_t<T> inp, std::vector<py::array_t<U>> grid
 
     auto npts = coords.size() / ndim;
     if (ndim > 1) check_dimension("coords", coords.ndim() - 1, coords.shape(), ndim);
-    else if (*(coords.shape() + coords.ndim() - 1) != ndim)
+    else if (static_cast<size_t>(*(coords.shape() + coords.ndim() - 1)) != ndim)
     {
         std::vector<size_t> shape {coords.shape(), coords.shape() + coords.ndim()};
         shape.push_back(ndim);

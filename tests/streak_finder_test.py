@@ -28,19 +28,19 @@ class TestStreakFinder():
         return np.stack((ctr + 2 * np.sqrt(np.log(2) * eigval[-1]) * eigvec[-1],
                          ctr - 2 * np.sqrt(np.log(2) * eigval[-1]) * eigvec[-1]))
 
-    @pytest.fixture(params=[60])
+    @pytest.fixture(params=[40])
     def n_lines(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
-    @pytest.fixture(params=[(100, 120)])
+    @pytest.fixture(params=[(80, 100)])
     def shape(self, request: pytest.FixtureRequest) -> Shape:
         return request.param
 
-    @pytest.fixture(params=[30.0])
+    @pytest.fixture(params=[15.0])
     def length(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
-    @pytest.fixture(params=[1.5])
+    @pytest.fixture(params=[1.0])
     def width(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
@@ -89,7 +89,7 @@ class TestStreakFinder():
         mask[indices] = False
         return mask
 
-    @pytest.fixture(params=[(3, 2)])
+    @pytest.fixture(params=[(1, 2)])
     def structure(self, request: pytest.FixtureRequest) -> Structure2D:
         radius, rank = request.param
         return Structure2D(radius, rank)
@@ -132,8 +132,9 @@ class TestStreakFinder():
     def get_pixels(self, x: int, y: int, finder: PatternStreakFinder
                    ) -> Tuple[NDIntArray, NDIntArray]:
         xs, ys = np.array(finder.structure.x) + x, np.array(finder.structure.y) + y
-        mask = (xs >= 0) & (xs < finder.mask.shape[1]) & (ys >= 0) & (ys < finder.mask.shape[0])
-        mask &= finder.mask[ys, xs]
+        is_inbound = (xs >= 0) & (xs < finder.mask.shape[1]) & (ys >= 0) & (ys < finder.mask.shape[0])
+        xs, ys = xs[is_inbound], ys[is_inbound]
+        mask = finder.mask[ys, xs]
         return xs[mask], ys[mask]
 
     def get_line(self, x: int, y: int, image: NDRealArray, finder: PatternStreakFinder

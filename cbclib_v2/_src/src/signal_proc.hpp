@@ -143,11 +143,11 @@ InterpValues<T> bilinear(const std::vector<array<U>> & grid, const Coord & coord
         else dx.push_back(T());
     }
 
-    T out = T();
     InterpValues<T> values {coord.size()};
 
     // Iterating over a square around coord
-    for (size_t i = 0; auto [v_coord, v_factor] : values)
+    size_t i = 0;
+    for (auto [v_coord, v_factor] : values)
     {
         for (size_t n = 0; n < coord.size(); n++)
         {
@@ -190,7 +190,7 @@ public:
     template <typename InputIt, typename UnaryFunction, typename = std::enable_if_t<
         (std::is_base_of_v<typename array<T>::const_iterator, InputIt> ||
          std::is_base_of_v<typename array<T>::iterator, InputIt>) &&
-        std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t>
+        std::is_invocable_v<remove_cvref_t<UnaryFunction>, size_t>
     >>
     UnaryFunction find(InputIt first, InputIt last, size_t index, size_t axis, UnaryFunction && unary_op)
     {
@@ -199,7 +199,7 @@ public:
     }
 
     template <typename UnaryFunction, typename = std::enable_if_t<
-        std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t>
+        std::is_invocable_v<remove_cvref_t<UnaryFunction>, size_t>
     >>
     UnaryFunction find(size_t index, size_t axis, UnaryFunction && unary_op)
     {
@@ -225,9 +225,11 @@ private:
 
     struct FindContext
     {
+        using const_iterator = typename array<T>::const_iterator;
+
         size_t index, axis;
         array<T> line;
-        array<T>::const_iterator first, last;
+        const_iterator first, last;
 
         FindContext(const array<T> & arr, size_t idx, size_t ax) : index(idx), axis(ax), line(arr.slice(idx, ax))
         {
@@ -238,7 +240,7 @@ private:
     template <typename InputIt, typename UnaryFunction, typename = std::enable_if_t<
         (std::is_base_of_v<typename array<T>::const_iterator, InputIt> ||
          std::is_base_of_v<typename array<T>::iterator, InputIt>) &&
-        std::is_invocable_v<std::remove_cvref_t<UnaryFunction>, size_t>
+        std::is_invocable_v<remove_cvref_t<UnaryFunction>, size_t>
     >>
     UnaryFunction find_with_context(InputIt first, InputIt last, UnaryFunction && unary_op, const FindContext & context)
     {

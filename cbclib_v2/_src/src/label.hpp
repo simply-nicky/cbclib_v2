@@ -39,7 +39,7 @@ PixelND<T, N> make_pixel(PointND<I, N> && point, const array<T> & data)
     return std::make_pair(std::move(point), data.at(point.coordinate()));
 }
 
-template <typename... Ix, typename T> requires is_all_integral<Ix...>
+template <typename... Ix, typename T, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
 PixelND<T, sizeof...(Ix)> make_pixel(T value, Ix... xs)
 {
     return std::make_pair(PointND<long, sizeof...(Ix)>{xs...}, value);
@@ -72,27 +72,40 @@ public:
     }
 
     // Angle between the largest eigenvector of the covariance matrix and x-axis
-    T theta() const requires (N == 2)
+    // Can return nan if mu_xx[0] == mu_xx[1]
+    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    T theta() const
     {
         T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
         if (mu_xx[1] > mu_xx[0]) theta += M_PI_2;
         return detail::modulo(theta, M_PI);
     }
 
-    Line<T> line() const requires (N == 2)
+    // Return line segment representing the major axis of the object
+    // Returns a zero-length line if mu_xx[0] == mu_xx[1]
+    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    Line<T> line() const
     {
         T angle = theta();
+        if (std::isnan(angle)) return Line<T>{origin, origin};
         Point<T> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
         return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
+    friend std::ostream & operator<<(std::ostream & os, const CentralMomentsND & m)
+    {
+        os << "{origin = " << m.origin << ", mu_x = " << m.mu_x
+           << ", mu_xx = " << m.mu_xx << ", mu_xy = " << m.mu_xy << "}";
+        return os;
+    }
+
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
-    PointND<T, N> origin;
-    PointND<T, N> mu_x, mu_xx;
-    PointND<T, NumPairs> mu_xy;
+    PointND<T, N> origin;               // centroid
+    PointND<T, N> mu_x {}, mu_xx {};    // mu_x: first central moments, mu_xx: second central moments
+    PointND<T, NumPairs> mu_xy {};      // cross second central moments
 
     friend class MomentsND<T, N>;
 
@@ -107,10 +120,10 @@ class MomentsND
 public:
     MomentsND() = default;
 
-    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt>>>>
-    MomentsND(Pt && pt) : org(std::forward<Pt>(pt)), mu(), mu_x(), mu_xx(), mu_xy() {}
+    template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt>>>>
+    MomentsND(Pt && pt) : org(std::forward<Pt>(pt)) {}
 
-    MomentsND(const PixelSetND<T, N> & pset) : MomentsND()
+    MomentsND(const PixelSetND<T, N> & pset)
     {
         if (pset.size())
         {
@@ -163,7 +176,7 @@ public:
         insert(std::get<0>(pixel), std::get<1>(pixel));
     }
 
-    template <typename InputIt, typename Value = typename std::iter_value_t<InputIt>, typename V = typename Value::second_type,
+    template <typename InputIt, typename Value = iter_value_t<InputIt>, typename V = typename Value::second_type,
         typename = std::enable_if_t<std::is_same_v<PixelND<V, N>, Value> && std::is_convertible_v<T, V>>
     >
     void insert(InputIt first, InputIt last)
@@ -252,10 +265,10 @@ public:
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
 
-    PointND<T, N> org;
-    T mu;
-    PointND<T, N> mu_x, mu_xx;
-    PointND<T, NumPairs> mu_xy;
+    PointND<T, N> org {};               // origin
+    T mu = T();                         // zeroth moment
+    PointND<T, N> mu_x {}, mu_xx {};    // mu_x: first central moments, mu_xx: second central moments
+    PointND<T, NumPairs> mu_xy {};      // cross second central moments
 };
 
 template <typename T>
@@ -321,7 +334,7 @@ public:
 
     PointSetND() = default;
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
     void dilate(Func && func, const StructureND<N> & structure)
     {
         std::vector<PointND<long, N>> last_pixels {begin(), end()};
@@ -351,8 +364,8 @@ public:
     }
 
     template <typename Func, typename Stop, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>> &&
-        std::is_invocable_r_v<bool, std::remove_cvref_t<Stop>, const PointSetND<N> &>
+        std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>> &&
+        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const PointSetND<N> &>
     >>
     void dilate(Func && func, const StructureND<N> & structure, Stop && stop)
     {
@@ -382,7 +395,7 @@ public:
         }
     }
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, std::remove_cvref_t<Func>, PointND<long, N>>>>
+    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
     void dilate(Func && func, const StructureND<N> & structure, size_t n_iter)
     {
         std::vector<PointND<long, N>> last_pixels {begin(), end()};
@@ -489,7 +502,8 @@ public:
         merge(source);
     }
 
-    Line<T> line() const requires (N == 2)
+    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    Line<T> line() const
     {
         if (m_mnt.zeroth()) return m_mnt.central().line();
         return {m_mnt.origin(), m_mnt.origin()};
@@ -505,36 +519,6 @@ protected:
 
 template <typename T>
 using Pixels = PixelsND<T, 2>;
-
-// template <size_t N>
-// class RegionsND : public WrappedContainer<std::vector<PointSetND<N>>>
-// {
-// public:
-//     using WrappedContainer<std::vector<PointSetND<N>>>::WrappedContainer;
-//     using WrappedContainer<std::vector<PointSetND<N>>>::size;
-
-//     RegionsND() = default;
-
-//     std::string info() const
-//     {
-//         return "<RegionsND, regions = <List[PointSetND], size = " + std::to_string(size()) + ">>";
-//     }
-
-//     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-//     void mask(array<I> & array, bool value) const
-//     {
-//         for (const auto & region: m_ctr) region.mask(array, value);
-//     }
-
-//     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-//     void mask(array<I> && array, bool value) const
-//     {
-//         mask(array, value);
-//     }
-
-// protected:
-//     using WrappedContainer<std::vector<PointSetND<N>>>::m_ctr;
-// };
 
 template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
 std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
@@ -573,6 +557,12 @@ template <typename List, typename Element = typename List::value_type, typename 
 void declare_list(py::class_<List> & cls, const std::string & str)
 {
     cls.def(py::init<>())
+        .def(py::init([](py::iterable elems)
+        {
+            List list;
+            for (auto item : elems) list.push_back(item.cast<Element>());
+            return list;
+        }), py::arg("elements"))
         .def("__delitem__", [str](List & list, py::ssize_t index)
         {
             list.erase(std::next(list.begin(), compute_index(index, list.size(), str)));
@@ -581,7 +571,7 @@ void declare_list(py::class_<List> & cls, const std::string & str)
         {
             auto range = slice_range(slice, list.size());
             auto iter = std::next(list.begin(), range.start());
-            for (size_t i = 0; i < range.size(); ++i, iter += range.step() - 1) iter = list.erase(iter);
+            for (size_t i = 0; i < static_cast<size_t>(range.size()); ++i, iter += range.step() - 1) iter = list.erase(iter);
         }, py::arg("index"))
         .def("__getitem__", [str](const List & list, py::ssize_t index)
         {

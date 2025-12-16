@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "streak_finder.hpp"
 #include "zip.hpp"
 
@@ -28,7 +29,7 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, py::array_t<bool> mask, siz
     Sequence<long> axes;
     if (ax)
     {
-        if (ax.value().size() != mask.ndim())
+        if (static_cast<ssize_t>(ax.value().size()) != mask.ndim())
         {
             auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to the mask number of dimensions (" +
                            std::to_string(mask.ndim()) + ")";
@@ -129,7 +130,7 @@ void filter_peaks(std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<b
     Sequence<long> axes;
     if (ax)
     {
-        if (ax.value().size() != mask.ndim())
+        if (static_cast<ssize_t>(ax.value().size()) != mask.ndim())
         {
             auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to the mask number of dimensions (" +
                            std::to_string(mask.ndim()) + ")";
@@ -210,7 +211,7 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
     Sequence<long> axes;
     if (ax)
     {
-        if (ax.value().size() != mask.ndim())
+        if (static_cast<ssize_t>(ax.value().size()) != mask.ndim())
         {
             auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to the mask number of dimensions (" +
                            std::to_string(mask.ndim()) + ")";
@@ -232,7 +233,8 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
     size_t n_modules = marr.size() / module_size;
     size_t repeats = darr.size() / module_size;
     if (repeats != peaks.size())
-        throw std::invalid_argument("Size of peaks list (" + std::to_string(peaks.size()) + ") is incompatible with data");
+        throw std::invalid_argument("Size of peaks list (" + std::to_string(peaks.size()) + ") must be equal to the number of data modules (" +
+                                     std::to_string(repeats) + ")");
 
     size_t n_chunks = threads / repeats + (threads % repeats > 0);
 
@@ -278,6 +280,9 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                 T p = T(1.0) - T(lesses[index]) / totals[index];
                 T log_eps = std::log(p) * min_size;
 
+                LOG(DEBUG) << "Processing frame " << index << ", chunk " << remainder <<
+                              "/" << n_chunks - 1 << ": log_eps = " << log_eps;
+
                 auto first = remainder * chunk_size;
                 auto last = (remainder == n_chunks - 1) ? inputs[index].peaks().size() : first + chunk_size;
                 buffer.mask() = marr.slice_back(index % n_modules, 2);
@@ -287,10 +292,17 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                     if (buffer.is_free(seed))
                     {
                         auto streak = inputs[index].get_streak(seed, buffer, xtol);
-                        if (buffer.p_value(streak, xtol, vmin, p, StreakMask::not_used) < log_eps)
+
+                        LOG(DEBUG) << "Found streak with " << streak.pixels().size() << " points for seed point " <<
+                                       seed << " and line = " << streak.line();
+
+                        auto streak_p = buffer.p_value(streak, xtol, vmin, p, StreakMask::not_used);
+                        if (streak_p < log_eps)
                         {
                             buffer.add(streak);
                             locals[index].push_back(streak);
+
+                            LOG(DEBUG) << "Accepted streak for seed point " << seed << " with p_value = " << streak_p;
                         }
                     }
                 }
@@ -321,6 +333,9 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::a
                 {
                     buffer.remove(*iter);
                     iter = results[i].erase(iter);
+
+                    LOG(DEBUG) << "Rejected streak during filtering with seed " << iter->center()
+                               << " and line " << iter->line();
                 }
             }
             buffer.clear();
@@ -362,7 +377,8 @@ std::tuple<py::array_t<T>, T> p_value(const std::vector<Streak<T>> & streaks, py
     StreakMask buffer (marr);
     for (const auto & streak: streaks) buffer.add(streak);
 
-    for (size_t i = 0; const auto & streak : streaks)
+    size_t i = 0;
+    for (const auto & streak : streaks)
     {
         p_values.mutable_at(i++) = buffer.p_value(streak, xtol, vmin, p, streak.id());
     }
@@ -421,7 +437,7 @@ void declare_streak(py::module & m, const std::string & typestr)
         {
             streak.merge(source);
             return streak;
-        }, py::arg("source"))
+        }, py::arg("source"), py::return_value_policy::reference_internal)
         .def("center", [](Streak<T> & streak){return streak.center().to_array();})
         .def("central_line", [](Streak<T> & streak){return streak.central_line().to_array();})
         .def("line", [](Streak<T> & streak){return streak.line().to_array();})
@@ -499,11 +515,11 @@ std::array<size_t, 2> push_to_lines(std::vector<T> & lines, const std::vector<St
 template <typename T>
 std::array<size_t, 2> push_to_lines(std::vector<T> & lines, const std::vector<Streak<T>> & streaks, const std::optional<py::array_t<T>> & width, size_t index = 0)
 {
-    size_t n_pushed;
+    size_t n_pushed = 0;
 
     if (width)
     {
-        if (width.value().ndim() != 1 || width.value().size() != streaks.size())
+        if (width.value().ndim() != 1 || width.value().size() != static_cast<ssize_t>(streaks.size()))
         {
             std::ostringstream oss;
             std::copy(width.value().shape(), width.value().shape() + width.value().ndim(), std::experimental::make_ostream_joiner(oss, ", "));
@@ -651,12 +667,12 @@ PYBIND11_MODULE(streak_finder, m)
             if (iter != peaks.end()) return std::vector<long>{iter->x(), iter->y()};
             return std::vector<long>{};
         }, py::arg("x"), py::arg("y"), py::arg("range"))
-        .def("append", [](Peaks & peaks, long x, long y){peaks.insert(Point<long>{x, y});}, py::arg("x"), py::arg("y"))
+        .def("append", [](Peaks & peaks, long x, long y){peaks.insert(Point<long>{x, y});}, py::arg("x"), py::arg("y"), py::keep_alive<1, 2>())
         .def("clear", [](Peaks & peaks){peaks.clear();})
         .def("extend", [](Peaks & peaks, std::vector<long> xvec, std::vector<long> yvec)
         {
             for (auto [x, y] : zip::zip(xvec, yvec)) peaks.insert(Point<long>{x, y});
-        }, py::arg("xs"), py::arg("ys"))
+        }, py::arg("xs"), py::arg("ys"), py::keep_alive<1, 2>())
         .def("remove", [](Peaks & peaks, long x, long y)
         {
             auto iter = peaks.find(Point<long>{x, y});
@@ -670,7 +686,7 @@ PYBIND11_MODULE(streak_finder, m)
     list_cls.def("index", [](const std::vector<Peaks> & list)
         {
             std::vector<py::ssize_t> indices;
-            for (auto index = 0; index < list.size(); index++)
+            for (size_t index = 0; index < list.size(); index++)
             {
                 for (size_t i = 0; i < list[index].size(); i++) indices.push_back(index);
             }
@@ -679,7 +695,7 @@ PYBIND11_MODULE(streak_finder, m)
         .def("x", [](const std::vector<Peaks> & list)
         {
             std::vector<long> x;
-            for (auto index = 0; index < list.size(); index++)
+            for (size_t index = 0; index < list.size(); index++)
             {
                 for (const auto & point : list[index]) x.push_back(point.x());
             }
@@ -688,7 +704,7 @@ PYBIND11_MODULE(streak_finder, m)
         .def("y", [](const std::vector<Peaks> & list)
         {
             std::vector<long> y;
-            for (auto index = 0; index < list.size(); index++)
+            for (size_t index = 0; index < list.size(); index++)
             {
                 for (const auto & point : list[index]) y.push_back(point.y());
             }

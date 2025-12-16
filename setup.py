@@ -1,69 +1,297 @@
 import os
+import platform
+import shutil
+import subprocess
 import sys
-from setuptools import setup, find_namespace_packages
+from typing import Iterable, Protocol
+from setuptools import setup, find_namespace_packages, Extension
 from setuptools.command.build_ext import build_ext
-from pybind11.setup_helpers import Pybind11Extension
-import numpy
+from numpy import get_include as numpy_get_include
+from pybind11 import get_include as pybind11_get_include
 
-__version__ = '0.12.0'
+IS_WINDOWS = sys.platform == 'win32'
+IS_MACOS = sys.platform.startswith('darwin')
+IS_LINUX = sys.platform.startswith('linux')
 
-class BuildExtDebugFlags(build_ext):
+__version__ = '0.12.1'
+
+def find_conda_home() -> str:
+    """Find the Conda install path."""
+    conda_home = os.environ.get('CONDA_PREFIX')
+    if conda_home is None:
+        raise RuntimeError("Could not find Conda installation home folder.")
+    return conda_home
+
+def find_cuda_home() -> str | None:
+    """Find the CUDA install path."""
+    # Guess #1
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home is None:
+        # Guess #2
+        nvcc_path = shutil.which("nvcc")
+        if nvcc_path is not None:
+            cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+
+    return cuda_home
+
+SKIP_CUDA = os.environ.get('CBCLIB_SKIP_CUDA', '0').lower() in ('1', 'true', 'yes')
+CUDA_HOME_FOUND = find_cuda_home() is not None and not SKIP_CUDA
+
+def find_fftw_paths() -> tuple[list[str], list[str]]:
+    """Find FFTW include and library directories using pkg-config."""
+    try:
+        include_dirs = subprocess.check_output(['pkg-config', '--cflags-only-I', 'fftw3'],
+                                               text=True).strip().split()
+        include_dirs = [d[2:] for d in include_dirs if d.startswith('-I')]
+
+        lib_dirs = subprocess.check_output(['pkg-config', '--libs-only-L', 'fftw3'],
+                                          text=True).strip().split()
+        lib_dirs = [d[2:] for d in lib_dirs if d.startswith('-L')]
+
+        return include_dirs, lib_dirs
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("ERROR: FFTW3 library not found. Install it with:")
+        print("  conda (recommended): conda install -c conda-forge fftw")
+        print("  Ubuntu/Debian: sudo apt-get install libfftw3-dev")
+        print("  macOS: brew install fftw")
+        print("  Fedora: sudo dnf install fftw-devel")
+        sys.exit(1)
+
+def cuda_include() -> str:
+    """ Return the CUDA include path. """
+    conda_home = find_conda_home()
+
+    arch = platform.machine() # e.g., 'x86_64' or 'aarch64'
+    system = platform.system().lower() # e.g., 'linux' or 'windows'
+    include_path = os.path.join(conda_home, 'targets', f'{arch}-{system}', 'include')
+    if not os.path.exists(include_path):
+        raise RuntimeError(f"CUDA include path does not exist: {include_path}")
+
+    return include_path
+
+def cuda_library_path() -> str:
+    """ Return the CUDA library path. """
+    conda_home = find_conda_home()
+
+    lib_path = os.path.join(conda_home, 'lib')
+    if not os.path.exists(lib_path):
+        raise RuntimeError(f"CUDA library path does not exist: {lib_path}")
+
+    return lib_path
+
+class CCompiler(Protocol):
+    compiler_so : list[str]
+    src_extensions : list[str]
+
+    def _compile(self, obj: str, src: str, ext: str, cc_args: list[str],
+                 extra_postargs: list[str], pp_opts: list[str]) -> None: ...
+
+    def set_executable(self, key: str, value: list[str]) -> None: ...
+
+class CPPExtension(Extension):
+    """
+    Build a C++11+ Extension module with pybind11. This automatically adds the
+    recommended flags when you init the extension and assumes C++ sources - you
+    can further modify the options yourself.
+
+    The customizations are:
+
+    * ``/EHsc`` and ``/bigobj`` on Windows
+    * ``stdlib=libc++`` on macOS
+    * ``visibility=hidden`` and ``-g0`` on Unix
+
+    Finally, you can set ``cxx_std`` via constructor or afterwards to enable
+    flags for C++ std, and a few extra helper flags related to the C++ standard
+    level. It is _highly_ recommended you either set this, or use the provided
+    ``build_ext``, which will search for the highest supported extension for
+    you if the ``cxx_std`` property is not set. Do not set the ``cxx_std``
+    property more than once, as flags are added when you set it. Set the
+    property to None to disable the addition of C++ standard flags.
+
+    If you want to add pybind11 headers manually, for example for an exact
+    git checkout, then set ``include_pybind11=False``.
+    """
+    STD_TMPL = "/std:c++{}" if IS_WINDOWS else "-std=c++{}"
+
+    # flags are prepended, so that they can be further overridden, e.g. by
+    # ``extra_compile_args=["-g"]``.
+
+    def add_compile_args(self, flags: list[str]) -> None:
+        self.extra_compile_args[:0] = flags
+
+    def add_link_args(self, flags: list[str]) -> None:
+        self.extra_link_args[:0] = flags
+
+    def __init__(
+        self,
+        name: str,
+        sources: Iterable[str],
+        include_dirs: list[str] | None = None,
+        define_macros: list[tuple[str, str | None]] | None = None,
+        undef_macros: list[str] | None = None,
+        library_dirs: list[str] | None = None,
+        libraries: list[str] | None = None,
+        runtime_library_dirs: list[str] | None = None,
+        extra_objects: list[str] | None = None,
+        extra_compile_args: list[str] | None = None,
+        extra_link_args: list[str] | None = None,
+        export_symbols: list[str] | None = None,
+        swig_opts: list[str] | None = None,
+        depends: list[str] | None = None,
+        language: str | None = None,
+        optional: bool | None = None,
+        *,
+        cxx_std: int = 17,
+        include_pybind11: bool = True,
+        include_numpy: bool = True,
+        py_limited_api: bool = False,
+    ) -> None:
+        if language is None:
+            language = "c++"
+
+        super().__init__(name, sources, include_dirs, define_macros, undef_macros,
+                         library_dirs, libraries, runtime_library_dirs, extra_objects,
+                         extra_compile_args, extra_link_args, export_symbols, swig_opts,
+                         depends, language, optional, py_limited_api=py_limited_api)
+
+        # Include the installed package pybind11 headers
+        if include_pybind11:
+            self.include_dirs.append(pybind11_get_include())
+        if include_numpy:
+            self.include_dirs.append(numpy_get_include())
+
+        cflags = [self.STD_TMPL.format(cxx_std),]
+        ldflags = []
+
+        if IS_MACOS and "MACOSX_DEPLOYMENT_TARGET" not in os.environ:
+            # C++17 requires a higher min version of macOS. An earlier version
+            # (10.12 or 10.13) can be set manually via environment variable if
+            # you are careful in your feature usage, but 10.14 is the safest
+            # setting for general use. However, never set higher than the
+            # current macOS version!
+            current_macos = tuple(int(x) for x in platform.mac_ver()[0].split(".")[:2])
+            desired_macos = (10, 9) if cxx_std < 17 else (10, 14)
+            macos_string = ".".join(str(x) for x in min(current_macos, desired_macos))
+            macosx_min = f"-mmacosx-version-min={macos_string}"
+            cflags += [macosx_min]
+            ldflags += [macosx_min]
+
+        if IS_WINDOWS:
+            cflags += ["/EHsc", "/bigobj"]
+        if IS_MACOS:
+            cflags += ["-stdlib=libc++"]
+
+        self.add_compile_args(cflags)
+        self.add_link_args(ldflags)
+
+class BuildCPPExp(build_ext):
+    compiler    : CCompiler
+    extensions  : list[Extension]
+
+    def add_extra_args(self, extension: Extension, args: list[str]) -> None:
+        extension.extra_compile_args += args
+
     def build_extensions(self):
         # You can detect --debug via self.debug
-        if self.debug:
-            for ext in self.extensions:
+        self.compiler.src_extensions += ['.cu']
+        original_compile = self.compiler._compile
+
+        for ext in self.extensions:
+            if self.debug:
                 # Add your debug flags here
-                ext.extra_compile_args += ["-g", "-O0", "-D_FORTIFY_SOURCE=0"]
+                self.add_extra_args(ext, ["-g", "-O0", "-D_FORTIFY_SOURCE=0", '-DCPP_LOG'])
+            else:
+                self.add_extra_args(ext, ["-O3"])
+                if IS_LINUX:
+                    self.add_extra_args(ext, ["-fvisibility=hidden", "-g0"])
+
+            ext.library_dirs += [os.path.join(sys.prefix, 'lib')]
+            ext.include_dirs += [os.path.join(sys.prefix, 'include')]
+
+            ext.define_macros += [('VERSION_INFO', __version__)]
+
+        def wrap_single_compile(obj: str, src: str, ext: str, cc_args: list[str],
+                                extra_postargs: list[str], pp_opts: list[str]) -> None:
+            # Copy before we make any modifications.
+            original_compiler = self.compiler.compiler_so
+            try:
+                if src.endswith('.cu'):
+                    nvcc = [os.path.join(find_conda_home(), 'bin', 'nvcc')]
+                    self.compiler.set_executable('compiler_so', nvcc)
+
+                    cflags = extra_postargs
+                    cflags = ['--compiler-options', ','.join(['-fPIC'] + cflags)]
+                else:
+                    cflags = extra_postargs
+                original_compile(obj, src, ext, cc_args, cflags, pp_opts)
+            finally:
+                # Put the original compiler back in place.
+                self.compiler.set_executable('compiler_so', original_compiler)
+
+        self.compiler._compile = wrap_single_compile
 
         super().build_extensions()
 
-extension_args = {'extra_compile_args': ['-fopenmp', '-std=c++20'],
-                  'extra_link_args': ['-lgomp'],
-                  'library_dirs': ['/usr/local/lib',
-                                   os.path.join(sys.prefix, 'lib')],
-                  'include_dirs': [numpy.get_include(),
-                                   os.path.join(sys.prefix, 'include')]}
+# Find FFTW paths
+fftw_includes, fftw_libs = find_fftw_paths()
 
 extensions = [
-    Pybind11Extension("cbclib_v2._src.src.bresenham",
-                      sources=["cbclib_v2/_src/src/bresenham.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.fft_functions",
-                      sources=["cbclib_v2/_src/src/fft_functions.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      libraries = ['fftw3', 'fftw3f', 'fftw3l', 'fftw3_omp',
-                                   'fftw3f_omp', 'fftw3l_omp'],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.index",
-                      sources=["cbclib_v2/_src/src/index.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.label",
-                      sources=["cbclib_v2/_src/src/label.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.median",
-                      sources=["cbclib_v2/_src/src/median.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.signal_proc",
-                      sources=["cbclib_v2/_src/src/signal_proc.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.streak_finder",
-                      sources=["cbclib_v2/_src/src/streak_finder.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
-    Pybind11Extension("cbclib_v2._src.src.test",
-                      sources=["cbclib_v2/_src/src/test.cpp"],
-                      define_macros = [('VERSION_INFO', __version__)],
-                      **extension_args),
+    CPPExtension("cbclib_v2._src.src.bresenham",
+                 sources=["cbclib_v2/_src/src/bresenham.cpp"],
+                 cxx_std=17,
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.fft_functions",
+                 sources=["cbclib_v2/_src/src/fft_functions.cpp"],
+                 cxx_std=17,
+                 include_dirs=fftw_includes,
+                 library_dirs=fftw_libs,
+                 libraries = ['fftw3', 'fftw3f', 'fftw3l', 'fftw3_omp',
+                              'fftw3f_omp', 'fftw3l_omp'],
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.index",
+                 sources=["cbclib_v2/_src/src/index.cpp"],
+                 cxx_std=17),
+    CPPExtension("cbclib_v2._src.src.label",
+                 sources=["cbclib_v2/_src/src/label.cpp"],
+                 cxx_std=17,
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.median",
+                 sources=["cbclib_v2/_src/src/median.cpp"],
+                 cxx_std=17,
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.signal_proc",
+                 sources=["cbclib_v2/_src/src/signal_proc.cpp"],
+                 cxx_std=17,
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.streak_finder",
+                 sources=["cbclib_v2/_src/src/streak_finder.cpp"],
+                 cxx_std=17,
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.test",
+                 sources=["cbclib_v2/_src/src/test.cpp"],
+                 cxx_std=17)
 ]
 
-setup(version=__version__,
+if CUDA_HOME_FOUND:
+    extensions.append(
+        CPPExtension("cbclib_v2._src.src.cuda_functions",
+                     sources=["cbclib_v2/_src/src/cuda_functions.cu",],
+                     cxx_std=17,
+                     include_dirs=[cuda_include()],
+                     library_dirs=[cuda_library_path()],
+                     libraries=['cudart'])
+    )
+
+setup(
+    version=__version__,
     packages=find_namespace_packages(),
     include_package_data=True,
     ext_modules=extensions,
-    cmdclass={"build_ext": BuildExtDebugFlags}
+    cmdclass={"build_ext": BuildCPPExp}
 )

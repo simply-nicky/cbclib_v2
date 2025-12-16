@@ -37,13 +37,13 @@ T logbinom(I n, I k, T p)
 
 struct Peaks;
 
-template <typename Iterator, typename = std::iterator_traits<Iterator>::value_type::second_type>
+template <typename Iterator, typename = typename std::iterator_traits<Iterator>::value_type::second_type>
 class ValueIterator
 {
 public:
-    using iterator_category = std::iterator_traits<Iterator>::iterator_category;
-    using value_type = std::iterator_traits<Iterator>::value_type::second_type;
-    using difference_type = typename std::iter_difference_t<Iterator>;
+    using iterator_category = typename std::iterator_traits<Iterator>::iterator_category;
+    using value_type = typename std::iterator_traits<Iterator>::value_type::second_type;
+    using difference_type = iter_difference_t<Iterator>;
     using reference = const value_type &;
     using pointer = const value_type *;
 
@@ -51,83 +51,102 @@ public:
     ValueIterator(Iterator && iter) : m_iter(std::move(iter)) {}
     ValueIterator(const Iterator & iter) : m_iter(iter) {}
 
-    ValueIterator & operator++() requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    ValueIterator & operator++()
     {
         ++m_iter;
         return *this;
     }
 
-    ValueIterator operator++(int) requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    ValueIterator operator++(int)
     {
         return ValueIterator(m_iter++);
     }
 
-    ValueIterator & operator--() requires (std::bidirectional_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
+    ValueIterator & operator--()
     {
         --m_iter;
         return *this;
     }
 
-    ValueIterator operator--(int) requires (std::bidirectional_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
+    ValueIterator operator--(int)
     {
         return ValueIterator(m_iter--);
     }
 
-    ValueIterator & operator+=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator & operator+=(difference_type offset)
     {
         m_iter += offset;
         return *this;
     }
 
-    ValueIterator operator+(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator operator+(difference_type offset) const
     {
         return ValueIterator(m_iter + offset);
     }
 
-    ValueIterator & operator-=(difference_type offset) requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator & operator-=(difference_type offset)
     {
         m_iter -= offset;
         return *this;
     }
 
-    ValueIterator operator-(difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    ValueIterator operator-(difference_type offset) const
     {
         return ValueIterator(m_iter - offset);
     }
 
-    difference_type operator-(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    difference_type operator-(const ValueIterator & rhs) const
     {
         return m_iter - rhs;
     }
 
-    reference operator[](difference_type offset) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    reference operator[](difference_type offset) const
     {
         return (m_iter + offset)->to_array();
     }
 
-    bool operator==(const ValueIterator & rhs) const requires (std::forward_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    bool operator==(const ValueIterator & rhs) const
     {
         return m_iter == rhs.m_iter;
     }
-    bool operator!=(const ValueIterator & rhs) const requires (std::forward_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
+    bool operator!=(const ValueIterator & rhs) const
     {
         return !(*this == rhs);
     }
 
-    bool operator<(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator<(const ValueIterator & rhs) const
     {
         return m_iter < rhs.m_iter;
     }
-    bool operator>(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator>(const ValueIterator & rhs) const
     {
         return m_iter > rhs.m_iter;
     }
 
-    bool operator<=(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator<=(const ValueIterator & rhs) const
     {
         return !(*this > rhs);
     }
-    bool operator>=(const ValueIterator & rhs) const requires (std::random_access_iterator<Iterator>)
+
+    template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
+    bool operator>=(const ValueIterator & rhs) const
     {
         return !(*this < rhs);
     }
@@ -341,8 +360,8 @@ class Streak
 {
 public:
     template <typename PSet, typename Pt, typename = std::enable_if_t<
-        std::is_same_v<PixelSet<T>, std::remove_cvref_t<PSet>> &&
-        std::is_constructible_v<Point<long>, std::remove_cvref_t<Pt>>
+        std::is_same_v<PixelSet<T>, remove_cvref_t<PSet>> &&
+        std::is_constructible_v<Point<long>, remove_cvref_t<Pt>>
     >>
     Streak(PSet && pset, Pt && ctr) : m_pxls(std::forward<PSet>(pset))
     {
@@ -500,6 +519,8 @@ template <typename T>
 struct StreakFinderInput
 {
 public:
+    static constexpr size_t MAX_NUM_ITER = 1000;
+
     using const_iterator = std::vector<Point<long>>::const_iterator;
     using iterator = std::vector<Point<long>>::iterator;
 
@@ -528,13 +549,20 @@ public:
         auto streak = get_streak(seed, mask);
 
         Line<long> old_line = Line<long>{}, line = streak.central_line();
-        while (old_line != line)
+        size_t n_iter = 0;
+        while (old_line != line && n_iter++ < MAX_NUM_ITER)
         {
             old_line = line;
 
             streak = grow_streak<false>(std::move(streak), old_line.pt0, mask, xtol);
             streak = grow_streak<true>(std::move(streak), old_line.pt1, mask, xtol);
             line = streak.central_line();
+        }
+        if (n_iter == MAX_NUM_ITER)
+        {
+            auto err_txt = "get_streak: Streak growth did not converge for seed point (" +
+                           std::to_string(seed.x()) + ", " + std::to_string(seed.y()) + ")";
+            throw std::runtime_error(err_txt);
         }
 
         return streak;
@@ -556,11 +584,11 @@ public:
     }
 
 protected:
-    Peaks m_peaks;
-    array<T> m_data;
-    Structure m_structure;
-    unsigned m_lookahead;
-    unsigned m_nfa;
+    Peaks m_peaks;              // sparse 2D peaks
+    array<T> m_data;            // 2D data array
+    Structure m_structure;      // connectivity structure
+    unsigned m_lookahead = 0;   // maximum number of lookahead steps
+    unsigned m_nfa = 0;         // maximum number of unaligned points allowed
 
     std::pair<bool, Streak<T>> add_point_to_streak(Streak<T> && streak, const StreakMask & mask, const Point<long> & pt, T xtol) const
     {
@@ -585,7 +613,9 @@ protected:
     template <bool IsForward>
     Point<long> find_next_step(const Streak<T> & streak, const Point<long> & point, int n_steps) const
     {
-        auto iter = BresenhamPlotter<T, 2, IsForward>{streak.line()}.begin(point);
+        auto line = streak.line();
+        if (line.pt0 == line.pt1) return point; // zero-length line
+        auto iter = BresenhamPlotter<T, 2, IsForward>{line}.begin(point);
         for (int i = 0; i < n_steps; i++) iter++;
         return *iter;
     }
@@ -600,7 +630,10 @@ protected:
 
             // Find the closest peak in structure vicinity
             auto iter = m_peaks.find_range(pt, m_structure.rank);
-            if (iter != m_peaks.end() && mask.is_free(*iter) && *iter != point) pt = *iter;
+            if (iter != m_peaks.end() && mask.is_free(*iter) && *iter != point)
+            {
+                pt = *iter;
+            }
 
             if (!mask.is_bad(pt) && pt != point)
             {

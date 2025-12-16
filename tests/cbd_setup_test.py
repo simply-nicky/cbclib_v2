@@ -1,8 +1,8 @@
 import pytest
 from jax import random
 from cbclib_v2.annotations import ArrayNamespace, KeyArray, NumPy, RealArray
-from cbclib_v2.indexer import (CBDModel, CBDPoints, LaueVectors, Miller, MillerWithRLP, Rotation,
-                               RotationState, XtalCell, XtalState)
+from cbclib_v2.indexer import (CBDModel, CBDPoints, LaueVectors, Miller, MillerWithRLP, RotationState,
+                               XtalCell, XtalState)
 from cbclib_v2.test_util import FixedState, TestSetup, check_close
 
 class TestCBDSetup():
@@ -72,7 +72,7 @@ class TestCBDSetup():
                           cell: XtalCell, xp: ArrayNamespace):
         basis = cell.to_basis()
         check_close(xp.linalg.det(ormatrix.matrix), xp.array(1.0))
-        check_close(Rotation()(basis.basis, ormatrix), xtal.basis)
+        check_close(ormatrix @ basis.basis, xtal.basis)
 
     def test_xtal_to_spherical(self, xtal: XtalState):
         r, theta, phi = xtal.to_spherical()

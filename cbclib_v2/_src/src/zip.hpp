@@ -14,6 +14,17 @@
 
 namespace zip {
 
+// C++20 standard features
+
+template <typename T>
+struct remove_cvref
+{
+    using type = std::remove_cv_t<std::remove_reference_t<T>>;
+};
+
+template <typename T>
+using remove_cvref_t = typename remove_cvref<T>::type;
+
 template <typename Iter>
 using select_access_type_for = std::conditional_t<
     std::is_same_v<Iter, std::vector<bool>::iterator> ||
@@ -84,8 +95,8 @@ private:
 template <typename T>
 using select_iterator_for = std::conditional_t<
     std::is_const_v<std::remove_reference_t<T>>,
-    typename std::remove_cvref_t<T>::const_iterator,
-    typename std::remove_cvref_t<T>::iterator
+    typename remove_cvref_t<T>::const_iterator,
+    typename remove_cvref_t<T>::iterator
 >;
 
 template <typename ... T>

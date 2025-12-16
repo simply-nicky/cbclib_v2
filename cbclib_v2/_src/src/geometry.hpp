@@ -208,13 +208,19 @@ struct PointND : public std::array<T, N>
     const std::array<T, N> & to_array() const & {return *this;}
     std::array<T, N> && to_array() && {return std::move(*this);}
 
-    T & x() requires(N >= 1) {return this->operator[](0);}
-    T & y() requires(N >= 2) {return this->operator[](1);}
-    T & z() requires(N >= 3) {return this->operator[](2);}
+    template <size_t M = N, typename = std::enable_if_t<(M >= 1)>>
+    T & x() {return this->operator[](0);}
+    template <size_t M = N, typename = std::enable_if_t<(M >= 2)>>
+    T & y() {return this->operator[](1);}
+    template <size_t M = N, typename = std::enable_if_t<(M >= 3)>>
+    T & z() {return this->operator[](2);}
 
-    const T & x() const requires(N >= 1) {return this->operator[](0);}
-    const T & y() const requires(N >= 2) {return this->operator[](1);}
-    const T & z() const requires(N >= 3) {return this->operator[](2);}
+    template <size_t M = N, typename = std::enable_if_t<(M >= 1)>>
+    const T & x() const {return this->operator[](0);}
+    template <size_t M = N, typename = std::enable_if_t<(M >= 2)>>
+    const T & y() const {return this->operator[](1);}
+    template <size_t M = N, typename = std::enable_if_t<(M >= 3)>>
+    const T & z() const {return this->operator[](2);}
 };
 
 template <template <typename, size_t> class Array, typename T, size_t ... sizes>
@@ -270,20 +276,21 @@ using Point = PointND<T, 2>;
 template <typename T, size_t N>
 struct LineND
 {
-    PointND<T, N> pt0, pt1;
+    PointND<T, N> pt0 {}, pt1 {};   // endpoints
 
     LineND() = default;
 
     template <typename Pt0, typename Pt1, typename = std::enable_if_t<
-        std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt0>> &&
-        std::is_base_of_v<PointND<T, N>, std::remove_cvref_t<Pt1>>
+        std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt0>> &&
+        std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt1>>
     >>
     LineND(Pt0 && pt0, Pt1 && pt1) : pt0(std::forward<Pt0>(pt0)), pt1(std::forward<Pt1>(pt1)) {}
 
     bool operator==(const LineND<T, N> & rhs) const {return pt0 == rhs.pt0 && pt1 == rhs.pt1;}
     bool operator!=(const LineND<T, N> & rhs) const {return !operator==(rhs);}
 
-    PointND<T, N> normal() const requires(N >= 2)
+    template <size_t M = N, typename = std::enable_if_t<(M >= 2)>>
+    PointND<T, N> normal() const
     {
         PointND<T, N> norm {};
         norm[0] = pt1[1] - pt0[1];

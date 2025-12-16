@@ -55,16 +55,17 @@ class TestPyBind11Functions:
         shape = random_shape()
         out_shape = tuple(2 * ax for ax in shape)
         inp = random_complex(shape)
+        axes = tuple(range(-len(out_shape) + 1, 0))
         check_close(fftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
-                    np.fft.fftn(inp, s=out_shape[1:], norm=norm))
+                    np.fft.fftn(inp, s=out_shape[1:], axes=axes, norm=norm))
         check_close(ifftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
-                    np.fft.ifftn(inp, s=out_shape[1:], norm=norm))
+                    np.fft.ifftn(inp, s=out_shape[1:], axes=axes, norm=norm))
 
         inp = random_float(shape)
         check_close(fftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
-                         np.fft.fftn(inp, s=out_shape[1:], norm=norm))
+                         np.fft.fftn(inp, s=out_shape[1:], axes=axes, norm=norm))
         check_close(ifftn(inp, shape=out_shape[1:], norm=norm, num_threads=num_threads),
-                         np.fft.ifftn(inp, s=out_shape[1:], norm=norm))
+                         np.fft.ifftn(inp, s=out_shape[1:], axes=axes, norm=norm))
 
     def test_fft_convolve(self, random_float: ArrayGenerator, random_complex: ArrayGenerator,
                           random_shape: ShapeGenerator, num_threads: int):

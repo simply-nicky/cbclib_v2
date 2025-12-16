@@ -6,8 +6,8 @@ container :class:`cbclib_v2.CrystData`. All transform classes are inherited from
 from collections import defaultdict
 from dataclasses import InitVar, dataclass, fields
 from math import prod
-from typing import (Any, DefaultDict, Dict, Generic, Iterable, Iterator, List, Literal, Protocol,
-                    Sequence, Set, Tuple, Type, TypeVar, Union, get_args, get_type_hints, overload)
+from typing import (Any, DefaultDict, Dict, Generic, Iterable, Iterator, List, Protocol, Sequence,
+                    Set, Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints, overload)
 import numpy as np
 import jax.numpy as jnp
 from .src.index import Indexer
@@ -77,13 +77,16 @@ def to_list(sequence: ToListSequence | Sequence[Item] | Sequence[List[Item] | Tu
     return result
 
 def is_generic(t: Any) -> bool:
-    return isinstance(t, (type(List[int]), type(Literal), type(list[int])))
+    return isinstance(t, (type(List[int]), type(list[int])))
 
 def is_union(t: Any) -> bool:
     return isinstance(t, (type(list | int), type(Union[list, int])))
 
+def is_compound(t: Any) -> bool:
+    return is_generic(t) or is_union(t)
+
 def list_indices(indices: Indices, size: int) -> List[int]:
-    if isinstance(indices, int):
+    if isinstance(indices, (int, np.integer)):
         return [indices,]
     if isinstance(indices, slice):
         start, stop, step = indices.indices(size)
@@ -115,14 +118,42 @@ class Container(DataclassInstance):
         for field in fields(cls):
             attr_type = types[field.name]
             value = values[field.name]
-            if is_union(attr_type):
+
+            # Handle Optional[Container] and Union[..., None]
+            if is_union(attr_type) and type(None) in get_args(attr_type):
                 if value is not None:
                     for t in get_args(attr_type):
-                        if not is_generic(t) and issubclass(t, Container):
+                        if not is_compound(t) and issubclass(t, Container):
                             kwargs[field.name] = t.from_dict(**value)
-                kwargs[field.name] = value
-            elif not is_generic(attr_type) and issubclass(attr_type, Container):
+                            break
+                    else:
+                        kwargs[field.name] = value
+                else:
+                    kwargs[field.name] = None
+
+            # Handle Container types
+            elif not is_compound(attr_type) and issubclass(attr_type, Container):
                 kwargs[field.name] = attr_type.from_dict(**value)
+
+            # Handle List[Container] and Tuple[Container, ...]
+            elif is_generic(attr_type) and get_origin(attr_type) in (list, List, tuple, Tuple):
+                elem_types = get_args(attr_type)
+                if len(elem_types) == 2 and elem_types[1] is Ellipsis:
+                    elem_type = elem_types[0]
+                elif len(elem_types) == 1:
+                    elem_type = elem_types[0]
+                else:
+                    elem_type = attr_type
+
+                if not is_compound(elem_type) and issubclass(elem_type, Container):
+                    if get_origin(attr_type) in (tuple, Tuple):
+                        kwargs[field.name] = tuple(elem_type.from_dict(**v) for v in value)
+                    else:
+                        kwargs[field.name] = [elem_type.from_dict(**v) for v in value]
+                else:
+                    kwargs[field.name] = value
+
+            # Handle other types
             else:
                 kwargs[field.name] = value
         return cls(**kwargs)
@@ -155,8 +186,19 @@ class Container(DataclassInstance):
         result = {}
         for field in fields(self):
             value = getattr(self, field.name)
+            # Handle Container types
             if isinstance(value, Container):
                 result[field.name] = value.to_dict()
+            # Handle List[Container] and Tuple[Container, ...]
+            elif isinstance(value, (list, tuple)):
+                elements = []
+                for elem in value:
+                    if isinstance(elem, Container):
+                        elements.append(elem.to_dict())
+                    else:
+                        elements.append(elem)
+                result[field.name] = elements
+            # Handle other types
             else:
                 result[field.name] = value
         return result
@@ -198,7 +240,7 @@ class DataContainer(Container):
         return {f.name: getattr(self, f.name) for f in fields(self)
                 if not self.is_empty(getattr(self, f.name))}
 
-    def asjax(self: D) -> D:
+    def to_jax(self: D) -> D:
         """Return a copy of this container with NumPy arrays converted to JAX.
 
         Only attributes that are :class:`numpy.ndarray` are converted. Other
@@ -211,7 +253,7 @@ class DataContainer(Container):
                 if isinstance(val, NDArray)}
         return self.replace(**data)
 
-    def asnumpy(self: D) -> D:
+    def to_numpy(self: D) -> D:
         """Return a copy of this container with JAX arrays converted to NumPy.
 
         Only attributes that are recognised as JAX arrays are converted. Other
@@ -305,11 +347,14 @@ class ArrayContainer(DataContainer):
     @property
     def shape(self) -> Shape:
         shape: List[int] = []
+        ndim = 0
         for lengths in zip(*(val.shape for val in self.contents().values())):
             if len(lengths) == len(self.contents()):
-                if not all(l == lengths[0] for l in lengths):
-                    raise ValueError("Inconsistent array shapes in the container")
-                shape.append(lengths[0])
+                if all(l == lengths[0] for l in lengths):
+                    shape.append(lengths[0])
+                ndim += 1
+        if len(shape) == 0 and ndim > 0:
+            raise ValueError("No uniform shape found among array fields")
         return tuple(shape)
 
     def __getitem__(self: A, indices: MultiIndices | BoolArray) -> A:
