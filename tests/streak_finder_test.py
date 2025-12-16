@@ -28,15 +28,15 @@ class TestStreakFinder():
         return np.stack((ctr + 2 * np.sqrt(np.log(2) * eigval[-1]) * eigvec[-1],
                          ctr - 2 * np.sqrt(np.log(2) * eigval[-1]) * eigvec[-1]))
 
-    @pytest.fixture(params=[10])
+    @pytest.fixture(params=[40])
     def n_lines(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
-    @pytest.fixture(params=[(30, 40)])
+    @pytest.fixture(params=[(80, 100)])
     def shape(self, request: pytest.FixtureRequest) -> Shape:
         return request.param
 
-    @pytest.fixture(params=[8.0])
+    @pytest.fixture(params=[15.0])
     def length(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
@@ -145,7 +145,7 @@ class TestStreakFinder():
     def test_streak_points(self, streak: Streak, image: NDRealArray, finder: PatternStreakFinder):
         ends = np.stack([self.get_line(ctr[0], ctr[1], image, finder) for ctr in streak.centers])
         streak_ends = np.array(streak.ends).reshape((-1, 2, 2))
-        check_close(np.sort(ends, axis=-2), np.sort(streak_ends, axis=-2), rtol=5e-2)
+        check_close(np.sort(ends, axis=-2), np.sort(streak_ends, axis=-2))
 
         pts = np.concatenate([np.stack(self.get_pixels(ctr[0], ctr[1], finder), axis=-1)
                               for ctr in streak.centers])

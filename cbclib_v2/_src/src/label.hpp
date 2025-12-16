@@ -2,7 +2,6 @@
 #define NEW_LABEL_H_
 #include "array.hpp"
 #include "geometry.hpp"
-#include "log.hpp"
 
 namespace cbclib {
 
@@ -31,21 +30,18 @@ std::vector<T> get_x(const Container & c, size_t index)
 template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
 PixelND<T, N> make_pixel(const PointND<I, N> & point, const array<T> & data)
 {
-    LOG(DEBUG) << "make_pixel: Creating pixel at point " << point << " with value " << data.at(point.coordinate());
     return std::make_pair(point, data.at(point.coordinate()));
 }
 
 template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
 PixelND<T, N> make_pixel(PointND<I, N> && point, const array<T> & data)
 {
-    LOG(DEBUG) << "make_pixel: Creating pixel at point " << point << " with value " << data.at(point.coordinate());
     return std::make_pair(std::move(point), data.at(point.coordinate()));
 }
 
 template <typename... Ix, typename T, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
 PixelND<T, sizeof...(Ix)> make_pixel(T value, Ix... xs)
 {
-    LOG(DEBUG) << "make_pixel: Creating pixel at point {" << ((std::to_string(xs) + ", ") + ...) << "} with value " << value;
     return std::make_pair(PointND<long, sizeof...(Ix)>{xs...}, value);
 }
 
@@ -107,9 +103,9 @@ public:
 
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
-    PointND<T, N> origin;
-    PointND<T, N> mu_x, mu_xx;
-    PointND<T, NumPairs> mu_xy;
+    PointND<T, N> origin;               // centroid
+    PointND<T, N> mu_x {}, mu_xx {};    // mu_x: first central moments, mu_xx: second central moments
+    PointND<T, NumPairs> mu_xy {};      // cross second central moments
 
     friend class MomentsND<T, N>;
 
@@ -122,14 +118,13 @@ template <typename T, size_t N>
 class MomentsND
 {
 public:
-    MomentsND() : org{}, mu(T()), mu_x(), mu_xx(), mu_xy() {};
+    MomentsND() = default;
 
     template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt>>>>
-    MomentsND(Pt && pt) : org(std::forward<Pt>(pt)), mu(), mu_x(), mu_xx(), mu_xy() {}
+    MomentsND(Pt && pt) : org(std::forward<Pt>(pt)) {}
 
-    MomentsND(const PixelSetND<T, N> & pset) : MomentsND()
+    MomentsND(const PixelSetND<T, N> & pset)
     {
-        LOG(DEBUG) << "MomentsND::MomentsND: Initial moments = " << *this;
         if (pset.size())
         {
             org = std::next(pset.begin(), pset.size() / 2)->first;
@@ -173,9 +168,6 @@ public:
             auto [i, j] = UniquePairs<N>::instance().pairs(n);
             mu_xy[n] += r[i] * r[j] * val;
         }
-        LOG(DEBUG) << "MomentsND::insert: Inserted pixel at " << point << " with value " << val
-                   << ", updated moments: mu = " << mu << ", mu_x = " << mu_x
-                   << ", mu_xx = " << mu_xx << ", mu_xy = " << mu_xy;
     }
 
     template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
@@ -273,10 +265,10 @@ public:
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
 
-    PointND<T, N> org;
-    T mu;
-    PointND<T, N> mu_x, mu_xx;
-    PointND<T, NumPairs> mu_xy;
+    PointND<T, N> org {};               // origin
+    T mu = T();                         // zeroth moment
+    PointND<T, N> mu_x {}, mu_xx {};    // mu_x: first central moments, mu_xx: second central moments
+    PointND<T, NumPairs> mu_xy {};      // cross second central moments
 };
 
 template <typename T>

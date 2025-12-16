@@ -366,10 +366,10 @@ public:
     size_t itemsize() const {return m_itemsize;}
 
 protected:
-    size_t m_ndim;
+    size_t m_ndim = 0;
     std::vector<size_t> m_shape;
     std::vector<size_t> m_strides;
-    size_t m_itemsize;
+    size_t m_itemsize = 0;
 
     size_t partial_size(size_t n0, size_t n1) const
     {
@@ -887,7 +887,7 @@ public:
 
 private:
     Container m_strides;
-    size_t m_size;
+    size_t m_size = 0;
 };
 
 /*----------------------------------------------------------------------------*/
@@ -1083,7 +1083,7 @@ public:
     class slice_sentinel
     {
     private:
-        size_t m_index;
+        size_t m_index = 0;
 
         slice_sentinel(size_t index) : m_index(index) {}
 
@@ -1121,8 +1121,8 @@ public:
         friend bool operator!=(const slice_iterator & lhs, const slice_sentinel & rhs) {return lhs.m_index.first != rhs.m_index;}
 
     private:
-        std::pair<size_t, py::ssize_t> m_index;
-        py::ssize_t m_step;
+        std::pair<size_t, py::ssize_t> m_index {};
+        py::ssize_t m_step = 0;
 
         slice_iterator(size_t index, py::ssize_t py_index, py::ssize_t step) : m_index(index, py_index), m_step(step) {}
 
@@ -1149,7 +1149,7 @@ public:
     py::ssize_t step() const {return m_step;}
 
 private:
-    py::ssize_t m_start, m_stop, m_step, m_slicelength;
+    py::ssize_t m_start = 0, m_stop = 0, m_step = 0, m_slicelength = 0;
 };
 
 /*----------------------------------------------------------------------------*/

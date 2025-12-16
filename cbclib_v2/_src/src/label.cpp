@@ -443,11 +443,11 @@ void declare_pixels(py::module & m, const std::string & typestr)
             for (const auto & [_, val]: pixels.pixels()) values.push_back(val);
             return values;
         }, nullptr)
-        .def("merge", [](PixelsND<T, 2> & pixels, PixelsND<T, 2> source) -> PixelsND<T, 2>
+        .def("merge", [](PixelsND<T, 2> & pixels, PixelsND<T, 2> source) -> PixelsND<T, 2> &
         {
             pixels.merge(source);
             return pixels;
-        }, py::arg("source"))
+        }, py::arg("source"), py::return_value_policy::reference_internal)
         .def("total_mass", [](const PixelsND<T, 2> & pixels){return pixels.moments().zeroth();})
         .def("mean", [](const PixelsND<T, 2> & pixels){return pixels.moments().first();})
         .def("center_of_mass", [](const PixelsND<T, 2> & pixels){return pixels.moments().central().first();})

@@ -199,7 +199,7 @@ class BuildCPPExp(build_ext):
         for ext in self.extensions:
             if self.debug:
                 # Add your debug flags here
-                self.add_extra_args(ext, ["-g", "-O0", "-D_FORTIFY_SOURCE=0"])
+                self.add_extra_args(ext, ["-g", "-O0", "-D_FORTIFY_SOURCE=0", '-DCPP_LOG'])
             else:
                 self.add_extra_args(ext, ["-O3"])
                 if IS_LINUX:
@@ -271,7 +271,7 @@ extensions = [
     CPPExtension("cbclib_v2._src.src.streak_finder",
                  sources=["cbclib_v2/_src/src/streak_finder.cpp"],
                  cxx_std=17,
-                 extra_compile_args=['-fopenmp', '-DCPP_LOG'],
+                 extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.test",
                  sources=["cbclib_v2/_src/src/test.cpp"],

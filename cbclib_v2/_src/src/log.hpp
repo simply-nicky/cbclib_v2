@@ -8,6 +8,16 @@
 
 namespace cbclib {
 
+template <typename T, typename = void>
+struct is_streamable : std::false_type {};
+
+template <typename T>
+struct is_streamable<T, std::void_t<decltype(std::declval<std::ostream &>() << std::declval<T &>())>>
+    : std::true_type {};
+
+template <typename T>
+constexpr bool is_streamable_v = is_streamable<T>::value;
+
 enum LogLevel {ERROR, WARNING, INFO, DEBUG};
 
 class STDErrLogStream
@@ -126,10 +136,27 @@ public:
         return *this;
     }
 
-    template <typename T>
+    template <typename T, typename = std::enable_if_t<is_streamable_v<T>>>
     friend Log & operator<<(Log & log, const T & msg)
     {
         log.m_oss << msg;
+        return log;
+    }
+
+    template <typename Container, typename T = typename Container::value_type, typename = std::enable_if_t<
+        !is_streamable_v<Container> && is_streamable_v<T>>
+    >
+    friend Log & operator<<(Log & log, const Container & vec)
+    {
+        log.m_oss << "{";
+        bool first = true;
+        for (const auto & item : vec)
+        {
+            if (!first) log.m_oss << ", ";
+            log.m_oss << item;
+            first = false;
+        }
+        log.m_oss << "}";
         return log;
     }
 

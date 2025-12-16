@@ -548,9 +548,6 @@ public:
     {
         auto streak = get_streak(seed, mask);
 
-        LOG(DEBUG) << "get_streak: Initial streak with " << streak.pixels().size() << " pixels for seed point " <<
-                      seed << ", moments = " << streak.moments().central() << ", and line = " << streak.line();
-
         Line<long> old_line = Line<long>{}, line = streak.central_line();
         size_t n_iter = 0;
         while (old_line != line && n_iter++ < MAX_NUM_ITER)
@@ -560,10 +557,6 @@ public:
             streak = grow_streak<false>(std::move(streak), old_line.pt0, mask, xtol);
             streak = grow_streak<true>(std::move(streak), old_line.pt1, mask, xtol);
             line = streak.central_line();
-
-            LOG(DEBUG) << "get_streak: Grown streak with " << streak.pixels().size() << " pixels at iteration " <<
-                          n_iter << " for seed point " << seed << ", moments = " << streak.moments().central() <<
-                          ", central line = " << line << ", and line = " << streak.line();
         }
         if (n_iter == MAX_NUM_ITER)
         {
@@ -591,11 +584,11 @@ public:
     }
 
 protected:
-    Peaks m_peaks;
-    array<T> m_data;
-    Structure m_structure;
-    unsigned m_lookahead;
-    unsigned m_nfa;
+    Peaks m_peaks;              // sparse 2D peaks
+    array<T> m_data;            // 2D data array
+    Structure m_structure;      // connectivity structure
+    unsigned m_lookahead = 0;   // maximum number of lookahead steps
+    unsigned m_nfa = 0;         // maximum number of unaligned points allowed
 
     std::pair<bool, Streak<T>> add_point_to_streak(Streak<T> && streak, const StreakMask & mask, const Point<long> & pt, T xtol) const
     {
@@ -608,10 +601,6 @@ protected:
             return new_line.distance(pt) >= xtol;
         };
         auto num_unaligned = std::transform_reduce(new_streak.ends().begin(), new_streak.ends().end(), unsigned(), std::plus(), is_unaligned);
-
-        LOG(DEBUG) << "add_point_to_streak: Trying to add point " << pt << " to streak with line " << streak.line() << ", new streak moments " <<
-                      new_streak.moments().central() << ", new line " << new_line << ", and " << num_unaligned << " unaligned end points (xtol = "
-                      << xtol << ")";
 
         if (num_unaligned <= m_nfa)
         {
@@ -628,8 +617,6 @@ protected:
         if (line.pt0 == line.pt1) return point; // zero-length line
         auto iter = BresenhamPlotter<T, 2, IsForward>{line}.begin(point);
         for (int i = 0; i < n_steps; i++) iter++;
-
-        LOG(DEBUG) << "find_next_step: Next step for point " << point << " is " << *iter << " along line " << line;
         return *iter;
     }
 
@@ -646,7 +633,6 @@ protected:
             if (iter != m_peaks.end() && mask.is_free(*iter) && *iter != point)
             {
                 pt = *iter;
-                LOG(DEBUG) << "grow_streak: Found peak point " << pt << " near predicted point " << point;
             }
 
             if (!mask.is_bad(pt) && pt != point)

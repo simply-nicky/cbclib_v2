@@ -159,13 +159,13 @@ class TestPeaksAndMoments():
     def test_pixels_merge(self, regions: List[Pixels2DDouble]):
         rsum = Pixels2DDouble().merge(regions[0])
         assert self.to_tuple(rsum) == self.to_tuple(regions[0])
-        check_close(self.moments(rsum), self.moments(regions[0]), rtol=5e-2)
-        check_close(self.central_moments(rsum), self.central_moments(regions[0]), rtol=5e-2)
+        check_close(self.moments(rsum), self.moments(regions[0]))
+        check_close(self.central_moments(rsum), self.central_moments(regions[0]))
 
         rsum = rsum.merge(regions[0])
         assert self.to_tuple(rsum) == self.to_tuple(regions[0])
-        check_close(self.moments(rsum), self.moments(regions[0]), rtol=5e-2)
-        check_close(self.central_moments(rsum), self.central_moments(regions[0]), rtol=5e-2)
+        check_close(self.moments(rsum), self.moments(regions[0]))
+        check_close(self.central_moments(rsum), self.central_moments(regions[0]))
 
     def test_pixels(self, image: NDRealArray, points: NDIntArray, regions: List[Pixels2DDouble]):
         all_pixels = Pixels2DDouble()

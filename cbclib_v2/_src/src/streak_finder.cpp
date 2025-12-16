@@ -437,7 +437,7 @@ void declare_streak(py::module & m, const std::string & typestr)
         {
             streak.merge(source);
             return streak;
-        }, py::arg("source"))
+        }, py::arg("source"), py::return_value_policy::reference_internal)
         .def("center", [](Streak<T> & streak){return streak.center().to_array();})
         .def("central_line", [](Streak<T> & streak){return streak.central_line().to_array();})
         .def("line", [](Streak<T> & streak){return streak.line().to_array();})
@@ -667,12 +667,12 @@ PYBIND11_MODULE(streak_finder, m)
             if (iter != peaks.end()) return std::vector<long>{iter->x(), iter->y()};
             return std::vector<long>{};
         }, py::arg("x"), py::arg("y"), py::arg("range"))
-        .def("append", [](Peaks & peaks, long x, long y){peaks.insert(Point<long>{x, y});}, py::arg("x"), py::arg("y"))
+        .def("append", [](Peaks & peaks, long x, long y){peaks.insert(Point<long>{x, y});}, py::arg("x"), py::arg("y"), py::keep_alive<1, 2>())
         .def("clear", [](Peaks & peaks){peaks.clear();})
         .def("extend", [](Peaks & peaks, std::vector<long> xvec, std::vector<long> yvec)
         {
             for (auto [x, y] : zip::zip(xvec, yvec)) peaks.insert(Point<long>{x, y});
-        }, py::arg("xs"), py::arg("ys"))
+        }, py::arg("xs"), py::arg("ys"), py::keep_alive<1, 2>())
         .def("remove", [](Peaks & peaks, long x, long y)
         {
             auto iter = peaks.find(Point<long>{x, y});

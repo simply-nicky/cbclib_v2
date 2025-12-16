@@ -276,7 +276,7 @@ using Point = PointND<T, 2>;
 template <typename T, size_t N>
 struct LineND
 {
-    PointND<T, N> pt0, pt1;
+    PointND<T, N> pt0 {}, pt1 {};   // endpoints
 
     LineND() = default;
 

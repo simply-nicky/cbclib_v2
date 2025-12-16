@@ -38,8 +38,8 @@ private:
 template <typename T, size_t N>
 struct BaseError
 {
-    PointND<T, N> derror;
-    T error;
+    PointND<T, N> derror {};    // derivative of error
+    T error = T();              // current error
 
     BaseError() = default;
 
@@ -67,7 +67,7 @@ template <typename T, size_t N>
 struct TangentError : public BaseError<T, N>
 {
     using BaseError<T, N>::error;
-    T length;
+    T length = T();
 
     TangentError() = default;
 
@@ -174,13 +174,12 @@ public:
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
 
-    PointND<long, N> step, current;
-    PointND<bool, N> next;
-    TangentError<T, N> terror;
-    std::array<NormalError<T, N>, NumPairs> nerrors;
+    PointND<long, N> step {}, current {};
+    PointND<bool, N> next {};
+    TangentError<T, N> terror {};
+    std::array<NormalError<T, N>, NumPairs> nerrors {};
 
-    LineIterator(PointND<long, N> current) :
-        step(), current(std::move(current)), next(), terror(), nerrors() {}
+    LineIterator(PointND<long, N> current) : current(std::move(current)) {}
 
     LineIterator(PointND<long, N> step, PointND<long, N> current, TangentError<T, N> terror, std::array<NormalError<T, N>, NumPairs> nerrors) :
         step(std::move(step)), current(std::move(current)), next(), terror(std::move(terror)), nerrors(std::move(nerrors))
