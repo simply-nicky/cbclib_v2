@@ -2,9 +2,10 @@ from dataclasses import dataclass
 from math import prod
 from typing import Tuple, TypeVar
 import pandas as pd
-from .annotations import BoolArray, IntArray, RealArray, RealSequence, Shape
-from .data_container import ArrayContainer, ArrayNamespace, IndexedContainer, NumPy, array_namespace
-from .src.bresenham import draw_lines, write_lines
+from .annotations import AnyNamespace, BoolArray, IntArray, RealArray, RealSequence, Shape
+from .array_api import array_namespace
+from .data_container import ArrayContainer, IndexedContainer, NumPy
+from .functions import write_lines
 
 L = TypeVar("L", bound='BaseLines')
 
@@ -73,7 +74,7 @@ class BaseLines(ArrayContainer):
             lines = self.lines
         else:
             widths = xp.broadcast_to(xp.asarray(width), self.lines.shape[:-1] + (1,))
-            lines = xp.concatenate((self.lines, widths), axis=-1)
+            lines = xp.concat((self.lines, widths), axis=-1)
 
         return lines
 
@@ -90,7 +91,7 @@ class BaseStreaks(IndexedContainer, BaseLines):
         return self.index
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=NumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=NumPy
                          ) -> Tuple[IntArray, RealArray]:
         index = xp.asarray(df['index'].to_numpy())
         lines = xp.stack((df['x_0'].to_numpy(), df['y_0'].to_numpy(),
@@ -104,8 +105,8 @@ class BaseStreaks(IndexedContainer, BaseLines):
         lines = xp.stack((x[..., 0], y[..., 0], x[..., 1], y[..., 1]), axis=-1)
         return index, lines
 
-    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                          num_threads: int=1) -> pd.DataFrame:
+    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular'
+                          ) -> pd.DataFrame:
         """Draw a pattern in the :class:`dict` format.
 
         Args:
@@ -125,16 +126,15 @@ class BaseStreaks(IndexedContainer, BaseLines):
         """
         xp = self.__array_namespace__()
         index, streak_id, value = write_lines(lines=self.to_lines(width=width), shape=shape,
-                                              idxs=xp.asarray(self.flat_index), kernel=kernel,
-                                              num_threads=num_threads)
+                                              idxs=xp.asarray(self.flat_index), kernel=kernel)
         normalised_shape = (prod(shape[:-2]),) + shape[-2:]
         frames, y, x = xp.unravel_index(index, normalised_shape)
 
         data = {'index': streak_id, 'frames': frames, 'y': y, 'x': x, 'value': value}
         return pd.DataFrame(data)
 
-    def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian',
-                      num_threads: int=1) -> RealArray:
+    def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian'
+                      ) -> RealArray:
         """Draw a pattern in the :class:`numpy.ndarray` format.
 
         Args:
@@ -154,7 +154,7 @@ class BaseStreaks(IndexedContainer, BaseLines):
         """
         xp = self.__array_namespace__()
         return draw_lines(self.to_lines(width=width), idxs=xp.asarray(self.flat_index),
-                          shape=shape, kernel=kernel, num_threads=num_threads)
+                          shape=shape, kernel=kernel)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Export a streaks container into :class:`pandas.DataFrame`.
@@ -172,7 +172,7 @@ class Streaks(BaseStreaks):
     lines       : RealArray
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=NumPy) -> 'Streaks':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=NumPy) -> 'Streaks':
         index, lines = super(Streaks, cls).import_dataframe(df, xp)
         return cls(index=index, lines=lines)
 
@@ -201,7 +201,7 @@ class StackedStreaks(BaseStreaks):
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, num_modules: int=1,
-                         xp: ArrayNamespace=NumPy) -> 'StackedStreaks':
+                         xp: AnyNamespace=NumPy) -> 'StackedStreaks':
         index, lines = super(StackedStreaks, cls).import_dataframe(df, xp)
         return cls(index=index, module_id=xp.asarray(df['module_id'].to_numpy()), lines=lines,
                    num_modules=num_modules)
@@ -214,9 +214,9 @@ class StackedStreaks(BaseStreaks):
     @property
     def flat_index(self) -> IntArray:
         return self.num_modules * self.index + self.module_id
-    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                          num_threads: int=1) -> pd.DataFrame:
-        dataframe = super().pattern_dataframe(width, shape, kernel, num_threads)
+    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular'
+                          ) -> pd.DataFrame:
+        dataframe = super().pattern_dataframe(width, shape, kernel)
         if self.num_modules > 1:
             dataframe['module_id'] = dataframe['frames'] % self.num_modules
             dataframe['frames'] = dataframe['frames'] // self.num_modules

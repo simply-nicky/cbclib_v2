@@ -52,33 +52,33 @@ def fftn(inp: RealArray | ComplexArray, shape: IntSequence | None=None,
     ...
 
 @overload
-def fft_convolve(array: RealArray, kernel: RealArray, axis: IntSequence | None=None,
+def fft_convolve(inp: RealArray, kernel: RealArray, axis: IntSequence | None=None,
                  num_threads: int=1) -> NDRealArray:
     ...
 
 @overload
-def fft_convolve(array: RealArray, kernel: ComplexArray, axis: IntSequence | None=None,
+def fft_convolve(inp: RealArray, kernel: ComplexArray, axis: IntSequence | None=None,
                  num_threads: int=1) -> NDComplexArray:
     ...
 
 @overload
-def fft_convolve(array: ComplexArray, kernel: RealArray, axis: IntSequence | None=None,
+def fft_convolve(inp: ComplexArray, kernel: RealArray, axis: IntSequence | None=None,
                  num_threads: int=1) -> NDComplexArray:
     ...
 
 @overload
-def fft_convolve(array: ComplexArray, kernel: ComplexArray,
+def fft_convolve(inp: ComplexArray, kernel: ComplexArray,
                  axis: IntSequence | None=None, num_threads: int=1) -> NDComplexArray:
     ...
 
-def fft_convolve(array: RealArray | ComplexArray, kernel: RealArray | ComplexArray,
+def fft_convolve(inp: RealArray | ComplexArray, kernel: RealArray | ComplexArray,
                  axis: IntSequence | None=None, num_threads: int=1
                  ) -> NDRealArray | NDComplexArray:
     """Convolve a multi-dimensional `array` with one-dimensional `kernel` along the `axis` by means
     of FFT. Output has the same size as `array`.
 
     Args:
-        array : Input array.
+        inp : Input array.
         kernel : Kernel array.
         axis : Array axis along which convolution is performed.
         num_threads : Number of threads used in the calculations.
@@ -166,20 +166,19 @@ def gaussian_filter(inp: RealArray | ComplexArray, sigma: RealSequence, order: I
 
 @overload
 def gaussian_gradient_magnitude(inp: RealArray, sigma: RealSequence, mode: Mode='reflect',
-                                cval: float=0.0, truncate: float=4.0, backend: str='numpy',
-                                num_threads: int=1) -> NDRealArray:
+                                cval: float=0.0, truncate: float=4.0, num_threads: int=1
+                                ) -> NDRealArray:
     ...
 
 @overload
 def gaussian_gradient_magnitude(inp: ComplexArray, sigma: RealSequence, mode: Mode='reflect',
-                                cval: float=0.0, truncate: float=4.0, backend: str='numpy',
-                                num_threads: int=1) -> NDComplexArray:
+                                cval: float=0.0, truncate: float=4.0, num_threads: int=1
+                                ) -> NDComplexArray:
     ...
 
 def gaussian_gradient_magnitude(inp: RealArray | ComplexArray, sigma: RealSequence,
                                 mode: Mode='reflect', cval: float=0.0, truncate: float=4.0,
-                                backend: str='numpy', num_threads: int=1
-                                ) -> NDRealArray | NDComplexArray:
+                                num_threads: int=1) -> NDRealArray | NDComplexArray:
     r"""Multidimensional gradient magnitude using Gaussian derivatives. The multidimensional filter
     is implemented as a sequence of 1-D FFT convolutions.
 
@@ -207,8 +206,6 @@ def gaussian_gradient_magnitude(inp: RealArray | ComplexArray, sigma: RealSequen
 
         cval : Value to fill past edges of input if mode is `constant`. Default is 0.0.
         truncate : Truncate the filter at this many standard deviations. Default is 4.0.
-        backend : Choose between numpy ('numpy') or FFTW ('fftw') backend library for the FFT
-            implementation.
         num_threads : Number of threads.
 
     Raises:

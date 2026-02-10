@@ -8,8 +8,9 @@ import re
 from types import TracebackType
 from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, Literal,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import Array, ArrayNamespace, DataclassInstance, IntArray, NumPy, RealArray, Shape
-from .data_container import Container, array_namespace
+from .annotations import Array, AnyNamespace, DataclassInstance, IntArray, NumPy, RealArray, Shape
+from .array_api import array_namespace
+from .data_container import Container
 from .streaks import StackedStreaks, Streaks
 from ..indexer import Patterns
 
@@ -653,10 +654,10 @@ class Panel(Container):
                     ) -> Tuple[float, float, float]: ...
 
     @overload
-    def to_detector(self, ss: RealArray, fs: RealArray, half_pixel_shift: bool=True
+    def to_detector(self, ss: Array, fs: Array, half_pixel_shift: bool=True
                     ) -> Tuple[RealArray, RealArray, RealArray]: ...
 
-    def to_detector(self, ss: RealArray | float, fs: RealArray | float, half_pixel_shift: bool=True
+    def to_detector(self, ss: Array | float, fs: Array | float, half_pixel_shift: bool=True
                     ) -> Tuple[RealArray | float, RealArray | float, RealArray | float]:
         x = ss * self.ss.x + fs * self.fs.x + self.corner.x
         y = ss * self.ss.y + fs * self.fs.y + self.corner.y
@@ -714,7 +715,7 @@ class Detector():
             return 1.0 / panel.res
         raise RuntimeError('No pixel resolution data in the panels')
 
-    def indices(self, xp: ArrayNamespace=NumPy) -> PixelIndices:
+    def indices(self, xp: AnyNamespace=NumPy) -> PixelIndices:
         pix_x, pix_y, _ = self.pixel_map(xp=xp)
         pix_x = xp.asarray(xp.round(pix_x - pix_x.min()), dtype=int)
         pix_y = xp.asarray(xp.round(pix_y - pix_y.min()), dtype=int)
@@ -723,7 +724,7 @@ class Detector():
     def panel(self, module_id: int) -> Panel:
         return self.panels[list(self.panels.keys())[module_id]]
 
-    def pixel_map(self, half_pixel_shift: bool=True, xp: ArrayNamespace=NumPy):
+    def pixel_map(self, half_pixel_shift: bool=True, xp: AnyNamespace=NumPy):
         pixel_map = xp.zeros((3,) + self.shape)
         for panel in self.panels.values():
             roi = panel.roi()

@@ -83,13 +83,12 @@ py::array_t<T> binterpolate(py::array_t<T> inp, std::vector<py::array_t<U>> grid
 /*---------------------------- Kernel regression -----------------------------*/
 /*----------------------------------------------------------------------------*/
 
-template <typename T>
-py::array_t<T> kr_predict(py::array_t<T> y, py::array_t<T> x, py::array_t<T> x_hat, T sigma, std::string kernel,
-                          std::optional<py::array_t<T>> w, unsigned threads)
+template <typename T, kernels::type K>
+py::array_t<T> kr_predict_impl(py::array_t<T> y, py::array_t<T> x, py::array_t<T> x_hat, T sigma,
+                               std::optional<py::array_t<T>> w, unsigned threads)
 {
+    constexpr auto kernel = kernels_t<T>::template select<K>();
     check_optional("w", y.shape(), y.shape() + y.ndim(), w, T(1));
-
-    auto krn = kernels<T>::get_kernel(kernel);
 
     size_t ndim = *(x_hat.shape() + x_hat.ndim() - 1), npts = y.size();
     check_dimension("x", x.ndim() - 1, x.shape(), ndim);
@@ -162,7 +161,7 @@ py::array_t<T> kr_predict(py::array_t<T> y, py::array_t<T> x, py::array_t<T> x_h
                     {
                         T dist = T();
                         for (size_t axis = 0; axis < ndim; axis++) dist += std::pow(xarr[index * ndim + axis] - xhline[axis], 2);
-                        T rbf = krn(std::sqrt(dist) / sigma);
+                        T rbf = kernel(std::sqrt(dist) / sigma);
                         Y += yarr[index] * warr[index] * rbf;
                         W += warr[index] * warr[index] * rbf;
                     }
@@ -181,10 +180,32 @@ py::array_t<T> kr_predict(py::array_t<T> y, py::array_t<T> x, py::array_t<T> x_h
 }
 
 template <typename T>
-auto kr_grid(py::array_t<T> y, py::array_t<T> x, std::vector<py::array_t<T>> grid, T sigma, std::string kernel,
-             std::optional<py::array_t<T>> w, unsigned threads)
+py::array_t<T> kr_predict(py::array_t<T> y, py::array_t<T> x, py::array_t<T> x_hat, T sigma, std::string kernel,
+                          std::optional<py::array_t<T>> w, unsigned threads)
 {
-    auto krn = kernels<T>::get_kernel(kernel);
+    auto ktype = kernels::get_type(kernel);
+    switch (ktype)
+    {
+        case kernels::biweight:
+            return kr_predict_impl<T, kernels::biweight>(y, x, x_hat, sigma, w, threads);
+        case kernels::gaussian:
+            return kr_predict_impl<T, kernels::gaussian>(y, x, x_hat, sigma, w, threads);
+        case kernels::parabolic:
+            return kr_predict_impl<T, kernels::parabolic>(y, x, x_hat, sigma, w, threads);
+        case kernels::rectangular:
+            return kr_predict_impl<T, kernels::rectangular>(y, x, x_hat, sigma, w, threads);
+        case kernels::triangular:
+            return kr_predict_impl<T, kernels::triangular>(y, x, x_hat, sigma, w, threads);
+        default:
+            throw std::invalid_argument("Invalid kernel type");
+    }
+}
+
+template <typename T, kernels::type K>
+auto kr_grid_impl(py::array_t<T> y, py::array_t<T> x, std::vector<py::array_t<T>> grid, T sigma,
+                  std::optional<py::array_t<T>> w, unsigned threads)
+{
+    constexpr auto kernel = kernels_t<T>::template select<K>();
 
     auto xbuf = x.request();
     auto ybuf = y.request();
@@ -275,7 +296,7 @@ auto kr_grid(py::array_t<T> y, py::array_t<T> x, std::vector<py::array_t<T>> gri
                     {
                         dist += std::pow(grid_arrs[ndim - 1 - n][coord[n] + roi[2 * n]] - xarr.at(i, ndim - 1 - n), 2);
                     }
-                    T rbf = krn(std::sqrt(dist) / sigma);
+                    T rbf = kernel(std::sqrt(dist) / sigma);
 
                     size_t index = W.index_at(coord);
 
@@ -303,6 +324,28 @@ auto kr_grid(py::array_t<T> y, py::array_t<T> x, std::vector<py::array_t<T>> gri
     e.rethrow();
 
     return std::make_tuple(y_hat, roi);
+}
+
+template <typename T>
+auto kr_grid(py::array_t<T> y, py::array_t<T> x, std::vector<py::array_t<T>> grid, T sigma, std::string kernel,
+             std::optional<py::array_t<T>> w, unsigned threads)
+{
+    auto ktype = kernels::get_type(kernel);
+    switch (ktype)
+    {
+        case kernels::biweight:
+            return kr_grid_impl<T, kernels::biweight>(y, x, grid, sigma, w, threads);
+        case kernels::gaussian:
+            return kr_grid_impl<T, kernels::gaussian>(y, x, grid, sigma, w, threads);
+        case kernels::parabolic:
+            return kr_grid_impl<T, kernels::parabolic>(y, x, grid, sigma, w, threads);
+        case kernels::rectangular:
+            return kr_grid_impl<T, kernels::rectangular>(y, x, grid, sigma, w, threads);
+        case kernels::triangular:
+            return kr_grid_impl<T, kernels::triangular>(y, x, grid, sigma, w, threads);
+        default:
+            throw std::invalid_argument("Invalid kernel type");
+    }
 }
 
 template <typename T, typename U>

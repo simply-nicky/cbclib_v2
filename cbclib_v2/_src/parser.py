@@ -8,7 +8,7 @@ from typing import (Any, Callable, ClassVar, Dict, List, Tuple, Type, TypeVar, g
                     overload)
 import numpy as np
 from .data_container import Container
-from .annotations import (AnyType, Array, ArrayNamespace, DataclassInstance, ExpandedType, NDArray,
+from .annotations import (AnyType, Array, AnyNamespace, DataclassInstance, ExpandedType, NDArray,
                           NumPy, UnionType)
 
 class BaseFormatter:
@@ -73,7 +73,7 @@ class ArrayFormatter(Formatter):
     aliases = (NDArray,)
 
     @classmethod
-    def format_string(cls, string: str, dtype: Type, xp: ArrayNamespace) -> Array:
+    def format_string(cls, string: str, dtype: Type, xp: AnyNamespace) -> Array:
         is_list = re.search(r'^\[([\s\S]*)\]$', string)
         if is_list:
             return xp.fromstring(is_list.group(1), dtype=dtype, sep=',')
@@ -132,7 +132,7 @@ class StringFormatting:
         return float
 
     @classmethod
-    def get_formatter(cls, t: AnyType, xp: ArrayNamespace) -> Callable[[str,], Any]:
+    def get_formatter(cls, t: AnyType, xp: AnyNamespace) -> Callable[[str,], Any]:
         types = cls.list_types(cls.expand_types(t))
         for formatter in cls.formatters.values():
             for extended_type in types:
@@ -152,7 +152,7 @@ class StringFormatting:
 
     @classmethod
     def format_dict(cls, dct: Dict[str, Any], types: Dict[str, AnyType] | AnyType,
-                    xp: ArrayNamespace) -> Dict[str, Any]:
+                    xp: AnyNamespace) -> Dict[str, Any]:
         formatted_dct = {}
         for attr, val in dct.items():
             if isinstance(val, dict) and isinstance(types, dict):
@@ -313,7 +313,7 @@ class INIParser(Parser, Container):
 
         return {section: dict(ini_parser.items(section)) for section in ini_parser.sections()}
 
-    def read(self, file: str, xp: ArrayNamespace=NumPy) -> Dict[str, Any]:
+    def read(self, file: str, xp: AnyNamespace=NumPy) -> Dict[str, Any]:
         return StringFormatting.format_dict(super().read(file), self.types, xp)
 
     def to_dict(self, obj: Any) -> Dict[str, Dict[str, Any]]:

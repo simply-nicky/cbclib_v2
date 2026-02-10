@@ -1,7 +1,7 @@
 #ifndef NEW_LABEL_H_
 #define NEW_LABEL_H_
-#include "array.hpp"
 #include "geometry.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
 
@@ -275,87 +275,259 @@ template <typename T>
 using Moments = MomentsND<T, 2>;
 
 // Connectivity structure class
+// Structure offsets follow zyx ordering
 
-template <size_t N>
-struct StructureND : public WrappedContainer<std::vector<PointND<long, N>>>
+template <bool IsConst>
+struct chunk_traits {};
+
+template <>
+struct chunk_traits<false>
 {
-public:
-    using WrappedContainer<std::vector<PointND<long, N>>>::begin;
-    using WrappedContainer<std::vector<PointND<long, N>>>::end;
-    using WrappedContainer<std::vector<PointND<long, N>>>::size;
+    using size_type = size_t;
+    using iterator = long *;
+    using const_iterator = const long *;
+    using reference = long &;
+    using const_reference = const long &;
+    using pointer = long *;
+};
 
-    int radius, rank;
+template <>
+struct chunk_traits<true>
+{
+    using size_type = size_t;
+    using iterator = const long *;
+    using const_iterator = const long *;
+    using reference = const long &;
+    using const_reference = const long &;
+    using pointer = const long *;
+};
 
-    StructureND(int radius, int rank) : radius(radius), rank(rank)
+struct Structure
+{
+protected:
+    template <bool IsConst>
+    class chunk_iterator;
+
+    template <bool IsConst>
+    class chunk
     {
-        PointND<long, N> shape;
-        for (size_t i = 0; i < N; i++) shape[i] = 2 * radius + 1;
-        for (auto point : rectangle_range<PointND<long, N>>{std::move(shape)})
+    public:
+        using size_type = typename chunk_traits<IsConst>::size_type;
+        using value_type = long;
+
+        using iterator = typename chunk_traits<IsConst>::iterator;
+        using const_iterator = typename chunk_traits<IsConst>::const_iterator;
+
+        using reference = typename chunk_traits<IsConst>::reference;
+        using const_reference = typename chunk_traits<IsConst>::const_reference;
+
+        iterator begin() {return m_first;}
+        const_iterator begin() const {return m_first;}
+
+        iterator end() {return m_last;}
+        const_iterator end() const {return m_last;}
+
+        size_type size() const {return m_last - m_first;}
+
+        reference operator[](size_type index) {return m_first[index];}
+        const_reference operator[](size_type index) const {return m_first[index];}
+    protected:
+        using pointer = typename chunk_traits<IsConst>::pointer;
+        pointer m_first, m_last;
+
+        chunk(pointer first, pointer last) : m_first(first), m_last(last) {}
+
+        friend class chunk_iterator<IsConst>;
+    };
+
+    template <bool IsConst>
+    class chunk_iterator
+    {
+    public:
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = chunk<IsConst>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const value_type *;
+        using reference = value_type;
+
+        chunk_iterator() = default;
+
+        template <bool RHIsConst, typename = std::enable_if_t<IsConst || !RHIsConst>>
+        chunk_iterator(const chunk_iterator<RHIsConst> & rhs) : m_ptr(rhs.m_ptr), m_chunk_size(rhs.m_chunk_size) {}
+
+        bool operator==(const chunk_iterator & rhs) const {return m_ptr == rhs.m_ptr;}
+        bool operator!=(const chunk_iterator & rhs) const {return !(*this == rhs);}
+        bool operator<(const chunk_iterator & rhs) const {return m_ptr < rhs.m_ptr;}
+        bool operator>(const chunk_iterator & rhs) const {return m_ptr > rhs.m_ptr;}
+        bool operator<=(const chunk_iterator & rhs) const {return !(*this > rhs);}
+        bool operator>=(const chunk_iterator & rhs) const {return !(*this < rhs);}
+
+        chunk_iterator & operator+=(difference_type offset)
         {
-            point -= radius;
+            m_ptr += offset * m_chunk_size;
+            return *this;
+        }
+        chunk_iterator & operator-=(difference_type offset)
+        {
+            m_ptr -= offset * m_chunk_size;
+            return *this;
+        }
+        chunk_iterator & operator++()
+        {
+            m_ptr += m_chunk_size;
+            return *this;
+        }
+        chunk_iterator & operator--()
+        {
+            m_ptr -= m_chunk_size;
+            return *this;
+        }
+        chunk_iterator operator++(int)
+        {
+            auto saved = *this;
+            ++(*this);
+            return saved;
+        }
+        chunk_iterator operator--(int)
+        {
+            auto saved = *this;
+            --(*this);
+            return saved;
+        }
+        chunk_iterator operator+(difference_type offset) const
+        {
+            auto saved = *this;
+            return saved += offset;
+        }
+        chunk_iterator operator-(difference_type offset) const
+        {
+            auto saved = *this;
+            return saved -= offset;
+        }
+        difference_type operator-(const chunk_iterator & rhs) const
+        {
+            return (m_ptr - rhs.m_ptr) / static_cast<difference_type>(m_chunk_size);
+        }
+
+        reference operator[] (size_t offset) const
+        {
+            return *(*this + offset);
+        }
+        reference operator*() const
+        {
+            return chunk<IsConst>(m_ptr, m_ptr + m_chunk_size);
+        }
+    protected:
+        using ptr_t = typename chunk_traits<IsConst>::pointer;
+        ptr_t m_ptr;
+        size_t m_chunk_size = 0;
+
+        chunk_iterator(ptr_t ptr, size_t chunk_size) : m_ptr(ptr), m_chunk_size(chunk_size) {}
+
+        friend class Structure;
+    };
+public:
+
+    using iterator = chunk_iterator<false>;
+    using const_iterator = chunk_iterator<true>;
+    using size_type = size_t;
+    using reference = chunk<false>;
+    using const_reference = chunk<true>;
+
+    int connectivity;
+
+    template <typename Radii>
+    Structure(const Radii & radii, int connectivity) : connectivity(connectivity)
+    {
+        for (size_t n = 0; n < radii.size(); n++) m_shape.push_back(2 * radii[n] + 1);
+        for (auto point : rectangle_range<std::vector<long>>(std::vector<long>(m_shape.begin(), m_shape.end())))
+        {
             long abs = 0;
-            for (size_t i = 0; i < N; i++) abs += std::abs(point[i]);
-            if (abs <= rank) m_ctr.emplace_back(std::move(point));
+            for (size_t n = 0; n < radii.size(); n++)
+            {
+                point[n] -= radii[n];
+                abs += std::abs(point[n]);
+            }
+            if (abs > 0 && abs <= connectivity)
+            {
+                m_ctr.insert(m_ctr.end(), point.begin(), point.end());
+            }
         }
     }
 
-    StructureND & sort()
-    {
-        auto compare = [](const PointND<long, N> & a, const PointND<long, N> & b)
-        {
-            return magnitude(a) < magnitude(b);
-        };
-        std::sort(begin(), end(), compare);
-        return *this;
-    }
+    iterator begin() {return iterator(m_ctr.data(), rank());}
+    const_iterator begin() const {return const_iterator(m_ctr.data(), rank());}
+
+    iterator end() {return iterator(m_ctr.data() + rank() * size(), rank());}
+    const_iterator end() const {return const_iterator(m_ctr.data() + rank() * size(), rank());}
+
+    size_type size() const {return m_ctr.size() / rank();}
+    size_type rank() const {return m_shape.size();}
+
+    const std::vector<size_t> & shape() const {return m_shape;}
+    size_t shape(size_t index) const {return m_shape[index];}
 
     std::string info() const
     {
-        return "<StructureND, N = " + std::to_string(N) + ", radius = " + std::to_string(radius) +
-               ", rank = " + std::to_string(rank) + ", points = <PointsND, size = " +  std::to_string(size()) + ">>";
+        return "<Structure, connectivity = " + std::to_string(connectivity) +
+               ", rank = " + std::to_string(rank()) + ", size = " +  std::to_string(size()) + ">";
     }
 
 protected:
-    using WrappedContainer<std::vector<PointND<long, N>>>::m_ctr;
+    std::vector<long> m_ctr;
+    std::vector<size_t> m_shape;
 };
 
-using Structure = StructureND<2>;
-
 // Extended interface of set of points - needed for Regions
-
-template <size_t N>
-class PointSetND : public WrappedContainer<std::set<PointND<long, N>>>
+class Region
 {
 public:
-    using WrappedContainer<std::set<PointND<long, N>>>::WrappedContainer;
-    using WrappedContainer<std::set<PointND<long, N>>>::begin;
-    using WrappedContainer<std::set<PointND<long, N>>>::end;
-    using WrappedContainer<std::set<PointND<long, N>>>::size;
+    using size_type = size_t;
+    using iterator = typename std::set<long>::iterator;
+    using const_iterator = typename std::set<long>::const_iterator;
 
-    PointSetND() = default;
+    iterator begin() {return m_ctr.begin();}
+    const_iterator begin() const {return m_ctr.begin();}
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
-    void dilate(Func && func, const StructureND<N> & structure)
+    iterator end() {return m_ctr.end();}
+    const_iterator end() const {return m_ctr.end();}
+
+    size_type size() const {return m_ctr.size();}
+
+    std::pair<iterator, bool> insert(long index)
     {
-        std::vector<PointND<long, N>> last_pixels {begin(), end()};
-        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
+        return m_ctr.insert(index);
+    }
+
+    iterator insert(iterator hint, long index)
+    {
+        return m_ctr.insert(hint, index);
+    }
+
+    template <typename Func, typename I, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, long>>>
+    void dilate(Func && func, const Structure & structure, const array_indexer_view<I> & indexer)
+    {
+        std::vector<long> last_pixels {begin(), end()};
+        std::set<long> new_pixels;
 
         while (last_pixels.size())
         {
-            for (const auto & point: last_pixels)
+            for (auto index : last_pixels)
             {
                 for (const auto & shift: structure)
                 {
-                    new_pixels.insert(point + shift);
+                    // Add new index if in bounds
+                    long new_index = shift_index(index, shift, indexer);
+                    if (new_index >= 0) new_pixels.insert(new_index);
                 }
             }
             last_pixels.clear();
 
-            for (auto && point: new_pixels)
+            for (auto index : new_pixels)
             {
-                if (std::forward<Func>(func)(point))
+                if (std::forward<Func>(func)(index))
                 {
-                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
+                    auto [iter, is_added] = m_ctr.insert(index);
                     if (is_added) last_pixels.push_back(*iter);
                 }
             }
@@ -363,31 +535,33 @@ public:
         }
     }
 
-    template <typename Func, typename Stop, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>> &&
-        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const PointSetND<N> &>
+    template <typename Func, typename Stop, typename I, typename = std::enable_if_t<
+        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
+        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const Region &>
     >>
-    void dilate(Func && func, const StructureND<N> & structure, Stop && stop)
+    void dilate(Func && func, const Structure & structure, Stop && stop, const array_indexer_view<I> & indexer)
     {
-        std::vector<PointND<long, N>> last_pixels {begin(), end()};
-        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
+        std::vector<long> last_pixels {begin(), end()};
+        std::set<long> new_pixels;
 
         while (last_pixels.size() && std::forward<Stop>(stop)(*this))
         {
-            for (const auto & point: last_pixels)
+            for (auto index : last_pixels)
             {
                 for (const auto & shift: structure)
                 {
-                    new_pixels.insert(point + shift);
+                    // Add new index if in bounds
+                    long new_index = shift_index(index, shift, indexer);
+                    if (new_index >= 0) new_pixels.insert(new_index);
                 }
             }
             last_pixels.clear();
 
-            for (auto && point: new_pixels)
+            for (auto index : new_pixels)
             {
-                if (std::forward<Func>(func)(point))
+                if (std::forward<Func>(func)(index))
                 {
-                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
+                    auto [iter, is_added] = m_ctr.insert(index);
                     if (is_added) last_pixels.push_back(*iter);
                 }
             }
@@ -395,28 +569,30 @@ public:
         }
     }
 
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
-    void dilate(Func && func, const StructureND<N> & structure, size_t n_iter)
+    template <typename Func, typename I, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, long>>>
+    void dilate(Func && func, const Structure & structure, size_t n_iter, const array_indexer_view<I> & indexer)
     {
-        std::vector<PointND<long, N>> last_pixels {begin(), end()};
-        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
+        std::vector<long> last_pixels {begin(), end()};
+        std::set<long> new_pixels;
 
         for (size_t n = 0; n < n_iter; n++)
         {
-            for (const auto & point: last_pixels)
+            for (auto index : last_pixels)
             {
                 for (const auto & shift: structure)
                 {
-                    new_pixels.insert(point + shift);
+                    // Add new index if in bounds
+                    long new_index = shift_index(index, shift, indexer);
+                    if (new_index >= 0) new_pixels.insert(new_index);
                 }
             }
             last_pixels.clear();
 
-            for (auto && point: new_pixels)
+            for (auto index : new_pixels)
             {
-                if (std::forward<Func>(func)(point))
+                if (std::forward<Func>(func)(index))
                 {
-                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
+                    auto [iter, is_added] = m_ctr.insert(index);
                     if (is_added) last_pixels.push_back(*iter);
                 }
             }
@@ -425,30 +601,78 @@ public:
     }
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> & array, bool value) const
+    void mask(array<I> & array, I value) const
     {
-        for (const auto & pt : m_ctr)
-        {
-            if (array.is_inbound(pt.coordinate())) array.at(pt.coordinate()) = value;
-        }
+        for (auto index : m_ctr) array[index] = value;
     }
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> && array, bool value) const
+    void mask(array<I> && array, I value) const
     {
         mask(array, value);
     }
 
+    // Region follow xyz ordering
+    template <size_t N>
+    PointND<long, N> to_point(long index, const array_indexer & indexer) const
+    {
+        PointND<long, N> point;
+        for (size_t n = N; n > 0; --n)
+        {
+            size_t zyx_n = n - 1, xyz_n = N - n;
+            point[xyz_n] = index % indexer.shape(zyx_n);
+            index /= indexer.shape(zyx_n);
+        }
+        return point;
+    }
+
     std::string info() const
     {
-        return "<PointsSetND, N = " + std::to_string(N) + ", size = " + std::to_string(m_ctr.size()) + ">";
+        return "<Region, size = " +  std::to_string(size()) + ">";
     }
 
 protected:
-    using WrappedContainer<std::set<PointND<long, N>>>::m_ctr;
+    std::set<long> m_ctr;
+
+    template <typename Container, typename I>
+    long shift_index(long index, const Container & shift, const array_indexer_view<I> & indexer) const
+    {
+        long new_index = 0;
+        long stride = 1;
+        for (size_t n = shift.size(); n > 0; --n)
+        {
+            long coord = index % indexer.shape(n - 1) + shift[n - 1];
+            if (coord < 0 || coord >= indexer.shape(n - 1)) return -1;
+
+            new_index += coord * stride;
+            index /= indexer.shape(n - 1);
+            stride *= indexer.shape(n - 1);
+        }
+        return new_index;
+    }
 };
 
-using PointSet = PointSetND<2>;
+class LabelResult
+{
+public:
+    LabelResult(array_indexer && indexer, std::vector<Region> && regions) :
+        m_indexer(std::move(indexer)), m_regions(std::move(regions)) {}
+
+    LabelResult(const array_indexer & indexer, const std::vector<Region> & regions) :
+        m_indexer(indexer), m_regions(regions) {}
+
+    const std::vector<Region> & regions() const {return m_regions;}
+    std::vector<Region> & regions() {return m_regions;}
+
+    size_t coord_along_dim(long index, size_t dim) const {return m_indexer.coord_along_dim(index, dim);}
+
+    const std::vector<size_t> & shape() const {return m_indexer.shape();}
+    size_t shape(size_t index) const {return m_indexer.shape(index);}
+
+protected:
+    array_indexer m_indexer;
+    std::vector<Region> m_regions;
+};
 
 // Set of [point, value] pairs
 
@@ -461,14 +685,11 @@ public:
     PixelsND(const PixelSetND<T, N> & pset) : m_mnt(pset), m_pset(pset) {}
     PixelsND(PixelSetND<T, N> && pset) : m_mnt(pset), m_pset(std::move(pset)) {}
 
-    PixelsND(const PointSetND<N> & points, const array<T> & data)
+    PixelsND(const Region & points, const array<T> & data)
     {
-        for (auto && pt : points)
+        for (auto index : points)
         {
-            if (data.is_inbound(pt.coordinate()))
-            {
-                m_pset.emplace_hint(m_pset.end(), make_pixel(std::forward<decltype(pt)>(pt), data));
-            }
+            m_pset.emplace_hint(m_pset.end(), make_pixel(points.to_point<N>(index, data), data));
         }
         m_mnt = m_pset;
     }
@@ -519,37 +740,6 @@ protected:
 
 template <typename T>
 using Pixels = PixelsND<T, 2>;
-
-template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
-{
-    std::vector<PointSetND<N>> regions;
-    auto func = [&mask](const PointND<long, N> & pt)
-    {
-        return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());
-    };
-
-    for (; first != last; ++first)
-    {
-        size_t index = mask.index_at(first->coordinate());
-        if (mask[index])
-        {
-            PointSetND<N> points;
-            points->insert(*first);
-            points.dilate(func, structure);
-            points.mask(mask, false);
-            if (points.size() >= npts) regions.emplace_back(std::move(points));
-        }
-    }
-
-    return regions;
-}
-
-template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> && mask, const StructureND<N> & structure, size_t npts)
-{
-    return labelise(first, last, mask, structure, npts);
-}
 
 // PyBind11 helper functions to wrap an std::vector derived classes
 

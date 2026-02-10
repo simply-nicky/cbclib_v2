@@ -1,6 +1,6 @@
 #ifndef BRESENHAM_
 #define BRESENHAM_
-#include "array.hpp"
+#include "numpy.hpp"
 #include "geometry.hpp"
 
 namespace cbclib {
@@ -8,15 +8,15 @@ namespace cbclib {
 namespace detail {
 
 template <class... Types>
-class ImageBuffer : public shape_handler
+class ImageBuffer : public array_indexer
 {
 public:
     using value_type = std::tuple<size_t, Types...>;
     using iterator = typename std::vector<value_type>::iterator;
     using const_iterator = typename std::vector<value_type>::const_iterator;
 
-    ImageBuffer() : shape_handler(), data() {}
-    ImageBuffer(ShapeContainer shape) : shape_handler(std::move(shape), 1), data() {}
+    ImageBuffer() : array_indexer(), data() {}
+    ImageBuffer(ShapeContainer shape) : array_indexer(std::move(shape), 1), data() {}
 
     iterator begin() {return data.begin();}
     const_iterator begin() const {return data.begin();}

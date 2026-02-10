@@ -1,6 +1,6 @@
 #ifndef MEDIAN_
 #define MEDIAN_
-#include "array.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
 

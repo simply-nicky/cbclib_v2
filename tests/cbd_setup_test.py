@@ -1,23 +1,23 @@
 import pytest
 from jax import random
-from cbclib_v2.annotations import ArrayNamespace, KeyArray, NumPy, RealArray
+from cbclib_v2.annotations import NumPyNamespace, KeyArray, NumPy, RealArray
 from cbclib_v2.indexer import (CBDModel, CBDPoints, LaueVectors, Miller, MillerWithRLP, RotationState,
                                XtalCell, XtalState)
 from cbclib_v2.test_util import FixedState, TestSetup, check_close
 
 class TestCBDSetup():
     @pytest.fixture
-    def xp(self) -> ArrayNamespace:
+    def xp(self) -> NumPyNamespace:
         return NumPy
 
     @pytest.fixture
-    def state(self, xp: ArrayNamespace) -> FixedState:
+    def state(self, xp: NumPyNamespace) -> FixedState:
         return FixedState(TestSetup.xtal(xp))
 
-    def skew_symmetric(self, vec: RealArray, xp: ArrayNamespace) -> RealArray:
+    def skew_symmetric(self, vec: RealArray, xp: NumPyNamespace) -> RealArray:
         return xp.cross(xp.identity(vec.shape[-1]), vec[..., None, :])
 
-    def rodriguez_formula(self, angles: RealArray, xp: ArrayNamespace) -> RealArray:
+    def rodriguez_formula(self, angles: RealArray, xp: NumPyNamespace) -> RealArray:
         axis = xp.stack([xp.sin(angles[..., 1]) * xp.cos(angles[..., 2]),
                          xp.sin(angles[..., 1]) * xp.sin(angles[..., 2]),
                          xp.cos(angles[..., 1])], axis=-1)
@@ -55,21 +55,21 @@ class TestCBDSetup():
 
     @pytest.fixture
     def rlp(self, miller: Miller, model: CBDModel,
-            state: FixedState, xp: ArrayNamespace) -> MillerWithRLP:
+            state: FixedState, xp: NumPyNamespace) -> MillerWithRLP:
         return model.xtal.hkl_to_q(miller, state.xtal, xp)
 
     @pytest.fixture
     def laue(self, rlp: MillerWithRLP, model: CBDModel, state: FixedState,
-             xp: ArrayNamespace) -> LaueVectors:
+             xp: NumPyNamespace) -> LaueVectors:
         return model.lens.source_lines(rlp, state.lens, xp)
 
     @pytest.fixture
     def points(self, laue: LaueVectors, model: CBDModel, state: FixedState,
-               xp: ArrayNamespace) -> CBDPoints:
+               xp: NumPyNamespace) -> CBDPoints:
         return model.kout_to_points(laue, state, xp)
 
     def text_xtal_to_cell(self, xtal: XtalState, ormatrix: RotationState,
-                          cell: XtalCell, xp: ArrayNamespace):
+                          cell: XtalCell, xp: NumPyNamespace):
         basis = cell.to_basis()
         check_close(xp.linalg.det(ormatrix.matrix), xp.array(1.0))
         check_close(ormatrix @ basis.basis, xtal.basis)
@@ -88,20 +88,20 @@ class TestCBDSetup():
         check_close(cell.lengths, new_cell.lengths)
 
     def test_hkl_and_q(self, miller: Miller, rlp: MillerWithRLP,
-                       model: CBDModel, state: FixedState, xp: ArrayNamespace):
+                       model: CBDModel, state: FixedState, xp: NumPyNamespace):
         rlp = model.xtal.q_to_hkl(rlp, state.xtal, xp)
         assert xp.all(rlp.hkl_indices == miller.hkl_indices)
 
     def test_laue(self, laue: LaueVectors, model: CBDModel,
-                  state: FixedState, xp: ArrayNamespace):
+                  state: FixedState, xp: NumPyNamespace):
         check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
         check_close(laue.kin, model.lens.project_to_pupil(laue.kin, state.lens, xp))
 
     def test_points_and_kout(self, laue: LaueVectors, points: CBDPoints, model: CBDModel,
-                             state: FixedState, xp: ArrayNamespace):
+                             state: FixedState, xp: NumPyNamespace):
         check_close(model.points_to_kout(points, state, xp).kout, laue.kout)
 
-    def test_rotation_to_tilt(self, ormatrix: RotationState, xp: ArrayNamespace):
+    def test_rotation_to_tilt(self, ormatrix: RotationState, xp: NumPyNamespace):
         tilt = ormatrix.to_tilt()
         check_close(tilt.to_rotation().matrix, self.rodriguez_formula(tilt.angles, xp))
         check_close(ormatrix.matrix, tilt.to_rotation().matrix)

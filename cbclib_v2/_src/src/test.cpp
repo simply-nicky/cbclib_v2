@@ -1,4 +1,4 @@
-#include "array.hpp"
+#include "numpy.hpp"
 
 PYBIND11_MODULE(test, m)
 {

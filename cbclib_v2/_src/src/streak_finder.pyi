@@ -1,6 +1,6 @@
 from typing import Iterable, Iterator, List, Tuple, overload
-from ..annotations import BoolArray, IntSequence, NDIntArray, NDRealArray, RealArray, RealSequence
-from .label import Regions2D, Structure2D
+from ..annotations import BoolArray, IntSequence, NDIntArray, NDRealArray, RealArray, RealSequence, Shape
+from .label import Regions, Structure
 
 class Peaks:
     """Peak finding algorithm. Finds sparse peaks in a two-dimensional image.
@@ -81,7 +81,7 @@ class StreakDouble:
     x       : List[int]
     y       : List[int]
 
-    def __init__(self, x: int, y: int, structure: Structure2D, data: RealArray): ...
+    def __init__(self, x: int, y: int, structure: Structure, data: RealArray): ...
 
     def center(self) -> List[float]: ...
 
@@ -109,7 +109,7 @@ class StreakFloat:
     x       : List[int]
     y       : List[int]
 
-    def __init__(self, x: int, y: int, structure: Structure2D, data: RealArray): ...
+    def __init__(self, x: int, y: int, structure: Structure, data: RealArray): ...
 
     def center(self) -> List[float]: ...
 
@@ -160,7 +160,7 @@ class PatternDouble:
 
     def to_lines(self, width: RealSequence | None=None) -> NDRealArray: ...
 
-    def to_regions(self) -> Regions2D: ...
+    def to_regions(self, shape: Shape) -> Regions: ...
 
 class PatternFloat:
     @overload
@@ -193,7 +193,7 @@ class PatternFloat:
 
     def to_lines(self, width: RealSequence | None=None) -> NDRealArray: ...
 
-    def to_regions(self) -> Regions2D: ...
+    def to_regions(self, shape: Shape) -> Regions: ...
 
 Pattern = PatternDouble | PatternFloat
 
@@ -261,11 +261,11 @@ def detect_peaks(data: RealArray, mask: BoolArray, radius: int, vmin: float,
                  axes: Tuple[int, int] | None=None, num_threads: int=1) -> PeaksList: ...
 
 def filter_peaks(peaks: PeaksList, data: RealArray, mask: BoolArray,
-                 structure: Structure2D, vmin: float, npts: int,
+                 structure: Structure, vmin: float, npts: int,
                  axes: Tuple[int, int] | None=None, num_threads: int=1): ...
 
 def detect_streaks(peaks: PeaksList, data: RealArray, mask: BoolArray,
-                   structure: Structure2D, xtol: float, vmin: float, min_size: int,
+                   structure: Structure, xtol: float, vmin: float, min_size: int,
                    lookahead: int=0, nfa: int=0, axes: Tuple[int, int] | None=None,
                    num_threads: int=1) -> PatternList:
     """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively

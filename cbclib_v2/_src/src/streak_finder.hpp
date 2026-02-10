@@ -1,5 +1,6 @@
 #ifndef STREAK_FINDER_
 #define STREAK_FINDER_
+#include <iostream>
 #include "bresenham.hpp"
 #include "label.hpp"
 #include "signal_proc.hpp"
@@ -319,16 +320,11 @@ public:
     >>
     void filter(InputIt first, InputIt last, std::vector<InputIt> & output, const Structure & srt, T vmin, size_t npts)
     {
-        auto func = [this, vmin](const Point<long> & pt)
+        auto func = [this, vmin](long index)
         {
-            if (m_data.is_inbound(pt.coordinate()))
-            {
-                auto idx = m_data.index_at(pt.coordinate());
-                return m_mask[idx] && m_data[idx] > vmin;
-            }
-            return false;
+            return m_mask[index] && m_data[index] > vmin;
         };
-        auto stop = [npts](const PointSet & support)
+        auto stop = [npts](const Region & support)
         {
             return support.size() < npts;
         };
@@ -337,12 +333,12 @@ public:
         {
             if (!m_good[m_good.index_at(iter->coordinate())])
             {
-                PointSet support;
-                support->insert(*iter);
-                support.dilate(func, srt, stop);
+                Region support;
+                support.insert(m_data.index_at(iter->coordinate()));
+                support.dilate(func, srt, stop, m_data);
 
                 if (support.size() < npts) output.push_back(iter);
-                else support.mask(m_good, true);
+                else support.mask(m_good, u_char(1));
             }
         }
     }
@@ -537,7 +533,7 @@ public:
         PixelSet<T> pset;
         for (auto shift : m_structure)
         {
-            Point<long> pt {seed.x() + shift.x(), seed.y() + shift.y()};
+            Point<long> pt {seed.x() + shift[m_structure.rank() - 1], seed.y() + shift[m_structure.rank() - 2]};
 
             if (!mask.is_bad(pt)) pset.emplace(make_pixel(std::move(pt), m_data));
         }
@@ -626,10 +622,10 @@ protected:
         unsigned tries = 0;
         while (tries <= m_lookahead)
         {
-            Point<long> pt = find_next_step<IsForward>(streak, point, m_structure.rank);
+            Point<long> pt = find_next_step<IsForward>(streak, point, m_structure.rank());
 
             // Find the closest peak in structure vicinity
-            auto iter = m_peaks.find_range(pt, m_structure.rank);
+            auto iter = m_peaks.find_range(pt, m_structure.rank());
             if (iter != m_peaks.end() && mask.is_free(*iter) && *iter != point)
             {
                 pt = *iter;

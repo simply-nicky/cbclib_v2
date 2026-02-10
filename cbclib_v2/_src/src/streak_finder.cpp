@@ -119,6 +119,7 @@ void filter_peaks(std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<b
                   std::optional<std::vector<long>> ax, unsigned threads)
 {
     using PeakIterators = std::vector<Peaks::iterator>;
+    if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
 
     if (data.ndim() < 2)
         fail_container_check("wrong number of dimensions (" + std::to_string(data.ndim()) + " < 2)",
@@ -201,6 +202,8 @@ template <typename T>
 auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> data, py::array_t<bool> mask, Structure structure, T xtol, T vmin, unsigned min_size,
                     unsigned lookahead, unsigned nfa, std::optional<std::vector<long>> ax, unsigned threads)
 {
+    if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
+
     if (data.ndim() < 2)
         fail_container_check("wrong number of dimensions (" + std::to_string(data.ndim()) + " < 2)",
                              std::vector<py::ssize_t>{data.shape(), data.shape() + data.ndim()});
@@ -393,11 +396,13 @@ void declare_streak(py::module & m, const std::string & typestr)
     py::class_<Streak<T>>(m, cls.c_str())
         .def(py::init([](long x, long y, Structure structure, py::array_t<T> data)
         {
+            if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
+
             array<T> darr {data.request()};
             PixelSet<T> pset;
             for (auto shift : structure)
             {
-                Point<long> pt {x + shift.x(), y + shift.y()};
+                Point<long> pt {x + shift[structure.rank() - 1], y + shift[structure.rank() - 2]};
                 pset.emplace(make_pixel(std::move(pt), darr));
             }
             return Streak<T>{std::move(pset), Point<long>{x, y}};
@@ -572,13 +577,25 @@ void declare_pattern(py::module & m, const std::string & typestr)
             auto shape = push_to_lines(lines, streaks, width);
             return as_pyarray(std::move(lines), shape);
         }, py::arg("width") = std::nullopt)
-        .def("to_regions", [](const std::vector<Streak<T>> & streaks)
+        .def("to_regions", [](const std::vector<Streak<T>> & streaks, std::vector<py::ssize_t> shape)
         {
-            std::vector<PointSet> regions;
+            if (shape.size() != 2)
+            {
+                auto err_txt = "shape size (" + std::to_string(shape.size()) + ") must be equal to 2";
+                throw std::invalid_argument(err_txt);
+            }
+            auto size = std::reduce(shape.begin(), shape.end(), size_t(1), std::multiplies());
+
+            std::vector<Region> regions;
             for (const auto & streak : streaks)
             {
-                PointSet & points = regions.emplace_back();
-                for (auto && [point, _] : streak.pixels()) points->emplace_hint(points.end(), std::forward<decltype(point)>(point));
+                Region & points = regions.emplace_back();
+                for (auto && [point, _] : streak.pixels())
+                {
+                    auto coord = point.coordinate();
+                    auto index = detail::coord_to_index(coord.begin(), coord.end(), shape.begin(), size);
+                    points.insert(index);
+                }
             }
             return regions;
         });
@@ -657,7 +674,8 @@ PYBIND11_MODULE(streak_finder, m)
         .def_property("y", [](const Peaks & peaks){return detail::get_x(peaks, 1);}, nullptr)
         .def("__iter__", [](const Peaks & peaks)
         {
-            return py::make_iterator(make_python_iterator(peaks.begin()), make_python_iterator(peaks.end()));
+            auto func = [](const Point<long> & pt) { return pt.to_array(); };
+            return py::make_iterator(make_python_iterator(peaks.begin(), func), make_python_iterator(peaks.end(), func));
         }, py::keep_alive<0, 1>())
         .def("__len__", [](const Peaks & peaks){return peaks.size();})
         .def("__repr__", &Peaks::info)

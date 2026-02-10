@@ -147,21 +147,9 @@ def maximum_filter(inp: RealArray | IntArray, size: IntSequence | None=None,
     """
     ...
 
-@overload
-def robust_mean(inp: RealArray, mask: BoolArray | None=None, axis: IntSequence=0, r0: float=0.0,
-                r1: float=0.5, n_iter: int=12, lm: float=9.0, return_std: bool=False,
-                num_threads: int=1) -> NDRealArray:
-    ...
-
-@overload
-def robust_mean(inp: IntArray, mask: BoolArray | None=None, axis: IntSequence=0, r0: float=0.0,
-                r1: float=0.5, n_iter: int=12, lm: float=9.0, return_std: bool=False,
-                num_threads: int=1) -> NDIntArray:
-    ...
-
 def robust_mean(inp: RealArray | IntArray, mask: BoolArray | None=None, axis: IntSequence=0,
                 r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0, return_std: bool=False,
-                num_threads: int=1) -> NDRealArray | NDIntArray:
+                num_threads: int=1) -> NDRealArray:
     """Calculate a mean along the `axis` by robustly fitting a Gaussian to input vector [RFG]_.
     The algorithm performs `n_iter` times the fast least kth order statistics (FLkOS [FLKOS]_)
     algorithm to fit a gaussian to data.
@@ -198,21 +186,9 @@ def robust_mean(inp: RealArray | IntArray, mask: BoolArray | None=None, axis: In
     """
     ...
 
-@overload
-def robust_lsq(W: RealArray, y: RealArray, mask: BoolArray | None=None, axis: IntSequence=-1,
-               r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0, num_threads: int=1
-               ) -> NDRealArray:
-    ...
-
-@overload
-def robust_lsq(W: IntArray, y: IntArray, mask: BoolArray | None=None, axis: IntSequence=-1,
-               r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0, num_threads: int=1
-               ) -> NDIntArray:
-    ...
-
 def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, mask: BoolArray | None=None,
                axis: IntSequence=-1, r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-               num_threads: int=1) -> NDRealArray | NDIntArray:
+               num_threads: int=1) -> NDRealArray:
     """Robustly solve a linear least-squares problem with the fast least kth order statistics
     (FLkOS [FLKOS]_) algorithm.
 

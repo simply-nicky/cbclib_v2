@@ -1,8 +1,9 @@
 from typing import Union
 from .cbc_setup import TiltOverAxisState
 from .geometry import safe_divide, kxy_to_k
-from .._src.annotations import ArrayNamespace, BoolArray, IntArray, RealArray
-from .._src.data_container import ArrayContainer, IndexedContainer, array_namespace
+from .._src.annotations import AnyNamespace, BoolArray, IntArray, RealArray
+from .._src.array_api import array_namespace
+from .._src.data_container import ArrayContainer, IndexedContainer
 from .._src.state import State
 from .._src.streaks import BaseLines
 
@@ -105,7 +106,7 @@ class UCA(State, ArrayContainer):
     def q_corners(self) -> RealArray:
         xp = self.__array_namespace__()
         kxy = xp.stack((self.kxy_min, self.kxy_max))
-        kxy = xp.concatenate((kxy, xp.stack((kxy[..., 0], kxy[::-1, ..., 1]), axis=-1)))
+        kxy = xp.concat((kxy, xp.stack((kxy[..., 0], kxy[::-1, ..., 1]), axis=-1)))
         return self.kout - kxy_to_k(kxy, xp)
 
 class CircleState(State, ArrayContainer):
@@ -127,9 +128,9 @@ class Rotograms(State, IndexedContainer, BaseLines):
 
     @classmethod
     def from_tilts(cls, tilts: TiltOverAxisState, index: IntArray, streak_id: IntArray,
-                   xp: ArrayNamespace) -> 'Rotograms':
-        points = tilts.axis * xp.arctan(0.25 * tilts.angles[..., None])
-        lines = xp.concatenate((points[..., 1:, :], points[..., :-1, :]), axis=-1)
+                   xp: AnyNamespace) -> 'Rotograms':
+        points = tilts.axis * xp.atan(0.25 * tilts.angles[..., None])
+        lines = xp.concat((points[..., 1:, :], points[..., :-1, :]), axis=-1)
         return cls(index, xp.asarray(streak_id), lines)
 
     @property
@@ -165,7 +166,7 @@ class Miller(State, ArrayContainer):
     def collapse(self) -> 'Miller':
         xp = self.__array_namespace__()
         index = xp.broadcast_to(self.index, self.hkl.shape[:-1])
-        idxs = xp.concatenate((self.hkl, index[..., None]), axis=-1)
+        idxs = xp.concat((self.hkl, index[..., None]), axis=-1)
         idxs = xp.unique(xp.reshape(idxs, (-1,) + idxs.shape[-1:]), axis=0)
         return self.replace(hkl=idxs[..., :3], index=idxs[..., 3])
 
@@ -184,8 +185,8 @@ class RLP(State, ArrayContainer):
     def source_points(self) -> RealArray:
         xp = self.__array_namespace__()
         rec_abs = xp.sqrt(xp.sum(self.q**2, axis=-1))
-        theta = xp.arccos(0.5 * rec_abs) - xp.arccos(safe_divide(-self.q[..., 2], rec_abs, xp))
-        phi = xp.arctan2(self.q[..., 1], self.q[..., 0])
+        theta = xp.acos(0.5 * rec_abs) - xp.acos(safe_divide(-self.q[..., 2], rec_abs, xp))
+        phi = xp.atan2(self.q[..., 1], self.q[..., 0])
         return xp.stack((xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi),
                          xp.cos(theta)), axis=-1)
 

@@ -1,6 +1,6 @@
 #ifndef FFT_FUNCTIONS_
 #define FFT_FUNCTIONS_
-#include "array.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
 
@@ -498,7 +498,7 @@ OutputIt gauss_kernel(OutputIt first, size_t size, size_t radius, T sigma, unsig
 }
 
 template <typename T, typename InputIt>
-void write_line(std::vector<T> & buffer, size_t flen, size_t origin, InputIt first, InputIt last, extend mode)
+void write_line(std::vector<T> & buffer, size_t flen, size_t origin, InputIt first, InputIt last, extend mode, T cval)
 {
     auto n = std::distance(first, last);
 
@@ -511,7 +511,7 @@ void write_line(std::vector<T> & buffer, size_t flen, size_t origin, InputIt fir
             {
                 case extend::constant:
 
-                    buffer[i] = T();
+                    buffer[i] = cval;
                     break;
 
                 case extend::nearest:

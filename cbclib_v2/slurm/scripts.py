@@ -7,10 +7,11 @@ from shlex import quote
 from typing import ClassVar, Iterator, List, Literal, Type, overload
 import h5py
 import pandas as pd
-import numpy as np
 from tqdm.auto import tqdm
-from .._src.annotations import Array, ArrayNamespace, NumPy
-from .._src.data_container import DataContainer
+from .._src import device
+from .._src.annotations import AnyNamespace, Array, NumPy
+from .._src.array_api import default_rng
+from .._src.data_container import DataContainer, compute_index
 from .._src.data_processing import CrystMetadata
 from .._src.crystfel import Detector, read_crystfel
 from .._src.cxi_protocol import CXIIndices, CXIProtocol, CXIStore, write_hdf
@@ -19,7 +20,6 @@ from .._src.scripts import (BaseParameters, DetectionKind, FinderConfig, Indexin
 from .._src.scripts import create_metadata, pool_detection, pool_indexing
 from .._src.streaks import StackedStreaks, Streaks
 from ..indexer import FixedSetup, XtalCell, XtalList, XtalState
-from ..test_util import compute_index
 from .slurm_manager import SLURMScript, ScriptSpec
 
 @dataclass
@@ -123,12 +123,12 @@ class SetupConfig(BaseParameters):
     unit_file       : str
     xtals_dir       : str
 
-    def unit_cell(self, xp: ArrayNamespace=NumPy) -> XtalCell:
+    def unit_cell(self, xp: AnyNamespace=NumPy) -> XtalCell:
         if self.unit_file == str():
             raise ValueError("No crystal file provided")
         return XtalCell.read(self.unit_file, xp)
 
-    def xtal(self, xp: ArrayNamespace=NumPy) -> XtalState:
+    def xtal(self, xp: AnyNamespace=NumPy) -> XtalState:
         return self.unit_cell(xp).to_basis()
 
     def setup(self) -> FixedSetup:
@@ -148,9 +148,8 @@ class ScanFileStructure(BaseParameters):
         return folder
 
     def filename(self, scan_num: int, kind: str, file_index: int | None=None,
-                 module_id: int | None=None, suffix: str=str()) -> str:
-        path = self.file_pattern.format(scan_num=scan_num, kind=kind)
-        filename, extension = os.path.splitext(path)
+                 module_id: int | None=None, suffix: str=str(), extension: str='.h5') -> str:
+        filename = self.file_pattern.format(scan_num=scan_num, kind=kind)
         if file_index is not None:
             filename += f'_f{file_index:04d}'
         if module_id is not None:
@@ -181,7 +180,7 @@ class ScanFileStructure(BaseParameters):
             if os.path.isdir(path) and re.match(pattern, filename):
                 yield path
 
-FILE_STRUCTURE = ScanFileStructure('scan_{scan_num:d}_{kind}', 'scan_{scan_num:d}_{kind}.h5')
+FILE_STRUCTURE = ScanFileStructure('scan_{scan_num:d}_{kind}', 'scan_{scan_num:d}_{kind}')
 
 @dataclass
 class ScanConfig(BaseParameters):
@@ -218,12 +217,12 @@ class ScanConfig(BaseParameters):
         return self.detector.data_files(data_dir, self.scan_num, file_index, module_id)
 
     def file_indices(self, indices: CXIIndices, file_index: int | None=None,
-                     module_id: int | None=None) -> CXIIndices:
+                     module_id: int | None=None, xp: AnyNamespace=NumPy) -> CXIIndices:
         if file_index is not None:
-            data_files = np.asarray(self.data_files(file_index)).ravel()
-            mask = np.asarray(np.any(indices.files[..., 0, None] == data_files, axis=-1))
+            data_files = xp.asarray(self.data_files(file_index)).reshape(-1)
+            mask = xp.asarray(xp.any(indices.files[..., 0, None] == data_files, axis=-1))
 
-            idxs = np.where(mask)
+            idxs = xp.where(mask)
             file_indices = indices[idxs].reshape((-1, self.detector.num_modules))
         else:
             file_indices = indices
@@ -239,7 +238,12 @@ class ScanConfig(BaseParameters):
         return sorted(self.structure.find_folders(folder, self.scan_num, self.image_kind))
 
     def find_metadata(self, file_index: int | None=None) -> str:
-        metalist_path = self.new_file(self.metalist.output_dir, file_index)
+        if file_index is not None:
+            metalist_path = self.new_file(self.metalist.output_dir, file_index)
+            if os.path.isfile(metalist_path):
+                return metalist_path
+
+        metalist_path = self.new_file(self.metalist.output_dir)
         if os.path.isfile(metalist_path):
             return metalist_path
 
@@ -270,18 +274,18 @@ class ScanConfig(BaseParameters):
         return CXIStore(data_files, protocol=self.protocol())
 
     def new_filename(self, file_index: int | None=None, module_id: int | None=None,
-                     suffix: str=str()) -> str:
+                     suffix: str=str(), extension: str='.h5') -> str:
         return self.structure.filename(self.scan_num, self.image_kind, file_index, module_id,
-                                       suffix)
+                                       suffix, extension)
 
     def new_file(self, folder: str, file_index: int | None=None, module_id: int | None=None,
-                 suffix: str=str()) -> str:
+                 suffix: str=str(), extension: str='.h5') -> str:
         if file_index is None:
-            filename = self.new_filename(None, module_id, suffix)
+            filename = self.new_filename(None, module_id, suffix, extension)
             return os.path.join(folder, filename)
 
         return os.path.join(self.new_folder(folder, suffix),
-                            self.new_filename(file_index, module_id))
+                            self.new_filename(file_index, module_id, str(), extension))
 
     def new_folder(self, folder: str, suffix: str=str()) -> str:
         return os.path.join(folder, self.structure.folder(self.scan_num, self.image_kind, suffix))
@@ -381,6 +385,9 @@ class CreateMetadata(BaseScript):
 
     def run(self):
         print("Configuring the script...")
+        xp = NumPy                          # Supports CPU only for now
+        rng = default_rng(xp=xp)
+
         pre_processor = self.scan.pre_processor()
         scan_file = self.scan.scan_file()
 
@@ -390,8 +397,8 @@ class CreateMetadata(BaseScript):
         print("Looking for data...")
         indices = scan_file.indices('data')
         if self.frames is None:
-            frames = np.random.choice(len(indices), self.scan.metadata.n_frames,
-                                      replace=False)
+            frames = rng.choice(len(indices), self.scan.metadata.n_frames,
+                                replace=False)
             indices = indices[frames]
         else:
             indices = indices[self.frames]
@@ -402,7 +409,8 @@ class CreateMetadata(BaseScript):
             images = pre_processor(images)
 
         print("Generating metadata...")
-        metadata = create_metadata(images, self.params)
+        with device.context(device.cpu(self.params.num_threads)):
+            metadata = create_metadata(images, self.params)
 
         output_file = os.path.join(self.scan.metadata.output_dir, self.scan.new_filename())
         print(f"Saving to {output_file}")
@@ -413,10 +421,13 @@ class CreateMetaList(BaseScript):
     scan        : ScanConfig
     params      : MetadataParameters
     file_index  : int | None
+    n_points    : int | None
 
     def __post_init__(self):
         if self.file_index is not None:
             self.file_index = compute_index(self.file_index, self.scan.num_files())
+        if self.n_points is not None and self.n_points < 0:
+            raise ValueError("n_points must be a non-negative integer")
 
     @classmethod
     def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
@@ -425,6 +436,8 @@ class CreateMetaList(BaseScript):
         initial.add_argument('parameters', type=str,
                              help='Path to a metadata parameters JSON file')
         initial.add_argument('--file_index', '-f', type=int, help='Index of the file to process')
+        initial.add_argument('--n_points', '-n', type=int,
+                             help='Number of metadata points to generate')
         return initial
 
     @classmethod
@@ -432,14 +445,16 @@ class CreateMetaList(BaseScript):
         return "Calculate a list of CBD metadata"
 
     @classmethod
-    def from_file(cls, scan_file: str, params_file: str, file_index: int | None
-                  ) -> 'CreateMetaList':
+    def from_file(cls, scan_file: str, params_file: str, file_index: int | None,
+                  n_points: int | None) -> 'CreateMetaList':
         scan = ScanConfig.read(scan_file)
         params = MetadataParameters.read(params_file)
-        return cls(scan, params, file_index)
+        return cls(scan, params, file_index, n_points)
 
     def run(self):
         print("Configuring the script...")
+        xp = NumPy                          # Supports CPU only for now
+
         if self.params.num_threads == 0:
             self.params.num_threads = cpu_count()
 
@@ -455,10 +470,16 @@ class CreateMetaList(BaseScript):
             indices = scan_file.indices('data')
         print(f"Starting to process {len(indices):d} frames...")
 
-        offsets = np.arange(0, self.scan.metalist.n_frames) - self.scan.metalist.n_frames // 2
+        offsets = xp.arange(0, self.scan.metalist.n_frames) - self.scan.metalist.n_frames // 2
         spacing = min(self.scan.metalist.spacing, len(indices) - len(offsets))
-        frames = np.arange(-int(offsets[0]), len(indices) - int(offsets[-1]),
-                           spacing)[:, None] + offsets
+
+        if self.n_points is None:
+            centers = xp.arange(-int(offsets[0]), len(indices) - int(offsets[-1]),
+                                spacing)
+        else:
+            centers = xp.linspace(-int(offsets[0]), len(indices) - int(offsets[-1]) - 1,
+                                  self.n_points, dtype=int)
+        frames = centers[:, None] + offsets
         print(f"Creating a metadata list of {frames.shape[0]:d} points...")
 
         output_path = self.scan.new_file(self.scan.metalist.output_dir, self.file_index)
@@ -468,39 +489,41 @@ class CreateMetaList(BaseScript):
         print(f"The results will be saved to {output_path}")
 
         output_file = CXIStore(output_path, CrystMetadata.default_protocol())
-        mask, var = np.ones(1, dtype=bool), np.zeros(1)
+        mask, var = xp.ones(1, dtype=bool), xp.zeros(1)
 
         whitefields = []
-        for index, fidxs in tqdm(enumerate(frames), total=frames.shape[0],
-                                 desc='Generating the list'):
-            images = scan_file.load('data', indices[fidxs], verbose=False)
-            if pre_processor is not None:
-                images = pre_processor(images)
-            metadata = create_metadata(images, self.params)
-            mask = mask & metadata.mask
-            var = var + metadata.std**2
-            whitefields.append(metadata.whitefield)
-            with output_file.file('a') as cxi_file:
-                output_file.save('data_frames', fidxs, cxi_file, mode='insert', idxs=index)
-                output_file.save('whitefield', metadata.whitefield, cxi_file, mode='insert',
-                                 idxs=index)
+        with device.context(device.cpu(self.params.num_threads)):
+            for index, fidxs in tqdm(enumerate(frames), total=frames.shape[0],
+                                    desc='Generating the list'):
+                images = scan_file.load('data', indices[fidxs], verbose=False)
+                if pre_processor is not None:
+                    images = pre_processor(images)
+                metadata = create_metadata(images, self.params)
+                mask = mask & metadata.mask
+                var = var + metadata.std**2
+                whitefields.append(metadata.whitefield)
+                with output_file.file('a') as cxi_file:
+                    output_file.save('data_frames', fidxs, cxi_file, mode='insert', idxs=index)
+                    output_file.save('whitefield', metadata.whitefield, cxi_file, mode='insert',
+                                     idxs=index)
 
-        print("Performing PC analysis...")
-        metadata = CrystMetadata(data_frames=frames, whitefield=np.stack(whitefields, axis=0),
-                                 mask=mask, std=np.sqrt(var / frames.shape[0]))
-        metadata = metadata.pca()
+            print("Performing PC analysis...")
+            metadata = CrystMetadata(data_frames=frames, whitefield=xp.stack(whitefields, axis=0),
+                                     mask=mask, std=xp.sqrt(var / frames.shape[0]))
+            metadata = metadata.pca()
 
         print("Saving the rest...")
         write_hdf(metadata, output_file, 'eigen_field', 'eigen_value', 'flatfield', 'mask',
                   'std', file_mode='a')
 
 @dataclass
-class DetectStreaks(BaseScript):
+class DetectHits(BaseScript):
     scan        : ScanConfig
     params      : FinderConfig
     file_index  : int | None
     module_id   : int | None
     n_frames    : int | None
+    frames_only : bool
 
     def __post_init__(self):
         if self.file_index is not None:
@@ -522,6 +545,8 @@ class DetectStreaks(BaseScript):
         initial.add_argument('--module_index', '-m', type=int,
                              help='Index of the detector module to process')
         initial.add_argument('--n_frames', '-n', type=int, help='Number of frames to process')
+        initial.add_argument('--frames-only', action='store_true',
+                             help='Only save the list of frames with hits')
         return initial
 
     @classmethod
@@ -530,8 +555,8 @@ class DetectStreaks(BaseScript):
 
     @classmethod
     def from_file(cls, kind: DetectionKind, scan_file: str, params_file: str,
-                  file_index: int | None, module_id: int | None, n_frames: int | None
-                  ) -> 'DetectStreaks':
+                  file_index: int | None, module_id: int | None, n_frames: int | None,
+                  frames_only: bool) -> 'DetectHits':
         scan = ScanConfig.read(scan_file)
         if kind == 'streaks':
             params = StreakFinderConfig.read(params_file)
@@ -539,7 +564,7 @@ class DetectStreaks(BaseScript):
             params = RegionFinderConfig.read(params_file)
         else:
             raise ValueError(f"Invalid detection kind: {kind}")
-        return cls(scan, params, file_index, module_id, n_frames)
+        return cls(scan, params, file_index, module_id, n_frames, frames_only)
 
     @property
     def kind(self) -> DetectionKind:
@@ -552,6 +577,8 @@ class DetectStreaks(BaseScript):
     def run(self):
         if self.file_index is not None:
             print(f"Processing a file No. {self.file_index}")
+        xp = NumPy
+
         if self.params.num_threads == 0:
             self.params.num_threads = cpu_count()
 
@@ -592,35 +619,44 @@ class DetectStreaks(BaseScript):
         else:
             raise ValueError(f"Invalid image_kind keyword: {self.scan.image_kind}")
 
-        streaks = pool_detection(scan_file, metadata_path, self.params, self.kind,
-                                 (indices, ss_idxs, fs_idxs), detector, pre_processor)
+        with device.context(device.cpu(self.params.num_threads)):
+            streaks = pool_detection(scan_file, metadata_path, self.params, self.kind,
+                                     (indices, ss_idxs, fs_idxs), detector, pre_processor)
 
-        frames, counts = np.unique_counts(streaks.index)
+        frames, counts = xp.unique_counts(streaks.index)
         hit_frames = frames[counts > self.scan.detect.hit_threshold]
         hits = streaks.take(hit_frames)
         print(f"{hit_frames.size:d} hits were found.")
 
         if len(hits) > 0:
-            print("Preparing the file...")
-            df = hits.to_dataframe()
-            pid_indices = scan_file.indices('pulse_id')[hits.index_array.unique()]
-            pid_indices = self.scan.file_indices(pid_indices,
-                                                 module_id=self.scan.detector.starts_at)
-            pulse_ids = scan_file.load('pulse_id', idxs=pid_indices)
-            df['pulse_id'] = pulse_ids[hits.index_array.reset()]
-
-            if self.kind == 'streaks':
-                output_dir = self.scan.detect.streaks_dir
+            if self.frames_only:
+                print("Frames only requested, skipping saving the full hits data.")
+                output_path = self.scan.new_file(self.scan.detect.streaks_dir,
+                                                 self.file_index, self.module_id,
+                                                 extension='.csv')
+                pd.DataFrame({'frame': hit_frames}).to_csv(output_path, index=False)
+                print(f"The results were saved to {output_path}")
             else:
-                output_dir = self.scan.detect.regions_dir
+                print("Preparing the file...")
+                df = hits.to_dataframe()
+                pid_indices = scan_file.indices('pulse_id')[hits.index_array.unique()]
+                pid_indices = self.scan.file_indices(pid_indices,
+                                                    module_id=self.scan.detector.starts_at)
+                pulse_ids = scan_file.load('pulse_id', idxs=pid_indices)
+                df['pulse_id'] = pulse_ids[hits.index_array.reset()]
 
-            output_path = self.scan.new_file(output_dir, self.file_index, self.module_id)
-            dir_path = os.path.dirname(output_path)
-            if not os.path.exists(dir_path):
-                os.makedirs(dir_path)
-            print(f"The results will be saved to {output_path}")
+                if self.kind == 'streaks':
+                    output_dir = self.scan.detect.streaks_dir
+                else:
+                    output_dir = self.scan.detect.regions_dir
 
-            df.to_hdf(output_path, key='data')
+                output_path = self.scan.new_file(output_dir, self.file_index, self.module_id)
+                dir_path = os.path.dirname(output_path)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path)
+                print(f"The results will be saved to {output_path}")
+
+                df.to_hdf(output_path, key='data')
 
 @dataclass
 class IndexingScript(BaseScript):
@@ -693,7 +729,8 @@ class IndexingScript(BaseScript):
         setup = self.scan.setup.setup()
 
         print(f"Indexing {len(patterns):d} patterns...")
-        indexed = pool_indexing(patterns, xtals, setup, self.params)
+        with device.context(device.cpu(self.params.num_threads)):
+            indexed = pool_indexing(patterns, xtals, setup, self.params)
 
         output_path = self.scan.new_file(self.scan.setup.xtals_dir, self.file_index,
                                          self.module_id, self.suffix)
@@ -745,17 +782,19 @@ class SBatchScripts:
 
     @classmethod
     def metalist(cls, scan_file: str, params_file: str, script_file: str,
-                 file_index: int | None=None) -> SLURMScript:
+                 file_index: int | None=None, n_points: int | None=None) -> SLURMScript:
         command = f"{cls.main} metalist {quote(scan_file)} {quote(params_file)}"
         if file_index is not None:
             command += f' --file_index {file_index:d}'
+        if n_points is not None:
+            command += f' --n_points {n_points:d}'
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="metalist", command=command, parameters=script_spec)
 
     @classmethod
     def detect(cls, kind: DetectionKind, scan_file: str, params_file: str, script_file: str,
                file_index: int | None=None, module_id: int | None=None,
-               n_frames: int | None=None) -> SLURMScript:
+               n_frames: int | None=None, frames_only: bool=False) -> SLURMScript:
         command = f"{cls.main} detect {quote(kind)} {quote(scan_file)} {quote(params_file)}"
         if file_index is not None:
             command += f' --file_index {file_index:d}'
@@ -763,6 +802,8 @@ class SBatchScripts:
             command += f' --module_index {module_id:d}'
         if n_frames is not None:
             command += f' --n_frames {n_frames:d}'
+        if frames_only:
+            command += ' --frames-only'
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="detect", command=command, parameters=script_spec)
 
@@ -808,7 +849,7 @@ class Scripts:
     index           : ClassVar[Type[IndexingScript]] = IndexingScript
     metadata        : ClassVar[Type[CreateMetadata]] = CreateMetadata
     metalist        : ClassVar[Type[CreateMetaList]] = CreateMetaList
-    detect          : ClassVar[Type[DetectStreaks]] = DetectStreaks
+    detect          : ClassVar[Type[DetectHits]] = DetectHits
 
     @classmethod
     def parser(cls) -> ArgumentParser:
@@ -848,13 +889,13 @@ def main():
     elif args['command'] == 'metalist':
         print(f"JSON file with the metadata parameters: {args['parameters']}")
         script = CreateMetaList.from_file(args['scan'], args['parameters'],
-                                          args['file_index'])
+                                          args['file_index'], args['n_points'])
         script.run()
     elif args['command'] == 'detect':
         print(f"JSON file with the streak finding parameters: {args['parameters']}")
-        script = DetectStreaks.from_file(args['kind'], args['scan'], args['parameters'],
+        script = DetectHits.from_file(args['kind'], args['scan'], args['parameters'],
                                          args['file_index'], args['module_index'],
-                                         args['n_frames'])
+                                         args['n_frames'], args['frames_only'])
         script.run()
     else:
         raise ValueError(f"Invalid command: {args['command']}")

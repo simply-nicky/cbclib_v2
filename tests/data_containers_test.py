@@ -2,7 +2,7 @@ from typing import Dict, List, Tuple
 from dataclasses import dataclass
 import pytest
 from cbclib_v2 import Container, CrystData, StackedStreaks
-from cbclib_v2.annotations import ArrayNamespace, NumPy
+from cbclib_v2.annotations import NumPy, NumPyNamespace
 
 @dataclass
 class SimpleContainer(Container):
@@ -45,34 +45,34 @@ class TestContainerSerialization:
 class TestDataContainers:
     """Test data container functionality."""
     @pytest.fixture
-    def xp(self) -> ArrayNamespace:
+    def xp(self) -> NumPyNamespace:
         return NumPy
 
     @pytest.fixture
-    def streaks1(self, xp: ArrayNamespace) -> StackedStreaks:
+    def streaks1(self, xp: NumPyNamespace) -> StackedStreaks:
         """First StackedStreaks with 10 elements."""
         return StackedStreaks(index=xp.zeros(12), module_id=xp.zeros(12, dtype=int),
                               lines=xp.ones((12, 4)), num_modules=2)
 
     @pytest.fixture
-    def streaks2(self, xp: ArrayNamespace) -> StackedStreaks:
+    def streaks2(self, xp: NumPyNamespace) -> StackedStreaks:
         """Second StackedStreaks with 10 elements."""
         return StackedStreaks(index=xp.arange(10, 20), module_id=xp.ones(10, dtype=int),
                               lines=2.0 * xp.ones((10, 4)), num_modules=2)
 
     @pytest.fixture
-    def streaks3(self, xp: ArrayNamespace) -> StackedStreaks:
+    def streaks3(self, xp: NumPyNamespace) -> StackedStreaks:
         """Third StackedStreaks with 0 elements (empty)."""
         return StackedStreaks(index=xp.array([]), module_id=xp.array([], dtype=int),
                               lines=xp.empty((0, 4)), num_modules=2)
 
     @pytest.fixture
-    def data(self, xp: ArrayNamespace) -> CrystData:
+    def data(self, xp: NumPyNamespace) -> CrystData:
         """Sample CrystData fixture."""
         return CrystData(data=xp.ones((10, 10, 10)), whitefield=xp.array([]))
 
     def test_concatenate(self, streaks1: StackedStreaks, streaks2: StackedStreaks,
-                         streaks3: StackedStreaks, xp: ArrayNamespace):
+                         streaks3: StackedStreaks, xp: NumPyNamespace):
         """Test concatenation of three StackedStreaks including an empty one.
         """
         # Concatenate the three StackedStreaks
@@ -88,15 +88,15 @@ class TestDataContainers:
         assert result.num_modules == 2
 
         # Verify index values are correct
-        index = xp.concatenate([streaks1.index, streaks2.index, streaks3.index])
+        index = xp.concat([streaks1.index, streaks2.index, streaks3.index])
         assert xp.all(result.index == index), "Index values don't match expected"
 
         # Verify module_id values are correct
-        module_id = xp.concatenate([streaks1.module_id, streaks2.module_id, streaks3.module_id])
+        module_id = xp.concat([streaks1.module_id, streaks2.module_id, streaks3.module_id])
         assert xp.all(result.module_id == module_id), "Module IDs don't match expected"
 
         # Verify lines values are correct
-        lines = xp.concatenate([streaks1.lines, streaks2.lines, streaks3.lines])
+        lines = xp.concat([streaks1.lines, streaks2.lines, streaks3.lines])
         assert xp.all(result.lines == lines), "Line values don't match expected"
 
     def test_concatenate_empty_only(self, streaks3: StackedStreaks):
@@ -127,7 +127,7 @@ class TestDataContainers:
         with pytest.raises(ValueError):
             streaks3.reshape((1, 0))  # Invalid reshape for empty data
 
-    def test_reshape(self, streaks1: StackedStreaks, xp: ArrayNamespace):
+    def test_reshape(self, streaks1: StackedStreaks, xp: NumPyNamespace):
         """Test reshape method of StackedStreaks."""
         new_shape = (3, 2, 2)
         reshaped = streaks1.reshape(new_shape)

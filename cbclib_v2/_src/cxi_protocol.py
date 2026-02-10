@@ -20,9 +20,10 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Seque
 import h5py, hdf5plugin
 import numpy as np
 from tqdm.auto import tqdm
-from .data_container import Container, DataContainer, IndexedContainer, array_namespace, list_indices, to_list
+from .array_api import array_namespace
+from .data_container import Container, DataContainer, IndexedContainer, list_indices, to_list
 from .parser import Parser, get_parser
-from .annotations import (Array, ArrayNamespace, BoolArray, FileMode, Indices, IntArray, IntSequence,
+from .annotations import (Array, AnyNamespace, BoolArray, FileMode, Indices, IntArray, IntSequence,
                           IntTuple, MultiIndices, NumPy, ReadOut, Shape)
 
 I = TypeVar("I", bound='DataIndices')
@@ -45,7 +46,7 @@ class DataIndices(IndexedContainer):
 
     def zip(self) -> Iterator[Tuple]:
         xp = self.__array_namespace__()
-        yield from zip(*(xp.ravel(val).tolist() for val in self.contents().values()))
+        yield from zip(*(xp.reshape(val, -1).tolist() for val in self.contents().values()))
 
 @dataclass
 class CXIIndices(DataIndices):
@@ -201,7 +202,7 @@ class CXIProtocol(BaseProtocol):
 
         return shapes
 
-    def read_indices(self, attr: str, cxi_files: Iterable[h5py.File], xp: ArrayNamespace=NumPy
+    def read_indices(self, attr: str, cxi_files: Iterable[h5py.File], xp: AnyNamespace=NumPy
                      ) -> CXIIndices:
         """Return a set of indices of the dataset containing the attribute's data inside a set
         of files.
@@ -286,7 +287,7 @@ class CXIReader():
 
     def load_stack(self, attr: str, indices: CXIIndices, ss_idxs: Indices, fs_idxs: Indices,
                    proc: Processor | None, processes: int, verbose: bool,
-                   xp: ArrayNamespace) -> Array:
+                   xp: AnyNamespace) -> Array:
         stack = []
 
         if processes > 1:
@@ -307,7 +308,7 @@ class CXIReader():
                    proc: Processor | None) -> ReadOut:
         return CXIReadWorker(ss_idxs, fs_idxs, proc)(index)
 
-    def load_sequence(self, attr, indices: CXIIndices, verbose: bool, xp: ArrayNamespace) -> Array:
+    def load_sequence(self, attr, indices: CXIIndices, verbose: bool, xp: AnyNamespace) -> Array:
         sequence = []
         worker = CXIReadWorker()
         for index in tqdm(indices, total=len(indices), disable=not verbose,
@@ -382,7 +383,7 @@ class FileStore(Container):
 
     def load(self, attr: str, idxs: DataIndices | None=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Processor | None=None, processes: int=1,
-             verbose: bool=True, xp: ArrayNamespace=NumPy) -> Array:
+             verbose: bool=True, xp: AnyNamespace=NumPy) -> Array:
         raise NotImplementedError
 
     def read_frame_shape(self) -> Tuple[int, int]:
@@ -473,7 +474,7 @@ class CXIStore(FileStore):
 
     def load(self, attr: str, idxs: CXIIndices | None=None, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), proc: Processor | None=None, processes: int=1,
-             verbose: bool=True, xp: ArrayNamespace=NumPy) -> Array:
+             verbose: bool=True, xp: AnyNamespace=NumPy) -> Array:
         """Load a data attribute from the files.
 
         Args:

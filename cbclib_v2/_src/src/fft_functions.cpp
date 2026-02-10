@@ -73,7 +73,6 @@ template <typename Inp, typename Shape, typename Axis, bool isForward>
 auto fftn(py::array_t<Inp> inp, std::optional<Shape> shape, std::optional<Axis> axis, std::string norm, unsigned threads)
 {
     using Out = std::complex<remove_complex_t<Inp>>;
-    assert(PyArray_API);
 
     Sequence<long> seq;
     Sequence<size_t> shape_seq;
@@ -172,7 +171,6 @@ template <typename Inp, typename Krn, typename Seq>
 auto fft_convolve(py::array_t<Inp> inp, py::array_t<Krn> kernel, std::optional<Seq> axis, unsigned threads)
 {
     using Out = std::common_type_t<Inp, Krn>;
-    assert(PyArray_API);
 
     Sequence<long> seq;
     if (!axis)
@@ -310,11 +308,14 @@ py::array_t<T> gaussian_kernel_vec(std::vector<T> sigma, U order, T truncate)
 }
 
 template <typename T, typename F>
-void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, const std::vector<unsigned> & order, F truncate, extend mode, unsigned threads)
+void gauss_filter(array<T> & out, const array<T> & input, const std::vector<F> & sigma, const std::vector<unsigned> & order, extend mode, T cval, F truncate, unsigned threads)
 {
     thread_exception e;
 
     py::gil_scoped_release release;
+
+    // Input buffer for in-place filtering
+    auto current_input = input;
 
     for (size_t axis = 0; axis < input.ndim(); axis++)
     {
@@ -324,7 +325,7 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
 
             auto radius = gauss_radius(sigma[axis], truncate);
             std::array<size_t, 1> gshape = {2 * radius + 1};
-            std::array<size_t, 1> oshape = {gshape[0] + input.shape(axis) - 1};
+            std::array<size_t, 1> oshape = {gshape[0] + out.shape(axis) - 1};
             std::array<size_t, 1> fshape = {next_fast_len(oshape[0])};
             size_t buf_size = fftw_buffer_shape<T>(fshape)[0];
             T factor = 1.0 / fshape[0];
@@ -344,11 +345,11 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
 
             #pragma omp parallel num_threads(threads)
             {
-                std::vector<T> ibuffer (buf_size, T());
+                std::vector<T> ibuffer (buf_size, cval);
                 std::array<long, 1> w_origin, r_origin;
 
-                write_origin(oshape.begin(), oshape.end(), std::next(input.shape().begin(), axis), w_origin.begin());
-                read_origin(oshape.begin(), oshape.end(), std::next(input.shape().begin(), axis), r_origin.begin());
+                write_origin(oshape.begin(), oshape.end(), std::next(out.shape().begin(), axis), w_origin.begin());
+                read_origin(oshape.begin(), oshape.end(), std::next(out.shape().begin(), axis), r_origin.begin());
 
                 auto ibuf_inp = ibuffer.data();
                 auto ibuf_out = reinterpret_cast<std::complex<F> *>(ibuffer.data());
@@ -359,8 +360,8 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
                 {
                     e.run([&]
                     {
-                        auto iline = input.slice(i, axis);
-                        write_line(ibuffer, fshape[0], w_origin[0], iline.begin(), iline.end(), mode);
+                        auto iline = current_input.slice(i, axis);
+                        write_line(ibuffer, fshape[0], w_origin[0], iline.begin(), iline.end(), mode, cval);
                         fftw_execute(fwd_plan, ibuf_inp, ibuf_out);
                         for (size_t j = 0; j < buf_size; j++) ibuf_out[j] *= kbuf_out[j] * factor;
                         fftw_execute(bwd_plan, ibuf_out, ibuf_inp);
@@ -370,7 +371,8 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
                 }
             }
 
-            input = out;
+            // Filtering is done in-place after the first axis
+            current_input = out;
         }
     }
 
@@ -380,14 +382,12 @@ void gauss_filter(array<T> & out, array<T> input, const std::vector<F> & sigma, 
 }
 
 template <typename T, typename U, typename V>
-py::array_t<T> gaussian_filter(py::array_t<T> inp, U sigma, V order, remove_complex_t<T> truncate, std::string mode, unsigned threads)
+py::array_t<T> gaussian_filter(py::array_t<T> inp, U sigma, V order, std::string mode, T cval, remove_complex_t<T> truncate, unsigned threads)
 {
     using F = remove_complex_t<T>;
-    assert(PyArray_API);
 
     auto it = modes.find(mode);
-    if (it == modes.end())
-        throw std::invalid_argument("invalid mode argument: " + mode);
+    if (it == modes.end()) throw std::invalid_argument("invalid mode argument: " + mode);
     auto m = it->second;
 
     auto iarr = array<T>(inp.request());
@@ -397,20 +397,18 @@ py::array_t<T> gaussian_filter(py::array_t<T> inp, U sigma, V order, remove_comp
     Sequence<F> sigmas (sigma, iarr.ndim());
     Sequence<unsigned> orders (order, iarr.ndim());
 
-    gauss_filter<T, F>(oarr, std::move(iarr), std::move(sigmas), std::move(orders), truncate, m, threads);
+    gauss_filter<T, F>(oarr, iarr, *sigmas, *orders, m, cval, truncate, threads);
 
     return out;
 }
 
 template <typename T, typename U>
-py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::string mode, remove_complex_t<T> truncate, unsigned threads)
+py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::string mode, T cval, remove_complex_t<T> truncate, unsigned threads)
 {
     using F = remove_complex_t<T>;
-    assert(PyArray_API);
 
     auto it = modes.find(mode);
-    if (it == modes.end())
-        throw std::invalid_argument("invalid mode argument: " + mode);
+    if (it == modes.end()) throw std::invalid_argument("invalid mode argument: " + mode);
     auto m = it->second;
 
     auto iarr = array<T>(inp.request());
@@ -421,7 +419,7 @@ py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::str
 
     std::vector<unsigned> orders (iarr.ndim(), 0);
     orders[0] = 1;
-    gauss_filter<T, F>(oarr, iarr, *sigmas, orders, truncate, m, threads);
+    gauss_filter<T, F>(oarr, iarr, *sigmas, orders, m, cval, truncate, threads);
 
     if (iarr.ndim() > 1)
     {
@@ -433,7 +431,7 @@ py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::str
         for (size_t axis = 1; axis < iarr.ndim(); axis++)
         {
             orders[axis - 1] = 0; orders[axis] = 1;
-            gauss_filter<T, F>(buffer, iarr, *sigmas, orders, truncate, m, threads);
+            gauss_filter<T, F>(buffer, iarr, *sigmas, orders, m, cval, truncate, threads);
 
             std::transform(oarr.begin(), oarr.end(), buffer.begin(), oarr.begin(), add_buffer);
         }
@@ -449,8 +447,6 @@ py::array_t<T> gaussian_gradient_magnitude(py::array_t<T> inp, U sigma, std::str
 PYBIND11_MODULE(fft_functions, m)
 {
     using namespace cbclib;
-    py::options options;
-    options.disable_function_signatures();
 
     try
     {
@@ -465,76 +461,88 @@ PYBIND11_MODULE(fft_functions, m)
 
     m.def("fftn", &fftn<float, int, int, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
     m.def("fftn", &fftn<float, std::vector<int>, std::vector<int>, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("fftn", &fftn<double, int, int, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("fftn", &fftn<double, std::vector<int>, std::vector<int>, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+
+    m.def("fftn", &fftn<double, long, long, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+    m.def("fftn", &fftn<double, std::vector<long>, std::vector<long>, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
 
     m.def("fftn", &fftn<std::complex<float>, int, int, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
     m.def("fftn", &fftn<std::complex<float>, std::vector<int>, std::vector<int>, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("fftn", &fftn<std::complex<double>, int, int, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("fftn", &fftn<std::complex<double>, std::vector<int>, std::vector<int>, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+
+    m.def("fftn", &fftn<std::complex<double>, long, long, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+    m.def("fftn", &fftn<std::complex<double>, std::vector<long>, std::vector<long>, true>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
 
     m.def("ifftn", &fftn<float, int, int, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
     m.def("ifftn", &fftn<float, std::vector<int>, std::vector<int>, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("ifftn", &fftn<double, int, int, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("ifftn", &fftn<double, std::vector<int>, std::vector<int>, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+
+    m.def("ifftn", &fftn<double, long, long, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+    m.def("ifftn", &fftn<double, std::vector<long>, std::vector<long>, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
 
     m.def("ifftn", &fftn<std::complex<float>, int, int, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
     m.def("ifftn", &fftn<std::complex<float>, std::vector<int>, std::vector<int>, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("ifftn", &fftn<std::complex<double>, int, int, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
-    m.def("ifftn", &fftn<std::complex<double>, std::vector<int>, std::vector<int>, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
 
-    m.def("fft_convolve", &fft_convolve<float, float, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<float, float, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<double, double, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<double, double, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("ifftn", &fftn<std::complex<double>, long, long, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
+    m.def("ifftn", &fftn<std::complex<double>, std::vector<long>, std::vector<long>, false>, py::arg("inp"), py::arg("shape") = std::nullopt, py::arg("axis") = std::nullopt, py::arg("norm") = "backward", py::arg("num_threads") = 1);
 
-    m.def("fft_convolve", &fft_convolve<std::complex<float>, float, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<std::complex<float>, float, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<std::complex<double>, double, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<std::complex<double>, double, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<float, float, int>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<float, float, std::vector<int>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
 
-    m.def("fft_convolve", &fft_convolve<float, std::complex<float>, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<float, std::complex<float>, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<double, std::complex<double>, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<double, std::complex<double>, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<double, double, long>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<double, double, std::vector<long>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
 
-    m.def("fft_convolve", &fft_convolve<std::complex<float>, std::complex<float>, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<std::complex<float>, std::complex<float>, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<std::complex<double>, std::complex<double>, int>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
-    m.def("fft_convolve", &fft_convolve<std::complex<double>, std::complex<double>, std::vector<int>>, py::arg("inp"), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<std::complex<float>, float, int>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<std::complex<float>, float, std::vector<int>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+
+    m.def("fft_convolve", &fft_convolve<std::complex<double>, double, long>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<std::complex<double>, double, std::vector<long>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+
+    m.def("fft_convolve", &fft_convolve<float, std::complex<float>, int>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<float, std::complex<float>, std::vector<int>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+
+    m.def("fft_convolve", &fft_convolve<double, std::complex<double>, long>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<double, std::complex<double>, std::vector<long>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+
+    m.def("fft_convolve", &fft_convolve<std::complex<float>, std::complex<float>, int>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<std::complex<float>, std::complex<float>, std::vector<int>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+
+    m.def("fft_convolve", &fft_convolve<std::complex<double>, std::complex<double>, long>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
+    m.def("fft_convolve", &fft_convolve<std::complex<double>, std::complex<double>, std::vector<long>>, py::arg("inp").noconvert(), py::arg("kernel"), py::arg("axis") = std::nullopt, py::arg("num_threads") = 1);
 
     m.def("gaussian_kernel", &gaussian_kernel<float>, py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0);
     m.def("gaussian_kernel", &gaussian_kernel<double>, py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0);
-    m.def("gaussian_kernel", &gaussian_kernel_vec<float, unsigned>, py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0);
-    m.def("gaussian_kernel", &gaussian_kernel_vec<float, std::vector<unsigned>>, py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0);
-    m.def("gaussian_kernel", &gaussian_kernel_vec<double, unsigned>, py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0);
-    m.def("gaussian_kernel", &gaussian_kernel_vec<double, std::vector<unsigned>>, py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0);
 
-    m.def("gaussian_filter", &gaussian_filter<float, float, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<float, float, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<float, std::vector<float>, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<float, std::vector<float>, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<double, double, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<double, double, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<double, std::vector<double>, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<double, std::vector<double>, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
+    m.def("gaussian_kernel", &gaussian_kernel_vec<float, int>, py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0);
+    m.def("gaussian_kernel", &gaussian_kernel_vec<float, std::vector<int>>, py::arg("sigma"), py::arg("order") = std::vector<int>{0}, py::arg("truncate") = 4.0);
 
-    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, float, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, float, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, std::vector<float>, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, std::vector<float>, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, double, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, double, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, std::vector<double>, unsigned>, py::arg("inp"), py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
-    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, std::vector<double>, std::vector<unsigned>>, py::arg("inp"), py::arg("sigma"), py::arg("order") = std::vector<unsigned>{0}, py::arg("truncate") = 4.0, py::arg("mode") = "reflect", py::arg("num_threads") = 1);
+    m.def("gaussian_kernel", &gaussian_kernel_vec<double, long>, py::arg("sigma"), py::arg("order") = 0, py::arg("truncate") = 4.0);
+    m.def("gaussian_kernel", &gaussian_kernel_vec<double, std::vector<long>>, py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("truncate") = 4.0);
 
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<float, float>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<float, std::vector<float>>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<double, double>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<double, std::vector<double>>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<float, float, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<float, float, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<float, std::vector<float>, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<float, std::vector<float>, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
 
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<float>, float>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<float>, std::vector<float>>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<double>, double>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
-    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<double>, std::vector<double>>, py::arg("inp"), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<double, double, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<double, double, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<double, std::vector<double>, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<double, std::vector<double>, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+
+    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, float, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0f, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, float, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0f, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, std::vector<float>, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0f, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<std::complex<float>, std::vector<float>, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0f, py::arg("num_threads") = 1);
+
+    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, double, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, double, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, std::vector<double>, long>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = 0, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_filter", &gaussian_filter<std::complex<double>, std::vector<double>, std::vector<long>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("order") = std::vector<long>{0}, py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<float, float>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<float, std::vector<float>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<double, double>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<double, std::vector<double>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<float>, float>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<float>, std::vector<float>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<double>, double>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
+    m.def("gaussian_gradient_magnitude", &gaussian_gradient_magnitude<std::complex<double>, std::vector<double>>, py::arg("inp").noconvert(), py::arg("sigma"), py::arg("mode") = "reflect", py::arg("cval") = 0.0, py::arg("truncate") = 4.0, py::arg("num_threads") = 1);
 }

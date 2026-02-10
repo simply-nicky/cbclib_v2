@@ -1,54 +1,54 @@
 from typing import Callable, Iterator, Tuple, Type, TypeVar, get_type_hints, overload
 import pandas as pd
-from jax import random
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
-from .._src.state import State, dynamic_fields, field, static_fields
-from .._src.annotations import (ArrayNamespace, BoolArray, Indices, IntArray, JaxNumPy, KeyArray, NDRealArray, RealArray,
-                                RealSequence, Shape)
-from .._src.data_container import ArrayContainer, Container, DataContainer, IndexedContainer, array_namespace
+from .._src.annotations import (AnyNamespace, Array, BoolArray, Generator, Indices, IntArray, JaxNumPy,
+                                NDRealArray, RealArray, RealSequence, Shape)
+from .._src.array_api import array_namespace
+from .._src.data_container import ArrayContainer, Container, DataContainer, IndexedContainer
 from .._src.parser import JSONParser, INIParser, Parser, get_extension, get_parser
+from .._src.state import State, dynamic_fields, field, static_fields
 
 S = TypeVar('S', bound=State)
 
-def random_array(array: RealArray, span: RealSequence) -> Callable[[KeyArray], RealArray]:
+def random_array(array: RealArray, span: RealSequence) -> Callable[[Generator[Array]], RealArray]:
     xp = array_namespace(array, span)
-    def rnd(key: KeyArray):
+    def random(rng: Generator[Array]):
         bound = xp.asarray(span)
-        return array + xp.asarray(random.uniform(key, array.shape, array.dtype,
-                                                 -0.5 * bound, 0.5 * bound))
+        return array + xp.asarray(rng.uniform(-0.5 * bound, 0.5 * bound, array.shape),
+                                  dtype=array.dtype)
 
-    return rnd
+    return random
 
-def random_state(state: S, span: S) -> Callable[[KeyArray], S]:
+def random_state(state: S, span: S) -> Callable[[Generator[Array]], S]:
     xp = array_namespace(state, span)
-    def rnd(key: KeyArray):
+    def random(rng: Generator[Array]):
         dynamic = {}
         for fld in dynamic_fields(state):
             attr = getattr(state, fld.name)
 
             if isinstance(attr, State):
-                dynamic[fld.name] = random_state(attr, getattr(span, fld.name))(key)
+                dynamic[fld.name] = random_state(attr, getattr(span, fld.name))(rng)
             else:
                 center = xp.asarray(attr)
                 bound = xp.abs(xp.asarray(getattr(span, fld.name)))
-                rnd = xp.asarray(random.uniform(key, center.shape, center.dtype,
-                                                -0.5 * bound, 0.5 * bound))
+                rnd = xp.asarray(rng.uniform(-0.5 * bound, 0.5 * bound, center.shape),
+                                 dtype=center.dtype)
                 dynamic[fld.name] = center + rnd
 
         static = {fld.name: getattr(state, fld.name) for fld in static_fields(state)}
 
         return type(state)(**dynamic, **static)
 
-    return rnd
+    return random
 
-def random_rotation(shape: Shape=(), xp: ArrayNamespace = JaxNumPy
-                    ) -> Callable[[KeyArray], 'RotationState']:
-    def rnd(key: KeyArray):
+def random_rotation(shape: Shape=(), xp: AnyNamespace = JaxNumPy
+                    ) -> Callable[[Generator[Array]], 'RotationState']:
+    def random(rng: Generator[Array]):
         """Creates a random rotation matrix.
         """
         # from http://blog.lostinmyterminal.com/python/2015/05/12/random-rotation-matrix.html
         # and  http://www.realtimerendering.com/resources/GraphicsGems/gemsiii/rand_rotation.c
-        values = xp.asarray(random.uniform(key, shape=shape + (3,)))
+        values = xp.asarray(rng.uniform(size=shape + (3,)))
         theta = 2.0 * xp.pi * values[..., 0]
         phi = 2.0 * xp.pi * values[..., 1]
         r = xp.sqrt(values[..., 2])
@@ -61,15 +61,15 @@ def random_rotation(shape: Shape=(), xp: ArrayNamespace = JaxNumPy
         V = 2 * V[..., None, :] * V[..., None] - xp.broadcast_to(xp.eye(3), shape + (3, 3))
         return RotationState(xp.sum(V[..., None] * R[..., None, :, :], axis=-2))
 
-    return rnd
+    return random
 
-def random_euler(shape: Shape=(), xp: ArrayNamespace=JaxNumPy
-                 ) -> Callable[[KeyArray], 'EulerState']:
-    def rnd(key: KeyArray):
-        angles = random.uniform(key, shape=shape + (3,), minval=xp.array([0.0, 0.0, 0.0]),
-                                maxval=xp.array([2 * xp.pi, xp.pi, 2 * xp.pi]))
+def random_euler(shape: Shape=(), xp: AnyNamespace=JaxNumPy
+                 ) -> Callable[[Generator[Array]], 'EulerState']:
+    def random(rng: Generator[Array]):
+        angles = rng.uniform(xp.array([0.0, 0.0, 0.0]), xp.array([2 * xp.pi, xp.pi, 2 * xp.pi]),
+                             size=shape + (3,))
         return EulerState(xp.asarray(angles))
-    return rnd
+    return random
 
 class BaseCell(Container):
     angles  : RealArray | Tuple[Tuple[float, float, float], ...]
@@ -79,7 +79,7 @@ class BaseCell(Container):
     def parser(cls, file_or_extension: str='ini') -> Parser:
         return get_parser(file_or_extension, cls, 'unit_cell')
 
-    def to_basis(self, xp: ArrayNamespace=JaxNumPy) -> 'XtalState':
+    def to_basis(self, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
         gamma = xp.asarray(self.angles)[..., 2]
         cos = xp.cos(xp.asarray(self.angles))
         sin = xp.sin(gamma)
@@ -89,7 +89,7 @@ class BaseCell(Container):
         b_vec = xp.stack((cos[..., 2], sin, xp.zeros(cos.shape[:-1])), axis=-1)
         c_vec = xp.stack((cos[..., 1], (cos[..., 0] - cos[..., 1] * cos[..., 2]) / sin,
                            v_ratio / sin), axis=-1)
-        vectors = xp.stack((a_vec, b_vec, c_vec), axis=-2, dtype=float)
+        vectors = xp.stack((a_vec, b_vec, c_vec), axis=-2)
         return XtalState(xp.asarray(xp.asarray(self.lengths)[..., None] * vectors, dtype=float))
 
 class FixedXtalCell(BaseCell, State, eq=True, unsafe_hash=True):
@@ -118,7 +118,7 @@ class XtalCell(BaseCell, ArrayContainer, State):
         return self.angles[..., 2]
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'XtalCell':
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'XtalCell':
         data = cls.parser(file).read(file)
         return cls(xp.asarray(data['angles']), xp.asarray(data['lengths']))
 
@@ -163,12 +163,12 @@ class XtalState(ArrayContainer, State):
         raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace = JaxNumPy) -> 'XtalState':
+    def read(cls, file: str, xp: AnyNamespace = JaxNumPy) -> 'XtalState':
         data = cls.parser(file).read(file)
         return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=JaxNumPy) -> 'XtalState':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
         a = xp.stack((df['a_x'].to_numpy(), df['a_y'].to_numpy(), df['a_z'].to_numpy()), axis=-1)
         b = xp.stack((df['b_x'].to_numpy(), df['b_y'].to_numpy(), df['b_z'].to_numpy()), axis=-1)
         c = xp.stack((df['c_x'].to_numpy(), df['c_y'].to_numpy(), df['c_z'].to_numpy()), axis=-1)
@@ -176,7 +176,7 @@ class XtalState(ArrayContainer, State):
 
     @classmethod
     def import_spherical(cls, r: RealArray, theta: RealArray, phi: RealArray,
-                         xp: ArrayNamespace = JaxNumPy) -> 'XtalState':
+                         xp: AnyNamespace = JaxNumPy) -> 'XtalState':
         """Return a new :class:`XtalState` object, initialised by a stacked matrix of three basis
         vectors written in spherical coordinate system.
 
@@ -202,7 +202,7 @@ class XtalState(ArrayContainer, State):
                            xp.sum(self.c * self.a, axis=-1) / (lengths[..., 2] * lengths[..., 0]),
                            xp.sum(self.a * self.b, axis=-1) / (lengths[..., 0] * lengths[..., 1])],
                           axis=-1)
-        return XtalCell(angles=xp.arccos(angles), lengths=lengths)
+        return XtalCell(angles=xp.acos(angles), lengths=lengths)
 
     @property
     def orientation_matrix(self) -> 'RotationState':
@@ -217,9 +217,9 @@ class XtalState(ArrayContainer, State):
             The basis of the reciprocal lattice.
         """
         xp = self.__array_namespace__()
-        a_rec = xp.cross(self.b, self.c) / xp.sum(xp.cross(self.b, self.c) * self.a, axis=-1)
-        b_rec = xp.cross(self.c, self.a) / xp.sum(xp.cross(self.c, self.a) * self.b, axis=-1)
-        c_rec = xp.cross(self.a, self.b) / xp.sum(xp.cross(self.a, self.b) * self.c, axis=-1)
+        a_rec = xp.linalg.cross(self.b, self.c) / xp.sum(xp.linalg.cross(self.b, self.c) * self.a, axis=-1)
+        b_rec = xp.linalg.cross(self.c, self.a) / xp.sum(xp.linalg.cross(self.c, self.a) * self.b, axis=-1)
+        c_rec = xp.linalg.cross(self.a, self.b) / xp.sum(xp.linalg.cross(self.a, self.b) * self.c, axis=-1)
         return XtalState(xp.stack((a_rec, b_rec, c_rec), axis=-2))
 
     def to_dataframe(self, index: IntArray | None) -> pd.DataFrame:
@@ -239,8 +239,8 @@ class XtalState(ArrayContainer, State):
         """
         xp = self.__array_namespace__()
         lengths = xp.sqrt(xp.sum(self.basis**2, axis=-1))
-        return (lengths, xp.arccos(self.basis[..., 2] / lengths),
-                xp.arctan2(self.basis[..., 1], self.basis[..., 0]))
+        return (lengths, xp.acos(self.basis[..., 2] / lengths),
+                xp.atan2(self.basis[..., 1], self.basis[..., 0]))
 
 class XtalList(IndexedContainer, State):
     index       : IntArray
@@ -250,7 +250,7 @@ class XtalList(IndexedContainer, State):
         return XtalState(self.basis)
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=JaxNumPy) -> 'XtalList':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy) -> 'XtalList':
         xtals = XtalState.import_dataframe(df, xp)
         return cls(df['index'].to_numpy(), xtals.basis)
 
@@ -284,7 +284,7 @@ class BaseLens(Container):
         return get_parser(file_or_extension, cls, 'geometry')
 
     @classmethod
-    def read(cls: Type[L], file: str, xp: ArrayNamespace=JaxNumPy) -> L:
+    def read(cls: Type[L], file: str, xp: AnyNamespace=JaxNumPy) -> L:
         raise NotImplementedError
 
 class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
@@ -292,7 +292,7 @@ class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedLens':
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedLens':
         data = cls.parser(file).read(file)
         return cls(tuple(data['foc_pos']), tuple(data['pupil_roi']))
 
@@ -301,7 +301,7 @@ class FixedPupilLens(DataContainer, FixedLens):
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedPupilLens':
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedPupilLens':
         data = cls.parser(file).read(file)
         return cls(xp.asarray(data['foc_pos']), tuple(data['pupil_roi']))
 
@@ -318,14 +318,14 @@ class FixedApertureLens(BaseLens, DataContainer, State):
         return xp.array([y - 0.5 * ap_y, y + 0.5 * ap_y, x - 0.5 * ap_x, x + 0.5 * ap_x])
 
     @classmethod
-    def from_roi(cls, obj: FixedLens | FixedPupilLens, xp: ArrayNamespace=JaxNumPy
+    def from_roi(cls, obj: FixedLens | FixedPupilLens, xp: AnyNamespace=JaxNumPy
                  ) -> 'FixedApertureLens':
         return cls(xp.asarray(obj.foc_pos), xp.asarray(obj.pupil_center),
                    (float(obj.pupil_max[0] - obj.pupil_min[0]),
                     float(obj.pupil_max[1] - obj.pupil_min[1])))
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureLens':
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedApertureLens':
         return cls.from_roi(FixedLens.read(file), xp)
 
     @classmethod
@@ -354,10 +354,10 @@ class RotationState(ArrayContainer, State):
     def __matmul__(self, other: 'RotationState') -> 'RotationState': ...
 
     @overload
-    def __matmul__(self, other: RealArray) -> RealArray: ...
+    def __matmul__(self, other: XtalState) -> XtalState: ...
 
     @overload
-    def __matmul__(self, other: XtalState) -> XtalState: ...
+    def __matmul__(self, other: RealArray) -> RealArray: ...
 
     def __matmul__(self, other: 'RotationState | RealArray | XtalState'
                    ) -> 'RotationState | RealArray | XtalState':
@@ -368,10 +368,10 @@ class RotationState(ArrayContainer, State):
         return other @ self.matrix
 
     @overload
-    def __rmatmul__(self, other: RealArray) -> RealArray: ...
+    def __rmatmul__(self, other: XtalState) -> XtalState: ...
 
     @overload
-    def __rmatmul__(self, other: XtalState) -> XtalState: ...
+    def __rmatmul__(self, other: RealArray) -> RealArray: ...
 
     def __rmatmul__(self, other: RealArray | XtalState) -> RealArray | XtalState:
         if isinstance(other, XtalState):
@@ -379,7 +379,7 @@ class RotationState(ArrayContainer, State):
         return other @ self.matrix
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=JaxNumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
                          ) -> 'RotationState':
         """Initialize a new :class:`Sample` object with a :class:`pandas.Series` array. The array
         must contain the following columns:
@@ -426,12 +426,12 @@ class RotationState(ArrayContainer, State):
             of the axis of rotation :math:`\beta`.
         """
         xp = self.__array_namespace__()
-        if xp.allclose(self.matrix, xp.swapaxes(self.matrix, -1, -2)):
+        if xp.allclose(self.matrix, xp.permute_dims(self.matrix, (*range(self.matrix.ndim - 2), -1, -2))):
             eigw, eigv = xp.linalg.eigh(self.matrix)
             axis = eigv[xp.isclose(eigw, 1.0)]
-            theta = xp.arccos(0.5 * (xp.trace(self.matrix) - 1.0))
-            alpha = xp.arccos(axis[0, 2])
-            beta = xp.arctan2(axis[0, 1], axis[0, 0])
+            theta = xp.acos(0.5 * (xp.trace(self.matrix) - 1.0))
+            alpha = xp.acos(axis[0, 2])
+            beta = xp.atan2(axis[0, 1], axis[0, 0])
             return TiltState(xp.array([theta, alpha, beta]))
         return TiltState(tilt_angles(self.matrix, xp))
 
@@ -510,11 +510,11 @@ class TiltOverAxisState(ArrayContainer, State):
     def alpha(self) -> RealArray:
         xp = self.__array_namespace__()
         r = xp.sqrt(xp.sum(self.axis**2, axis=-1))
-        return xp.broadcast_to(xp.arccos(self.axis[..., 2] / r), self.angles.shape)
+        return xp.broadcast_to(xp.acos(self.axis[..., 2] / r), self.angles.shape)
 
     def beta(self) -> RealArray:
         xp = self.__array_namespace__()
-        return xp.broadcast_to(xp.arctan2(self.axis[..., 1], self.axis[..., 0]),
+        return xp.broadcast_to(xp.atan2(self.axis[..., 1], self.axis[..., 0]),
                                self.angles.shape)
 
     def to_point(self) -> RealArray:
@@ -568,7 +568,7 @@ class FixedPupilSetup(BaseSetup, DataContainer, State):
     z       : RealArray
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedPupilSetup':
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedPupilSetup':
         data = cls.parser(file).read(file)
         return cls(FixedPupilLens(xp.asarray(data['foc_pos']), tuple(data['pupil_roi'])),
                    xp.asarray(data['z']))
@@ -578,7 +578,7 @@ class FixedApertureSetup(BaseSetup, DataContainer, State):
     z       : RealArray
 
     @classmethod
-    def read(cls, file: str, xp: ArrayNamespace=JaxNumPy) -> 'FixedApertureSetup':
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedApertureSetup':
         data = cls.parser(file).read(file)
         lens = FixedLens(tuple(data['foc_pos']), tuple(data['pupil_roi']))
         return cls(FixedApertureLens.from_roi(lens), xp.asarray(data['z']))

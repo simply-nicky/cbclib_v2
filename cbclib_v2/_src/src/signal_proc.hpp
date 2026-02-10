@@ -1,6 +1,6 @@
 #ifndef SIGNAL_PROC_
 #define SIGNAL_PROC_
-#include "array.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
 

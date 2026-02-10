@@ -17,8 +17,8 @@ import subprocess
 from typing import AsyncGenerator, ClassVar, Dict, Iterator, List, NamedTuple, Set, Tuple
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
-from cbclib_v2._src.parser import Parser, get_parser
-from cbclib_v2._src.data_container import Container
+from .._src.parser import Parser, get_parser
+from .._src.data_container import Container
 
 class SLURMConfig(NamedTuple):
     """NamedTuple holding the paths/names of SLURM binaries.
@@ -38,6 +38,7 @@ class ScriptSpec(Container):
     nodes           : int = 1
     chdir           : str = ''
     mem             : str = '0'
+    exclusive       : bool = False
     output          : str = 'slurm-%j.out'
     error           : str = 'slurm-%j.out'
     modules         : List[str] = field(default_factory=list)
@@ -85,6 +86,8 @@ class ScriptSpec(Container):
         header.append(f"#SBATCH --nodes={self.nodes}\n")
         header.append(f"#SBATCH --chdir={self.chdir}\n")
         header.append(f"#SBATCH --mem={self.mem}\n")
+        if self.exclusive:
+            header.append("#SBATCH --exclusive\n")
         header.append("#SBATCH --open-mode=append\n")
         header.append(f"#SBATCH --output={self.output}\n")
         header.append(f"#SBATCH --error={self.error}\n")

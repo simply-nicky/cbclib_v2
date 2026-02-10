@@ -2,12 +2,18 @@ from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax import tree
 from jax.test_util import check_grads
-from .indexer import (BaseState, CBData, FixedLens, FixedPupilLens, FixedPupilSetup,
-                      FixedSetup, XtalState, random_state)
-from ._src.annotations import Array, ArrayNamespace, ComplexArray, JaxNumPy, RealArray
+from .indexer import (BaseState, CBData, FixedLens, FixedPupilLens, FixedPupilSetup, FixedSetup,
+                      XtalState, random_state)
+from ._src.annotations import (Array, AnyNamespace, ComplexArray, CPArray, CuPyNamespace, Generator,
+                               JaxNumPy, NDArray, NumPyNamespace, RealArray)
+from ._src.array_api import array_namespace
+from ._src.data_container import compute_index
 from ._src.state import State, field
 from ._src.src.test import ArrayView, RectangleRange
 from ._src.crystfel import parse_crystfel_file
+
+TestNamespace = NumPyNamespace | CuPyNamespace
+TestGenerator = Generator[NDArray] | Generator[CPArray]
 
 REL_TOL = 0.025
 
@@ -26,7 +32,7 @@ class TestSetup():
     y_pixel_size    = 7.5e-05
 
     @classmethod
-    def xtal(cls, xp: ArrayNamespace) -> XtalState:
+    def xtal(cls, xp: AnyNamespace) -> XtalState:
         return XtalState(xp.array(cls.basis))
 
     @classmethod
@@ -34,7 +40,7 @@ class TestSetup():
         return FixedLens(cls.foc_pos, cls.pupil_roi)
 
     @classmethod
-    def fixed_pupil_lens(cls, xp: ArrayNamespace) -> FixedPupilLens:
+    def fixed_pupil_lens(cls, xp: AnyNamespace) -> FixedPupilLens:
         return FixedPupilLens(xp.asarray(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
@@ -42,7 +48,7 @@ class TestSetup():
         return FixedSetup(cls.fixed_lens(), cls.z(size=size))
 
     @classmethod
-    def fixed_pupil_setup(cls, xp: ArrayNamespace, size: int=1) -> FixedPupilSetup:
+    def fixed_pupil_setup(cls, xp: AnyNamespace, size: int=1) -> FixedPupilSetup:
         return FixedPupilSetup(cls.fixed_pupil_lens(xp), cls.z(xp, size))
 
     @overload
@@ -51,10 +57,10 @@ class TestSetup():
 
     @overload
     @classmethod
-    def z(cls, xp: ArrayNamespace, size: int=1) -> RealArray: ...
+    def z(cls, xp: AnyNamespace, size: int=1) -> RealArray: ...
 
     @classmethod
-    def z(cls, xp: ArrayNamespace | None=None, size: int=1) -> Tuple[float, ...] | RealArray:
+    def z(cls, xp: AnyNamespace | None=None, size: int=1) -> Tuple[float, ...] | RealArray:
         if xp is None:
             return tuple([cls.smp_dist + cls.foc_pos[2],] * size)
         return xp.array([cls.smp_dist + cls.foc_pos[2],] * size)
@@ -102,23 +108,18 @@ def check_close(a: float | RealArray | ComplexArray, b: float | RealArray | Comp
     if not isinstance(b, Array):
         b = np.asarray(b)
 
+    xp = array_namespace(a, b)
+
     if rtol is None:
         rtol = max(gradient_tolerance(a.dtype, rtol),
                    gradient_tolerance(b.dtype, rtol))
     if atol is None:
         atol = max(tolerance(a.dtype, atol), tolerance(b.dtype, atol))
 
-    np.testing.assert_allclose(a, b, rtol=rtol, atol=atol)
+    assert xp.allclose(a, b, rtol=rtol, atol=atol)
 
 def check_gradient(f: Callable, args: Any, atol: float | None=None, rtol: float | None=None,
                    eps: float | None=None, **static_args: Any):
     def wrapper(*args):
         return f(*args, **static_args)
     check_grads(wrapper, args, order=1, modes='rev', atol=atol, rtol=rtol, eps=eps)
-
-def compute_index(index: int, length: int) -> int:
-    if index < 0:
-        index = index + length
-    if index < 0 or index >= length:
-        raise ValueError(f'Index {index:d} is out of range [0, {length - 1:d}]')
-    return index

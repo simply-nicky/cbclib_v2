@@ -4,14 +4,16 @@
 
 (c) Nikolay Ivanov, 2024
 """
+from ._src.array_api import add_at, argmin_at, array_namespace, default_rng, min_at, set_at
 from ._src.crystfel import Detector, Panel, read_crystfel
 from ._src.cxi_protocol import (CXIFiles, CXIIndices, CXIProtocol, CXIStore, Kinds, read_hdf,
                                 write_hdf)
-from ._src.data_container import (Container, DataContainer, ArrayContainer, IndexArray, add_at,
-                                  argmin_at, array_namespace, min_at, set_at, split, to_list)
+from ._src.data_container import (Container, DataContainer, ArrayContainer, IndexArray, split,
+                                  to_list)
 from ._src.data_processing import CrystData, CrystMetadata, StreakDetector, RegionDetector
 from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
 from ._src.streaks import Lines, StackedStreaks, Streaks
+from . import device
 from . import fft
 from . import indexer
 from . import label
