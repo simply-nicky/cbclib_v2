@@ -644,11 +644,10 @@ private:
 /*------------------------------ Python helpers ------------------------------*/
 /*----------------------------------------------------------------------------*/
 
-/* Iterator adapter for point containers for pybind11 */
-/* python_point_iterator dereferences to an std::array instead of PointND */
+/* Transform iterator implementation */
 
 template <typename Iterator, typename Func, typename Value = typename std::iterator_traits<Iterator>::value_type, typename Return = std::remove_reference_t<decltype(std::declval<Func &>()(std::declval<Value &>()))>>
-class python_iterator
+class transform_iterator
 {
 public:
     using iterator_category = std::input_iterator_tag;
@@ -656,63 +655,63 @@ public:
     using difference_type = iter_difference_t<Iterator>;
     using reference = value_type;
 
-    python_iterator() = default;
-    python_iterator(Iterator && iter, Func && func) : m_iter(std::forward<Iterator>(iter)), m_func(std::forward<Func>(func)) {}
+    transform_iterator() = default;
+    transform_iterator(Iterator && iter, Func && func) : m_iter(std::forward<Iterator>(iter)), m_func(std::forward<Func>(func)) {}
 
     template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-    python_iterator & operator++()
+    transform_iterator & operator++()
     {
         ++m_iter;
         return *this;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-    python_iterator operator++(int)
+    transform_iterator operator++(int)
     {
-        return python_iterator(m_iter++, m_func);
+        return transform_iterator(m_iter++, m_func);
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
-    python_iterator & operator--()
+    transform_iterator & operator--()
     {
         --m_iter;
         return *this;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
-    python_iterator operator--(int)
+    transform_iterator operator--(int)
     {
-        return python_iterator(m_iter--, m_func);
+        return transform_iterator(m_iter--, m_func);
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    python_iterator & operator+=(difference_type offset)
+    transform_iterator & operator+=(difference_type offset)
     {
         m_iter += offset;
         return *this;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    python_iterator operator+(difference_type offset) const
+    transform_iterator operator+(difference_type offset) const
     {
-        return python_iterator(m_iter + offset, m_func);
+        return transform_iterator(m_iter + offset, m_func);
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    python_iterator & operator-=(difference_type offset)
+    transform_iterator & operator-=(difference_type offset)
     {
         m_iter -= offset;
         return *this;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    python_iterator operator-(difference_type offset) const
+    transform_iterator operator-(difference_type offset) const
     {
-        return python_iterator(m_iter - offset, m_func);
+        return transform_iterator(m_iter - offset, m_func);
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    difference_type operator-(const python_iterator & rhs) const
+    difference_type operator-(const transform_iterator & rhs) const
     {
         return m_iter - rhs.m_iter;
     }
@@ -724,37 +723,37 @@ public:
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-    bool operator==(const python_iterator & rhs) const
+    bool operator==(const transform_iterator & rhs) const
     {
         return m_iter == rhs.m_iter;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-    bool operator!=(const python_iterator & rhs) const
+    bool operator!=(const transform_iterator & rhs) const
     {
         return !(*this == rhs);
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    bool operator<(const python_iterator & rhs) const
+    bool operator<(const transform_iterator & rhs) const
     {
         return m_iter < rhs.m_iter;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    bool operator>(const python_iterator & rhs) const
+    bool operator>(const transform_iterator & rhs) const
     {
         return m_iter > rhs.m_iter;
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    bool operator<=(const python_iterator & rhs) const
+    bool operator<=(const transform_iterator & rhs) const
     {
         return !(*this > rhs);
     }
 
     template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-    bool operator>=(const python_iterator & rhs) const
+    bool operator>=(const transform_iterator & rhs) const
     {
         return !(*this < rhs);
     }
@@ -769,9 +768,9 @@ private:
 template <typename Iterator, typename Func, typename = std::enable_if_t<
     input_iterator_v<Iterator> && std::is_invocable_v<Func, typename std::iterator_traits<Iterator>::value_type>
 >>
-python_iterator<Iterator, Func> make_python_iterator(Iterator && iterator, Func && func)
+transform_iterator<Iterator, Func> make_transform_iterator(Iterator && iterator, Func && func)
 {
-    return python_iterator<Iterator, Func>(std::forward<Iterator>(iterator), std::forward<Func>(func));
+    return transform_iterator<Iterator, Func>(std::forward<Iterator>(iterator), std::forward<Func>(func));
 }
 
 /* C++ container to NumPy array converters */

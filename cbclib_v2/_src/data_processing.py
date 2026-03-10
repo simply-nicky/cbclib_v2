@@ -6,25 +6,25 @@ Examples:
     Load all the necessary data using a :func:`cbclib_v2.CrystData.load` function.
 
     >>> import cbclib as cbc
-    >>> inp_file = cbc.CXIStore('data.cxi')
+    >>> inp_file = cbc.H5Handler('data.cxi')
     >>> data = cbc.CrystData(inp_file)
     >>> data = data.load()
 """
 from math import prod
 import os
-from typing import Literal, NamedTuple, Sequence, TypeVar, cast
+from typing import Literal, NamedTuple, Sequence, cast
 from dataclasses import dataclass, field
 from weakref import ref
+from typing_extensions import Self
 import numpy as np
-import pandas as pd
-from .cxi_protocol import CXIProtocol, Kinds
+from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
 from .streak_finder import PeaksList, detect_peaks, detect_streaks, filter_peaks
 from .streaks import StackedStreaks, Streaks
-from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
+from .annotations import (Array, ArrayLike, BoolArray, CPIntArray, Indices, IntArray, NumPy, RealArray, ReferenceType,
                           ROI, Shape)
-from .functions import (LabelResult, Structure, binterpolate, center_of_mass, covariance_matrix,
-                        ellipse_fit, index_at, label, line_fit, median, robust_mean, robust_lsq)
+from .functions import (LabelResult, Structure, center_of_mass, covariance_matrix, ellipse_fit,
+                        min_at, label, line_fit, median, robust_mean, robust_lsq)
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
 MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
@@ -34,10 +34,8 @@ WFMethod = Literal['median', 'robust-mean', 'robust-mean-scale']
 DATA_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cryst_data.ini')
 METADATA_PROTOCOL = os.path.join(os.path.dirname(__file__), 'config/cryst_metadata.ini')
 
-C = TypeVar("C", bound='CrystBase')
-
 class CrystBase(DataContainer):
-    protocol    : CXIProtocol
+    protocol    : H5Protocol
 
     @property
     def frame_shape(self) -> Shape:
@@ -57,13 +55,15 @@ class CrystBase(DataContainer):
 
             old = current
 
-        return current
+        if current:
+            return current
+        return (0,)
 
     @property
     def num_modules(self) -> int:
         return prod(self.frame_shape) // prod(self.frame_shape[-2:])
 
-    def crop(self: C, roi: ROI) -> C:
+    def crop(self: Self, roi: ROI) -> Self:
         cropped = {}
         for attr, data in self.contents().items():
             if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
@@ -80,39 +80,32 @@ class CrystMetadata(CrystBase):
     eigen_value : RealArray = field(default_factory=lambda: np.array([]))
     flatfield   : RealArray = field(default_factory=lambda: np.array([]))
     frames      : IntArray  = field(default_factory=lambda: np.array([], dtype=int))
-    data_frames : IntArray  = field(default_factory=lambda: np.array([], dtype=int))
     mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
     std         : RealArray = field(default_factory=lambda: np.array([]))
-    whitefield  : RealArray = field(default_factory=lambda: np.array([]))
+    whitefields : RealArray = field(default_factory=lambda: np.array([]))
 
-    protocol    : CXIProtocol = field(default_factory=lambda: CXIProtocol.read(METADATA_PROTOCOL))
+    protocol    : H5Protocol = field(default_factory=lambda: H5Protocol.read(METADATA_PROTOCOL))
 
     def __post_init__(self):
-        super().__post_init__()
         if not self.is_empty(self.mask):
             if not self.is_empty(self.std):
                 self.std *= self.mask
-            if not self.is_empty(self.whitefield):
-                self.whitefield *= self.mask
+            if not self.is_empty(self.whitefields):
+                self.whitefields *= self.mask
 
-        if self.is_empty(self.flatfield) and not self.is_empty(self.whitefield):
-            self.flatfield = self.whitefield.mean(axis=0)
-
-    @property
-    def center_frames(self) -> IntArray:
-        if not self.is_empty(self.data_frames):
-            return np.asarray(median(self.data_frames, axis=-1), dtype=int)
-        return np.array([], dtype=int)
+        if self.is_empty(self.flatfield) and not self.is_empty(self.whitefields):
+            self.flatfield = self.whitefields.mean(axis=0)
 
     @classmethod
-    def default_protocol(cls) -> CXIProtocol:
-        return CXIProtocol.read(METADATA_PROTOCOL)
+    def default_protocol(cls) -> H5Protocol:
+        return H5Protocol.read(METADATA_PROTOCOL)
 
     def import_data(self, data: RealArray, frames: IntArray | int=np.array([], dtype=int),
                     whitefield: RealArray=np.array([])) -> 'CrystData':
         xp = self.__array_namespace__()
-        frames = xp.asarray(frames)
-        frames = xp.reshape(frames, (-1,) if frames.ndim == 0 else frames.shape)
+        if not isinstance(frames, Array):
+            frames = xp.array([frames,], dtype=int)
+        data = xp.reshape(data, (frames.size,) + self.frame_shape)
 
         if not whitefield.size:
             if self.is_empty(self.flatfield):
@@ -120,30 +113,23 @@ class CrystMetadata(CrystBase):
             return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
                              whitefield=self.flatfield)
 
-        if whitefield.shape != data.shape:
-            raise ValueError(f'whitefield shape {whitefield.shape} is incompatible with data '
-                             f'{data.shape}')
+        if whitefield.size != data.size:
+            raise ValueError(f'whitefield size {whitefield.size} must be equal to data size '
+                             f'{data.size}')
+
         protocol = CrystData.default_protocol()
         protocol.kinds['whitefield'] = 'stack'
         return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
-                         whitefield=whitefield, protocol=protocol)
-
-    def interpolate(self, frames: IntArray) -> RealArray:
-        if self.is_empty(self.data_frames):
-            raise ValueError('no data_frames in the container')
-        if self.is_empty(self.whitefield):
-            raise ValueError('no whitefield in the container')
-
-        return binterpolate(self.whitefield, [self.center_frames,], frames, axis=0)
+                         whitefield=xp.reshape(whitefield, data.shape), protocol=protocol)
 
     def pca(self) -> 'CrystMetadata':
-        if self.is_empty(self.whitefield):
+        if self.is_empty(self.whitefields):
             raise ValueError('no whitefield in the container')
-        if self.whitefield.shape[0] == 1:
+        if self.whitefields.shape[0] == 1:
             raise ValueError('A stack of several whitefields is needed to perform PCA')
 
         xp = self.__array_namespace__()
-        fields = self.whitefield - self.flatfield
+        fields = self.whitefields - self.flatfield
         axes = tuple(range(1, len(self.frame_shape) + 1))
         mat_svd = xp.tensordot(fields, fields, axes=(axes, axes))
         eig_vals, eig_vecs = xp.linalg.eigh(mat_svd)
@@ -160,7 +146,7 @@ class CrystMetadata(CrystBase):
         Args:
             method : Choose one of the following methods to scale the white-field:
 
-                * "median" : By taking a median of data and whitefield.
+                * "lsq" : By taking a least squares fit of data and whitefield.
                 * "robust-lsq" : By solving a least-squares problem with truncated
                   with the fast least k-th order statistics (FLkOS) estimator.
 
@@ -213,7 +199,7 @@ class CrystMetadata(CrystBase):
 
 @dataclass
 class CrystData(CrystBase):
-    """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.CXIStore`
+    """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.H5Handler`
     file handler. Provides an interface to work with the detector images and detect the diffraction
     streaks. Also provides an interface to load from a file and save to a file any of the data
     attributes. The data frames can be tranformed using any of the :class:`cbclib_v2.Transform`
@@ -235,10 +221,9 @@ class CrystData(CrystBase):
     frames      : IntArray = field(default_factory=lambda: np.array([], dtype=int))
     mask        : BoolArray = field(default_factory=lambda: np.array([], dtype=bool))
 
-    protocol    : CXIProtocol = field(default_factory=lambda: CXIProtocol.read(DATA_PROTOCOL))
+    protocol    : H5Protocol = field(default_factory=lambda: H5Protocol.read(DATA_PROTOCOL))
 
     def __post_init__(self):
-        super().__post_init__()
         xp = self.__array_namespace__()
         if self.frames.size != self.num_frames:
             self.frames = xp.arange(self.num_frames)
@@ -269,8 +254,8 @@ class CrystData(CrystBase):
         return (self.num_frames,) + self.frame_shape
 
     @classmethod
-    def default_protocol(cls) -> CXIProtocol:
-        return CXIProtocol.read(DATA_PROTOCOL)
+    def default_protocol(cls) -> H5Protocol:
+        return H5Protocol.read(DATA_PROTOCOL)
 
     def apply_mask(self) -> 'CrystData':
         attributes = {}
@@ -332,13 +317,11 @@ class CrystData(CrystBase):
         return self.replace(mask=mask).apply_mask()
 
     def region_detector(self, structure: Structure) -> 'RegionDetector':
-        if self.is_empty(self.mask):
-            raise ValueError('no mask in the container')
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
         parent = cast(ReferenceType[CrystData], ref(self))
-        return RegionDetector(data=self.snr, mask=self.mask, structure=structure, parent=parent)
+        return RegionDetector(data=self.snr, structure=structure, parent=parent)
 
     def reset_mask(self) -> 'CrystData':
         """Reset bad pixel mask. Every pixel is assumed to be good by default.
@@ -379,20 +362,16 @@ class CrystData(CrystBase):
         """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR frames.
 
         Raises:
-            ValueError : If there is no ``whitefield`` inside the container.
             ValueError : If there is no ``snr`` inside the container.
 
         Returns:
-            A CBC pattern detector based on :class:`cbclib_v2.bin.LSD` Line Segment Detection [LSD]_
-            algorithm.
+            A CBC pattern detector based on bespoke streak detection algorithm.
         """
-        if self.is_empty(self.mask):
-            raise ValueError('no mask in the container')
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
         parent = cast(ReferenceType[CrystData], ref(self))
-        return StreakDetector(data=self.snr, mask=self.mask, structure=structure, parent=parent)
+        return StreakDetector(data=self.snr, structure=structure, parent=parent)
 
     def update_mask(self, method: MaskMethod='no-bad', vmin: int=0, vmax: int=65535,
                     snr_max: float=3.0, roi: ROI | None=None) -> 'CrystData':
@@ -576,89 +555,29 @@ class CrystData(CrystBase):
 
         return self.replace(whitefield=whitefield, protocol=self.default_protocol())
 
-D = TypeVar("D", bound="DetectorBase")
-
 class DetectorBase(DataContainer):
     data            : RealArray
-    mask            : BoolArray
     parent          : ReferenceType[CrystData]
 
     @property
     def shape(self) -> Shape:
         return self.data.shape
 
-    def __getitem__(self: D, idxs: Indices) -> D:
-        return self.replace(data=self.data[idxs], mask=self.mask[idxs])
+    def __getitem__(self: Self, idxs: Indices) -> Self:
+        return self.replace(data=self.data[idxs])
 
-    def clip(self: D, vmin: ArrayLike, vmax: ArrayLike) -> D:
+    def clip(self: Self, vmin: ArrayLike, vmax: ArrayLike) -> Self:
         xp = self.__array_namespace__()
         return self.replace(data=xp.clip(self.data, vmin, vmax))
-
-    def export_table(self, streaks: StackedStreaks | Streaks, width: float,
-                     kernel: str='rectangular') -> pd.DataFrame:
-        """Export normalised pattern into a :class:`pandas.DataFrame` table.
-
-        Args:
-            streaks : A set of diffraction streaks.
-            width : Width of diffraction streaks in pixels.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following
-                kernels are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Raises:
-            ValueError : If there is no ``streaks`` inside the container.
-
-        Returns:
-            List of :class:`pandas.DataFrame` tables for each frame in ``frames`` if
-            ``concatenate`` is False, a single :class:`pandas.DataFrame` otherwise. Table
-            contains the following information:
-
-            * `frames` : Frame index.
-            * `x`, `y` : Pixel coordinates.
-            * `snr` : Signal-to-noise values.
-            * `rp` : Reflection profiles.
-            * `I_raw` : Measured intensity.
-            * `bgd` : Background values.
-        """
-        if self.parent() is None:
-            raise ValueError('Invalid parent: the parent data container was deleted')
-
-        table = streaks.pattern_dataframe(width, shape=self.parent().shape, kernel=kernel)
-        if self.parent().num_modules > 1:
-            index = table['frames'] * self.parent().num_modules + table['module_id']
-        else:
-            index = table['frames']
-
-        indices, x, y = index.to_numpy(), table['x'].to_numpy(), table['y'].to_numpy()
-        bgd = self.parent().whitefield.reshape((-1,)  + self.parent().frame_shape[-2:])
-        data = self.parent().data.reshape((-1,)  + self.parent().frame_shape[-2:])
-        snr = self.parent().snr.reshape((-1,)  + self.parent().frame_shape[-2:])
-        table = {'bgd': bgd[indices % bgd.shape[0], y, x], 'I_raw': data[indices, y, x],
-                 'frames': self.parent().frames[indices // self.parent().num_modules],
-                 'snr': snr[indices, y, x], 'x': x, 'y': y}
-
-        if self.parent().num_modules > 1:
-            table['module_id'] = indices % self.parent().num_modules
-            columns = ['frames', 'module_id', 'x', 'y', 'snr', 'I_raw', 'bgd']
-        else:
-            columns = ['frames', 'x', 'y', 'snr', 'I_raw', 'bgd']
-
-        return pd.DataFrame(table).loc[:, columns]
 
 @dataclass
 class StreakDetector(DetectorBase):
     data            : RealArray
-    mask            : BoolArray
     structure       : Structure
     parent          : ReferenceType[CrystData]
 
-    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure=Structure([1, 1], 1),
-                     radius: int | None=None) -> PeaksList:
+    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure=Structure([1, 1], 1)
+                     ) -> CPIntArray | PeaksList:
         """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
         ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
         between peaks is ``2 * structure.radius``.
@@ -674,14 +593,11 @@ class StreakDetector(DetectorBase):
         Returns:
             Set of detected peaks.
         """
-        if radius is None:
-            radius = self.structure.connectivity
-        peaks = detect_peaks(self.data, self.mask, radius, vmin)
-        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts)
-        return peaks
+        peaks = detect_peaks(self.data, self.structure.connectivity, vmin)
+        return filter_peaks(peaks, self.data, connectivity, vmin, npts)
 
-    def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float, min_size: int,
-                       lookahead: int=0, nfa: int=0) -> StackedStreaks | Streaks:
+    def detect_streaks(self, peaks: PeaksList | CPIntArray, xtol: float, vmin: float,
+                       min_size: float, lookahead: int=0, nfa: int=0) -> StackedStreaks | Streaks:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
         extended with a connectivity structure.
 
@@ -694,35 +610,43 @@ class StreakDetector(DetectorBase):
             min_size : Minimum number of linelets required in a detected streak.
             lookahead : Number of linelets considered at the ends of a streak to be added to the
                 streak.
+            nfa : Number of linelet end points that can fail the distance threshold in a streak.
 
         Returns:
             A list of detected streaks.
         """
-        detected = detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin, min_size,
-                                  lookahead, nfa)
+        xp = self.__array_namespace__()
+        detected = detect_streaks(peaks, self.data, self.structure, xtol, vmin, min_size, lookahead,
+                                  nfa)
+        lines = NumPy.zeros((detected.total(), 4), dtype=self.data.dtype)
+        lines = xp.asarray(detected.to_lines(lines))
         if self.parent().num_modules > 1:
-            return StackedStreaks(detected.index() // self.parent().num_modules,
-                                  detected.index() % self.parent().num_modules,
-                                  detected.to_lines(), self.parent().num_modules)
-        return Streaks(detected.index(), detected.to_lines())
+            return StackedStreaks(xp.asarray(detected.index() // self.parent().num_modules),
+                                  xp.asarray(detected.index() % self.parent().num_modules),
+                                  lines, self.parent().num_modules)
+        return Streaks(xp.asarray(detected.index()), lines)
 
 @dataclass
 class RegionDetector(DetectorBase):
     data            : RealArray
-    mask            : BoolArray
     structure       : Structure
     parent          : ReferenceType[CrystData]
 
+    def __post_init__(self):
+        if self.structure.rank != 2:
+            raise ValueError('Only 2D connectivity structure is supported for streak detection')
+        self.structure = self.structure.expand_dims(list(range(self.data.ndim - 2)))
+
     def detect_regions(self, vmin: float, npts: int) -> LabelResult:
-        return label((self.data > vmin) & self.mask, structure=self.structure, npts=npts)
+        return label(self.data > vmin, structure=self.structure, npts=npts)
 
     def detect_streaks(self, regions: LabelResult) -> StackedStreaks | Streaks:
         lines = self.line_fit(regions)
         if self.parent().num_modules > 1:
-            return StackedStreaks(index_at(regions, axis=0) // self.parent().num_modules,
-                                  index_at(regions, axis=0) % self.parent().num_modules,
+            return StackedStreaks(min_at(regions, axis=0) // self.parent().num_modules,
+                                  min_at(regions, axis=0) % self.parent().num_modules,
                                   lines, self.parent().num_modules)
-        return Streaks(index_at(regions, axis=0), lines)
+        return Streaks(min_at(regions, axis=0), lines)
 
     def ellipse_fit(self, regions: LabelResult) -> RealArray:
         return ellipse_fit(regions, self.data)

@@ -4,7 +4,7 @@
 
 namespace cbclib::cuda {
 
-DeviceVector<py::ssize_t> structure_shifts(const Structure & structure)
+DeviceVector<py::ssize_t> negative_shifts(const Structure & structure)
 {
     std::vector<py::ssize_t> shifts;
     for (auto shift : structure)
@@ -15,6 +15,21 @@ DeviceVector<py::ssize_t> structure_shifts(const Structure & structure)
             offset = offset * structure.shape(n) + shift[n];
         }
         if (offset < 0) shifts.insert(shifts.end(), shift.begin(), shift.end());
+    }
+    return DeviceVector<py::ssize_t>::from_host(shifts.data(), shifts.size());
+}
+
+DeviceVector<py::ssize_t> all_shifts(const Structure & structure)
+{
+    std::vector<py::ssize_t> shifts;
+    for (auto shift : structure)
+    {
+        py::ssize_t offset = 0;
+        for (csize_t n = 0; n < structure.rank(); n++)
+        {
+            offset = offset * structure.shape(n) + shift[n];
+        }
+        if (offset != 0) shifts.insert(shifts.end(), shift.begin(), shift.end());
     }
     return DeviceVector<py::ssize_t>::from_host(shifts.data(), shifts.size());
 }
@@ -219,7 +234,7 @@ DeviceVector<csize_t> filter_labels(const DeviceVector<csize_t> & label_sizes, D
     DeviceVector<csize_t> label_map(n_labels);
 
     // Launch kernel to mark labels to keep (1) or discard (0)
-    csize_t block_size = 256;
+    csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_labels + block_size - 1) / block_size;
     keep_kernel<<<n_blocks, block_size>>>(label_sizes.view(), keep_flags.view(), npts);
     handle_cuda_error(cudaGetLastError());
@@ -250,12 +265,12 @@ template <csize_t N>
 std::tuple<array_t<int>, py::ssize_t> label_nd(array_t<bool> input, Structure structure, py::ssize_t npts)
 {
     array_t<int> output = input.astype<int>();
-    DeviceVector<py::ssize_t> shifts = structure_shifts(structure);
+    DeviceVector<py::ssize_t> shifts = negative_shifts(structure);
 
     auto output_view = cast_to_nd<int, N>(output.view());
 
     // Launch kernel to initialize output array
-    csize_t block_size = 256;
+    csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (output.size() + block_size - 1) / block_size;
     init_kernel<<<n_blocks, block_size>>>(output_view);
     handle_cuda_error(cudaGetLastError());
@@ -331,6 +346,129 @@ std::tuple<array_t<int>, py::ssize_t> label(array_t<bool> input, Structure struc
     }
 }
 
+template <typename T, csize_t N>
+__global__ void detect_peaks_kernel(ArrayViewND<py::ssize_t, N> peaks, ArrayViewND<T, N> data, DeviceRange<py::ssize_t> shifts, csize_t n_shifts, size_t radius, T vmin)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= peaks.size()) return;
+
+    // Find the coordinates of the 2D square neighbourhood
+    auto start = peaks.coord_at(idx);
+    start[N - 2] *= radius;
+    start[N - 1] *= radius;
+
+    auto end = start;
+    end[N - 2] += radius;
+    end[N - 1] += radius;
+
+    end[N - 2] = min(end[N - 2], data.shape(N - 2));
+    end[N - 1] = min(end[N - 1], data.shape(N - 1));
+
+    // Find local maximum in the 2D neighbourhood
+    // A local maximum is a pixel whose value is higher than all its neighbors (defined by shifts)
+    py::ssize_t best_idx = -1, running_idx = -1;
+    T best_val = vmin;
+
+    // Find the index of the (coord[0], ..., coord[N - 3], 0, 0) pixel
+    auto running = start;
+    running[N - 2] = 0;
+    running[N - 1] = 0;
+    auto zero_idx = data.index_at(running);
+
+    for (csize_t i = start[N - 2]; i < end[N - 2]; ++i)
+    {
+        for (csize_t j = start[N - 1]; j < end[N - 1]; ++j)
+        {
+            running[N - 2] = i;
+            running[N - 1] = j;
+            running_idx = data.index_at(running);
+
+            T val = data.at(running);
+            if (val <= vmin) continue; // Skip if below threshold
+
+            // Check if this is a local maximum by comparing to all neighbors
+            for (csize_t k = 0; k < n_shifts; ++k)
+            {
+                py::ssize_t neighbour_idx = 0;
+                csize_t stride = 1;
+
+                // Converting last two dimensions of running coordinate
+                // to linear index and applying shifts
+                for (csize_t n = 2; n > 0; --n)
+                {
+                    auto coord = running[N + n - 3] + shifts[2 * k + (n - 1)];
+                    if (coord < 0 || coord >= data.shape(data.ndim() + n - 3))
+                    {
+                        neighbour_idx = -1; // Out of bounds
+                        break;
+                    }
+                    neighbour_idx += coord * stride;
+                    stride *= data.shape(data.ndim() + n - 3);
+                }
+
+                if (neighbour_idx < 0 || data[neighbour_idx + zero_idx] >= val)
+                {
+                    running_idx = -1; // Not a local maximum
+                    break;
+                }
+            }
+
+            // Keep track of the best local maximum found
+            if (running_idx >= 0 && val > best_val)
+            {
+                best_val = val;
+                best_idx = running_idx;
+            }
+        }
+    }
+
+    peaks[idx] = best_idx; // Will be -1 if no local maximum above threshold found
+}
+
+template <typename T, csize_t N>
+array_t<py::ssize_t> detect_peaks_nd(array_t<py::ssize_t> peaks, array_t<T> data, Structure structure, size_t radius, T vmin)
+{
+    auto peaks_view = cast_to_nd<py::ssize_t, N>(peaks.view());
+    auto data_view = cast_to_nd<T, N>(data.view());
+
+    auto shifts = all_shifts(structure); // Use the provided structure
+    csize_t n_shifts = shifts.size() / structure.rank();
+
+    // Launch kernel to detect peaks
+    csize_t block_size = BLOCK_SIZE;
+    csize_t n_blocks = (peaks.size() + block_size - 1) / block_size;
+    detect_peaks_kernel<<<n_blocks, block_size>>>(peaks_view, data_view, shifts.view(), n_shifts, radius, vmin);
+    handle_cuda_error(cudaGetLastError());
+    handle_cuda_error(cudaDeviceSynchronize());
+
+    return peaks;
+}
+
+template <typename T>
+array_t<py::ssize_t> detect_peaks(array_t<py::ssize_t> peaks, array_t<T> data, Structure structure, size_t radius, T vmin)
+{
+    if (peaks.ndim() != data.ndim())
+    {
+        throw std::invalid_argument("peaks array dimension (" + std::to_string(peaks.ndim()) +
+                                    ") does not match data array dimension (" + std::to_string(data.ndim()) + ")");
+    }
+    if (structure.rank() != 2)
+    {
+        throw std::invalid_argument("structure rank (" + std::to_string(structure.rank()) + ") must be 2");
+    }
+
+    switch (peaks.ndim())
+    {
+        case 2: return detect_peaks_nd<T, 2>(peaks, data, structure, radius, vmin);
+        case 3: return detect_peaks_nd<T, 3>(peaks, data, structure, radius, vmin);
+        case 4: return detect_peaks_nd<T, 4>(peaks, data, structure, radius, vmin);
+        case 5: return detect_peaks_nd<T, 5>(peaks, data, structure, radius, vmin);
+        case 6: return detect_peaks_nd<T, 6>(peaks, data, structure, radius, vmin);
+        case 7: return detect_peaks_nd<T, 7>(peaks, data, structure, radius, vmin);
+        default: throw std::runtime_error("Unsupported number of dimensions: peaks.ndim = " + std::to_string(peaks.ndim()));
+    }
+}
+
 }; // namespace cbclib::cuda
 
 PYBIND11_MODULE(cuda_label, m)
@@ -348,4 +486,7 @@ PYBIND11_MODULE(cuda_label, m)
     }
 
     m.def("label", &cu::label, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1);
+
+    m.def("detect_peaks", &cu::detect_peaks<float>, py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"));
+    m.def("detect_peaks", &cu::detect_peaks<double>, py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"));
 }

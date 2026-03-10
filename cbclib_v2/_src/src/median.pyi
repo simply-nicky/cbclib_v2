@@ -1,25 +1,20 @@
 from typing import overload
-from ..annotations import BoolArray, IntArray, IntSequence, Mode, NDIntArray, NDRealArray, RealArray
+from ..annotations import IntArray, IntSequence, NDIntArray, NDRealArray, RealArray
 
 @overload
-def median(inp: RealArray, mask: BoolArray | None=None, axis: IntSequence=0,
-           num_threads: int=1) -> NDRealArray:
+def median(inp: RealArray, axis: IntSequence=0, num_threads: int=1) -> NDRealArray:
     ...
 
 @overload
-def median(inp: IntArray, mask: BoolArray | None=None, axis: IntSequence=0,
-           num_threads: int=1) -> NDIntArray:
+def median(inp: IntArray, axis: IntSequence=0, num_threads: int=1) -> NDIntArray:
     ...
 
-def median(inp: RealArray | IntArray, mask: BoolArray | None=None, axis: IntSequence=0,
-           num_threads: int=1) -> NDRealArray:
+def median(inp: RealArray | IntArray, axis: IntSequence=0, num_threads: int=1) -> NDRealArray | NDIntArray:
     """Calculate a median along the `axis`.
 
     Args:
         inp : Input array. Must be one of the following types: np.float64, np.float32, np.int32,
             np.uint32, np.uint64.
-        mask : Output mask. Median is calculated only where `mask` is True, output array set to 0
-            otherwise. Median is calculated over the whole input array by default.
         axis : Array axes along which median values are calculated.
         num_threads : Number of threads used in the calculations.
 
@@ -33,123 +28,9 @@ def median(inp: RealArray | IntArray, mask: BoolArray | None=None, axis: IntSequ
     """
     ...
 
-@overload
-def median_filter(inp: RealArray, size: IntSequence | None=None, footprint: BoolArray | None=None,
-                  mode: Mode='reflect', cval: float=0.0, num_threads: int=1) -> NDRealArray:
-    ...
-
-@overload
-def median_filter(inp: IntArray, size: IntSequence | None=None, footprint: BoolArray | None=None,
-                  mode: Mode='reflect', cval: float=0.0, num_threads: int=1) -> NDIntArray:
-    ...
-
-def median_filter(inp: RealArray | IntArray, size: IntSequence | None=None,
-                  footprint: BoolArray | None=None, mode: Mode='reflect', cval: float=0.0,
-                  num_threads: int=1) -> NDRealArray | NDIntArray:
-    """Calculate a multidimensional median filter.
-
-    Args:
-        inp : Input array. Must be one of the following types: np.float64, np.float32, np.int32,
-            np.uint32, np.uint64.
-        size : See footprint, below. Ignored if footprint is given.
-        footprint :  Either size or footprint must be defined. size gives the shape that is taken
-            from the input array, at every element position, to define the input to the filter
-            function. footprint is a boolean array that specifies (implicitly) a shape, but also
-            which of the elements within this shape will get passed to the filter function. Thus
-            size=(n, m) is equivalent to footprint=np.ones((n, m)). We adjust size to the number of
-            dimensions of the input array, so that, if the input array is shape (10, 10, 10), and
-            size is 2, then the actual size used is (2, 2, 2). When footprint is given, size is
-            ignored.
-        mode : The mode parameter determines how the input array is extended when the
-            filter overlaps a border. Default value is 'reflect'. The valid values and their
-            behavior is as follows:
-
-            * `constant`, (k k k k | a b c d | k k k k) : The input is extended by filling all
-              values beyond the edge with the same constant value, defined by the `cval`
-              parameter.
-            * `nearest`, (a a a a | a b c d | d d d d) : The input is extended by replicating
-              the last pixel.
-            * `mirror`, (c d c b | a b c d | c b a b) : The input is extended by reflecting
-              about the center of the last pixel. This mode is also sometimes referred to as
-              whole-sample symmetric.
-            * `reflect`, (d c b a | a b c d | d c b a) : The input is extended by reflecting
-              about the edge of the last pixel. This mode is also sometimes referred to as
-              half-sample symmetric.
-            * `wrap`, (a b c d | a b c d | a b c d) : The input is extended by wrapping around
-              to the opposite edge.
-        cval : Value to fill past edges of input if mode is 'constant'. Default is 0.0.
-        num_threads : Number of threads used in the calculations.
-
-    Raises:
-        ValueError : When neither `size` nor `footprint` are provided.
-        TypeError : If `data` has incompatible type.
-        RuntimeError : If C backend exited with error.
-
-    Returns:
-        Filtered array. Has the same shape as `inp`.
-    """
-    ...
-
-@overload
-def maximum_filter(inp: RealArray, size: IntSequence | None=None, footprint: BoolArray | None=None,
-                   mode: Mode='reflect', cval: float=0.0, num_threads: int=1) -> NDRealArray:
-    ...
-
-@overload
-def maximum_filter(inp: IntArray, size: IntSequence | None=None, footprint: BoolArray | None=None,
-                   mode: Mode='reflect', cval: float=0.0, num_threads: int=1) -> NDIntArray:
-    ...
-
-def maximum_filter(inp: RealArray | IntArray, size: IntSequence | None=None,
-                   footprint: BoolArray | None=None, mode: Mode='reflect', cval: float=0.0,
-                   num_threads: int=1) -> NDRealArray | NDIntArray:
-    """Calculate a multidimensional maximum filter.
-
-    Args:
-        inp : Input array. Must be one of the following types: np.float64, np.float32, np.int32,
-            np.uint32, np.uint64.
-        size: See footprint, below. Ignored if footprint is given.
-        footprint :  Either size or footprint must be defined. size gives the shape that is taken
-            from the input array, at every element position, to define the input to the filter
-            function. footprint is a boolean array that specifies (implicitly) a shape, but also
-            which of the elements within this shape will get passed to the filter function. Thus
-            size=(n, m) is equivalent to footprint=np.ones((n, m)). We adjust size to the number of
-            dimensions of the input array, so that, if the input array is shape (10, 10, 10), and
-            size is 2, then the actual size used is (2, 2, 2). When footprint is given, size is
-            ignored.
-        mode : The mode parameter determines how the input array is extended when the
-            filter overlaps a border. Default value is 'reflect'. The valid values and their
-            behavior is as follows:
-
-            * `constant`, (k k k k | a b c d | k k k k) : The input is extended by filling all
-              values beyond the edge with the same constant value, defined by the `cval`
-              parameter.
-            * `nearest`, (a a a a | a b c d | d d d d) : The input is extended by replicating
-              the last pixel.
-            * `mirror`, (c d c b | a b c d | c b a b) : The input is extended by reflecting
-              about the center of the last pixel. This mode is also sometimes referred to as
-              whole-sample symmetric.
-            * `reflect`, (d c b a | a b c d | d c b a) : The input is extended by reflecting
-              about the edge of the last pixel. This mode is also sometimes referred to as
-              half-sample symmetric.
-            * `wrap`, (a b c d | a b c d | a b c d) : The input is extended by wrapping around
-              to the opposite edge.
-        cval : Value to fill past edges of input if mode is 'constant'. Default is 0.0.
-        num_threads : Number of threads.
-
-    Raises:
-        ValueError : When neither `size` nor `footprint` are provided.
-        TypeError : If `data` has incompatible type.
-        RuntimeError : If C backend exited with error.
-
-    Returns:
-        Filtered array. Has the same shape as `inp`.
-    """
-    ...
-
-def robust_mean(inp: RealArray | IntArray, mask: BoolArray | None=None, axis: IntSequence=0,
-                r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0, return_std: bool=False,
-                num_threads: int=1) -> NDRealArray:
+def robust_mean(inp: RealArray | IntArray, axis: IntSequence=0, r0: float=0.0, r1: float=0.5,
+                n_iter: int=12, lm: float=9.0, return_std: bool=False, num_threads: int=1
+                ) -> NDRealArray:
     """Calculate a mean along the `axis` by robustly fitting a Gaussian to input vector [RFG]_.
     The algorithm performs `n_iter` times the fast least kth order statistics (FLkOS [FLKOS]_)
     algorithm to fit a gaussian to data.
@@ -186,9 +67,8 @@ def robust_mean(inp: RealArray | IntArray, mask: BoolArray | None=None, axis: In
     """
     ...
 
-def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, mask: BoolArray | None=None,
-               axis: IntSequence=-1, r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0,
-               num_threads: int=1) -> NDRealArray:
+def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: IntSequence=-1, r0: float=0.0,
+               r1: float=0.5, n_iter: int=12, lm: float=9.0, num_threads: int=1) -> NDRealArray:
     """Robustly solve a linear least-squares problem with the fast least kth order statistics
     (FLkOS [FLKOS]_) algorithm.
 

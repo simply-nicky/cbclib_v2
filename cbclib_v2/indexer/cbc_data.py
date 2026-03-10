@@ -96,11 +96,13 @@ class UCA(State, ArrayContainer):
 
     @property
     def q_min(self) -> RealArray:
-        return self.kout - kxy_to_k(self.kxy_min, self.__namespace__)
+        xp = self.__array_namespace__()
+        return self.kout - kxy_to_k(self.kxy_min, xp)
 
     @property
     def q_max(self) -> RealArray:
-        return self.kout - kxy_to_k(self.kxy_max, self.__namespace__)
+        xp = self.__array_namespace__()
+        return self.kout - kxy_to_k(self.kxy_max, xp)
 
     @property
     def q_corners(self) -> RealArray:

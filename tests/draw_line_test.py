@@ -2,24 +2,36 @@ import sys
 from math import prod
 from typing import Callable, Dict, Tuple
 import pytest
-from cbclib_v2 import device
-from cbclib_v2 import Lines, add_at
-from cbclib_v2.annotations import CuPy, Device, IntArray, RealArray, Shape
-from cbclib_v2.ndimage import accumulate_lines, draw_lines, write_lines
-from cbclib_v2.test_util import check_close, TestGenerator, TestNamespace
+from cbclib_v2 import default_rng, Lines
+from cbclib_v2.annotations import (CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
+                                   NumPy, NumPyNamespace, RealArray, Shape)
+from cbclib_v2.ndimage import accumulate_lines, draw_lines
+from cbclib_v2.test_util import check_close
 
+TestNamespace = NumPyNamespace | CuPyNamespace
+TestGenerator = Generator[NDArray] | Generator[CPArray]
 Kernel = Callable[[RealArray, RealArray], RealArray]
 WriteResult = Tuple[IntArray, IntArray, RealArray]
 
 @pytest.mark.parametrize("ndim,shape", [(2, (4, 3, 16, 22)), (3, (2, 20, 16, 22))])
 class TestDrawLine():
-    @pytest.fixture
-    def xp(self, test_xp: TestNamespace) -> TestNamespace:
-        return test_xp
+    @pytest.fixture(params=['cpu', 'gpu'])
+    def platform(self, request: pytest.FixtureRequest) -> str:
+        return request.param
 
     @pytest.fixture
-    def rng(self, test_rng: TestGenerator) -> TestGenerator:
-        return test_rng
+    def xp(self, platform: str) -> TestNamespace:
+        if platform == 'cpu':
+            return NumPy
+        if platform == 'gpu':
+            if CuPy is None:
+                pytest.skip("CuPy is not available")
+            return CuPy
+        raise ValueError(f"Unknown platform: {platform}")
+
+    @pytest.fixture
+    def rng(self, xp: TestNamespace) -> TestGenerator:
+        return default_rng(42, xp)
 
     def kernel_dict(self, xp: TestNamespace) -> Dict[str, Kernel]:
         def biweight(x, sigma):
@@ -91,85 +103,53 @@ class TestDrawLine():
 
     @pytest.fixture
     def image(self, out: RealArray, lines: Lines, width: float, indices: IntArray, max_val: float,
-              kernel: str, test_device: Device, xp: TestNamespace) -> RealArray:
-        with device.context(test_device):
-            image = draw_lines(out, lines.to_lines(width), indices, max_val=max_val, kernel=kernel)
-        return xp.asarray(image)
+              kernel: str) -> RealArray:
+        return draw_lines(out, lines.to_lines(width), indices, max_val=max_val, kernel=kernel)
 
     @pytest.fixture
     def accumulated(self, out: RealArray, lines: Lines, width: float, terms: IntArray,
-                    frames: IntArray, max_val: float, kernel: str, test_device: Device
-                    ) -> RealArray:
-        with device.context(test_device):
-            image = accumulate_lines(out, lines.to_lines(width), terms, frames, max_val, kernel)
-        return image
-
-    @pytest.fixture
-    def arrays(self, lines: Lines, width: float, indices: IntArray, shape: Shape, max_val: float,
-              kernel: str, cpu_device: Device, xp: TestNamespace) -> WriteResult:
-        if xp is CuPy:
-            pytest.skip("Skipping write_lines test for CuPy backend")
-        with device.context(cpu_device):
-            idxs, ids, values = write_lines(lines.to_lines(width), shape, indices, max_val=max_val,
-                                            kernel=kernel)
-        return xp.asarray(idxs), xp.asarray(ids), xp.asarray(values)
+                    frames: IntArray, max_val: float, kernel: str) -> RealArray:
+        return accumulate_lines(out, lines.to_lines(width), terms, frames, max_val, kernel)
 
     def test_ref_count(self, lines: Lines, width: float, shape: Shape, ndim: int,
-                       test_device: Device, xp: TestNamespace):
+                       xp: TestNamespace):
         out = xp.zeros(shape[-ndim:])
         lines_array = lines.to_lines(width)
         out_refcount = sys.getrefcount(out)
         lines_refcount = sys.getrefcount(lines_array)
 
-        with device.context(test_device):
-            draw_lines(out, lines_array)
+        out = draw_lines(out, lines_array)
 
         assert out_refcount == sys.getrefcount(out)
         assert lines_refcount == sys.getrefcount(lines_array)
 
-    def test_empty_lines(self, shape: Shape, ndim: int, test_device: Device, xp: TestNamespace):
-        with device.context(test_device):
-            image = draw_lines(xp.zeros(shape[-ndim:]), xp.zeros((0, 2 * ndim + 1)))
-
+    def test_empty_lines(self, shape: Shape, ndim: int, xp: TestNamespace):
+        image = draw_lines(xp.zeros(shape[-ndim:]), xp.zeros((0, 2 * ndim + 1)))
         assert xp.sum(image) == 0.0
 
     @pytest.mark.xfail(raises=ValueError)
     def test_image_wrong_size_lines(self, out: RealArray, lines: Lines, width: float,
-                                    indices: IntArray, test_device: Device):
-        with device.context(test_device):
-            image = draw_lines(out, lines.to_lines(width)[::2], indices)
-
-    @pytest.mark.xfail(raises=ValueError)
-    def test_table_wrong_size_lines(self, lines: Lines, width: float, indices: IntArray,
-                                    shape: Shape, cpu_device: Device):
-        with device.context(cpu_device):
-            idxs, ids, values = write_lines(lines.to_lines(width)[::2], shape, indices)
+                                    indices: IntArray):
+        _ = draw_lines(out, lines.to_lines(width)[::2], indices)
 
     def test_zero_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
-                        test_device: Device, xp: TestNamespace):
+                        xp: TestNamespace):
         zero_lines = lines.to_lines(0.0)
-        with device.context(test_device):
-            image = draw_lines(out, zero_lines, indices, kernel=kernel)
+        image = draw_lines(out, zero_lines, indices, kernel=kernel)
 
         assert xp.sum(image) == 0
 
     def test_negative_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
-                            test_device: Device, xp: TestNamespace):
+                            xp: TestNamespace):
         neg_lines = lines.to_lines(-1.0)
-        with device.context(test_device):
-            image = draw_lines(out, neg_lines, indices, kernel=kernel)
+        image = draw_lines(out, neg_lines, indices, kernel=kernel)
 
         assert xp.sum(image) == 0
 
     @pytest.mark.slow
-    def test_max_val(self, image: RealArray, arrays: WriteResult, n_lines: int, max_val: float,
-                     xp: TestNamespace):
-        idxs, ids, values = arrays
+    def test_max_val(self, image: RealArray, n_lines: int, max_val: float, xp: TestNamespace):
         assert xp.min(image) == 0
         assert xp.all(xp.max(image, axis=(-2, -1)) <= n_lines * max_val)
-        assert xp.min(idxs) >= 0 and xp.max(idxs) < image.size
-        assert xp.min(ids) >= 0 and xp.max(ids) < n_lines
-        assert xp.min(values) >= 0.0 and xp.max(values) <= max_val
 
     @pytest.fixture
     def image_numpy(self, lines: Lines, width: float, indices: IntArray, shape: Shape, ndim: int,
@@ -187,12 +167,6 @@ class TestDrawLine():
         return xp.stack(frames).reshape(shape)
 
     def test_draw_line_image(self, image: RealArray, image_numpy: RealArray):
-        check_close(image, image_numpy)
-
-    def test_draw_line_table(self, arrays: WriteResult, image_numpy: RealArray, xp: TestNamespace):
-        image = xp.zeros(image_numpy.shape)
-        idxs, _, values = arrays
-        image = add_at(image, xp.unravel_index(idxs, image.shape), values)
         check_close(image, image_numpy)
 
     def test_accumulate_lines(self, accumulated, image_numpy: RealArray):

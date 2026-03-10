@@ -1,9 +1,27 @@
+from typing import Callable
 import pytest
-from jax import jit
-from cbclib_v2 import default_rng
-from cbclib_v2.annotations import Generator, JaxArray, JaxNamespace, JaxNumPy
-from cbclib_v2.indexer import CBData, CBDModel, Patterns
-from cbclib_v2.test_util import check_gradient, Criterion, FullState, TestSetup
+from jax import jit, tree
+from cbclib_v2 import default_rng, field, State
+from cbclib_v2.annotations import AnyGenerator, AnyNamespace, Generator, JaxArray, JaxNamespace, JaxNumPy, RealArray
+from cbclib_v2.indexer import BaseState, CBData, CBDModel, FixedPupilSetup, Patterns, XtalState
+from cbclib_v2.indexer import random_state
+from cbclib_v2.test_util import check_gradient, TestSetup
+
+Criterion = Callable[[CBData, BaseState,], RealArray]
+
+REL_TOL = 0.025
+
+def random_xtal(xp: AnyNamespace) -> Callable[[AnyGenerator], XtalState]:
+    return random_state(TestSetup.xtal(xp),
+                        tree.map(lambda val: REL_TOL * val, TestSetup.xtal(xp)))
+
+def random_setup(xp: AnyNamespace) -> Callable[[AnyGenerator], FixedPupilSetup]:
+    return random_state(TestSetup.fixed_pupil_setup(xp),
+                        tree.map(lambda val: REL_TOL * val, TestSetup.fixed_pupil_setup(xp)))
+
+class FullState(BaseState, State, random=True):
+    xtal    : XtalState = field(random=random_xtal(JaxNumPy))
+    setup   : FixedPupilSetup = field(random=random_setup(JaxNumPy))
 
 class TestCBDModel():
     EPS: float = 5e-7

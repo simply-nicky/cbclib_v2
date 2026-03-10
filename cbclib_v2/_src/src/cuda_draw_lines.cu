@@ -61,7 +61,7 @@ DeviceVector<LineData<T, N>> build_lines(const array_view<T, py::ssize_t> & line
 {
     DeviceVector<LineData<T, N>> line_data(lines.shape(0));
 
-    int block_size = 256;
+    int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((lines.shape(0) + block_size - 1) / block_size);
     build_lines_kernel<T, N><<<num_blocks, block_size>>>(cast_to_nd<T, 2>(lines), lines.shape(0), line_data.view());
 
@@ -551,7 +551,7 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
 
     // First pass: count lines per bin
     csize_t n_lines = lines.size() / L;
-    csize_t block_size = 256;
+    csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_lines + block_size - 1) / block_size;
     count_lines<T, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), context.view(), max_counts.view());
     handle_cuda_error(cudaGetLastError());
@@ -618,7 +618,7 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
 
     // First pass: count lines per bin
     csize_t n_lines = lines.size() / L;
-    csize_t block_size = 256;
+    csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_lines + block_size - 1) / block_size;
     count_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(idxs), n_frames, context.view(), max_counts.view());
     handle_cuda_error(cudaGetLastError());
@@ -695,7 +695,7 @@ DrawContext<AccumulateIndices, T, N> build_context(const array_view<T, py::ssize
     // First pass: count lines per bin
     csize_t n_lines = lines.size() / L;
     csize_t n_terms = frames.size();
-    csize_t block_size = 256;
+    csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_lines + block_size - 1) / block_size;
     count_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(terms), n_terms, cast_to_nd<I, 1>(frames), n_frames,
                                                    context.view(), max_counts.view());
@@ -821,7 +821,7 @@ array_t<T> draw_lines_nd_no_index(array_t<T> out, array_t<T> lines, T max_val, s
     auto line_data = build_lines<T, N>(lines.view());
     auto context = build_context<T, N>(lines.view(), shape, grid->data());
 
-    int block_size = 256;
+    int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
     draw_thick_lines_kernel<T, N, Update><<<num_blocks, block_size>>>(
         cast_to_nd<T, N + 1>(out.view()), line_data.view(), context.view(), max_val, kernel);
@@ -868,7 +868,7 @@ array_t<T> draw_lines_nd_with_index(array_t<T> out, array_t<T> lines, array_t<I>
     auto line_data = build_lines<T, N>(lines.view());
     auto context = build_context<T, I, N>(lines.view(), idxs.view(), n_frames, shape, grid->data());
 
-    int block_size = 256;
+    int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
 
     draw_thick_lines_kernel<T, N, Update><<<num_blocks, block_size>>>(
@@ -984,7 +984,7 @@ array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<I>
     auto line_data = build_lines<T, N>(lines.view());
     auto context = build_context<T, I, N>(lines.view(), terms.view(), frames.view(), n_frames, shape, grid->data());
 
-    int block_size = 256;
+    int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
 
     accumulate_thick_lines_kernel<T, N, Update><<<num_blocks, block_size>>>(

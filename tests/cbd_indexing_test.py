@@ -1,4 +1,5 @@
 import pytest
+from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, RealArray, NDArray, NumPy, NumPyNamespace
 from cbclib_v2.indexer import (CBData, CBDIndexer, CBDLoss, CBDModel, CircleState, MillerWithRLP,
                                Patterns, PointsWithK, TiltOverAxisState, UCA, project_to_rect)
@@ -12,8 +13,8 @@ class TestCBDIndexer():
         return NumPy
 
     @pytest.fixture
-    def rng(self, cpu_rng: Generator[RealArray]) -> Generator[RealArray]:
-        return cpu_rng
+    def rng(self, xp: NumPyNamespace) -> Generator[NDArray]:
+        return default_rng(42, xp)
 
     @pytest.fixture
     def state(self, xp: NumPyNamespace) -> FixedState:

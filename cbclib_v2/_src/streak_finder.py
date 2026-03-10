@@ -1,16 +1,11 @@
-from .annotations import NDBoolArray, NDRealArray
+from .annotations import NDRealArray
 from .functions import Structure, detect_peaks, detect_streaks, filter_peaks
-from .src.streak_finder import (PatternDouble, PatternDoubleList, PatternFloat, PatternFloatList, PeaksList,
-                                StreakDouble, StreakFloat)
-
-Streak = StreakDouble | StreakFloat
-Pattern = PatternDouble | PatternFloat
-PatternList = PatternDoubleList | PatternFloatList
+from .src.streak_finder import PatternList, PeaksList
 
 class PatternStreakFinder:
-    def __init__(self, data: NDRealArray, mask: NDBoolArray, structure: Structure,
-                 min_size: int, lookahead: int=0, nfa: int=0):
-        self.mask, self.data, self.structure = mask, data, structure
+    def __init__(self, data: NDRealArray, structure: Structure, min_size: float, lookahead: int=0,
+                 nfa: int=0):
+        self.data, self.structure = data, structure
         self.min_size, self.lookahead, self.nfa = min_size, lookahead, nfa
 
     def detect_peaks(self, vmin: float, npts: int, connectivity: Structure=Structure([1, 1], 1),
@@ -29,9 +24,8 @@ class PatternStreakFinder:
         Returns:
             Set of detected peaks.
         """
-        peaks = detect_peaks(self.data, self.mask, self.structure.rank, vmin)
-        filter_peaks(peaks, self.data, self.mask, connectivity, vmin, npts)
-        return peaks
+        peaks = detect_peaks(self.data, self.structure.connectivity, vmin)
+        return filter_peaks(peaks, self.data, connectivity, vmin, npts)
 
     def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float) -> PatternList:
         """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
@@ -50,5 +44,5 @@ class PatternStreakFinder:
         Returns:
             A list of detected streaks.
         """
-        return detect_streaks(peaks, self.data, self.mask, self.structure, xtol, vmin,
-                              self.min_size, self.lookahead, self.nfa)
+        return detect_streaks(peaks, self.data, self.structure, xtol, vmin, self.min_size,
+                              self.lookahead, self.nfa)

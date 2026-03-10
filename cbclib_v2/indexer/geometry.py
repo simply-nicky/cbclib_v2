@@ -84,7 +84,7 @@ def tilt_angles(rmats: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
                     rmats[..., 0, 2] - rmats[..., 2, 0],
                     rmats[..., 1, 0] - rmats[..., 0, 1]], axis=-1)
     rabs = xp.sqrt(xp.sum(vec**2, axis=-1))
-    return xp.stack([xp.atan2(rabs, xp.trace(rmats, axis1=-2, axis2=-1) - 1),
+    return xp.stack([xp.atan2(rabs, xp.linalg.trace(rmats) - 1),
                      xp.acos(vec[..., 2] / rabs),
                      xp.atan2(vec[..., 1], vec[..., 0])], axis=-1)
 
@@ -130,7 +130,7 @@ def det_to_k(pts: RealArray, src: RealArray, idxs: IntArray, xp: AnyNamespace = 
     src = xp.reshape(xp.reshape(src, (-1, 3))[xp.reshape(idxs, -1)], idxs.shape + (3,))
     xy = pts - src[..., :2]
     norm = xp.sqrt(xp.sum(xy**2, axis=-1) + src[..., 2]**2)
-    vec = xp.append(xy, xp.broadcast_to(-src[..., 2], pts.shape[:-1])[..., None], axis=-1)
+    vec = xp.concat((xy, xp.broadcast_to(-src[..., 2], pts.shape[:-1])[..., None]), axis=-1)
     return vec / norm[..., None]
 
 def k_to_det(k: RealArray, src: RealArray, idxs: IntArray, xp: AnyNamespace = JaxNumPy

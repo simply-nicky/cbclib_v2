@@ -280,6 +280,12 @@ struct LineND
 {
     PointND<T, N> pt0 {}, pt1 {};   // endpoints
 
+    template <typename V, typename = std::enable_if_t<std::is_constructible_v<T, V>>>
+    operator LineND<V, N>() const
+    {
+        return LineND<V, N>(static_cast<PointND<V, N>>(pt0), static_cast<PointND<V, N>>(pt1));
+    }
+
     LineND() = default;
 
     template <typename Pt0, typename Pt1, typename = std::enable_if_t<

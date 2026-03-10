@@ -1,7 +1,6 @@
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from typing import Iterable, Protocol
 from setuptools import setup, find_namespace_packages, Extension
@@ -13,7 +12,7 @@ IS_WINDOWS = sys.platform == 'win32'
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-__version__ = '0.13.0'
+__version__ = '0.13.1'
 
 def find_conda_home() -> str:
     """Find the Conda install path."""
@@ -36,26 +35,6 @@ def find_cuda_home() -> str | None:
 
 SKIP_CUDA = os.environ.get('CBCLIB_SKIP_CUDA', '0').lower() in ('1', 'true', 'yes')
 CUDA_HOME_FOUND = find_cuda_home() is not None and not SKIP_CUDA
-
-def find_fftw_paths() -> tuple[list[str], list[str]]:
-    """Find FFTW include and library directories using pkg-config."""
-    try:
-        include_dirs = subprocess.check_output(['pkg-config', '--cflags-only-I', 'fftw3'],
-                                               text=True).strip().split()
-        include_dirs = [d[2:] for d in include_dirs if d.startswith('-I')]
-
-        lib_dirs = subprocess.check_output(['pkg-config', '--libs-only-L', 'fftw3'],
-                                          text=True).strip().split()
-        lib_dirs = [d[2:] for d in lib_dirs if d.startswith('-L')]
-
-        return include_dirs, lib_dirs
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("ERROR: FFTW3 library not found. Install it with:")
-        print("  conda (recommended): conda install -c conda-forge fftw")
-        print("  Ubuntu/Debian: sudo apt-get install libfftw3-dev")
-        print("  macOS: brew install fftw")
-        print("  Fedora: sudo dnf install fftw-devel")
-        sys.exit(1)
 
 def cuda_include() -> str:
     """ Return the CUDA include path. """
@@ -277,22 +256,10 @@ class BuildCPPExp(build_ext):
 
         super().build_extensions()
 
-# Find FFTW paths
-fftw_includes, fftw_libs = find_fftw_paths()
-
 extensions = [
     CPPExtension("cbclib_v2._src.src.bresenham",
                  sources=["cbclib_v2/_src/src/bresenham.cpp"],
                  cxx_std=17,
-                 extra_compile_args=['-fopenmp'],
-                 extra_link_args=['-lgomp']),
-    CPPExtension("cbclib_v2._src.src.fft_functions",
-                 sources=["cbclib_v2/_src/src/fft_functions.cpp"],
-                 cxx_std=17,
-                 include_dirs=fftw_includes,
-                 library_dirs=fftw_libs,
-                 libraries = ['fftw3', 'fftw3f', 'fftw3l', 'fftw3_omp',
-                              'fftw3f_omp', 'fftw3l_omp'],
                  extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.index",
@@ -305,11 +272,6 @@ extensions = [
                  extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.median",
                  sources=["cbclib_v2/_src/src/median.cpp"],
-                 cxx_std=17,
-                 extra_compile_args=['-fopenmp'],
-                 extra_link_args=['-lgomp']),
-    CPPExtension("cbclib_v2._src.src.signal_proc",
-                 sources=["cbclib_v2/_src/src/signal_proc.cpp"],
                  cxx_std=17,
                  extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
@@ -333,6 +295,12 @@ if CUDA_HOME_FOUND:
                      libraries=['cudart']),
         CPPExtension("cbclib_v2._src.src.cuda_label",
                      sources=["cbclib_v2/_src/src/cuda_label.cu",],
+                     cxx_std=17,
+                     include_dirs=[cuda_include()],
+                     library_dirs=[cuda_library_path()],
+                     libraries=['cudart']),
+        CPPExtension("cbclib_v2._src.src.cuda_median",
+                     sources=["cbclib_v2/_src/src/cuda_median.cu",],
                      cxx_std=17,
                      include_dirs=[cuda_include()],
                      library_dirs=[cuda_library_path()],

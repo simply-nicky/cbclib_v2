@@ -1,27 +1,28 @@
 from typing import Callable, Iterator, Tuple, Type, TypeVar, get_type_hints, overload
+from typing_extensions import Self
 import pandas as pd
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
-from .._src.annotations import (AnyNamespace, Array, BoolArray, Generator, Indices, IntArray, JaxNumPy,
-                                NDRealArray, RealArray, RealSequence, Shape)
-from .._src.array_api import array_namespace
+from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, IntArray, JaxNumPy,
+                                RealArray, RealSequence, Shape)
+from .._src.array_api import array_namespace, asnumpy
 from .._src.data_container import ArrayContainer, Container, DataContainer, IndexedContainer
-from .._src.parser import JSONParser, INIParser, Parser, get_extension, get_parser
+from .._src.parser import JSONParser, INIParser, Parser, get_extension
 from .._src.state import State, dynamic_fields, field, static_fields
 
-S = TypeVar('S', bound=State)
-
-def random_array(array: RealArray, span: RealSequence) -> Callable[[Generator[Array]], RealArray]:
+def random_array(array: RealArray, span: RealSequence) -> Callable[[AnyGenerator], RealArray]:
     xp = array_namespace(array, span)
-    def random(rng: Generator[Array]):
+    def random(rng: AnyGenerator):
         bound = xp.asarray(span)
         return array + xp.asarray(rng.uniform(-0.5 * bound, 0.5 * bound, array.shape),
                                   dtype=array.dtype)
 
     return random
 
-def random_state(state: S, span: S) -> Callable[[Generator[Array]], S]:
+S = TypeVar('S', bound=State)
+
+def random_state(state: S, span: S) -> Callable[[AnyGenerator], S]:
     xp = array_namespace(state, span)
-    def random(rng: Generator[Array]):
+    def random(rng: AnyGenerator):
         dynamic = {}
         for fld in dynamic_fields(state):
             attr = getattr(state, fld.name)
@@ -42,8 +43,8 @@ def random_state(state: S, span: S) -> Callable[[Generator[Array]], S]:
     return random
 
 def random_rotation(shape: Shape=(), xp: AnyNamespace = JaxNumPy
-                    ) -> Callable[[Generator[Array]], 'RotationState']:
-    def random(rng: Generator[Array]):
+                    ) -> Callable[[AnyGenerator], 'RotationState']:
+    def random(rng: AnyGenerator):
         """Creates a random rotation matrix.
         """
         # from http://blog.lostinmyterminal.com/python/2015/05/12/random-rotation-matrix.html
@@ -64,8 +65,8 @@ def random_rotation(shape: Shape=(), xp: AnyNamespace = JaxNumPy
     return random
 
 def random_euler(shape: Shape=(), xp: AnyNamespace=JaxNumPy
-                 ) -> Callable[[Generator[Array]], 'EulerState']:
-    def random(rng: Generator[Array]):
+                 ) -> Callable[[AnyGenerator], 'EulerState']:
+    def random(rng: AnyGenerator):
         angles = rng.uniform(xp.array([0.0, 0.0, 0.0]), xp.array([2 * xp.pi, xp.pi, 2 * xp.pi]),
                              size=shape + (3,))
         return EulerState(xp.asarray(angles))
@@ -77,7 +78,13 @@ class BaseCell(Container):
 
     @classmethod
     def parser(cls, file_or_extension: str='ini') -> Parser:
-        return get_parser(file_or_extension, cls, 'unit_cell')
+        ext = get_extension(file_or_extension)
+        field_info = {'unit_cell': {'angles': 'angles', 'lengths': 'lengths'}}
+        if ext == 'ini':
+            return INIParser(field_info, get_type_hints(cls))
+        if ext == 'json':
+            return JSONParser(field_info)
+        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
 
     def to_basis(self, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
         gamma = xp.asarray(self.angles)[..., 2]
@@ -88,7 +95,7 @@ class BaseCell(Container):
         a_vec = xp.broadcast_to(xp.array([1.0, 0.0, 0.0]), cos.shape)
         b_vec = xp.stack((cos[..., 2], sin, xp.zeros(cos.shape[:-1])), axis=-1)
         c_vec = xp.stack((cos[..., 1], (cos[..., 0] - cos[..., 1] * cos[..., 2]) / sin,
-                           v_ratio / sin), axis=-1)
+                         v_ratio / sin), axis=-1)
         vectors = xp.stack((a_vec, b_vec, c_vec), axis=-2)
         return XtalState(xp.asarray(xp.asarray(self.lengths)[..., None] * vectors, dtype=float))
 
@@ -152,15 +159,15 @@ class XtalState(ArrayContainer, State):
             yield XtalState(basis[None])
 
     @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        ext = get_extension(file_or_extension)
+    def parser(cls, file: str='ini') -> Parser:
+        ext = get_extension(file)
+        field_info = {'basis': {'a': 'a', 'b': 'b', 'c': 'c'}}
         if ext == 'ini':
-            return INIParser({'basis': {'a': 'a', 'b': 'b', 'c': 'c'}},
-                             types={'a': NDRealArray, 'b': NDRealArray, 'c': NDRealArray})
+            return INIParser(field_info, {'a': RealArray, 'b': RealArray, 'c': RealArray})
         if ext == 'json':
-            return JSONParser({'basis': {'a': 'a', 'b': 'b', 'c': 'c'}})
+            return JSONParser(field_info)
 
-        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
+        raise ValueError(f"Unsupported file or extension format: {file}")
 
     @classmethod
     def read(cls, file: str, xp: AnyNamespace = JaxNumPy) -> 'XtalState':
@@ -169,9 +176,9 @@ class XtalState(ArrayContainer, State):
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
-        a = xp.stack((df['a_x'].to_numpy(), df['a_y'].to_numpy(), df['a_z'].to_numpy()), axis=-1)
-        b = xp.stack((df['b_x'].to_numpy(), df['b_y'].to_numpy(), df['b_z'].to_numpy()), axis=-1)
-        c = xp.stack((df['c_x'].to_numpy(), df['c_y'].to_numpy(), df['c_z'].to_numpy()), axis=-1)
+        a = xp.stack((xp.asarray(df['a_x']), xp.asarray(df['a_y']), xp.asarray(df['a_z'])), axis=-1)
+        b = xp.stack((xp.asarray(df['b_x']), xp.asarray(df['b_y']), xp.asarray(df['b_z'])), axis=-1)
+        c = xp.stack((xp.asarray(df['c_x']), xp.asarray(df['c_y']), xp.asarray(df['c_z'])), axis=-1)
         return cls(xp.stack((a, b, c), axis=-2))
 
     @classmethod
@@ -226,10 +233,13 @@ class XtalState(ArrayContainer, State):
         xp = self.__array_namespace__()
         if index is None:
             index = xp.arange(len(self))
-        return pd.DataFrame({'index': index,
-                             'a_x': self.a[..., 0], 'a_y': self.a[..., 1], 'a_z': self.a[..., 2],
-                             'b_x': self.b[..., 0], 'b_y': self.b[..., 1], 'b_z': self.b[..., 2],
-                             'c_x': self.c[..., 0], 'c_y': self.c[..., 1], 'c_z': self.c[..., 2]})
+        return pd.DataFrame({'index': asnumpy(index),
+                             'a_x': asnumpy(self.a[..., 0]), 'a_y': asnumpy(self.a[..., 1]),
+                             'a_z': asnumpy(self.a[..., 2]),
+                             'b_x': asnumpy(self.b[..., 0]), 'b_y': asnumpy(self.b[..., 1]),
+                             'b_z': asnumpy(self.b[..., 2]),
+                             'c_x': asnumpy(self.c[..., 0]), 'c_y': asnumpy(self.c[..., 1]),
+                             'c_z': asnumpy(self.c[..., 2])})
 
     def to_spherical(self) -> Tuple[RealArray, RealArray, RealArray]:
         """Return a stack of unit cell vectors in spherical coordinate system.
@@ -252,14 +262,12 @@ class XtalList(IndexedContainer, State):
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy) -> 'XtalList':
         xtals = XtalState.import_dataframe(df, xp)
-        return cls(df['index'].to_numpy(), xtals.basis)
+        return cls(xp.asarray(df['index']), xtals.basis)
 
     def to_dataframe(self) -> pd.DataFrame:
         xp = self.__array_namespace__()
         return self.to_xtals().to_dataframe(index=xp.asarray(self.index))
 
-
-L = TypeVar("L", bound='BaseLens')
 Float = float | RealArray
 
 class BaseLens(Container):
@@ -281,10 +289,16 @@ class BaseLens(Container):
 
     @classmethod
     def parser(cls, file_or_extension: str='ini') -> Parser:
-        return get_parser(file_or_extension, cls, 'geometry')
+        ext = get_extension(file_or_extension)
+        field_info = {'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}}
+        if ext == 'ini':
+            return INIParser(field_info, get_type_hints(cls))
+        if ext == 'json':
+            return JSONParser(field_info)
+        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
 
     @classmethod
-    def read(cls: Type[L], file: str, xp: AnyNamespace=JaxNumPy) -> L:
+    def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
         raise NotImplementedError
 
 class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
@@ -329,15 +343,15 @@ class FixedApertureLens(BaseLens, DataContainer, State):
         return cls.from_roi(FixedLens.read(file), xp)
 
     @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        ext = get_extension(file_or_extension)
+    def parser(cls, file: str) -> Parser:
+        ext = get_extension(file)
+        field_info = {'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}}
         if ext == 'ini':
-            return INIParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}},
-                             {'foc_pos': RealArray, 'pupil_roi': RealArray})
+            return INIParser(field_info, {'foc_pos': RealArray, 'pupil_roi': RealArray})
         if ext == 'json':
-            return JSONParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}})
+            return JSONParser(field_info)
 
-        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
+        raise ValueError(f"Unsupported file or extension format: {file}")
 
 class RotationState(ArrayContainer, State):
     matrix : RealArray
@@ -393,9 +407,9 @@ class RotationState(ArrayContainer, State):
         Returns:
             A new :class:`Sample` object.
         """
-        a = xp.stack((df['Rxx'].to_numpy(), df['Rxy'].to_numpy(), df['Rxz'].to_numpy()), axis=-1)
-        b = xp.stack((df['Ryx'].to_numpy(), df['Ryy'].to_numpy(), df['Ryz'].to_numpy()), axis=-1)
-        c = xp.stack((df['Rzx'].to_numpy(), df['Rzy'].to_numpy(), df['Rzz'].to_numpy()), axis=-1)
+        a = xp.stack((xp.asarray(df['Rxx']), xp.asarray(df['Rxy']), xp.asarray(df['Rxz'])), axis=-1)
+        b = xp.stack((xp.asarray(df['Ryx']), xp.asarray(df['Ryy']), xp.asarray(df['Ryz'])), axis=-1)
+        c = xp.stack((xp.asarray(df['Rzx']), xp.asarray(df['Rzy']), xp.asarray(df['Rzz'])), axis=-1)
         return cls(xp.stack((a, b, c), axis=-2))
 
     def to_dataframe(self, index: IntArray | None) -> pd.DataFrame:
@@ -403,10 +417,10 @@ class RotationState(ArrayContainer, State):
         if index is None:
             index = xp.arange(len(self))
         a, b, c = self.matrix[..., 0, :], self.matrix[..., 1, :], self.matrix[..., 2, :]
-        return pd.DataFrame({'index': index,
-                             'Rxx': a[..., 0], 'Rxy': a[..., 1], 'Rxz': a[..., 2],
-                             'Ryx': b[..., 0], 'Ryy': b[..., 1], 'Ryz': b[..., 2],
-                             'Rzx': c[..., 0], 'Rzy': c[..., 1], 'Rzz': c[..., 2]})
+        return pd.DataFrame({'index': asnumpy(index),
+                             'Rxx': asnumpy(a[..., 0]), 'Rxy': asnumpy(a[..., 1]), 'Rxz': asnumpy(a[..., 2]),
+                             'Ryx': asnumpy(b[..., 0]), 'Ryy': asnumpy(b[..., 1]), 'Ryz': asnumpy(b[..., 2]),
+                             'Rzx': asnumpy(c[..., 0]), 'Rzy': asnumpy(c[..., 1]), 'Rzz': asnumpy(c[..., 2])})
 
     def to_euler(self) -> 'EulerState':
         r"""Calculate Euler angles with Bunge convention [EUL]_.
@@ -524,8 +538,6 @@ class TiltOverAxisState(ArrayContainer, State):
         xp = self.__array_namespace__()
         return TiltState(xp.stack((self.angles, self.alpha(), self.beta()), axis=-1))
 
-S = TypeVar('S', bound='BaseSetup')
-
 class BaseSetup(Container):
     lens    : BaseLens
     z       : Tuple[float, ...] | RealArray
@@ -551,15 +563,13 @@ class BaseSetup(Container):
         return self.lens.pupil_center
 
     @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        ext = get_extension(file_or_extension)
+    def parser(cls, file: str) -> Parser:
+        ext = get_extension(file)
+        field_info = {'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi', 'z': 'z'}}
         if ext == 'ini':
-            return INIParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi',
-                                           'z': 'z'}},
-                             types=get_type_hints(cls))
+            return INIParser(field_info, get_type_hints(cls))
         if ext == 'json':
-            return JSONParser({'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi',
-                                            'z': 'z'}})
+            return JSONParser(field_info)
 
         raise ValueError(f"Invalid format: {ext}")
 

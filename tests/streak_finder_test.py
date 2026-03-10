@@ -1,12 +1,13 @@
 from math import prod
 from typing import Tuple
 import pytest
-from cbclib_v2.annotations import (Generator, NDArray, NDBoolArray, NDIntArray, NDRealArray,
-                                   NumPy, NumPyNamespace, Shape)
+from cbclib_v2 import default_rng
+from cbclib_v2.annotations import (Generator, NDArray, NDIntArray, NDRealArray, NumPy,
+                                   NumPyNamespace, Shape)
 from cbclib_v2.label import Structure
 from cbclib_v2.ndimage import draw_lines
-from cbclib_v2.streak_finder import PatternStreakFinder, PeaksList, Streak, Pattern, p_value
-from cbclib_v2.test_util import check_close
+from cbclib_v2.streak_finder import PatternStreakFinder, PeaksList, Pattern
+from cbclib_v2.test_util import check_close, p_value, p0_values, Streak
 
 class TestStreakFinder():
     ATOL: float = 1e-8
@@ -17,8 +18,8 @@ class TestStreakFinder():
         return NumPy
 
     @pytest.fixture
-    def rng(self, cpu_rng: Generator[NDArray]) -> Generator[NDArray]:
-        return cpu_rng
+    def rng(self, xp: NumPyNamespace) -> Generator[NDArray]:
+        return default_rng(42, xp)
 
     def center_of_mass(self, x: NDIntArray, y: NDIntArray, val: NDRealArray,
                        xp: NumPyNamespace) -> NDRealArray:
@@ -58,7 +59,8 @@ class TestStreakFinder():
     @pytest.fixture
     def centers(self, rng: Generator[NDArray], n_lines: int, shape: Shape, xp: NumPyNamespace
                 ) -> NDRealArray:
-        return xp.array([[shape[-1]], [shape[-2]]]) * rng.random((2, n_lines))
+        array : NDRealArray = rng.random((2, n_lines))
+        return xp.array([[shape[-1]], [shape[-2]]]) * array
 
     @pytest.fixture
     def lines(self, rng: Generator[NDArray], n_lines: int, centers: NDRealArray,
@@ -90,18 +92,6 @@ class TestStreakFinder():
         noise = 0.25 * vmin * rng.random(shape)
         return draw_lines(xp.zeros(shape), lines, kernel='biweight') + noise
 
-    @pytest.fixture(params=[0.05])
-    def num_bad(self, request: pytest.FixtureRequest, shape: Shape) -> int:
-        return int(request.param * prod(shape))
-
-    @pytest.fixture
-    def mask(self, rng: Generator[NDArray], shape: Shape, num_bad: int, xp: NumPyNamespace
-             ) -> NDBoolArray:
-        mask = xp.ones(shape, dtype=bool)
-        indices = xp.unravel_index(rng.choice(mask.size, num_bad, replace=False), mask.shape)
-        mask[indices] = False
-        return mask
-
     @pytest.fixture(params=[(1, 2)])
     def structure(self, request: pytest.FixtureRequest) -> Structure:
         radius, connectivity = request.param
@@ -112,9 +102,9 @@ class TestStreakFinder():
         return request.param
 
     @pytest.fixture
-    def finder(self, image: NDRealArray, mask: NDBoolArray, structure: Structure,
-               min_size: int) -> PatternStreakFinder:
-        return PatternStreakFinder(image, mask, structure, min_size)
+    def finder(self, image: NDRealArray, structure: Structure, min_size: int
+               ) -> PatternStreakFinder:
+        return PatternStreakFinder(image, structure, min_size)
 
     @pytest.fixture(params=[5])
     def npts(self, request: pytest.FixtureRequest) -> int:
@@ -144,11 +134,11 @@ class TestStreakFinder():
 
     def get_pixels(self, x: int, y: int, finder: PatternStreakFinder, xp: NumPyNamespace
                    ) -> Tuple[NDIntArray, NDIntArray]:
-        coords = xp.stack((y, x), axis=-1) + xp.array(list(finder.structure))
-        inbound = xp.all(coords >= 0 & (coords < xp.array(finder.mask.shape)), axis=-1)
+        shifts : NDIntArray = xp.asarray(list(finder.structure), dtype=int)
+        coords = xp.asarray([y, x]) + shifts
+        inbound = xp.all(coords >= 0 & (coords < xp.array(finder.data.shape[-2:])), axis=-1)
         coords = coords[inbound]
-        mask = finder.mask[coords[:, 0], coords[:, 1]]
-        return coords[mask, 1], coords[mask, 0]
+        return coords[:, 1], coords[:, 0]
 
     def get_line(self, x: int, y: int, image: NDRealArray, finder: PatternStreakFinder,
                  xp: NumPyNamespace) -> NDRealArray:
@@ -162,39 +152,40 @@ class TestStreakFinder():
         streak_ends = xp.array(streak.ends).reshape((-1, 2, 2))
         check_close(xp.sort(ends, axis=-2), xp.sort(streak_ends, axis=-2))
 
-        pts = xp.concat([xp.stack(self.get_pixels(ctr[0], ctr[1], finder, xp), axis=-1)
-                         for ctr in streak.centers])
-        pts = xp.unique(pts, axis=0)
-        pts = pts[xp.lexsort((pts[:, 1], pts[:, 0]))]
-        assert xp.all(xp.stack([streak.x, streak.y], axis=-1) == pts)
+        indices = []
+        for center in streak.centers:
+            x, y = self.get_pixels(center[0], center[1], finder, xp)
+            indices.append(xp.ravel_multi_index((y, x), finder.data.shape[-2:]))
 
-    def test_mask(self, result: Pattern, finder: PatternStreakFinder, xp: NumPyNamespace):
-        for streak in result:
-            assert xp.all(finder.mask[streak.y, streak.x])
+        indices = xp.unique(xp.concat(indices), axis=0)
+        assert xp.all(xp.array(list(streak.region)) == indices)
 
-    def test_p_values(self, result: Pattern, image: NDRealArray, mask: NDBoolArray, xtol: float,
+    @pytest.fixture
+    def p0(self, image: NDRealArray, vmin: float) -> NDRealArray:
+        return p0_values(image, vmin)
+
+    def test_p0_values(self, image: NDRealArray, vmin: float, p0: NDRealArray, xp: NumPyNamespace):
+        n_signal = xp.sum(image >= vmin, axis=(-2, -1))
+        check_close(p0, n_signal / prod(image.shape[-2:]))
+
+    def test_p_values(self, result: Pattern, image: NDRealArray, p0: NDRealArray, xtol: float,
                       vmin: float, min_size: int, xp: NumPyNamespace):
-        p_values, prob = p_value(result, image, mask, xtol, vmin)
-        assert xp.all(p_values < xp.log(prob) * min_size)
-
-    def test_result_probability(self, result: Pattern, image: NDRealArray, mask: NDBoolArray,
-                                xtol: float, vmin: float, xp: NumPyNamespace):
-        _, prob = p_value(result, image, mask, xtol, vmin)
-        index = xp.searchsorted(xp.sort(image[mask]), vmin)
-        check_close(1 - index / mask.sum(), xp.asarray(prob))
+        p_values = p_value(result, image, float(p0), xtol, vmin)
+        assert xp.all(p_values < xp.log(p0) * min_size)
 
     def test_central_line(self, streak: Streak, image: NDRealArray, xp: NumPyNamespace):
         line = streak.line()
         tau = xp.array(line[2:]) - xp.array(line[:2])
         centers = xp.array(streak.centers)
-        center = self.center_of_mass(xp.asarray(streak.x), xp.asarray(streak.y),
-                                     image[streak.y, streak.x], xp)
+        indices = xp.array(list(streak.region))
+        y, x = xp.unravel_index(indices, image.shape[-2:])
+        center = self.center_of_mass(x, y, image[y, x], xp)
         prods = xp.sum((centers - center) * tau, axis=-1)
         central_line = xp.concat((centers[xp.argmin(prods)], centers[xp.argmax(prods)]))
         assert xp.all(central_line == xp.asarray(streak.central_line()))
 
-    def test_negative_image(self, image: NDRealArray, mask: NDBoolArray, structure: Structure,
+    def test_negative_image(self, image: NDRealArray, structure: Structure,
                             min_size: int, peaks: PeaksList, xtol: float):
-        finder = PatternStreakFinder(-image, mask, structure, min_size)
-        streaks = finder.detect_streaks(peaks, xtol, 0.0)[0]
-        assert len(streaks) == 0
+        finder = PatternStreakFinder(-image, structure, min_size)
+        patterns = list(finder.detect_streaks(peaks, xtol, 0.0))
+        assert len(patterns[0]) == 0

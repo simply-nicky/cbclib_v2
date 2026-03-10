@@ -8,7 +8,7 @@ import re
 from types import TracebackType
 from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, Literal,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import Array, AnyNamespace, DataclassInstance, IntArray, NumPy, RealArray, Shape
+from .annotations import Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy, RealArray, Shape
 from .array_api import array_namespace
 from .data_container import Container
 from .streaks import StackedStreaks, Streaks
@@ -625,7 +625,8 @@ class Panel(Container):
 
         roi = self.roi()
         if len(roi) == 3:
-            index = xp.expand_dims(coordinates[-3], list(range(1, dist.ndim)))
+            index = coordinates[-3]
+            index = xp.reshape(index, index.shape[:1] + (1,) * (dist.ndim - 1) + index.shape[1:])
             dist = xp.where(index == roi[0].start, dist, xp.inf)
 
         return dist
@@ -675,9 +676,22 @@ class PixelIndices():
     def shape(self) -> Tuple[int, int]:
         return (int(self.ss.max()) + 1, int(self.fs.max()) + 1)
 
+    @overload
+    def __call__(self, frames: NDArray) -> NDArray: ...
+
+    @overload
+    def __call__(self, frames: Array) -> Array: ...
+
     def __call__(self, frames: Array) -> Array:
         xp = array_namespace(frames)
-        result = xp.zeros(frames.shape[:-self.ss.ndim] + self.shape)
+        frames = xp.reshape(frames, (-1,) + self.ss.shape)
+
+        n_frames = frames.size // self.ss.size
+        if n_frames > 1:
+            result = xp.zeros((n_frames,) + self.shape)
+        else:
+            result = xp.zeros(self.shape)
+
         result[..., self.ss, self.fs] = frames
         return result
 
@@ -762,9 +776,14 @@ class Detector():
     def to_patterns(self, streaks: Streaks | StackedStreaks, half_pixel_shift: bool=True,
                     tolerance: float=1.0) -> Patterns:
         if isinstance(streaks, StackedStreaks):
-            x, y, _ = self.to_detector(streaks.module_id, streaks.y, streaks.x,
-                                       half_pixel_shift=half_pixel_shift, units='meter',
-                                       tolerance=tolerance)
+            if streaks.num_modules > 1:
+                x, y, _ = self.to_detector(streaks.module_id, streaks.y, streaks.x,
+                                        half_pixel_shift=half_pixel_shift, units='meter',
+                                        tolerance=tolerance)
+            else:
+                x, y, _ = self.to_detector(streaks.y, streaks.x,
+                                           half_pixel_shift=half_pixel_shift,
+                                           units='meter', tolerance=tolerance)
             return Patterns.import_xy(streaks.index, x, y)
         if isinstance(streaks, Streaks):
             return Patterns(streaks.index, streaks.lines * self.pixel_size)

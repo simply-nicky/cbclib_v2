@@ -1,15 +1,18 @@
-from typing import Any, Tuple, Set, overload, cast
+from typing import Any, Literal, Tuple, Set, overload, cast
 import jax.numpy as jnp
-from jax import random
+from jax import devices, random
 import numpy as np
-from array_api_compat import array_namespace as get_array_namespace
+from array_api_compat import array_namespace as get_array_namespace, device, numpy as np_array_api
 from .annotations import (AnyFloat, Array, ArrayLike, AnyNamespace, ArrayNamespace, CPArray,
                           CPIntArray, CuPy, DTypeLike, Generator, IntArray, IntSequence, JaxArray,
-                          JaxNumPy, NDArray, NumPy, RealArray, RealSequence, Scalar, Shape,
-                          ShapeLike, SupportsNamespace)
+                          JaxDevice, JaxNumPy, NDArray, NumPy, RealArray, RealSequence, Scalar,
+                          Shape, ShapeLike, SupportsNamespace)
 
 if CuPy is not None:
     import cupy as cp
+    from cupy import fromDlpack as from_dlpack
+    from jax import device_put, dlpack as jdl
+    from array_api_compat import cupy as cp_array_api
 
     class CuPyGenerator(cp.random.RandomState):
         def integers(self, low: int | CPIntArray, high: int | None=None,
@@ -20,9 +23,24 @@ if CuPy is not None:
             if size is None:
                 return super().rand(1, dtype=dtype)
             return super().rand(*size, dtype=dtype)
+
+    def ascupy(array: Array) -> CPArray:
+        xp = array_namespace(array)
+        if xp is JaxNumPy:
+            x = device_put(array, device=devices("gpu")[0])
+            return from_dlpack(jdl.to_dlpack(x))
+        if xp is NumPy:
+            return CuPy.asarray(array)
+        if xp is CuPy:
+            return CuPy.asarray(array)
+        raise ValueError(f"Unsupported array namespace: {xp}")
 else:
     cp = None  # type: ignore
     CuPyGenerator = None  # type: ignore
+    cp_array_api = None  # type: ignore
+
+    def ascupy(array: Array) -> CPArray:
+        raise ValueError("CuPy is not available")
 
 def to_shape(shape: ShapeLike) -> Tuple[int, ...]:
     if isinstance(shape, (int, np.integer)):
@@ -191,7 +209,7 @@ def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
         np.add.at(np.asarray(a), indices, b)
         return xp.asarray(a)
     if cp is not None and xp is CuPy:
-        cp.add.at(cp.asarray(a), indices, b)
+        a[indices] += b
         return xp.asarray(a)
     raise ValueError(f"Unsupported array namespace: {xp}")
 
@@ -304,10 +322,54 @@ def array_namespace(*arrays: SupportsNamespace | Array | Any) -> AnyNamespace:
     nspaces = namespaces(*arrays)
     if len(nspaces) == 0:
         raise ValueError("namespace set should not be empty")
-    if CuPy in nspaces or cp in nspaces and CuPy is not None:
-        return CuPy
-    if JaxNumPy in nspaces:
+    if CuPy is not None:
+        if cp in nspaces or cp_array_api in nspaces:
+            return CuPy
+    if jnp in nspaces:
         return JaxNumPy
-    if NumPy in nspaces or np in nspaces:
+    if np in nspaces or np_array_api in nspaces:
         return NumPy
     raise ValueError(f"The array namespace {nspaces.pop()} is not supported")
+
+Platform = Literal['cpu', 'gpu']
+
+def get_platform(array: Array) -> Platform:
+    xp = array_namespace(array)
+    if xp is JaxNumPy:
+        dev : JaxDevice = device(array)
+        return 'gpu' if dev.platform == 'gpu' else 'cpu'
+    if xp is NumPy:
+        return 'cpu'
+    if cp is not None and xp is CuPy:
+        return 'gpu'
+    raise ValueError(f"Unsupported array namespace: {xp}")
+
+def asnumpy(array: Array) -> NDArray:
+    xp = array_namespace(array)
+    if xp is JaxNumPy:
+        return np.asarray(array)
+    if xp is NumPy:
+        return np.asarray(array)
+    if cp is not None and xp is CuPy:
+        return cp.asnumpy(array)
+    raise ValueError(f"Unsupported array namespace: {xp}")
+
+def asjax(array: Array) -> JaxArray:
+    xp = array_namespace(array)
+
+    if xp is JaxNumPy:
+        return jnp.asarray(array)
+    if xp is NumPy:
+        return jnp.asarray(array)
+    if cp is not None and xp is CuPy:
+        return jdl.from_dlpack(cp.asarray(array).toDlpack())
+    raise ValueError(f"Unsupported array namespace: {xp}")
+
+def default_api(platform: Platform) -> AnyNamespace:
+    if platform == 'cpu':
+        return NumPy
+    if platform == 'gpu':
+        if CuPy is None:
+            raise ValueError("CuPy is not available, cannot use GPU platform")
+        return CuPy
+    raise ValueError(f"Unsupported platform: {platform}")

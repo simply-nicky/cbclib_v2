@@ -36,7 +36,7 @@ auto dilate(py::array_t<bool> input, Structure structure, size_t iterations, py:
             {
                 Region region;
                 region.insert(region.end(), index);
-                region.dilate(func, structure, iterations, out);
+                region.dilate(func, structure, iterations, out.shape());
 
                 for (auto index : region)
                 {
@@ -89,7 +89,7 @@ auto dilate_with_mask(py::array_t<bool> input, Structure structure, size_t itera
             {
                 Region region;
                 region.insert(region.end(), index);
-                region.dilate(func, structure, iterations, out);
+                region.dilate(func, structure, iterations, out.shape());
 
                 for (auto index : region)
                 {
@@ -144,7 +144,7 @@ LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, uns
             {
                 Region region;
                 region.insert(region.end(), index);
-                region.dilate(func, structure, out);
+                region.dilate(func, structure, out.shape());
 
                 for (auto index : region)
                 {
@@ -167,7 +167,7 @@ LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, uns
 
     e.rethrow();
 
-    return LabelResult(array_indexer{output.request()}, std::move(result));
+    return LabelResult(std::vector<py::ssize_t>(output.shape(), output.shape() + output.ndim()), std::move(result));
 }
 
 template <typename T, size_t N, typename Func, typename = std::enable_if_t<
@@ -221,59 +221,6 @@ void declare_region_func(py::module & m, Func && func, const std::string & funcs
     }, py::arg("labels"), py::arg("data"));
 }
 
-template <typename T>
-void declare_pixels(py::module & m, const std::string & typestr)
-{
-    py::class_<PixelsND<T, 2>>(m, (std::string("Pixels2D") + typestr).c_str())
-        .def(py::init([](std::vector<long> x, std::vector<long> y, std::vector<T> values)
-        {
-            PixelSetND<T, 2> result;
-            for (auto [x, y, val] : zip::zip(x, y, values)) result.insert(make_pixel(val, x, y));
-            return PixelsND<T, 2>{std::move(result)};
-        }), py::arg("x") = std::vector<long>{}, py::arg("y") = std::vector<long>{}, py::arg("value") = std::vector<T>{})
-        .def(py::init([](py::array_t<long> x, py::array_t<long> y, py::array_t<T> values)
-        {
-            PixelSetND<T, 2> result;
-            for (auto [x, y, val] : zip::zip(array<long>{x.request()}, array<long>{y.request()}, array<T>{values.request()}))
-            {
-                result.insert(make_pixel(val, x, y));
-            }
-            return PixelsND<T, 2>{std::move(result)};
-        }), py::arg("x") = py::array_t<long>{}, py::arg("y") = py::array_t<long>{}, py::arg("value") = py::array_t<T>{})
-        .def_property("x", [](const PixelsND<T, 2> & pixels)
-        {
-            std::vector<long> xvec;
-            for (const auto & [pt, _]: pixels.pixels()) xvec.push_back(pt.x());
-            return xvec;
-        }, nullptr)
-        .def_property("y", [](const PixelsND<T, 2> & pixels)
-        {
-            std::vector<long> yvec;
-            for (const auto & [pt, _]: pixels.pixels()) yvec.push_back(pt.y());
-            return yvec;
-        }, nullptr)
-        .def_property("value", [](const PixelsND<T, 2> & pixels)
-        {
-            std::vector<T> values;
-            for (const auto & [_, val]: pixels.pixels()) values.push_back(val);
-            return values;
-        }, nullptr)
-        .def("merge", [](PixelsND<T, 2> & pixels, PixelsND<T, 2> source) -> PixelsND<T, 2> &
-        {
-            pixels.merge(source);
-            return pixels;
-        }, py::arg("source"), py::return_value_policy::reference_internal)
-        .def("total_mass", [](const PixelsND<T, 2> & pixels){return pixels.moments().zeroth();})
-        .def("mean", [](const PixelsND<T, 2> & pixels){return pixels.moments().first();})
-        .def("center_of_mass", [](const PixelsND<T, 2> & pixels){return pixels.moments().central().first();})
-        .def("moment_of_inertia", [](const PixelsND<T, 2> & pixels){return pixels.moments().second();})
-        .def("covariance_matrix", [](const PixelsND<T, 2> & pixels){return pixels.moments().central().second();})
-        .def("__repr__", [typestr](const PixelsND<T, 2> & pixels)
-        {
-            return "<Pixels2D" + typestr + ", size = " + std::to_string(pixels.pixels().size()) + ">";
-        });
-}
-
 }
 
 PYBIND11_MODULE(label, m)
@@ -293,6 +240,10 @@ PYBIND11_MODULE(label, m)
 
     py::class_<Region>(m, "Region")
         .def(py::init())
+        .def(py::init([](py::ssize_t index, const Structure & structure, std::vector<py::ssize_t> shape)
+        {
+            return Region(index, structure, shape);
+        }), py::arg("index"), py::arg("structure"), py::arg("shape"))
         .def("__iter__", [](const Region & region)
         {
             return py::make_iterator(region.begin(), region.end());
@@ -311,36 +262,38 @@ PYBIND11_MODULE(label, m)
             {
                 return std::vector<long>(chunk.begin(), chunk.end());
             };
-            return py::make_iterator(make_python_iterator(srt.begin(), func), make_python_iterator(srt.end(), func));
+            return py::make_iterator(make_transform_iterator(srt.begin(), func), make_transform_iterator(srt.end(), func));
         }, py::keep_alive<0, 1>())
         .def("__len__", [](const Structure & srt){return srt.size();})
         .def("__repr__", &Structure::info)
         .def("squeeze", [](const Structure & srt)
         {
             std::vector<py::ssize_t> new_shape;
-            for (auto dim : srt.shape()) if (dim > 1) new_shape.push_back(static_cast<py::ssize_t>(dim));
+            for (auto dim : srt.shape()) if (dim > 1) new_shape.push_back(static_cast<py::ssize_t>(dim / 2));
             return Structure{new_shape, srt.connectivity};
         })
         .def("expand_dims", [](const Structure & srt, size_t axis)
         {
-            std::vector<size_t> new_shape = srt.shape();
+            std::vector<py::ssize_t> new_shape;
+            for (auto dim : srt.shape()) new_shape.push_back(static_cast<py::ssize_t>(dim / 2));
+
             axis = compute_index(axis, new_shape.size() + 1, "axis out of bounds for expand_dims");
-            new_shape.insert(new_shape.begin() + axis, 1);
+            new_shape.insert(new_shape.begin() + axis, 0);
+
             return Structure{new_shape, srt.connectivity};
         }, py::arg("axis") = 0)
-        .def("expand_dims", [](const Structure & srt, const std::vector<py::ssize_t> & axes)
+        .def("expand_dims", [](const Structure & srt, std::vector<py::ssize_t> axes)
         {
-            std::vector<size_t> new_shape = srt.shape();
-            std::vector<size_t> norm_axes;
-            for (auto axis : axes)
+            std::vector<py::ssize_t> new_shape;
+            for (auto dim : srt.shape()) new_shape.push_back(static_cast<py::ssize_t>(dim / 2));
+
+            for (size_t i = 0; i < axes.size(); ++i)
             {
-                norm_axes.push_back(compute_index(axis, new_shape.size() + 1, "axis out of bounds for expand_dims"));
+                axes[i] = compute_index(axes[i], new_shape.size() + axes.size(), "axis out of bounds for expand_dims");
             }
-            std::sort(norm_axes.begin(), norm_axes.end());
-            for (size_t i = 0; i < norm_axes.size(); ++i)
-            {
-                new_shape.insert(new_shape.begin() + norm_axes[i] + i, 1);
-            }
+            std::sort(axes.begin(), axes.end());
+            for (auto axis : axes) new_shape.insert(new_shape.begin() + axis, 0);
+
             return Structure{new_shape, srt.connectivity};
         }, py::arg("axes"))
         .def("to_array", [](const Structure & srt, py::none out)
@@ -351,8 +304,6 @@ PYBIND11_MODULE(label, m)
 
             std::vector<py::ssize_t> center;
             for (size_t n = 0; n < srt.rank(); ++n) center.push_back(static_cast<py::ssize_t>(srt.shape(n)) / 2);
-
-            rarr.at(center) = true;
 
             std::vector<py::ssize_t> coord (srt.rank());
             for (const auto & shift : srt)
@@ -383,8 +334,6 @@ PYBIND11_MODULE(label, m)
             std::vector<py::ssize_t> center;
             for (size_t n = 0; n < srt.rank(); ++n) center.push_back(static_cast<py::ssize_t>(oarr.shape(n)) / 2);
 
-            oarr.at(center) = true;
-
             std::vector<py::ssize_t> coord (srt.rank());
             for (const auto & shift : srt)
             {
@@ -400,23 +349,20 @@ PYBIND11_MODULE(label, m)
     py::class_<LabelResult>(m, "LabelResult")
         .def_property("regions", [](const LabelResult & labels){ return labels.regions(); }, [](LabelResult & labels, std::vector<Region> regions){ labels.regions() = std::move(regions); })
         .def_property_readonly("shape", [](const LabelResult & labels){ return labels.shape(); })
-        .def("index_at", [](const LabelResult & labels, int axis)
+        .def("min_at", [](const LabelResult & labels, int axis)
         {
             std::vector<py::ssize_t> result;
 
             size_t index = 0;
             for (const auto & region : labels.regions())
             {
-                if (region.size() == 0) continue;
-
-                auto min_coord = labels.coord_along_dim(*region.begin(), axis);
-                auto max_coord = labels.coord_along_dim(*std::prev(region.end()), axis);
-                if (min_coord != max_coord)
+                long min_coord = std::numeric_limits<long>::max();
+                for (auto pixel : region)
                 {
-                    throw std::invalid_argument("Region at index " + std::to_string(index) + " has no unique index along axis " + std::to_string(axis));
+                    auto coord = labels.coord_along_dim(pixel, axis);
+                    if (coord < min_coord) min_coord = coord;
                 }
                 result.push_back(min_coord);
-                ++index;
             }
             return as_pyarray(std::move(result));
         }, py::arg("axis") = 0)
@@ -456,13 +402,42 @@ PYBIND11_MODULE(label, m)
             return out;
         }, py::arg("index"), py::arg("out"));
 
+    py::class_<PixelsND<double, 2>>(m, "Pixels2D")
+        .def(py::init())
+        .def(py::init([](Region region, py::array_t<double> data)
+        {
+            return PixelsND<double, 2>{std::move(region), array<double>{data.request()}};
+        }), py::arg("region"), py::arg("data"))
+        .def_property_readonly("region", [](const PixelsND<double, 2> & pixels){ return pixels.region(); })
+        .def("merge", [](PixelsND<double, 2> & pixels, PixelsND<double, 2> other, py::array_t<double> data)
+        {
+            pixels.merge(other, array<double>{data.request()});
+        }, py::arg("other"), py::arg("data"))
+        .def("total_mass", [](const PixelsND<double, 2> & pixels)
+        {
+            return pixels.moments().zeroth();
+        })
+        .def("mean", [](const PixelsND<double, 2> & pixels)
+        {
+            return pixels.moments().first();
+        })
+        .def("center_of_mass", [](const PixelsND<double, 2> & pixels)
+        {
+            return pixels.moments().central().first();
+        })
+        .def("moment_of_inertia", [](const PixelsND<double, 2> & pixels)
+        {
+            return pixels.moments().second();
+        })
+        .def("covariance_matrix", [](const PixelsND<double, 2> & pixels)
+        {
+            return pixels.moments().central().second();
+        });
+
     m.def("binary_dilation", &dilate, py::arg("inp"), py::arg("structure"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("num_threads") = 1);
     m.def("binary_dilation", &dilate_with_mask, py::arg("inp"), py::arg("structure"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("num_threads") = 1);
 
     m.def("label", &label, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
-
-    declare_pixels<float>(m, "Float");
-    declare_pixels<double>(m, "Double");
 
     auto total_mass = []<typename T, size_t N>(const PixelsND<T, N> & region)
     {

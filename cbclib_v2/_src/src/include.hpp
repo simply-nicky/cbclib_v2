@@ -20,7 +20,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <fftw3.h>
 
 #include <numpy/numpyconfig.h>
 #ifdef NPY_1_7_API_VERSION
@@ -576,160 +575,15 @@ struct kernels_t : public kernels
     }
 };
 
-/*----------------------------------------------------------------------------*/
-/*--------------------------- Extend line modes ------------------------------*/
-/*----------------------------------------------------------------------------*/
-/*
-    constant: kkkkkkkk|abcd|kkkkkkkk
-    nearest:  aaaaaaaa|abcd|dddddddd
-    mirror:   cbabcdcb|abcd|cbabcdcb
-    reflect:  abcddcba|abcd|dcbaabcd
-    wrap:     abcdabcd|abcd|abcdabcd
-*/
-enum class extend
-{
-    constant = 0,
-    nearest = 1,
-    mirror = 2,
-    reflect = 3,
-    wrap = 4
-};
-
-static std::unordered_map<std::string, extend> const modes = {{"constant", extend::constant},
-                                                              {"nearest", extend::nearest},
-                                                              {"mirror", extend::mirror},
-                                                              {"reflect", extend::reflect},
-                                                              {"wrap", extend::wrap}};
-
-// Internal helper utilities (implementation details).
-// Placed in the `detail` namespace to indicate they are not part of the
-// public API.
-namespace detail{
-
-static const size_t GOLDEN_RATIO = 0x9e3779b9;
-
-template <typename T>
-inline constexpr int signum(T x, std::false_type is_signed)
-{
-    return T(0) < x;
-}
-
-template <typename T>
-inline constexpr int signum(T x, std::true_type is_signed)
-{
-    return (T(0) < x) - (x < T(0));
-}
-
-template <typename T>
-inline constexpr int signum(T x)
-{
-    return signum(x, std::is_signed<T>());
-}
-
-/* Returns a positive remainder of division */
-template <typename T, typename U, typename = std::enable_if_t<std::is_integral_v<T> && std::is_integral_v<U>>>
-constexpr auto modulo(T a, U b) -> decltype(a % b)
-{
-    return (a % b + b) % b;
-}
-
-/* Returns a positive remainder of division */
-template <typename T, typename U, typename = std::enable_if_t<std::is_floating_point_v<T> || std::is_floating_point_v<U>>>
-constexpr auto modulo(T a, U b) -> decltype(std::fmod(a, b))
-{
-    return std::fmod(std::fmod(a, b) + b, b);
-}
-
-/* Returns a quotient: a = quotient * b + modulo(a, b) */
-template <typename T, typename U>
-constexpr auto quotient(T a, U b) -> decltype(modulo(a, b))
-{
-    return (a - modulo(a, b)) / b;
-}
-
-template <typename T, typename U, typename V>
-constexpr std::make_signed_t<T> mirror(T a, U min, V max)
-{
-    using F = std::make_signed_t<T>;
-    F val = std::minus<F>()(a, min);
-    F period = std::minus<F>()(max, min) - 1;
-    if (modulo(quotient(val, period), 2)) return period - modulo(val, period) + min;
-    else return modulo(val, period) + min;
-}
-
-template <typename T, typename U, typename V>
-constexpr std::make_signed_t<T> reflect(T a, U min, V max)
-{
-    using F = std::make_signed_t<T>;
-    F val = std::minus<F>()(a, min);
-    F period = std::minus<F>()(max, min);
-    if (modulo(quotient(val, period), 2)) return period - 1 - modulo(val, period) + min;
-    else return modulo(val, period) + min;
-}
-
-template <typename T, typename U, typename V>
-constexpr std::make_signed_t<T> wrap(T a, U min, V max)
-{
-    using F = std::make_signed_t<T>;
-    F val = std::minus<F>()(a, min);
-    F period = std::minus<F>()(max, min);
-    return modulo(val, period) + min;
-}
-
 // ------------------------------------------------------------------
 // Hashing helpers
 // Small utilities to combine value hashes into a single hash. These are
 // used by fixed-size array/tuple hashers implemented below.
 // ------------------------------------------------------------------
 
-template <typename T, size_t N>
-struct ArrayHasher
-{
-    size_t operator()(const std::array<T, N> & arr) const
-    {
-        size_t h = 0;
-        for (auto elem : arr) h = hash_combine(h, elem);
-        return h;
-    }
-};
+namespace detail {
 
-// Recursive template code derived from Matthieu M.
-template <class Tuple, size_t Index = std::tuple_size<Tuple>::value - 1>
-struct HashValueImpl
-{
-    static size_t apply(size_t seed, const Tuple & tuple)
-    {
-        seed = HashValueImpl<Tuple, Index - 1>::apply(seed, tuple);
-        return hash_combine(seed, std::get<Index>(tuple));
-    }
-};
-
-template <class Tuple>
-struct HashValueImpl<Tuple, 0>
-{
-    static size_t apply(size_t seed, const Tuple & tuple)
-    {
-        return hash_combine(seed, std::get<0>(tuple));
-    }
-};
-
-template <typename ... Ts>
-struct TupleHasher
-{
-    size_t operator()(const std::tuple<Ts...> & tt) const
-    {
-        return HashValueImpl<std::tuple<Ts...>>::apply(0, tt);
-    }
-};
-
-template <typename T1, typename T2>
-struct PairHasher
-{
-    size_t operator()(const std::pair<T1, T2> & tt) const
-    {
-        return HashValueImpl<std::pair<T1, T2>>::apply(0, tt);
-    }
-};
+static const size_t GOLDEN_RATIO = 0x9e3779b9;
 
 // Taken from the boost::hash_combine: https://www.boost.org/doc/libs/1_35_0/doc/html/boost/hash_combine_id241013.html
 template <class T>

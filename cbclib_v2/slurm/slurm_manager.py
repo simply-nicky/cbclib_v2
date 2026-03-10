@@ -17,7 +17,7 @@ import subprocess
 from typing import AsyncGenerator, ClassVar, Dict, Iterator, List, NamedTuple, Set, Tuple
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
-from .._src.parser import Parser, get_parser
+from .._src.parser import from_container, from_file
 from .._src.data_container import Container
 
 class SLURMConfig(NamedTuple):
@@ -68,12 +68,13 @@ class ScriptSpec(Container):
         return bool(cls.shell_pattern.search(value))
 
     @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        return get_parser(file_or_extension, cls, 'parameters')
-
-    @classmethod
     def read(cls, file: str) -> 'ScriptSpec':
-        return cls.from_dict(**cls.parser(file).read(file))
+        parser = from_file(file, cls, 'parameters')
+        return cls.from_dict(**parser.read(file))
+
+    def write(self, file: str):
+        parser = from_container(file, self, 'parameters')
+        parser.write(file, self)
 
     def add_define(self, key: str, value: str) -> None:
         self.define_macros[key] = value

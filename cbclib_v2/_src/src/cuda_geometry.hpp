@@ -144,6 +144,11 @@ struct PointND
         for (csize_t i = 0; i < N; i++) _M_elems[i] = static_cast<T>(ptr[i]);
     }
 
+    template <typename... Args,  typename = std::enable_if_t<
+        sizeof...(Args) == N && (std::is_constructible_v<T, Args> && ...)
+    >>
+    HOST_DEVICE constexpr PointND(Args... args) : _M_elems{static_cast<T>(args)...} {}
+
     template <typename V, typename = std::enable_if_t<std::is_constructible_v<T, V>>>
     HOST_DEVICE explicit PointND(V (&arr)[N]) : PointND(&arr[0]) {}
 

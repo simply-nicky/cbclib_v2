@@ -3,7 +3,6 @@ channels:
   - conda-forge
 dependencies:
   - cxx-compiler
-  - fftw
   - h5py
   - hdf5plugin
   - jax

@@ -1,6 +1,7 @@
 from math import prod
 from typing import List
 import pytest
+from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, NDArray, NDIntArray, NDRealArray, NumPy, NumPyNamespace, Shape
 from cbclib_v2.test_util import ArrayView, RectangleRange
 
@@ -12,8 +13,8 @@ class TestArrayView:
         return NumPy
 
     @pytest.fixture
-    def rng(self, cpu_rng: Generator[NDArray]) -> Generator[NDArray]:
-        return cpu_rng
+    def rng(self, xp: NumPyNamespace) -> Generator[NDArray]:
+        return default_rng(42, xp)
 
     @pytest.fixture
     def indices(self, rng: Generator[NDArray], shape: Shape) -> NDIntArray:

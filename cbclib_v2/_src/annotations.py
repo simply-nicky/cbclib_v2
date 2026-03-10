@@ -2,12 +2,12 @@ from dataclasses import Field
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Dict, Generic, Iterator, List, Literal,
                     Protocol, Sequence, Tuple, Type, TypeVar, Union, cast, overload,
                     runtime_checkable)
+from typing_extensions import Self
 from types import ModuleType
 import numpy.typing as npt
 from jax import Array as JaxArray, Device as JaxDevice
 import jax.numpy as jnp
 import numpy as np
-from array_api_compat import numpy as np_array_api
 
 if TYPE_CHECKING:
     from cupy import cuda  # used only by type checkers
@@ -123,11 +123,9 @@ class CuPyArray(Protocol):
 
 T = TypeVar('T')
 T_Array = TypeVar('T_Array', bound='Array')
-Self = TypeVar('Self')
 
-Norm = Literal['backward', 'forward', 'ortho']
-Mode = Literal['constant', 'nearest', 'mirror', 'reflect', 'wrap']
 FileMode = Literal['r', 'r+', 'w', 'w-', 'x', 'a']
+Attribute = str | Literal['data', 'eigen_field', 'eigen_value', 'flatfield', 'mask', 'std', 'snr', 'whitefield', 'whitefields']
 
 PyTree = Any
 Scalar = int | float | np.bool_ | np.number | bool | complex
@@ -161,8 +159,6 @@ JaxComplexArray = JaxArray
 JaxIntArray = JaxArray
 JaxRealArray = JaxArray
 
-KeyArray = JaxArray
-
 NDArray = np.ndarray
 NDArrayLike = npt.ArrayLike
 NDBoolArray = npt.NDArray[np.bool_]
@@ -186,15 +182,14 @@ ROI = List[int] | Tuple[int, int, int, int] | IntArray
 
 AnyFloat = float | np.floating[Any] | RealArray
 ShapeLike = int | np.integer[Any] | Sequence[int] | IntArray
-ReadOut = Array | int | float | Sequence[int] | Sequence[float]
 
 class ReferenceType(Generic[T]):
     __callback__: Callable[['ReferenceType[T]'], Any]
-    def __new__(cls: type[Self], o: T,
-                callback: Callable[['ReferenceType[T]'], Any] | None=...) -> Self:
-        ...
-    def __call__(self) -> T:
-        ...
+
+    def __new__(cls: Type[Self], o: T,
+                callback: Callable[['ReferenceType[T]'], Any] | None=...) -> Self: ...
+
+    def __call__(self) -> T: ...
 
 @runtime_checkable
 class SupportsNamespace(Protocol):
@@ -216,7 +211,7 @@ class Generator(Generic[T_Array], Protocol):
 
     def chisquare(self, df: AnyFloat, size: ShapeLike | None = None) -> T_Array: ...
 
-    def choice(self, a: IntSequence | RealSequence | ArrayLike, size: ShapeLike | None = None,
+    def choice(self, a: int | IntSequence | RealSequence | ArrayLike, size: ShapeLike | None = None,
                replace: bool = True, p: RealSequence | ArrayLike | None = None) -> T_Array: ...
 
     def dirichlet(self, alpha: RealSequence, size: ShapeLike | None = None) -> T_Array: ...
@@ -642,25 +637,24 @@ class ArrayNamespace(Generic[T_Array]):
 
     def broadcast_to(self, x: ArrayLike, /, shape: ShapeLike) -> T_Array: ...
 
-    def concat(self, xs: Sequence[ArrayLike], /, axis: int = 0) -> T_Array: ...
+    def concat(self, xs: Sequence[ArrayLike], /, axis: int | None = 0) -> T_Array: ...
 
-    def expand_dims(self, x: ArrayLike, /, axis: ShapeLike) -> T_Array: ...
+    def expand_dims(self, x: ArrayLike, /, axis: int = 0) -> T_Array: ...
 
-    def flip(self, m: ArrayLike, /, axis: int | None = None) -> T_Array: ...
+    def flip(self, m: ArrayLike, /, axis: ShapeLike | None = None) -> T_Array: ...
 
     def moveaxis(self, x: ArrayLike, source: ShapeLike,
                  destination: ShapeLike, /) -> T_Array: ...
 
-    def permute_dims(self, x: ArrayLike, /, axes: Sequence[int] | None = None
-                     ) -> T_Array: ...
+    def permute_dims(self, x: ArrayLike, /, axes: Sequence[int]) -> T_Array: ...
 
-    def repeat(self, x: ArrayLike, repeats: int | ArrayLike, /, axis: int | None = None
+    def repeat(self, x: ArrayLike, repeats: int | ArrayLike, /, *, axis: int | None = None
                ) -> T_Array: ...
 
     def reshape(self, x: ArrayLike, /, shape: ShapeLike, copy: bool | None = None
                 ) -> T_Array: ...
 
-    def roll(self, x: ArrayLike, /, shift: ShapeLike,
+    def roll(self, x: ArrayLike, /, shift: ShapeLike, *,
              axis: ShapeLike | None = None) -> T_Array: ...
 
     def squeeze(self, x: ArrayLike, /, axis: ShapeLike | None = None
@@ -668,9 +662,9 @@ class ArrayNamespace(Generic[T_Array]):
 
     def stack(self, xs: Sequence[ArrayLike], /, axis: int = 0) -> T_Array: ...
 
-    def tile(self, x: ArrayLike, /, reps: ShapeLike) -> T_Array: ...
+    def tile(self, x: ArrayLike, reps: int | Sequence[int], /) -> T_Array: ...
 
-    def unstack(self, x: ArrayLike, /, axis: int = 0) -> list[T_Array]: ...
+    def unstack(self, x: ArrayLike, /, *, axis: int = 0) -> list[T_Array]: ...
 
     # ========== Searching Functions ==========
 
@@ -710,8 +704,14 @@ class ArrayNamespace(Generic[T_Array]):
 
     # ========== Sorting Functions ==========
 
+    def argpartition(self, x: ArrayLike, kth: int | Sequence[int], /, axis: int = -1
+                     ) -> T_Array: ...
+
     def argsort(self, x: ArrayLike, /, axis: int = -1, descending: bool = False,
                 stable: bool = True) -> T_Array: ...
+
+    def partition(self, x: ArrayLike, kth: int | Sequence[int], /, axis: int = -1
+                  ) -> T_Array: ...
 
     def sort(self, x: ArrayLike, /, axis: int = -1, descending: bool = False,
              stable: bool = True) -> T_Array: ...
@@ -727,12 +727,10 @@ class ArrayNamespace(Generic[T_Array]):
                        ) -> T_Array: ...
 
     def max(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            keepdims: bool = False, initial: ArrayLike | None = None,
-            where: ArrayLike | None = None) -> T_Array: ...
+            keepdims: bool = False) -> T_Array: ...
 
     def mean(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-             dtype: DTypeLike | None = None, keepdims: bool = False,
-             where: ArrayLike | None = None) -> T_Array: ...
+             keepdims: bool = False) -> T_Array: ...
 
     def median(self, x: ArrayLike, /, axis: ShapeLike | None = None,
                overwrite_input: bool = False, keepdims: bool = False) -> T_Array: ...
@@ -741,41 +739,36 @@ class ArrayNamespace(Generic[T_Array]):
                   overwrite_input: bool = False, keepdims: bool = False) -> T_Array: ...
 
     def min(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            keepdims: bool = False, initial: ArrayLike | None = None,
-            where: ArrayLike | None = None) -> T_Array: ...
+            keepdims: bool = False) -> T_Array: ...
 
     def prod(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-             dtype: DTypeLike | None = None, keepdims: bool = False,
-             initial: ArrayLike | None = None, where: ArrayLike | None = None
-             ) -> T_Array: ...
+             dtype: DTypeLike | None = None, keepdims: bool = False) -> T_Array: ...
 
     def std(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            correction: int | float = 0.0, keepdims: bool = False
-            ) -> T_Array: ...
+            correction: int | float = 0.0, keepdims: bool = False) -> T_Array: ...
 
     def sum(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            dtype: DTypeLike | None = None, keepdims: bool = False
-            ) -> T_Array: ...
+            dtype: DTypeLike | None = None, keepdims: bool = False) -> T_Array: ...
 
     def var(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            correction: int | float = 0.0, keepdims: bool = False
-            ) -> T_Array: ...
+            correction: int | float = 0.0, keepdims: bool = False) -> T_Array: ...
 
     # ========== Utility Functions ==========
 
     def all(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            keepdims: bool = False, where: ArrayLike | None = None
-            ) -> T_Array: ...
+            keepdims: bool = False) -> T_Array: ...
 
     def any(self, x: ArrayLike, /, axis: ShapeLike | None = None,
-            keepdims: bool = False, where: ArrayLike | None = None
-            ) -> T_Array: ...
+            keepdims: bool = False) -> T_Array: ...
 
     def diff(self, x: ArrayLike, /, n: int = 1, axis: int = -1,
              prepend: ArrayLike | None = None, append: ArrayLike | None = None
              ) -> T_Array: ...
 
     # ========== Extra Functions not in Array API ==========
+
+    def fromstring(self, string: str, dtype: DTypeLike=float, count: int=-1, *,
+                   sep: str | None = None) -> T_Array: ...
 
     def array(self, object: Any, /, *, dtype: DTypeLike | None = None,
               device: ArrayDevice | None = None, copy: bool | None = None) -> T_Array: ...
@@ -846,12 +839,12 @@ class ArrayNamespace(Generic[T_Array]):
                ) -> T_Array | Tuple[T_Array, ...]: ...
 
 JaxNumPy = cast(ArrayNamespace[JaxArray], jnp)
-NumPy = cast(ArrayNamespace[NDArray], np_array_api)
+NumPy = cast(ArrayNamespace[NDArray], np)
 
 try:
-    from array_api_compat import cupy as cp_array_api
+    from array_api_compat import cupy as cp
 
-    CuPy = cast(ArrayNamespace[CuPyArray], cp_array_api)
+    CuPy = cast(ArrayNamespace[CuPyArray], cp)
 except ImportError:
     CuPy = None
 

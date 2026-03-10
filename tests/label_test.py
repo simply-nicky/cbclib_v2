@@ -1,11 +1,14 @@
 from math import prod
 from typing import Set, Tuple
 import pytest
-from cbclib_v2 import device, set_at
-from cbclib_v2.annotations import BoolArray, Device, IntArray, RealArray, Shape
+from cbclib_v2 import default_rng, set_at
+from cbclib_v2.annotations import (BoolArray, CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
+                                   NumPy, NumPyNamespace, RealArray, Shape)
 from cbclib_v2.label import (CPLabelResult, NPLabelResult, LabelResult, Structure, binary_dilation,
                              center_of_mass, covariance_matrix, label)
-from cbclib_v2.test_util import TestGenerator, TestNamespace
+
+TestNamespace = NumPyNamespace | CuPyNamespace
+TestGenerator = Generator[NDArray] | Generator[CPArray]
 
 @pytest.mark.parametrize('shape,structure', [((50, 50), Structure([2, 2], 2)),
                                              ((10, 10, 10), Structure([1, 1, 1], 1))])
@@ -42,13 +45,23 @@ class TestLabel():
             return labeled.to_mask(index), index
         raise TypeError("Unknown LabelResult type")
 
-    @pytest.fixture
-    def xp(self, test_xp: TestNamespace) -> TestNamespace:
-        return test_xp
+    @pytest.fixture(params=['cpu', 'gpu'])
+    def platform(self, request: pytest.FixtureRequest) -> str:
+        return request.param
 
     @pytest.fixture
-    def rng(self, test_rng: TestGenerator) -> TestGenerator:
-        return test_rng
+    def xp(self, platform: str) -> TestNamespace:
+        if platform == 'cpu':
+            return NumPy
+        if platform == 'gpu':
+            if CuPy is None:
+                pytest.skip("CuPy is not available")
+            return CuPy
+        raise ValueError(f"Unknown platform: {platform}")
+
+    @pytest.fixture
+    def rng(self, xp: TestNamespace) -> TestGenerator:
+        return default_rng(42, xp)
 
     @pytest.fixture(params=[30])
     def n_good(self, request: pytest.FixtureRequest) -> int:
@@ -59,12 +72,11 @@ class TestLabel():
         return rng.choice(prod(shape), size=n_good, replace=False)
 
     @pytest.fixture
-    def mask(self, seeds: IntArray, shape: Shape, structure: Structure, test_device: Device,
-             xp: TestNamespace) -> BoolArray:
+    def mask(self, seeds: IntArray, shape: Shape, structure: Structure, xp: TestNamespace
+             ) -> BoolArray:
         mask = xp.zeros(prod(shape), dtype=bool)
         mask = set_at(mask, seeds, True).reshape(shape)
-        with device.context(test_device):
-            mask = binary_dilation(mask, structure=structure)
+        mask = binary_dilation(mask, structure=structure)
         return mask
 
     @pytest.fixture
@@ -72,10 +84,8 @@ class TestLabel():
         return rng.random(size=shape)
 
     @pytest.fixture
-    def labeled(self, mask: BoolArray, structure: Structure, test_device: Device) -> LabelResult:
-        with device.context(test_device):
-            labeled = label(mask, structure=structure)
-        return labeled
+    def labeled(self, mask: BoolArray, structure: Structure) -> LabelResult:
+        return label(mask, structure=structure)
 
     def test_dilation(self, seeds: IntArray, shape: Shape, structure: Structure,
                       mask: BoolArray, xp: TestNamespace):
@@ -97,11 +107,10 @@ class TestLabel():
             assert all(labels[px] == labels[xp.unravel_index(seed, shape)]
                        for px in pixels)
 
-    def test_label_moments(self, labeled: LabelResult, data: RealArray, test_device: Device,
+    def test_label_moments(self, labeled: LabelResult, data: RealArray,
                            xp: TestNamespace):
-        with device.context(test_device):
-            centers = center_of_mass(labeled, data)
-            covmats = covariance_matrix(labeled, data)
+        centers = center_of_mass(labeled, data)
+        covmats = covariance_matrix(labeled, data)
         labels, index = self.labels_and_index(labeled, xp)
         for i, idx in enumerate(index):
             indices = xp.where(labels == idx)

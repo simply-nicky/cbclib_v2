@@ -8,8 +8,8 @@ from .geometry import (arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, project_t
 from .._src.annotations import (AnyNamespace, BoolArray, AnyGenerator, IntArray, JaxNumPy, NumPy,
                                 RealArray)
 from .._src.array_api import add_at, array_namespace
-from .._src.functions import (LabelResult, Structure, accumulate_lines, binary_dilation,
-                              center_of_mass, index_at, label)
+from .._src.functions import (Structure, accumulate_lines, binary_dilation, center_of_mass, min_at,
+                              label)
 from .._src.state import State
 
 class Xtal():
@@ -36,9 +36,9 @@ class Xtal():
                     ) -> IntArray:
         lat_size = xp.asarray(xp.rint(q_abs / state.unit_cell.lengths), dtype=int)
         lat_size = xp.max(xp.reshape(lat_size, (-1, 3)), axis=0)
-        hkl = self.hkl_meshgrid(xp.arange(-lat_size[0], lat_size[0] + 1),
-                                xp.arange(-lat_size[1], lat_size[1] + 1),
-                                xp.arange(-lat_size[2], lat_size[2] + 1), xp)
+        hkl = self.hkl_meshgrid(xp.arange(-int(lat_size[0]), int(lat_size[0]) + 1),
+                                xp.arange(-int(lat_size[1]), int(lat_size[1]) + 1),
+                                xp.arange(-int(lat_size[2]), int(lat_size[2]) + 1), xp)
         hkl = hkl[xp.any(hkl != 0, axis=-1)]
 
         rec_vec = xp.tensordot(hkl, state.basis, axes=(-1, -2))
@@ -65,9 +65,9 @@ class Xtal():
 
     def hkl_offsets(self, hkl_min: Miller, hkl_max: Miller, xp: AnyNamespace) -> IntArray:
         dhkl = xp.max(xp.reshape(hkl_max.hkl_indices - hkl_min.hkl_indices, (-1, 3)), axis=-2) + 1
-        offsets = xp.meshgrid(xp.arange(-dhkl[0] // 2 + 1, dhkl[0] // 2 + 1),
-                              xp.arange(-dhkl[1] // 2 + 1, dhkl[1] // 2 + 1),
-                              xp.arange(-dhkl[2] // 2 + 1, dhkl[2] // 2 + 1))
+        offsets = xp.meshgrid(xp.arange(-int(dhkl[0] // 2 + 1), int(dhkl[0] // 2 + 1)),
+                              xp.arange(-int(dhkl[1] // 2 + 1), int(dhkl[1] // 2 + 1)),
+                              xp.arange(-int(dhkl[2] // 2 + 1), int(dhkl[2] // 2 + 1)))
         return xp.reshape(xp.stack(offsets, axis=-1), (-1, 3))
 
     def hkl_range(self, indices: Sequence[int] | IntArray, hkl: IntArray, state: XtalState,
@@ -192,7 +192,7 @@ class CBDSetup():
         else:
             kin = self.lens.kin_center(state, xp)
         smp_pos = self.kin_to_sample(kin, points.index, state, xp)
-        kout = det_to_k(points.points, smp_pos, arange(smp_pos.shape[:-1]), xp)
+        kout = det_to_k(points.points, smp_pos, arange(smp_pos.shape[:-1], xp), xp)
         return PointsWithK(index=points.index, points=points.points, kout=kout)
 
     def kout_to_points(self, laue: LaueVectors, state: BaseState | BaseSetup, xp: AnyNamespace
@@ -323,21 +323,18 @@ class CBDIndexer(CBDSetup):
             return coords, self.step(shape, xp)
         return coords
 
-    def rotomap(self, shape: Tuple[int, int, int], rotograms: Rotograms, width: float
-                ) -> RealArray:
+    def rotomap(self, shape: Tuple[int, int, int], rotograms: Rotograms, frames: IntArray,
+                width: float) -> RealArray:
         xp = rotograms.__array_namespace__()
-        if xp is JaxNumPy:
-            raise ValueError('rotomap is not supported with JAX backend')
 
         lines = (rotograms.lines + self.rho_map()) / xp.tile(self.step(shape, xp), 2)
         lines = xp.concat((lines, xp.full(rotograms.lines.shape[:-1] + (1,), width)),
-                               axis=-1)
-        _, indices, _, counts = xp.unique_all(rotograms.streak_id)
-        frames = xp.asarray(rotograms.index_array.reset())
+                          axis=-1)
 
         rmap = xp.zeros((len(rotograms),) + shape)
-        rmap = accumulate_lines(rmap, lines, frames[indices], lines.shape[-2] * counts,
-                                kernel='gaussian', in_overlap='max', out_overlap='sum')
+        indices = xp.broadcast_to(rotograms.streak_id[..., None], lines.shape[:-1])
+        rmap = accumulate_lines(rmap, lines, indices, frames, kernel='gaussian',
+                                in_overlap='max', out_overlap='sum')
         return xp.asarray(rmap)
 
     def to_peaks(self, rotomap: RealArray, threshold: float, n_max: int=30) -> BoolArray:
@@ -345,9 +342,9 @@ class CBDIndexer(CBDSetup):
 
         rotomap = rotomap / xp.max(rotomap, axis=(-3, -2, -1), keepdims=True)
         f, z, y, x = xp.where(rotomap > threshold)
-        indices = xp.lexsort((rotomap[f, z, y, x], f))
+        indices = xp.lexsort(xp.stack((rotomap[f, z, y, x], f)))
         _, counts = xp.unique_counts(f)
-        mask = xp.concat([xp.arange(size - 1, -1, -1) < n_max for size in counts])
+        mask = xp.concat([xp.arange(int(size) - 1, -1, -1) < n_max for size in counts])
 
         f, z, y, x = f[indices[mask]], z[indices[mask]], y[indices[mask]], x[indices[mask]]
         mask = xp.zeros(rotomap.shape, dtype=bool)
@@ -356,15 +353,21 @@ class CBDIndexer(CBDSetup):
     def refine_peaks(self, mask: BoolArray, rotomap: RealArray, vicinity: Structure,
                      connectivity: Structure=Structure([1, 1, 1], 1)
                      ) -> Tuple[IntArray, TiltOverAxisState]:
-        xp = array_namespace(rotomap)
-        if xp is JaxNumPy:
-            raise ValueError('rotomap is not supported with JAX backend')
+        if vicinity.rank != 3:
+            raise ValueError(f'Vicinity structure must have rank 3, but got {vicinity.rank:d}')
+        if connectivity.rank != 3:
+            raise ValueError('Connectivity structure must have rank 3, but got '
+                             f'{connectivity.rank:d}')
 
+        vicinity = vicinity.expand_dims(list(range(mask.ndim - 3)))
+        connectivity = connectivity.expand_dims(list(range(mask.ndim - 3)))
+
+        xp = array_namespace(rotomap)
         mask = binary_dilation(mask, vicinity)
         regions = label(mask, connectivity)
         centers = center_of_mass(regions, rotomap)
-        centers = centers * self.step(rotomap.shape, xp) - self.rho_map()
-        return index_at(regions, 0), TiltOverAxisState.from_point(centers)
+        centers = centers[..., -1:-4:-1] * self.step(rotomap.shape, xp) - self.rho_map()
+        return min_at(regions, 0), TiltOverAxisState.from_point(centers)
 
     def solutions(self, initial: XtalState, indices: IntArray, tilts: TiltOverAxisState,
                   patterns: Patterns) -> XtalList:

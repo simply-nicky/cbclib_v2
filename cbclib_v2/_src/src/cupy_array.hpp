@@ -13,6 +13,8 @@
 
 namespace cbclib::cuda {
 
+static constexpr csize_t BLOCK_SIZE = 512;
+
 void handle_cuda_error(cudaError_t error)
 {
     if (error != cudaSuccess)
@@ -135,6 +137,8 @@ struct ArrayIndexerND : public ShapeND<N>
     using ShapeND<N>::_M_shape;
     PointND<csize_t, N> _M_strides;    // follows zyx ordering
 
+    ArrayIndexerND() : ShapeND<N>(), _M_strides() {}
+
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     HOST_DEVICE ArrayIndexerND(const I * dims, const I * strides) : ShapeND<N>(dims), _M_strides(strides) {}
 
@@ -145,7 +149,7 @@ struct ArrayIndexerND : public ShapeND<N>
 
     HOST_DEVICE csize_t offset_at(csize_t index) const
     {
-        return cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), 0, N);
+        return cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(0), N);
     }
 
     HOST_DEVICE csize_t * strides() const { return _M_strides.data(); }
@@ -207,12 +211,11 @@ struct ArrayViewND : public ArrayIndexerND<N>
     using ArrayIndexerND<N>::_M_strides;
     T * _M_ptr;
 
+    ArrayViewND() : ArrayIndexerND<N>(), _M_ptr(nullptr) {}
+
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     HOST_DEVICE ArrayViewND(T * ptr, const I * shape, const I * strides)
         : ArrayIndexerND<N>(shape, strides), _M_ptr(ptr) {}
-
-    HOST_DEVICE T * data() { return _M_ptr; }
-    HOST_DEVICE const T * data() const { return _M_ptr; }
 
     HOST_DEVICE T & operator[] (csize_t index)
     {
@@ -221,6 +224,18 @@ struct ArrayViewND : public ArrayIndexerND<N>
     HOST_DEVICE const T & operator[] (csize_t index) const
     {
         return *(_M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T));
+    }
+
+    HOST_DEVICE T * data() { return _M_ptr; }
+    HOST_DEVICE const T * data() const { return _M_ptr; }
+
+    HOST_DEVICE T * data(csize_t index)
+    {
+        return _M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T);
+    }
+    HOST_DEVICE const T * data(csize_t index) const
+    {
+        return _M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T);
     }
 
     HOST_DEVICE T * data(const PointND<csize_t, N> & coord)
@@ -239,6 +254,18 @@ struct ArrayViewND : public ArrayIndexerND<N>
     HOST_DEVICE const T & at(const PointND<csize_t, N> & coord) const
     {
         return *data(coord);
+    }
+
+    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix...> && sizeof...(Ix) == N>>
+    HOST_DEVICE T & at(Ix... index)
+    {
+        return *data(PointND<csize_t, N>{static_cast<csize_t>(index)...});
+    }
+
+    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix...> && sizeof...(Ix) == N>>
+    HOST_DEVICE const T & at(Ix... index) const
+    {
+        return *data(PointND<csize_t, N>{static_cast<csize_t>(index)...});
     }
 
     HOST_DEVICE StridedIterator<T> begin_at(csize_t offset, csize_t dim)
