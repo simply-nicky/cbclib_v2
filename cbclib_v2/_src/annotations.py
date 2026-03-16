@@ -1,6 +1,6 @@
 from dataclasses import Field
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Dict, Generic, Iterator, List, Literal,
-                    Protocol, Sequence, Tuple, Type, TypeVar, Union, cast, overload,
+                    Protocol, Sequence,Tuple, Type, TypeVar, Union, cast, overload,
                     runtime_checkable)
 from typing_extensions import Self
 from types import ModuleType
@@ -176,12 +176,12 @@ RealArray = JaxRealArray | NDRealArray | CPRealArray
 Indices = int | slice | IntArray | Sequence[int]
 MultiIndices = Indices | Tuple[Indices, ...]
 
-IntSequence = int | np.integer[Any] | Sequence[int] | IntArray
-RealSequence = float | np.floating[Any] | Sequence[float] | RealArray
+IntSequence = int | Sequence[int] | IntArray
+RealSequence = float | Sequence[float] | RealArray
 ROI = List[int] | Tuple[int, int, int, int] | IntArray
 
 AnyFloat = float | np.floating[Any] | RealArray
-ShapeLike = int | np.integer[Any] | Sequence[int] | IntArray
+ShapeLike = int | Sequence[int] | IntArray
 
 class ReferenceType(Generic[T]):
     __callback__: Callable[['ReferenceType[T]'], Any]

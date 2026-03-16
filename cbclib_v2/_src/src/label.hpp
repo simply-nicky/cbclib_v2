@@ -548,7 +548,7 @@ public:
 
     // Angle between the largest eigenvector of the covariance matrix and x-axis
     // Can return nan if mu_xx[0] == mu_xx[1]
-    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    template <size_t M = N, typename = std::enable_if_t<(M > 1)>>
     T theta() const
     {
         T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
@@ -558,15 +558,15 @@ public:
 
     // Return line segment representing the major axis of the object
     // Returns a zero-length line if mu_xx[0] == mu_xx[1]
-    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
-    Line<T> line() const
+    template <size_t M = N, typename = std::enable_if_t<(M > 1)>>
+    LineND<T, N> line() const
     {
         T angle = theta();
-        if (std::isnan(angle)) return Line<T>{origin, origin};
-        Point<T> tau {std::cos(angle), std::sin(angle)};
+        if (std::isnan(angle)) return LineND<T, N>{origin, origin};
+        PointND<T, N> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
-        return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
+        return LineND<T, N>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
     friend std::ostream & operator<<(std::ostream & os, const CentralMomentsND & m)

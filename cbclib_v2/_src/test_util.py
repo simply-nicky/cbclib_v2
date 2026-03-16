@@ -30,7 +30,7 @@ class TestSetup():
 
     @classmethod
     def fixed_pupil_lens(cls, xp: AnyNamespace) -> FixedPupilLens:
-        return FixedPupilLens(xp.asarray(cls.foc_pos), cls.pupil_roi)
+        return FixedPupilLens(xp.asarray(cls.foc_pos)[:2], float(cls.foc_pos[2]), cls.pupil_roi)
 
     @classmethod
     def fixed_setup(cls, size: int=1) -> FixedSetup:

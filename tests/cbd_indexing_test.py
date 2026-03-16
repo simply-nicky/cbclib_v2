@@ -93,6 +93,7 @@ class TestCBDIndexer():
         miller = pupil_loss.index(data, state)
         return model.xtal.hkl_to_q(miller, state.xtal, xp)
 
+    # Check that the candidate RLPs lie within the resolution shell
     def test_candidates(self, patterns_uca: UCA, solution: MillerWithRLP, points: PointsWithK,
                         candidates: MillerWithRLP, uca: UCA, xp: NumPyNamespace):
         resolution = xp.sum(solution.q**2, axis=-1)
@@ -109,6 +110,7 @@ class TestCBDIndexer():
                 xp: NumPyNamespace) -> CircleState:
         return indexer.intersection(candidates, uca, xp)
 
+    # Check that the RLPs pertaining to the intersection satisfy Bragg condition
     def test_intersection(self, circles: CircleState, candidates: MillerWithRLP, uca: UCA,
                           xp: NumPyNamespace):
         theta = xp.linspace(0, 2 * xp.pi, 50)[:, None]
@@ -122,6 +124,8 @@ class TestCBDIndexer():
                   xp: NumPyNamespace) -> RealArray:
         return indexer.uca_endpoints(circles, uca, xp)
 
+    # Check that the RLPs rotated to the endpoints belong to the intesection of the lens pupil
+    # and the UCA
     def test_endpoints(self, circles: CircleState, endpoints: RealArray, candidates: MillerWithRLP,
                        uca: UCA, xp: NumPyNamespace):
         pts = circles.points(endpoints)
@@ -141,6 +145,7 @@ class TestCBDIndexer():
               xp: NumPyNamespace):
         return indexer.rotations(candidates, midpoints, xp)
 
+    # Check that the rotation matrices indeed rotate the candidate RLPs to the midpoints
     def test_rotations(self, tilts: TiltOverAxisState, candidates: MillerWithRLP,
                        midpoints: RealArray, xp: NumPyNamespace):
         pts = (tilts.to_tilt().to_rotation() @ candidates.q[..., None, None, :])[..., 0, :]

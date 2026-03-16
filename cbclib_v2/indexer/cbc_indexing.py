@@ -1,15 +1,15 @@
 from typing import Callable, Iterator, Literal, Protocol, Sequence, Tuple
 from dataclasses import dataclass
-from .cbc_data import (AnyPoints, CBData, CBDPoints, CircleState, LaueVectors, Miller,
-                       MillerWithRLP, Patterns, PointsWithK, RLP, Rotograms, UCA)
+from .cbc_data import (AnyPoints, CBData, CBDataBest, CBDataInShell, CBDPoints, CircleState,
+                       LaueVectors, Miller, MillerWithRLP, Patterns, PointsWithK, RLP,
+                       Rotograms, UCA)
 from .cbc_setup import BaseLens, BaseSetup, BaseState, TiltOverAxisState, XtalList, XtalState
 from .geometry import (arange, det_to_k, k_to_det, k_to_smp, kxy_to_k, project_to_rect,
                        safe_divide, source_lines)
 from .._src.annotations import (AnyNamespace, BoolArray, AnyGenerator, IntArray, JaxNumPy, NumPy,
                                 RealArray)
 from .._src.array_api import add_at, array_namespace
-from .._src.functions import (Structure, accumulate_lines, binary_dilation, center_of_mass, min_at,
-                              label)
+from .._src.functions import Structure, accumulate_lines, binary_dilation, center_of_mass, label
 from .._src.state import State
 
 class Xtal():
@@ -366,8 +366,10 @@ class CBDIndexer(CBDSetup):
         mask = binary_dilation(mask, vicinity)
         regions = label(mask, connectivity)
         centers = center_of_mass(regions, rotomap)
-        centers = centers[..., -1:-4:-1] * self.step(rotomap.shape, xp) - self.rho_map()
-        return min_at(regions, 0), TiltOverAxisState.from_point(centers)
+
+        points = centers[..., -1:-4:-1] * self.step(rotomap.shape, xp) - self.rho_map()
+        indices = xp.round(centers[..., -4]).astype(int)
+        return indices, TiltOverAxisState.from_point(points)
 
     def solutions(self, initial: XtalState, indices: IntArray, tilts: TiltOverAxisState,
                   patterns: Patterns) -> XtalList:
@@ -404,34 +406,42 @@ class CBDModel(CBDSetup):
     def _init_mask(self, index: IntArray, quantile: float, xp: AnyNamespace):
         if max(min(quantile, 1.0), 0.0) < 1.0:
             _, counts = xp.unique(index, return_counts=True)
-            counts = xp.clip(counts, 1, xp.inf)
+            counts = xp.clip(counts, 1)
             return xp.concat([xp.arange(size) < quantile * size for size in counts])
 
         return xp.ones(index.shape[0], dtype=bool)
 
-    def init_data(self, patterns: Patterns, state: BaseState, values: Sequence[float]=(0.0, 1.0),
-                  quantile: float=1.0) -> 'CBData':
+    def init_data(self, patterns: Patterns, state: BaseState, values: Sequence[float]=(0.0, 1.0)
+                  ) -> 'CBData':
         xp = state.__array_namespace__()
-        if max(min(quantile, 1.0), 0.0) == 0.0:
-            raise ValueError(f"Invalid quantile value: {quantile}")
 
         miller = self.init_miller(patterns, state, xp)
         x = xp.broadcast_to(xp.asarray(values), miller.hkl.shape[:-1] + (len(values),))
-        mask = self._init_mask(xp.asarray(patterns.index), quantile, xp)
 
-        return CBData(miller, patterns.sample(x), mask)
+        return CBData(miller, patterns.sample(x))
 
     def init_data_random(self, rng: AnyGenerator, patterns: Patterns, num_points: int,
-                         state: BaseState, quantile: float=1.0) -> 'CBData':
+                         state: BaseState) -> 'CBData':
         xp = state.__array_namespace__()
-        if max(min(quantile, 1.0), 0.0) == 0.0:
-            raise ValueError(f"Invalid quantile value: {quantile}")
 
         miller = self.init_miller(patterns, state, xp)
         x = rng.uniform(size=miller.hkl.shape[:-1] + (num_points,))
-        mask = self._init_mask(xp.asarray(patterns.index), quantile, xp)
 
-        return CBData(miller, patterns.sample(x), mask)
+        return CBData(miller, patterns.sample(x))
+
+    def keep_best(self, data: CBData, quantile: float) -> CBDataBest:
+        if max(min(quantile, 1.0), 0.0) == 0.0:
+            raise ValueError(f"Invalid quantile value: {quantile}")
+
+        xp = data.__array_namespace__()
+        mask = self._init_mask(data.miller.index, quantile, xp)
+        return CBDataBest(miller=data.miller, points=data.points, mask=mask)
+
+    def keep_in_shell(self, data: CBData, q_abs: float, state: BaseState) -> CBDataInShell:
+        xp = state.__array_namespace__()
+        miller = self.xtal.hkl_to_q(data.miller, state.xtal, xp)
+        mask = xp.all(xp.sqrt(xp.sum(miller.q**2, axis=-1)) < q_abs, axis=-1)
+        return CBDataInShell(miller=data.miller, points=data.points, mask=mask)
 
     def line_loss(self, loss: Loss='l1', xp: AnyNamespace=JaxNumPy) -> 'CBDLoss':
         return CBDLoss(self, self.lens.line_projector, loss_function(loss, xp))
@@ -460,9 +470,17 @@ class CBDLoss():
         points = self.project_data(data, state, xp)
         dist = self.distance_matrix(points, state, xp)
         dist = xp.min(dist, axis=-1)
-        # Sorting distances according to frame_id
-        indices = xp.lexsort((dist, data.points.index), axis=0)
-        return xp.mean(dist[indices] * data.mask)
+
+        if isinstance(data, CBDataBest):
+            # Sorting distances according to frame_id
+            # lexsort is not implemented in CuPy
+            indices = xp.lexsort((dist, data.points.index), axis=0)
+            return xp.mean(dist[indices] * data.mask)
+
+        if isinstance(data, CBDataInShell):
+            return xp.mean(dist * data.mask)
+
+        return xp.mean(dist)
 
     def index(self, data: CBData, state: BaseState) -> Miller:
         xp = state.__array_namespace__()
@@ -477,12 +495,11 @@ class CBDLoss():
         points = self.project_data(data, state, xp)
         dist = self.distance_matrix(points, state, xp)
         dist = xp.min(dist, axis=-1)
-        # Sorting distances according to frame_id
-        indices = xp.lexsort((dist, data.points.index), axis=0)
-        return add_at(xp.zeros(len(state.xtal)), points.index, dist[indices] * data.mask)
+        return add_at(xp.zeros(len(state.xtal)), points.index, dist)
 
     def per_streak(self, data: CBData, state: BaseState) -> RealArray:
         xp = state.__array_namespace__()
         crit = self.per_pattern(data, state)
-        n_streaks = add_at(xp.zeros(len(state.xtal)), data.points.index, data.mask)
+        n_streaks = add_at(xp.zeros(len(state.xtal)), data.points.index,
+                           xp.ones_like(data.points.index))
         return crit / n_streaks

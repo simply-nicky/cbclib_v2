@@ -204,13 +204,13 @@ def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
-        return xp.asarray(jnp.asarray(a).at[indices].add(b))
+        return jnp.asarray(a).at[indices].add(b)
     if xp is NumPy:
         np.add.at(np.asarray(a), indices, b)
-        return xp.asarray(a)
+        return a
     if cp is not None and xp is CuPy:
         a[indices] += b
-        return xp.asarray(a)
+        return a
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 @overload
@@ -228,7 +228,7 @@ def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace = JaxNumPy) -> Arr
     sort_idxs = xp.argsort(a)
     idxs = set_at(xp.zeros(a.size, dtype=int), sort_idxs, xp.arange(a.size))
     result = xp.full(xp.unique_values(indices).size, a.size + 1, dtype=int)
-    return xp.asarray(sort_idxs[min_at(result, indices, idxs)])
+    return sort_idxs[min_at(result, indices, idxs)]
 
 @overload
 def min_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
@@ -243,13 +243,13 @@ def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
-        return xp.asarray(jnp.asarray(a).at[indices].min(b))
+        return jnp.asarray(a).at[indices].min(b)
     if xp is NumPy:
         np.minimum.at(np.asarray(a), indices, b)
-        return xp.asarray(a)
+        return a
     if cp is not None and xp is CuPy:
         cp.minimum.at(cp.asarray(a), indices, b)
-        return xp.asarray(a)
+        return a
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 @overload
@@ -265,13 +265,13 @@ def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
-        return xp.asarray(jnp.asarray(a).at[indices].set(b))
+        return jnp.asarray(a).at[indices].set(b)
     if xp is NumPy:
         a[indices] = b
-        return xp.asarray(a)
+        return a
     if cp is not None and xp is CuPy:
         a[indices] = b
-        return xp.asarray(a)
+        return a
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 @overload

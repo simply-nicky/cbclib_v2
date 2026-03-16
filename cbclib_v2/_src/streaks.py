@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from typing import Tuple
 from typing_extensions import Self
 import pandas as pd
-from .annotations import AnyNamespace, BoolArray, IntArray, RealArray, RealSequence
+from .annotations import AnyNamespace, BoolArray, IntArray, NumPy, RealArray, RealSequence
 from .array_api import array_namespace, asnumpy
-from .data_container import ArrayContainer, IndexedContainer, NumPy
+from .data_container import ArrayContainer, IndexedContainer
 from .functions import draw_lines
 
 class BaseLines(ArrayContainer):

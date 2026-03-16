@@ -179,7 +179,7 @@ class TestPeaksAndMoments():
         for region in pixels:
             all_pixels.merge(region, image)
 
-        all_indices = xp.unique_values(indices)
+        all_indices = xp.sort(xp.unique_values(indices))
         points = xp.stack(xp.unravel_index(all_indices, image.shape), axis=-1)
 
         assert xp.all(xp.asarray(list(all_pixels.region)) == all_indices)

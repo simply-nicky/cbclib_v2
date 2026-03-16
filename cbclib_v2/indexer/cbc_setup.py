@@ -310,19 +310,32 @@ class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
         data = cls.parser(file).read(file)
         return cls(tuple(data['foc_pos']), tuple(data['pupil_roi']))
 
-class FixedPupilLens(DataContainer, FixedLens):
-    foc_pos     : RealArray
+class FixedPupilLens(DataContainer, BaseLens, State):
+    foc_xy      : RealArray
+    foc_z       : float = field(static=True)
     pupil_roi   : Tuple[float, float, float, float] = field(static=True)
+
+    @property
+    def foc_pos(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.concat((self.foc_xy, xp.asarray([self.foc_z])))
 
     @classmethod
     def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedPupilLens':
         data = cls.parser(file).read(file)
-        return cls(xp.asarray(data['foc_pos']), tuple(data['pupil_roi']))
+        return cls(xp.asarray(data['foc_pos'][:2]), float(data['foc_pos'][2]),
+                   tuple(data['pupil_roi']))
 
 class FixedApertureLens(BaseLens, DataContainer, State):
-    foc_pos         : RealArray
+    foc_xy          : RealArray
+    foc_z           : float = field(static=True)
     pupil_center    : RealArray
     aperture        : Tuple[float, float] = field(static=True)
+
+    @property
+    def foc_pos(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.concat((self.foc_xy, xp.asarray([self.foc_z])))
 
     @property
     def pupil_roi(self) -> RealArray:
@@ -334,9 +347,10 @@ class FixedApertureLens(BaseLens, DataContainer, State):
     @classmethod
     def from_roi(cls, obj: FixedLens | FixedPupilLens, xp: AnyNamespace=JaxNumPy
                  ) -> 'FixedApertureLens':
-        return cls(xp.asarray(obj.foc_pos), xp.asarray(obj.pupil_center),
-                   (float(obj.pupil_max[0] - obj.pupil_min[0]),
-                    float(obj.pupil_max[1] - obj.pupil_min[1])))
+        aperture = (float(obj.pupil_max[0] - obj.pupil_min[0]),
+                    float(obj.pupil_max[1] - obj.pupil_min[1]))
+        return cls(xp.asarray(obj.foc_pos[:2]), float(obj.foc_pos[2]), xp.asarray(obj.pupil_center),
+                   aperture)
 
     @classmethod
     def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedApertureLens':
@@ -580,8 +594,9 @@ class FixedPupilSetup(BaseSetup, DataContainer, State):
     @classmethod
     def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedPupilSetup':
         data = cls.parser(file).read(file)
-        return cls(FixedPupilLens(xp.asarray(data['foc_pos']), tuple(data['pupil_roi'])),
-                   xp.asarray(data['z']))
+        foc_xy = xp.asarray(data['foc_pos'][:2])
+        foc_z = float(data['foc_pos'][2])
+        return cls(FixedPupilLens(foc_xy, foc_z, tuple(data['pupil_roi'])), xp.asarray(data['z']))
 
 class FixedApertureSetup(BaseSetup, DataContainer, State):
     lens    : FixedApertureLens

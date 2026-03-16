@@ -24,7 +24,7 @@ from .streaks import StackedStreaks, Streaks
 from .annotations import (Array, ArrayLike, BoolArray, CPIntArray, Indices, IntArray, NumPy, RealArray, ReferenceType,
                           ROI, Shape)
 from .functions import (LabelResult, Structure, center_of_mass, covariance_matrix, ellipse_fit,
-                        min_at, label, line_fit, median, robust_mean, robust_lsq)
+                        label, line_fit, median, robust_mean, robust_lsq)
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
 MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
@@ -641,12 +641,16 @@ class RegionDetector(DetectorBase):
         return label(self.data > vmin, structure=self.structure, npts=npts)
 
     def detect_streaks(self, regions: LabelResult) -> StackedStreaks | Streaks:
-        lines = self.line_fit(regions)
-        if self.parent().num_modules > 1:
-            return StackedStreaks(min_at(regions, axis=0) // self.parent().num_modules,
-                                  min_at(regions, axis=0) % self.parent().num_modules,
-                                  lines, self.parent().num_modules)
-        return Streaks(min_at(regions, axis=0), lines)
+        xp = self.__array_namespace__()
+        points = self.line_fit(regions).reshape((-1, 2, self.data.ndim))
+
+        indices = xp.round(xp.mean(points[:, :, 2:], axis=-2)).astype(int)
+        lines = points[:, :, :2].reshape((-1, 4))
+
+        num_modules = self.parent().num_modules
+        if num_modules > 1:
+            return StackedStreaks(indices[..., -1], indices[..., -2], lines, num_modules)
+        return Streaks(indices[..., -1], lines)
 
     def ellipse_fit(self, regions: LabelResult) -> RealArray:
         return ellipse_fit(regions, self.data)

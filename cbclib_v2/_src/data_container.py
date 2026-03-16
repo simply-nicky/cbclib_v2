@@ -10,11 +10,10 @@ from typing import (Any, DefaultDict, Dict, Generic, Iterable, Iterator, List, P
                     Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints, overload)
 from typing_extensions import Self
 import numpy as np
-import jax.numpy as jnp
-from .array_api import array_namespace, asnumpy
+from .array_api import array_namespace, asjax, asnumpy
 from .src.index import Indexer
 from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, DType, Indices,
-                          IntArray, IntSequence, JaxArray, MultiIndices, NDArray, NDIntArray, NumPy,
+                          IntArray, IntSequence, MultiIndices, NDArray, NDIntArray, NumPy,
                           RealSequence, Shape)
 
 def compute_index(index: int, length: int) -> int:
@@ -249,8 +248,12 @@ class DataContainer(Container):
         Returns:
             A new container instance with converted arrays.
         """
-        data = {attr: jnp.asarray(val) for attr, val in self.contents().items()
-                if isinstance(val, NDArray)}
+        data = {}
+        for attr, val in self.contents().items():
+            if isinstance(val, Array):
+                data[attr] = asjax(val)
+            if isinstance(val, DataContainer):
+                data[attr] = val.to_jax()
         return self.replace(**data)
 
     def to_numpy(self: Self) -> Self:
@@ -262,8 +265,12 @@ class DataContainer(Container):
         Returns:
             A new container instance with converted arrays.
         """
-        data = {attr: np.asarray(val) for attr, val in self.contents().items()
-                if isinstance(val, JaxArray)}
+        data = {}
+        for attr, val in self.contents().items():
+            if isinstance(val, Array):
+                data[attr] = asnumpy(val)
+            if isinstance(val, DataContainer):
+                data[attr] = val.to_numpy()
         return self.replace(**data)
 
 class ArrayContainer(DataContainer):
@@ -458,7 +465,7 @@ class IndexArray():
         return (self.__class__, (self.index.array,))
 
     def __array__(self, dtype: DType | None=None) -> NDArray:
-        return np.asarray(self.index.array, dtype=dtype)
+        return NumPy.asarray(self.index.array, dtype=dtype)
 
     def __getitem__(self, idxs: MultiIndices | BoolArray) -> 'IndexArray':
         xp = self.__array_namespace__()
@@ -468,7 +475,7 @@ class IndexArray():
         xp = self.__array_namespace__()
         array = xp.asarray(self.index)
         array[idxs] = value
-        self.index = Indexer(array)
+        self.index = Indexer(asnumpy(array))
 
     def __repr__(self) -> str:
         return f"IndexArray(index={self.index.array})"
@@ -485,17 +492,21 @@ class IndexArray():
     def is_increasing(self) -> bool:
         return self.index.is_increasing
 
-    @overload
-    def get_index(self, key: int) -> slice: ...
+    def get_index(self, key: IntSequence) -> Tuple[NDIntArray | slice, NDIntArray]:
+        def to_indices(key: int | np.integer | Array) -> Tuple[slice, NDIntArray]:
+            indices = self.index[int(key)]
+            start, stop, step = indices.indices(self.index.array.size)
+            return indices, NumPy.zeros((stop - start) // step, dtype=int)
 
-    @overload
-    def get_index(self, key: IntSequence) -> Tuple[NDIntArray, NDIntArray]: ...
+        if isinstance(key, (int, np.integer)):
+            return to_indices(key)
 
-    def get_index(self, key: int | IntSequence) -> slice | Tuple[NDIntArray, NDIntArray]:
+        if isinstance(key, Array):
+            key = asnumpy(key)
+            if key.ndim == 0:
+                return to_indices(key)
+
         return self.index[key]
-
-    def insert_index(self, key: IntSequence) -> Tuple[NDIntArray, NDIntArray]:
-        return self.index.insert_index(key)
 
     def unique(self) -> NDIntArray:
         return self.index.unique()
@@ -521,27 +532,35 @@ class GenericIndexer(Generic[I]):
 
 @dataclass
 class ILocIndexer(GenericIndexer[I]):
-    def __getitem__(self, indices: IntSequence | IndexArray) -> I:
+    def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
+        xp = NumPy
         if isinstance(indices, IndexArray):
-            idxs = self.obj.index_array.unique()[np.asarray(indices)]
+            idxs = self.obj.index_array.unique()[xp.asarray(indices)]
         elif isinstance(indices, int):
-            idxs = self.obj.index_array.unique()[np.atleast_1d(indices)]
+            idxs = self.obj.index_array.unique()[xp.atleast_1d(indices)]
         else:
             idxs = self.obj.index_array.unique()[indices]
         return super().__getitem__(idxs)
 
 @dataclass
 class LocIndexer(GenericIndexer[I]):
-    def __getitem__(self, indices: IntSequence | IndexArray) -> I:
+    def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
+        xp = NumPy
         if isinstance(indices, IndexArray):
-            idxs = np.asarray(indices)
+            idxs = xp.asarray(indices)
         elif isinstance(indices, int):
-            idxs = np.atleast_1d(indices)
+            idxs = xp.atleast_1d(indices)
+        elif isinstance(indices, slice):
+            start, stop, step = indices.indices(self.obj.index.size)
+            idxs = list(range(start, stop, step))
         else:
             idxs = indices
         return super().__getitem__(idxs)
 
 def concatenate_index(arrays: Iterable[IntArray], xp: AnyNamespace=NumPy) -> IntArray:
+    """Concatenate multiple index arrays while shifting following indices if they
+    are lower than the last index of the previous array to preserve monotonicity.
+    """
     indices, last = [], 0
     for array in arrays:
         array = xp.asarray(array)
@@ -571,9 +590,11 @@ class IndexedContainer(ArrayContainer):
             self.index_array = IndexArray(self.index)
         except ValueError:
             xp = self.__array_namespace__()
-            index = concatenate_index((chunk for chunk in self.index), xp)
-            self.index_array = IndexArray(index).reset()
-            self.index = xp.asarray(self.index_array)
+            indices = xp.argsort(self.index)
+            for attr, val in self.contents().items():
+                setattr(self, attr, val[indices])
+            self.index = self.index[indices]
+            self.index_array = IndexArray(self.index)
 
     @classmethod
     def concatenate(cls: Type[Self], containers: Iterable[Self]) -> Self:
@@ -700,7 +721,10 @@ class IndexedContainer(ArrayContainer):
 
         old_index = self.index.reshape(index_shape)
         new_index = old_index.reshape((int(index_shape[0]), prod(index_shape[1:])))[:, 0]
-        if not xp.all(old_index == xp.expand_dims(new_index, list(range(1, len(index_shape))))):
+
+        expanded_shape = (new_index.shape[0],) + (1,) * (len(index_shape) - 1) + new_index.shape[1:]
+        expanded_index = xp.reshape(new_index, expanded_shape)
+        if not xp.all(old_index == expanded_index):
             raise ValueError("Cannot reshape IndexedContainer: inconsistent index grouping")
         return type(self)(**(obj.to_dict() | {'index': new_index}))
 

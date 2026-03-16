@@ -79,8 +79,6 @@ class LabelResult:
     regions : Regions
     shape   : List[int]
 
-    def min_at(self, axis: int = 0) -> NDIntArray: ...
-
     def to_mask(self, index: IntArray, out: IntArray | None = None) -> NDIntArray: ...
 
 class Pixels2D:
@@ -123,4 +121,7 @@ def moment_of_inertia(labels: LabelResult, data: Array) -> NDRealArray:
     ...
 
 def covariance_matrix(labels: LabelResult, data: Array) -> NDRealArray:
+    ...
+
+def line_fit(labels: LabelResult, data: Array) -> NDRealArray:
     ...

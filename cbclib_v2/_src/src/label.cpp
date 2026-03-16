@@ -120,6 +120,7 @@ LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, uns
     }
 
     std::vector<Region> result;
+    std::vector<std::vector<Region>> thread_buffers(threads);
 
     thread_exception e;
 
@@ -159,8 +160,14 @@ LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, uns
             }
         }
 
-        #pragma omp critical
-        result.insert(result.end(), std::make_move_iterator(buffer.begin()), std::make_move_iterator(buffer.end()));
+        thread_buffers[thread_id] = std::move(buffer);
+    }
+
+    // I need to keep the order of regions in the output the same as in the input
+    for (auto & buffer : thread_buffers)
+    {
+        result.insert(result.end(), std::make_move_iterator(buffer.begin()),
+                      std::make_move_iterator(buffer.end()));
     }
 
     py::gil_scoped_acquire acquire;
@@ -188,8 +195,7 @@ py::array_t<T> apply_impl(const std::vector<Region> & regions, py::array_t<T> da
     if (results.size())
     {
         auto item_size = results.size() / regions.size();
-        std::vector<size_t> shape {regions.size()};
-        for (; item_size > 1; item_size /= N) shape.push_back(N);
+        std::vector<size_t> shape {regions.size(), item_size};
         return as_pyarray(std::move(results), shape);
     }
     return py::array_t<T>{};
@@ -200,7 +206,6 @@ py::array_t<T> apply(const std::vector<Region> & regions, py::array_t<T> data, F
 {
     switch(data.ndim())
     {
-        case 1: return apply_impl<T, 1>(regions, data, std::forward<Func>(func));
         case 2: return apply_impl<T, 2>(regions, data, std::forward<Func>(func));
         case 3: return apply_impl<T, 3>(regions, data, std::forward<Func>(func));
         case 4: return apply_impl<T, 4>(regions, data, std::forward<Func>(func));
@@ -349,23 +354,6 @@ PYBIND11_MODULE(label, m)
     py::class_<LabelResult>(m, "LabelResult")
         .def_property("regions", [](const LabelResult & labels){ return labels.regions(); }, [](LabelResult & labels, std::vector<Region> regions){ labels.regions() = std::move(regions); })
         .def_property_readonly("shape", [](const LabelResult & labels){ return labels.shape(); })
-        .def("min_at", [](const LabelResult & labels, int axis)
-        {
-            std::vector<py::ssize_t> result;
-
-            size_t index = 0;
-            for (const auto & region : labels.regions())
-            {
-                long min_coord = std::numeric_limits<long>::max();
-                for (auto pixel : region)
-                {
-                    auto coord = labels.coord_along_dim(pixel, axis);
-                    if (coord < min_coord) min_coord = coord;
-                }
-                result.push_back(min_coord);
-            }
-            return as_pyarray(std::move(result));
-        }, py::arg("axis") = 0)
         .def("to_mask", [](const LabelResult & labels, py::array_t<py::ssize_t> index, py::none out) -> py::array_t<py::ssize_t>
         {
             if (index.size() != static_cast<py::ssize_t>(labels.regions().size()))
@@ -478,4 +466,12 @@ PYBIND11_MODULE(label, m)
 
     declare_region_func<double>(m, covariance_matrix, "covariance_matrix");
     declare_region_func<float>(m, covariance_matrix, "covariance_matrix");
+
+    auto line_fit = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    {
+        return region.moments().central().line().to_array();
+    };
+
+    declare_region_func<double>(m, line_fit, "line_fit");
+    declare_region_func<float>(m, line_fit, "line_fit");
 }

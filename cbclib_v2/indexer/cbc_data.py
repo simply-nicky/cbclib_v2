@@ -78,6 +78,10 @@ class PointsWithK(Points):
     kout    : RealArray
 
 class UCA(State, ArrayContainer):
+    """Uncertainty Cap Area (UCA) is a region of all possible q vectors that might have
+    given rise to the given point on the detector defined by the point's kout. The UCA
+    extent is limited by the length of the streak line associated with the point.
+    """
     index       : IntArray
     streak_id   : IntArray
     kout        : RealArray
@@ -217,4 +221,9 @@ class CBDPoints(LaueVectors, Points):
 class CBData(State, ArrayContainer):
     miller  : Miller
     points  : Points
+
+class CBDataBest(CBData):
+    mask    : BoolArray
+
+class CBDataInShell(CBData):
     mask    : BoolArray

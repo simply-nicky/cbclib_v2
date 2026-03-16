@@ -95,6 +95,9 @@ class RunConfig(BaseParameters):
     def filenames(self, run_id: int) -> List[str]:
         raise NotImplementedError
 
+    def scan_dir(self, run_id: int) -> str:
+        raise NotImplementedError
+
     def geometry(self) -> Geometry:
         raise NotImplementedError
 
@@ -123,7 +126,8 @@ class BaseRun(Container, Generic[IndicesType]):
     def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[CPArray]) -> CPArray: ...
 
     @overload
-    def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[JaxArray]) -> JaxArray: ...
+    def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[JaxArray]
+                 ) -> JaxArray: ...
 
     @overload
     def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[NDArray]) -> NDArray: ...
@@ -177,8 +181,6 @@ class BaseRun(Container, Generic[IndicesType]):
             for index in tqdm(keys, disable=not verbose, desc="Loading data"):
                 stack.append(worker(index))
 
-        if len(stack) == 1:
-            return xp.asarray(stack[0])
         return xp.asarray(NumPy.stack(stack, axis=0))
 
     def pool(self, geometry: bool = False) -> Tuple[Pool, type[LoadWorker[NDArray]]]:
@@ -204,8 +206,11 @@ class XFELRunConfig(RunConfig):
     num_modules     : int = 1
     starts_at       : int = 0
 
+    def scan_dir(self, run_id: int) -> str:
+        return self.data_dir.format(run_id)
+
     def module_files(self, run_id: int) -> Iterator[List[str]]:
-        data_dir = self.data_dir.format(run_id)
+        data_dir = self.scan_dir(run_id)
 
         for module_id in range(self.starts_at, self.starts_at + self.num_modules):
             pattern = self.file_pattern.format(run_id, module_id)
@@ -424,8 +429,11 @@ class SwissFELConfig(RunConfig):
     file_pattern    : str
     geometry_file   : str
 
+    def scan_dir(self, run_id: int) -> str:
+        return self.data_dir.format(run_id)
+
     def filenames(self, run_id: int) -> List[str]:
-        data_dir = self.data_dir.format(run_id)
+        data_dir = self.scan_dir(run_id)
 
         filenames = []
         for path in os.listdir(data_dir):

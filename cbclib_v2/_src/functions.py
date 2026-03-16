@@ -421,7 +421,8 @@ def center_of_mass(labels: LabelResult, data: RealArray) -> RealArray:
     ...
 
 def _covariance_matrix_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArray:
-    return cpu_label.covariance_matrix(labels=labels, data=data)
+    matrices = cpu_label.covariance_matrix(labels=labels, data=data)
+    return matrices.reshape(-1, data.ndim, data.ndim)
 
 def _covariance_matrix_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
     if cupy_ndimage is None:
@@ -471,46 +472,6 @@ def covariance_matrix(labels: LabelResult, data: RealArray) -> RealArray:
         Array of covariance matrices for each region.
     """
     ...
-
-def _min_at_cpu(labels: NPLabelResult, axis: int = 0) -> NDIntArray:
-    return labels.min_at(axis)
-
-def _min_at_gpu(labels: CPLabelResult, axis: int = 0) -> CPIntArray:
-    if cupy_ndimage is None:
-        raise RuntimeError("min_at is not compiled for the current platform. "
-                           "Please, check if you have installed the cbclib_v2 with GPU support.")
-
-    xp = CuPy
-    if labels.index.size == 0:
-        return xp.empty((0,), dtype=int)
-
-    grids = xp.ogrid[[slice(0, s) for s in labels.labels.shape]]
-    indices = cupy_ndimage.minimum(grids[axis], labels=labels.labels, index=labels.index)
-    return xp.asarray(indices, dtype=int)
-
-@overload
-def min_at(labels: NPLabelResult, axis: int = 0) -> NDIntArray: ...
-
-@overload
-def min_at(labels: CPLabelResult, axis: int = 0) -> CPIntArray: ...
-
-def min_at(labels: LabelResult, axis: int = 0) -> NDIntArray | CPIntArray:
-    """Get indices of labeled regions along specified axis.
-
-    Automatically dispatches to CPU or CUDA backend based on current device context.
-
-    Args:
-        labels: Labeled regions.
-        axis: Axis along which to get indices.
-
-    Returns:
-        Array of region indices along the specified axis.
-    """
-    if isinstance(labels, NPLabelResult):
-        return _min_at_cpu(labels, axis)
-    if isinstance(labels, CPLabelResult):
-        return _min_at_gpu(labels, axis)
-    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
 
 @overload
 def index(labels: NPLabelResult) -> NDIntArray: ...
@@ -587,11 +548,15 @@ def to_line(centers: RealArray, matrix: RealArray) -> RealArray:
 
     mu_xx, mu_xy, mu_yy = matrix[..., -1, -1], matrix[..., -1, -2], matrix[..., -2, -2]
     theta = 0.5 * xp.atan2(2 * mu_xy, (mu_xx - mu_yy))
-    tau = xp.stack((xp.cos(theta), xp.sin(theta)), axis=-1)
+
+    tau = xp.zeros(centers.shape, dtype=centers.dtype)
+    tau[..., 0] = xp.cos(theta)
+    tau[..., 1] = xp.sin(theta)
+
     delta = xp.sqrt(4 * mu_xy**2 + (mu_xx - mu_yy)**2)
-    hw = xp.sqrt(2 * xp.log(2) * (mu_xx + mu_yy - delta))
-    return xp.concat((centers[..., :-3:-1] + hw[..., None] * tau,
-                      centers[..., :-3:-1] - hw[..., None] * tau), axis=-1)
+    hw = xp.sqrt(2 * xp.log(2) * (mu_xx + mu_yy + delta))
+    return xp.concat((centers[..., ::-1] + hw[..., None] * tau,
+                      centers[..., ::-1] - hw[..., None] * tau), axis=-1)
 
 @overload
 def line_fit(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
@@ -617,9 +582,13 @@ def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
         Array of shape (N, 4) where N is the number of regions. Each line is represented by
         (x1, y1, x2, y2) coordinates of its endpoints.
     """
-    centers = center_of_mass(labels, data)
-    covmat = covariance_matrix(labels, data)
-    return to_line(centers, covmat)
+    if isinstance(labels, NPLabelResult):
+        return cpu_label.line_fit(labels, data)
+    if isinstance(labels, CPLabelResult):
+        centers = center_of_mass(labels, data)
+        covmat = covariance_matrix(labels, data)
+        return to_line(centers, covmat)
+    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
 
 @overload
 def median(inp: NDRealArray, axis: IntSequence=0) -> NDRealArray: ...

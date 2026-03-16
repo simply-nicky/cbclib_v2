@@ -12,7 +12,7 @@ IS_WINDOWS = sys.platform == 'win32'
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-__version__ = '0.13.1'
+__version__ = '0.13.2'
 
 def find_conda_home() -> str:
     """Find the Conda install path."""
