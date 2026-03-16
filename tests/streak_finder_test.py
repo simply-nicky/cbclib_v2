@@ -170,7 +170,7 @@ class TestStreakFinder():
 
     def test_p_values(self, result: Pattern, image: NDRealArray, p0: NDRealArray, xtol: float,
                       vmin: float, min_size: int, xp: NumPyNamespace):
-        p_values = p_value(result, image, float(p0), xtol, vmin)
+        p_values = p_value(result, image, float(p0.item()), xtol, vmin)
         assert xp.all(p_values < xp.log(p0) * min_size)
 
     def test_central_line(self, streak: Streak, image: NDRealArray, xp: NumPyNamespace):
