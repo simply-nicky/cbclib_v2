@@ -1,4 +1,4 @@
-#include "array.hpp"
+#include "numpy.hpp"
 
 PYBIND11_MODULE(test, m)
 {
@@ -86,5 +86,4 @@ PYBIND11_MODULE(test, m)
         {
             return py::make_iterator(rr.begin(), rr.end());
         }, py::keep_alive<0, 1>());
-
 }

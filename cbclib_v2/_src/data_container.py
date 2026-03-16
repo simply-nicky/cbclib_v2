@@ -7,40 +7,21 @@ from collections import defaultdict
 from dataclasses import InitVar, dataclass, fields
 from math import prod
 from typing import (Any, DefaultDict, Dict, Generic, Iterable, Iterator, List, Protocol, Sequence,
-                    Set, Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints, overload)
+                    Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints, overload)
+from typing_extensions import Self
 import numpy as np
-import jax.numpy as jnp
+from .array_api import array_namespace, asjax, asnumpy
 from .src.index import Indexer
-from .annotations import (Array, ArrayNamespace, BoolArray, DataclassInstance, DType, Indices,
-                          IntArray, IntSequence, JaxArray, JaxNumPy, MultiIndices, NDArray,
-                          NumPy, RealSequence, Scalar, Shape, SupportsNamespace)
+from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, DType, Indices,
+                          IntArray, IntSequence, MultiIndices, NDArray, NDIntArray, NumPy,
+                          RealSequence, Shape)
 
-def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace=JaxNumPy) -> Array:
-    if xp is jnp:
-        return jnp.asarray(a).at[indices].add(b)
-    np.add.at(np.asarray(a), indices, b)
-    return np.asarray(a)
-
-def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace=JaxNumPy) -> Array:
-    sort_idxs = xp.argsort(a)
-    idxs = set_at(xp.zeros(a.size, dtype=int), sort_idxs, xp.arange(a.size))
-    result = xp.full(xp.unique(indices).size, a.size + 1, dtype=int)
-    return sort_idxs[min_at(result, indices, idxs)]
-
-def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace=JaxNumPy) -> Array:
-    if xp is jnp:
-        return jnp.asarray(a).at[indices].min(b)
-    np.minimum.at(np.asarray(a), indices, b)
-    return np.asarray(a)
-
-def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar,
-           xp: ArrayNamespace=JaxNumPy) -> Array:
-    if xp is jnp:
-        return jnp.asarray(a).at[indices].set(b)
-    a[indices] = b
-    return np.asarray(a)
+def compute_index(index: int, length: int) -> int:
+    if index < 0:
+        index = index + length
+    if index < 0 or index >= length:
+        raise ValueError(f'Index {index:d} is out of range [0, {length - 1:d}]')
+    return index
 
 Item = TypeVar("Item")
 
@@ -63,7 +44,7 @@ def to_list(sequence: ToListSequence | Sequence[Item] | Sequence[List[Item] | Tu
     if isinstance(sequence, str):
         return [sequence,]
     if isinstance(sequence, Array):
-        return to_list(sequence.ravel().tolist())
+        return to_list(sequence.reshape(-1).tolist())
     if isinstance(sequence, (int, np.integer)):
         return [int(sequence),]
     if isinstance(sequence, (float, np.floating)):
@@ -93,9 +74,17 @@ def list_indices(indices: Indices, size: int) -> List[int]:
         return list(range(start, stop, step))
     return list(indices)
 
-C = TypeVar("C", bound="Container")
-D = TypeVar("D", bound="DataContainer")
-A = TypeVar("A", bound="ArrayContainer")
+def resolved_type(field: type['Container'], field_name: str,
+                  data: Dict[str, Any]) -> type['Container']:
+    if hasattr(field, 'type_resolver'):
+        type_resolver = getattr(field, 'type_resolver')
+        if callable(type_resolver):
+            origin_type = type_resolver(data[field_name])
+            if isinstance(origin_type, type) and issubclass(origin_type, Container):
+                return origin_type
+            raise ValueError(f"Type resolver for field '{field_name}' should return "
+                             f"a dataclass instance, got {origin_type}")
+    return field
 
 class Container(DataclassInstance):
     """Lightweight dataclass-backed container base class.
@@ -112,7 +101,7 @@ class Container(DataclassInstance):
         return (self.__class__, tuple(getattr(self, field.name) for field in fields(self)))
 
     @classmethod
-    def from_dict(cls: Type[C], **values: Any) -> C:
+    def from_dict(cls: Type[Self], **values: Any) -> Self:
         kwargs = {}
         types = get_type_hints(cls)
         for field in fields(cls):
@@ -133,6 +122,7 @@ class Container(DataclassInstance):
 
             # Handle Container types
             elif not is_compound(attr_type) and issubclass(attr_type, Container):
+                attr_type = resolved_type(attr_type, field.name, values)
                 kwargs[field.name] = attr_type.from_dict(**value)
 
             # Handle List[Container] and Tuple[Container, ...]
@@ -146,6 +136,7 @@ class Container(DataclassInstance):
                     elem_type = attr_type
 
                 if not is_compound(elem_type) and issubclass(elem_type, Container):
+                    elem_type = resolved_type(elem_type, field.name, values)
                     if get_origin(attr_type) in (tuple, Tuple):
                         kwargs[field.name] = tuple(elem_type.from_dict(**v) for v in value)
                     else:
@@ -158,7 +149,7 @@ class Container(DataclassInstance):
                 kwargs[field.name] = value
         return cls(**kwargs)
 
-    def replace(self: C, **kwargs: Any) -> C:
+    def replace(self: Self, **kwargs: Any) -> Self:
         """Create a new instance with selected fields replaced.
 
         This is a convenience that constructs a new object of the same type as
@@ -214,18 +205,20 @@ class DataContainer(Container):
     appropriately-typed container instances (preserving the concrete subclass
     via :meth:`replace`).
     """
-    def __post_init__(self):
-        self.__namespace__ = array_namespace(*(getattr(self, f.name) for f in fields(self)))
+    def __array_namespace__(self) -> AnyNamespace:
+        contents = self.contents()
 
-    def __array_namespace__(self) -> ArrayNamespace:
-        return self.__namespace__
+        if contents:
+            return array_namespace(*contents.values())
+
+        return NumPy
 
     @classmethod
     def is_empty(cls, data: Any) -> bool:
         """A field is considered non-empty if it is an array with non-zero size."""
         if isinstance(data, Array):
             return data.size == 0
-        return True
+        return False
 
     def contents(self) -> Dict[str, Array]:
         """Return the non-empty array fields stored in the container.
@@ -237,33 +230,47 @@ class DataContainer(Container):
             Dict[str, Any]: Mapping from field name to field value for all
                 initialized (non-empty) array fields.
         """
-        return {f.name: getattr(self, f.name) for f in fields(self)
-                if not self.is_empty(getattr(self, f.name))}
+        data = {}
+        for f in fields(self):
+            val = getattr(self, f.name)
+            if isinstance(val, Array) and not self.is_empty(val):
+                data[f.name] = val
+            if isinstance(val, DataContainer) and len(val.contents()):
+                data[f.name] = val
+        return data
 
-    def to_jax(self: D) -> D:
+    def to_jax(self: Self) -> Self:
         """Return a copy of this container with NumPy arrays converted to JAX.
 
         Only attributes that are :class:`numpy.ndarray` are converted. Other
         values are left unchanged.
 
         Returns:
-            D: A new container instance with converted arrays.
+            A new container instance with converted arrays.
         """
-        data = {attr: jnp.asarray(val) for attr, val in self.contents().items()
-                if isinstance(val, NDArray)}
+        data = {}
+        for attr, val in self.contents().items():
+            if isinstance(val, Array):
+                data[attr] = asjax(val)
+            if isinstance(val, DataContainer):
+                data[attr] = val.to_jax()
         return self.replace(**data)
 
-    def to_numpy(self: D) -> D:
+    def to_numpy(self: Self) -> Self:
         """Return a copy of this container with JAX arrays converted to NumPy.
 
         Only attributes that are recognised as JAX arrays are converted. Other
         values are left unchanged.
 
         Returns:
-            D: A new container instance with converted arrays.
+            A new container instance with converted arrays.
         """
-        data = {attr: np.asarray(val) for attr, val in self.contents().items()
-                if isinstance(val, JaxArray)}
+        data = {}
+        for attr, val in self.contents().items():
+            if isinstance(val, Array):
+                data[attr] = asnumpy(val)
+            if isinstance(val, DataContainer):
+                data[attr] = val.to_numpy()
         return self.replace(**data)
 
 class ArrayContainer(DataContainer):
@@ -280,7 +287,7 @@ class ArrayContainer(DataContainer):
         return not isinstance(data, Array)
 
     @classmethod
-    def concatenate(cls: Type[A], containers: Iterable[A]) -> A:
+    def concatenate(cls: Type[Self], containers: Iterable[Self]) -> Self:
         """Concatenate a sequence of containers field-wise.
 
         For each field present in the container objects, the values are
@@ -292,7 +299,7 @@ class ArrayContainer(DataContainer):
                 type to concatenate. Must be non-empty.
 
         Returns:
-            A: A new container instance with concatenated array fields.
+            A new container instance with concatenated array fields.
 
         Raises:
             ValueError: If ``containers`` is empty.
@@ -308,11 +315,11 @@ class ArrayContainer(DataContainer):
         for container in containers:
             for key, val in container.contents().items():
                 concatenated[key].append(val)
-        result = {key: xp.concatenate(val) for key, val in concatenated.items()}
+        result = {key: xp.concat(val) for key, val in concatenated.items()}
         return cls(**(defaults | result))
 
     @classmethod
-    def stack(cls: Type[A], containers: Iterable[A], axis: int=0) -> A:
+    def stack(cls: Type[Self], containers: Iterable[Self], axis: int=0) -> Self:
         """Stack a sequence of containers along a new axis.
 
         Similar to :meth:`concatenate` but uses ``stack`` to create an extra
@@ -325,7 +332,7 @@ class ArrayContainer(DataContainer):
             axis: Axis along which to stack the arrays.
 
         Returns:
-            A: A new container instance with stacked array fields.
+            A new container instance with stacked array fields.
 
         Raises:
             ValueError: If ``containers`` is empty.
@@ -357,7 +364,7 @@ class ArrayContainer(DataContainer):
             raise ValueError("No uniform shape found among array fields")
         return tuple(shape)
 
-    def __getitem__(self: A, indices: MultiIndices | BoolArray) -> A:
+    def __getitem__(self: Self, indices: MultiIndices | BoolArray) -> Self:
         """Index into the container, returning a new container of the same type.
 
         Only the fields returned by :meth:`contents` are indexed; other fields
@@ -367,13 +374,13 @@ class ArrayContainer(DataContainer):
             indices: Indices or boolean mask used to index array fields.
 
         Returns:
-            A: A new container instance containing the indexed fields.
+            A new container instance containing the indexed fields.
         """
         data = {attr: val[indices] for attr, val in self.contents().items()
                 if isinstance(val, Array)}
         return self.replace(**data)
 
-    def reshape(self: A, shape: int | Sequence[int] | None=None) -> A:
+    def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:
         """Reshape all array fields in the container to the given shape.
 
         Args:
@@ -382,7 +389,7 @@ class ArrayContainer(DataContainer):
                 are flattened.
 
         Returns:
-            A: A new container instance with reshaped array fields.
+            A new container instance with reshaped array fields.
         """
         if shape is None:
             new_shape: Tuple[int, ...] = (-1,)
@@ -395,16 +402,23 @@ class ArrayContainer(DataContainer):
                 for attr, val in self.contents().items()}
         return self.replace(**data)
 
-@overload
-def split(containers: Iterable[A], size: int) -> Iterator[A]: ...
+A = TypeVar("A", bound=ArrayContainer)
+IC = TypeVar("IC", bound="IndexedContainer")
 
 @overload
-def split(containers: Iterable[Array], size: int) -> Iterator[Array]: ...
+def split(containers: IC | Sequence[IC], n_chunks: int) -> Iterator[IC]: ...
 
 @overload
-def split(containers: Iterable[Any], size: int) -> Iterator[List]: ...
+def split(containers: Sequence[A], n_chunks: int) -> Iterator[A]: ...
 
-def split(containers: Iterable[A | Array | Any], size: int) -> Iterator[A | Array | List]:
+@overload
+def split(containers: Array | Sequence[Array], n_chunks: int) -> Iterator[Array]: ...
+
+@overload
+def split(containers: Sequence[Any], n_chunks: int) -> Iterator[List]: ...
+
+def split(containers: IC | Array | Sequence[IC | A | Array | Any], n_chunks: int
+          ) -> Iterator[IC | A | Array | List]:
     """Split an iterable of items into chunks of the given size.
 
     If the elements are container-like (subclasses of :class:`ArrayContainer`)
@@ -416,181 +430,59 @@ def split(containers: Iterable[A | Array | Any], size: int) -> Iterator[A | Arra
     Args:
         containers: Iterable of items to chunk. Elements may be containers,
             NumPy/JAX arrays, or arbitrary Python objects.
-        size: Chunk size (must be positive).
+        n_chunks: Number of chunks to split the input into (must be positive).
 
     Yields:
         Either container instances, stacked arrays, or lists depending on the
         element types in the input.
     """
+    n_total = len(containers)
+    q, r = divmod(n_total, n_chunks)
 
-    chunk: List = []
-    types: Set[Type[A | Array]] = set()
+    chunks = []
+    start = 0
+    for chunk_size in [q + 1] * r + [q] * (n_chunks - r):
+        chunks.append(containers[start:start + chunk_size])
+        start += chunk_size
 
-    for container in containers:
-        chunk.append(container)
-        types.add(type(container))
-
-        if len(chunk) == size:
-            if len(types) != 1:
-                raise ValueError("Containers must have the same type")
-            t = types.pop()
-            if issubclass(t, ArrayContainer):
-                yield t.concatenate(chunk)
-            elif issubclass(t, (np.ndarray, np.number)):
-                yield np.stack(chunk)
-            elif issubclass(t, JaxArray):
-                yield jnp.stack(chunk)
-            else:
-                yield list(chunk)
-
-            chunk.clear()
-
-    if len(chunk) > 0:
-        if len(types) != 1:
-            raise ValueError("Containers must have the same type")
-        t = types.pop()
-        if issubclass(t, ArrayContainer):
-            yield t.concatenate(chunk)
-        elif issubclass(t, (np.ndarray, np.number)):
-            yield np.stack(chunk)
-        elif issubclass(t, JaxArray):
-            yield jnp.stack(chunk)
-        else:
-            yield list(chunk)
+    yield from chunks
 
 I = TypeVar("I", bound="Indexed")
-IC = TypeVar("IC", bound="IndexedContainer")
 
 @dataclass
 class IndexArray():
-    array       : InitVar[IntArray]
+    arr       : InitVar[IntArray]
 
-    def __post_init__(self, array: IntArray):
-        xp = self.__namespace__ = array_namespace(array)
-        self.index = Indexer(xp.asarray(xp.atleast_1d(array), dtype=int))
+    def __post_init__(self, arr: IntArray):
+        xp = self.__namespace__ = NumPy
+        arr = xp.asarray(asnumpy(arr), dtype=int)
+        self.index = Indexer(xp.reshape(arr, (-1,) if arr.ndim == 0 else arr.shape))
 
-    def __array_namespace__(self) -> ArrayNamespace:
+    def __array_namespace__(self) -> AnyNamespace:
         return self.__namespace__
 
     def __reduce__(self) -> Tuple:
         return (self.__class__, (self.index.array,))
 
-    # Comparisons
-
-    def __eq__(self, other) -> BoolArray:
-        return self.index.array.__eq__(other)
-
-    def __ne__(self, other) -> BoolArray:
-        return self.index.array.__ne__(other)
-
-    def __lt__(self, other) -> BoolArray:
-        return self.index.array.__lt__(other)
-
-    def __le__(self, other) -> BoolArray:
-        return self.index.array.__le__(other)
-
-    def __gt__(self, other) -> BoolArray:
-        return self.index.array.__gt__(other)
-
-    def __ge__(self, other) -> BoolArray:
-        return self.index.array.__ge__(other)
-
-    # Logical Methods
-
-    def __and__(self, other) -> IntArray:
-        return self.index.array.__and__(other)
-
-    def __rand__(self, other) -> IntArray:
-        return self.index.array.__rand__(other)
-
-    def __or__(self, other) -> IntArray:
-        return self.index.array.__or__(other)
-
-    def __ror__(self, other) -> IntArray:
-        return self.index.array.__ror__(other)
-
-    def __xor__(self, other) -> IntArray:
-        return self.index.array.__xor__(other)
-
-    def __rxor__(self, other) -> IntArray:
-        return self.index.array.__rxor__(other)
-
-    # Arithmetic Methods
-
-    def __add__(self, other) -> IntArray:
-        return self.index.array.__add__(other)
-
-    def __radd__(self, other) -> IntArray:
-        return self.index.array.__radd__(other)
-
-    def __sub__(self, other) -> IntArray:
-        return self.index.array.__sub__(other)
-
-    def __rsub__(self, other) -> IntArray:
-        return self.index.array.__rsub__(other)
-
-    def __mul__(self, other) -> IntArray:
-        return self.index.array.__mul__(other)
-
-    def __rmul__(self, other) -> IntArray:
-        return self.index.array.__rmul__(other)
-
-    def __truediv__(self, other) -> IntArray:
-        return self.index.array.__truediv__(other)
-
-    def __rtruediv__(self, other) -> IntArray:
-        return self.index.array.__rtruediv__(other)
-
-    def __floordiv__(self, other) -> IntArray:
-        return self.index.array.__floordiv__(other)
-
-    def __rfloordiv__(self, other) -> IntArray:
-        return self.index.array.__rfloordiv__(other)
-
-    def __mod__(self, other) -> IntArray:
-        return self.index.array.__mod__(other)
-
-    def __rmod__(self, other) -> IntArray:
-        return self.index.array.__rmod__(other)
-
-    def __divmod__(self, other) -> IntArray:
-        return self.index.array.__divmod__(other)
-
-    def __rdivmod__(self, other) -> IntArray:
-        return self.index.array.__rdivmod__(other)
-
-    def __pow__(self, other) -> IntArray:
-        return self.index.array.__pow__(other)
-
-    def __rpow__(self, other) -> IntArray:
-        return self.index.array.__rpow__(other)
-
-    # Other Methods
-
     def __array__(self, dtype: DType | None=None) -> NDArray:
-        return np.asarray(self.index.array, dtype=dtype)
-
-    def __contains__(self, key: int) -> bool:
-        return key in self.index.array
+        return NumPy.asarray(self.index.array, dtype=dtype)
 
     def __getitem__(self, idxs: MultiIndices | BoolArray) -> 'IndexArray':
         xp = self.__array_namespace__()
         return IndexArray(xp.asarray(self)[idxs])
 
-    def __iter__(self) -> Iterator[np.integer[Any]]:
-        return iter(self.index.array)
-
-    def __len__(self) -> int:
-        return len(self.index.array)
-
-    def __repr__(self) -> str:
-        return self.index.array.__repr__()
-
     def __setitem__(self, idxs: MultiIndices, value: IntArray):
         xp = self.__array_namespace__()
         array = xp.asarray(self.index)
         array[idxs] = value
-        self.index = Indexer(array)
+        self.index = Indexer(asnumpy(array))
+
+    def __repr__(self) -> str:
+        return f"IndexArray(index={self.index.array})"
+
+    @property
+    def array(self) -> NDIntArray:
+        return self.index.array
 
     @property
     def is_decreasing(self) -> bool:
@@ -600,27 +492,23 @@ class IndexArray():
     def is_increasing(self) -> bool:
         return self.index.is_increasing
 
-    @property
-    def size(self) -> int:
-        return self.index.array.size
+    def get_index(self, key: IntSequence) -> Tuple[NDIntArray | slice, NDIntArray]:
+        def to_indices(key: int | np.integer | Array) -> Tuple[slice, NDIntArray]:
+            indices = self.index[int(key)]
+            start, stop, step = indices.indices(self.index.array.size)
+            return indices, NumPy.zeros((stop - start) // step, dtype=int)
 
-    @property
-    def shape(self) -> Shape:
-        return self.index.array.shape
+        if isinstance(key, (int, np.integer)):
+            return to_indices(key)
 
-    @overload
-    def get_index(self, key: int) -> slice: ...
+        if isinstance(key, Array):
+            key = asnumpy(key)
+            if key.ndim == 0:
+                return to_indices(key)
 
-    @overload
-    def get_index(self, key: IntSequence) -> Tuple[IntArray, IntArray]: ...
-
-    def get_index(self, key: int | IntSequence) -> slice | Tuple[IntArray, IntArray]:
         return self.index[key]
 
-    def insert_index(self, key: IntSequence) -> Tuple[IntArray, IntArray]:
-        return self.index.insert_index(key)
-
-    def unique(self) -> IntArray:
+    def unique(self) -> NDIntArray:
         return self.index.unique()
 
     def reset(self) -> 'IndexArray':
@@ -644,28 +532,39 @@ class GenericIndexer(Generic[I]):
 
 @dataclass
 class ILocIndexer(GenericIndexer[I]):
-    def __getitem__(self, indices: IntSequence | IndexArray) -> I:
+    def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
+        xp = NumPy
         if isinstance(indices, IndexArray):
-            indices = self.obj.index_array.unique()[np.asarray(indices)]
+            idxs = self.obj.index_array.unique()[xp.asarray(indices)]
         elif isinstance(indices, int):
-            indices = self.obj.index_array.unique()[np.atleast_1d(indices)]
+            idxs = self.obj.index_array.unique()[xp.atleast_1d(indices)]
         else:
-            indices = self.obj.index_array.unique()[indices]
-        return super().__getitem__(indices)
+            idxs = self.obj.index_array.unique()[indices]
+        return super().__getitem__(idxs)
 
 @dataclass
 class LocIndexer(GenericIndexer[I]):
-    def __getitem__(self, indices: IntSequence | IndexArray) -> I:
+    def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
+        xp = NumPy
         if isinstance(indices, IndexArray):
-            indices = np.asarray(indices)
+            idxs = xp.asarray(indices)
         elif isinstance(indices, int):
-            indices = np.atleast_1d(indices)
-        return super().__getitem__(indices)
+            idxs = xp.atleast_1d(indices)
+        elif isinstance(indices, slice):
+            start, stop, step = indices.indices(self.obj.index.size)
+            idxs = list(range(start, stop, step))
+        else:
+            idxs = indices
+        return super().__getitem__(idxs)
 
-def concatenate_index(arrays: Iterable[IntArray], xp: ArrayNamespace=NumPy) -> IntArray:
+def concatenate_index(arrays: Iterable[IntArray], xp: AnyNamespace=NumPy) -> IntArray:
+    """Concatenate multiple index arrays while shifting following indices if they
+    are lower than the last index of the previous array to preserve monotonicity.
+    """
     indices, last = [], 0
     for array in arrays:
-        array = xp.atleast_1d(array)
+        array = xp.asarray(array)
+        array = xp.reshape(array, (-1,) if array.ndim == 0 else array.shape)
         if len(array) != 0:
             if array[0] < last:
                 index = array + last - array[0]
@@ -673,7 +572,7 @@ def concatenate_index(arrays: Iterable[IntArray], xp: ArrayNamespace=NumPy) -> I
                 index = array
             indices.append(index)
             last = int(index[-1]) + 1
-    return xp.concatenate(indices)
+    return xp.concat(indices)
 
 class IndexedContainer(ArrayContainer):
     """Container with an integer index mapping items to groups.
@@ -687,17 +586,18 @@ class IndexedContainer(ArrayContainer):
     index       : IntArray
 
     def __post_init__(self):
-        super().__post_init__()
         try:
             self.index_array = IndexArray(self.index)
         except ValueError:
             xp = self.__array_namespace__()
-            index = concatenate_index((chunk for chunk in self.index), xp)
-            self.index_array = IndexArray(index).reset()
-            self.index = xp.asarray(self.index_array)
+            indices = xp.argsort(self.index)
+            for attr, val in self.contents().items():
+                setattr(self, attr, val[indices])
+            self.index = self.index[indices]
+            self.index_array = IndexArray(self.index)
 
     @classmethod
-    def concatenate(cls: Type[IC], containers: Iterable[IC]) -> IC:
+    def concatenate(cls: Type[Self], containers: Iterable[Self]) -> Self:
         """Concatenate several indexed containers preserving group indices.
 
         This concatenates all data fields using the array namespace determined
@@ -709,7 +609,7 @@ class IndexedContainer(ArrayContainer):
                 same concrete type. Must be non-empty.
 
         Returns:
-            IC: A new instance of the concrete subclass with concatenated
+            A new instance of the concrete subclass with concatenated
                 data fields and adjusted ``index``.
         """
         obj = super(IndexedContainer, cls).concatenate(containers)
@@ -718,21 +618,21 @@ class IndexedContainer(ArrayContainer):
         return cls(**(obj.to_dict() | {'index': index}))
 
     @classmethod
-    def stack(cls: Type[IC], containers: Iterable[IC], axis: int=0) -> IC:
+    def stack(cls: Type[Self], containers: Iterable[Self], axis: int=0) -> Self:
         obj = super(IndexedContainer, cls).stack(containers, axis)
         for container in containers:
             return cls(**(obj.to_dict() | {'index': container.index}))
 
         raise ValueError("containers must not be empty")
 
-    def __getitem__(self: IC, indices: MultiIndices | BoolArray) -> IC:
+    def __getitem__(self: Self, indices: MultiIndices | BoolArray) -> Self:
         """Index the container and return a new container with sliced index.
 
         Args:
             indices: Position indices or boolean mask applied to data fields.
 
         Returns:
-            IC: A new container instance containing the indexed data and the
+            A new container instance containing the indexed data and the
                 corresponding entries of the ``index`` field.
         """
         obj = super().__getitem__(indices)
@@ -740,17 +640,17 @@ class IndexedContainer(ArrayContainer):
             index = self.index[indices[0]]
         elif isinstance(indices, Array) and indices.dtype == bool:
             xp = self.__array_namespace__()
-            index = xp.expand_dims(self.index, list(range(1, indices.ndim)))
+            index = xp.reshape(self.index, (self.index.size,) + (1,) * (indices.ndim - 1))
             index = xp.broadcast_to(index, indices.shape)[indices]
         else:
             index = self.index[indices]
         return type(self)(**(obj.to_dict() | {'index': index}))
 
-    def __iter__(self: IC) -> Iterator[IC]:
+    def __iter__(self: Self) -> Iterator[Self]:
         """Iterate over grouped items using unique indices.
 
         Yields:
-            IC: Container slices corresponding to each unique value in
+            A new container instance corresponding to each unique value in
                 ``self.index``.
         """
         for index in self.index_array.unique():
@@ -765,20 +665,20 @@ class IndexedContainer(ArrayContainer):
         return self.index_array.unique().size
 
     @property
-    def iloc(self: IC) -> ILocIndexer[IC]:
+    def iloc(self: Self) -> ILocIndexer[Self]:
         """Indexer for integer-location based indexing.
 
         Returns:
-            ILocIndexer[IC]: Helper that supports ``.iloc[...]`` style access.
+            Helper that supports ``.iloc[...]`` style access.
         """
         return ILocIndexer(self)
 
     @property
-    def loc(self: IC) -> LocIndexer[IC]:
+    def loc(self: Self) -> LocIndexer[Self]:
         """Indexer for label/location based indexing.
 
         Returns:
-            LocIndexer[IC]: Helper that supports ``.loc[...]`` style access.
+            Helper that supports ``.loc[...]`` style access.
         """
         return LocIndexer(self)
 
@@ -796,7 +696,7 @@ class IndexedContainer(ArrayContainer):
             del contents['index']
         return contents
 
-    def reshape(self: IC, shape: int | Sequence[int] | None=None) -> IC:
+    def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:
         """Reshape all data fields in the container to the given shape.
 
         The ``index`` field is preserved as-is.
@@ -807,25 +707,28 @@ class IndexedContainer(ArrayContainer):
                 are flattened.
 
         Returns:
-            IC: A new container instance with reshaped data fields.
+            A new container instance with reshaped data fields.
         """
         obj = super().reshape(shape)
         if obj.shape[0] > prod(obj.shape):
             raise ValueError("Cannot reshape IndexedContainer: invalid shape for index")
 
         xp = self.__array_namespace__()
-        sizes = xp.cumprod(obj.shape)
+        sizes = xp.cumulative_prod(obj.shape)
         index_shape = xp.asarray(obj.shape)[sizes <= self.index.size]
         if prod(index_shape) != self.index.size:
             raise ValueError("Cannot reshape IndexedContainer: incompatible index size")
 
         old_index = self.index.reshape(index_shape)
-        new_index = old_index.reshape((index_shape[0], prod(index_shape[1:])))[:, 0]
-        if not xp.all(old_index == xp.expand_dims(new_index, list(range(1, len(index_shape))))):
+        new_index = old_index.reshape((int(index_shape[0]), prod(index_shape[1:])))[:, 0]
+
+        expanded_shape = (new_index.shape[0],) + (1,) * (len(index_shape) - 1) + new_index.shape[1:]
+        expanded_index = xp.reshape(new_index, expanded_shape)
+        if not xp.all(old_index == expanded_index):
             raise ValueError("Cannot reshape IndexedContainer: inconsistent index grouping")
         return type(self)(**(obj.to_dict() | {'index': new_index}))
 
-    def take(self: IC, indices: IntSequence) -> IC:
+    def take(self: Self, indices: IntSequence) -> Self:
         """Select elements by index groups and return the corresponding slice.
 
         Args:
@@ -833,25 +736,12 @@ class IndexedContainer(ArrayContainer):
                 to groups (not raw row positions).
 
         Returns:
-            IC: A new container corresponding to the requested groups.
+            A new container corresponding to the requested groups.
         """
         if isinstance(indices, int):
             indexer = self.index_array.get_index(indices)
+        elif isinstance(indices, Array):
+            indexer, _ = self.index_array.get_index(asnumpy(indices))
         else:
             indexer, _ = self.index_array.get_index(indices)
         return self[indexer]
-
-def array_namespace(*arrays: SupportsNamespace | Any) -> ArrayNamespace:
-    def namespaces(*arrays: SupportsNamespace | Any) -> Set:
-        result = set()
-        for array in arrays:
-            if isinstance(array, dict):
-                result |= namespaces(*array.values())
-            elif isinstance(array, SupportsNamespace):
-                result.add(array.__array_namespace__())
-        return result
-
-    nspaces = namespaces(*arrays)
-    if len(nspaces) == 0:
-        raise ValueError("namespace set should not be empty")
-    return JaxNumPy if JaxNumPy in nspaces else NumPy

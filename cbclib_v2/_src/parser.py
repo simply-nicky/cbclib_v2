@@ -4,12 +4,10 @@ import dataclasses
 import json
 import os
 import re
-from typing import (Any, Callable, ClassVar, Dict, List, Tuple, Type, TypeVar, get_args, get_origin,
-                    overload)
+from typing import Any, Callable, ClassVar, Dict, List, Tuple, Type, get_args, get_origin, overload
 import numpy as np
-from .data_container import Container
-from .annotations import (AnyType, Array, ArrayNamespace, DataclassInstance, ExpandedType, NDArray,
-                          NumPy, UnionType)
+from .data_container import Container, resolved_type
+from .annotations import AnyType, Array, AnyNamespace, ExpandedType, NDArray, NumPy, UnionType
 
 class BaseFormatter:
     aliases : ClassVar[Tuple[Type, ...]]
@@ -73,7 +71,7 @@ class ArrayFormatter(Formatter):
     aliases = (NDArray,)
 
     @classmethod
-    def format_string(cls, string: str, dtype: Type, xp: ArrayNamespace) -> Array:
+    def format_string(cls, string: str, dtype: Type, xp: AnyNamespace) -> Array:
         is_list = re.search(r'^\[([\s\S]*)\]$', string)
         if is_list:
             return xp.fromstring(is_list.group(1), dtype=dtype, sep=',')
@@ -132,7 +130,7 @@ class StringFormatting:
         return float
 
     @classmethod
-    def get_formatter(cls, t: AnyType, xp: ArrayNamespace) -> Callable[[str,], Any]:
+    def get_formatter(cls, t: AnyType, xp: AnyNamespace) -> Callable[[str,], Any]:
         types = cls.list_types(cls.expand_types(t))
         for formatter in cls.formatters.values():
             for extended_type in types:
@@ -152,7 +150,7 @@ class StringFormatting:
 
     @classmethod
     def format_dict(cls, dct: Dict[str, Any], types: Dict[str, AnyType] | AnyType,
-                    xp: ArrayNamespace) -> Dict[str, Any]:
+                    xp: AnyNamespace) -> Dict[str, Any]:
         formatted_dct = {}
         for attr, val in dct.items():
             if isinstance(val, dict) and isinstance(types, dict):
@@ -190,11 +188,12 @@ class StringFormatting:
             return str(node.value)
         return str(node)
 
+ContainerType = type[Container]
 FieldValues = str | Dict[str, Any] | Tuple[str, Dict[str, 'FieldValues']]
 TypeValues = AnyType | Dict[str, AnyType]
 
-def fields(cls: DataclassInstance | type[DataclassInstance], default: str | None
-           ) -> Dict[str, FieldValues]:
+def fields(cls: ContainerType, data: Dict[str, Any],
+           default: str | None) -> Dict[str, FieldValues]:
     result = {}
 
     for field in dataclasses.fields(cls):
@@ -205,8 +204,9 @@ def fields(cls: DataclassInstance | type[DataclassInstance], default: str | None
         while get_origin(origin) is not None:
             origin = get_origin(origin)
 
-        if isinstance(origin, DataclassInstance):
-            result[field.name] = (field.name, fields(origin, None))
+        if isinstance(origin, type) and issubclass(origin, Container):
+            origin = resolved_type(origin, field.name, data)
+            result[field.name] = (field.name, fields(origin, data[field.name], None))
         elif isinstance(origin, type) and issubclass(origin, dict):
             result[field.name] = field.name
         elif default is not None:
@@ -220,27 +220,63 @@ def fields(cls: DataclassInstance | type[DataclassInstance], default: str | None
 
     return result
 
-def type_hints(cls: DataclassInstance | type[DataclassInstance]) -> Dict[str, TypeValues]:
+def type_hints(cls: ContainerType, data: Dict[str, Any]) -> Dict[str, TypeValues]:
     result = {}
     for field in dataclasses.fields(cls):
         origin = field.type
-        if isinstance(origin, DataclassInstance):
-            result[field.name] = type_hints(origin)
+        if isinstance(origin, type) and issubclass(origin, Container):
+            origin = resolved_type(origin, field.name, data)
+            result[field.name] = type_hints(origin, data[field.name])
         else:
             result[field.name] = field.type
     return result
 
-P = TypeVar('P', bound='Parser')
+def read_fields(field_info: Dict[str, FieldValues], data: Dict[str, Any]) -> Dict:
+    result: Dict[str, Any] = {}
+    for section, attrs in field_info.items():
+        if section not in data:
+            raise ValueError(f"Section '{section}' not found in the file")
 
+        if isinstance(attrs, str):
+            result[attrs] = data[section]
+        elif isinstance(attrs, dict):
+            # 'default' section with a dictionary of attributes
+            result.update(**read_fields(attrs, data[section]))
+        elif isinstance(attrs, tuple):
+            # 'container' contains another container at 'container.attr'
+            attr, attr_fields = attrs
+            result[attr] = read_fields(attr_fields, data[section])
+        else:
+            raise TypeError(f"Invalid 'fields' values: {attrs}")
+    return result
+
+def extract_fields(field_info: Dict[str, FieldValues], obj: Any) -> Dict:
+    result: Dict[str, Any] = {}
+    for section, attrs in field_info.items():
+        if isinstance(attrs, str):
+            result[section] = getattr(obj, attrs)
+        if isinstance(attrs, dict):
+            result[section] = extract_fields(attrs, obj)
+        if isinstance(attrs, tuple):
+            attr, attr_fields = attrs
+            result[section] = extract_fields(attr_fields, getattr(obj, attr))
+    return result
+
+@dataclasses.dataclass
 class Parser():
-    fields : Dict[str, FieldValues]
+    field_info      : Dict[str, Any]
 
     @classmethod
-    def from_container(cls: Type[P], container: DataclassInstance | type[DataclassInstance],
-                       default: str='default') -> P:
+    def from_container(cls, container: Container, default: str | None=None) -> 'Parser':
         raise NotImplementedError
 
-    def read_all(self, file: str) -> Dict[str, Any]:
+    @classmethod
+    def from_file(cls, file: str, container_type: ContainerType, default: str | None=None
+                  ) -> 'Parser':
+        raise NotImplementedError
+
+    @classmethod
+    def read_all(cls, file: str) -> Dict[str, Any]:
         raise NotImplementedError
 
     def read(self, file: str) -> Dict[str, Any]:
@@ -252,41 +288,10 @@ class Parser():
         Returns:
             A new container with all the attributes imported from the ini file.
         """
-        def read_fields(flds: Dict, data: Dict) -> Dict:
-            result: Dict[str, Any] = {}
-            for section, attrs in flds.items():
-                if section not in data:
-                    raise ValueError(f"Section '{section}' not found in the file '{file}'")
-
-                if isinstance(attrs, str):
-                    result[attrs] = data[section]
-                elif isinstance(attrs, dict):
-                    # 'default' section with a dictionary of attributes
-                    result.update(**read_fields(attrs, data[section]))
-                elif isinstance(attrs, tuple):
-                    # 'container' contains another container at 'container.attr'
-                    attr, attr_fields = attrs
-                    result[attr] = read_fields(attr_fields, data[section])
-                else:
-                    raise TypeError(f"Invalid 'fields' values: {attrs}")
-            return result
-
-        return read_fields(self.fields, self.read_all(file))
+        return read_fields(self.field_info, self.read_all(file))
 
     def to_dict(self, obj: Any) -> Dict[str, Dict[str, Any]]:
-        def extract_fields(obj: Any, flds: Dict) -> Dict:
-            result: Dict[str, Any] = {}
-            for section, attrs in flds.items():
-                if isinstance(attrs, str):
-                    result[section] = getattr(obj, attrs)
-                if isinstance(attrs, dict):
-                    result[section] = extract_fields(obj, attrs)
-                if isinstance(attrs, tuple):
-                    attr, attr_fields = attrs
-                    result[section] = extract_fields(getattr(obj, attr), attr_fields)
-            return result
-
-        return extract_fields(obj, self.fields)
+        return extract_fields(self.field_info, obj)
 
     def write(self, file: str, obj: Any):
         raise NotImplementedError
@@ -296,15 +301,25 @@ class INIParser(Parser, Container):
     """Abstract data container class based on :class:`dataclass` with an interface to read from
     and write to INI files.
     """
-    fields  : Dict[str, FieldValues]
-    types   : Dict[str, TypeValues]
+    type_info   : Dict[str, Any]
 
     @classmethod
-    def from_container(cls, container: DataclassInstance | type[DataclassInstance],
-                       default: str='default') -> 'INIParser':
-        return cls(fields(container, default), type_hints(container))
+    def from_container(cls, container: Container, default: str | None=None) -> 'INIParser':
+        data = container.to_dict()
+        field_info = fields(type(container), data, default)
+        type_info = type_hints(type(container), data)
+        return cls(field_info, type_info)
 
-    def read_all(self, file: str) -> Dict[str, Any]:
+    @classmethod
+    def from_file(cls, file: str, container_type: ContainerType, default: str | None=None
+                  ) -> 'INIParser':
+        data = cls.read_all(file)
+        field_info = fields(container_type, data, default)
+        type_info = type_hints(container_type, data)
+        return cls(field_info, type_info)
+
+    @classmethod
+    def read_all(cls, file: str) -> Dict[str, Any]:
         if not os.path.isfile(file):
             raise ValueError(f"File {file} doesn't exist")
 
@@ -313,8 +328,8 @@ class INIParser(Parser, Container):
 
         return {section: dict(ini_parser.items(section)) for section in ini_parser.sections()}
 
-    def read(self, file: str, xp: ArrayNamespace=NumPy) -> Dict[str, Any]:
-        return StringFormatting.format_dict(super().read(file), self.types, xp)
+    def read(self, file: str, xp: AnyNamespace=NumPy) -> Dict[str, Any]:
+        return StringFormatting.format_dict(super().read(file), self.type_info, xp)
 
     def to_dict(self, obj: Any) -> Dict[str, Dict[str, Any]]:
         return StringFormatting.to_string(super().to_dict(obj))
@@ -334,14 +349,21 @@ class INIParser(Parser, Container):
 
 @dataclasses.dataclass
 class JSONParser(Parser, Container):
-    fields  : Dict[str, FieldValues]
+    @classmethod
+    def from_container(cls, container: Container, default: str | None=None) -> 'JSONParser':
+        data = container.to_dict()
+        field_info = fields(type(container), data, default)
+        return cls(field_info)
 
     @classmethod
-    def from_container(cls, container: DataclassInstance | type[DataclassInstance],
-                       default: str='default') -> 'JSONParser':
-        return cls(fields(container, default))
+    def from_file(cls, file: str, container_type: ContainerType, default: str | None=None
+                  ) -> 'JSONParser':
+        data = cls.read_all(file)
+        field_info = fields(container_type, data, default)
+        return cls(field_info)
 
-    def read_all(self, file: str) -> Dict[str, Any]:
+    @classmethod
+    def read_all(cls, file: str) -> Dict[str, Any]:
         with open(file, 'r') as f:
             json_dict = json.load(f)
 
@@ -378,11 +400,19 @@ def get_extension(file_or_extension: str) -> str:
         return 'json'
     raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
 
-def get_parser(file_or_extension: str, container: DataclassInstance | type[DataclassInstance],
-               default: str='default') -> Parser:
+def from_container(file_or_extension: str, container: Container, default: str | None=None
+                   ) -> Parser:
     ext = get_extension(file_or_extension)
     if ext == 'ini':
         return INIParser.from_container(container, default)
     if ext == 'json':
         return JSONParser.from_container(container, default)
-    raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
+    raise ValueError(f"Unsupported file format: {file_or_extension}")
+
+def from_file(file: str, container_type: ContainerType, default: str | None=None) -> Parser:
+    ext = get_extension(file)
+    if ext == 'ini':
+        return INIParser.from_file(file, container_type, default)
+    if ext == 'json':
+        return JSONParser.from_file(file, container_type, default)
+    raise ValueError(f"Unsupported file format: {file}")

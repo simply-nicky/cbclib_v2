@@ -1,6 +1,9 @@
-#include "array.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
+
+// Anonymous namespace for internal linkage (not part of the public API)
+namespace {
 
 class Indexer
 {
@@ -192,7 +195,9 @@ protected:
     }
 };
 
-}
+}  // anonymous namespace
+
+}  // namespace cbclib
 
 PYBIND11_MODULE(index, m)
 {

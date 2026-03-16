@@ -1,21 +1,39 @@
+import sys
 from math import prod
 from typing import Callable, Dict, Tuple
-import numpy as np
 import pytest
-from cbclib_v2 import Lines, add_at
-from cbclib_v2.annotations import ArrayNamespace, IntArray, NumPy, RealArray, Shape
-from cbclib_v2.ndimage import accumulate_lines, draw_lines, write_lines
+from cbclib_v2 import default_rng, Lines
+from cbclib_v2.annotations import (CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
+                                   NumPy, NumPyNamespace, RealArray, Shape)
+from cbclib_v2.ndimage import accumulate_lines, draw_lines
 from cbclib_v2.test_util import check_close
 
+TestNamespace = NumPyNamespace | CuPyNamespace
+TestGenerator = Generator[NDArray] | Generator[CPArray]
 Kernel = Callable[[RealArray, RealArray], RealArray]
 WriteResult = Tuple[IntArray, IntArray, RealArray]
 
+@pytest.mark.parametrize("ndim,shape", [(2, (4, 3, 16, 22)), (3, (2, 20, 16, 22))])
 class TestDrawLine():
-    @pytest.fixture
-    def xp(self) -> ArrayNamespace:
-        return NumPy
+    @pytest.fixture(params=['cpu', 'gpu'])
+    def platform(self, request: pytest.FixtureRequest) -> str:
+        return request.param
 
-    def kernel_dict(self, xp: ArrayNamespace) -> Dict[str, Kernel]:
+    @pytest.fixture
+    def xp(self, platform: str) -> TestNamespace:
+        if platform == 'cpu':
+            return NumPy
+        if platform == 'gpu':
+            if CuPy is None:
+                pytest.skip("CuPy is not available")
+            return CuPy
+        raise ValueError(f"Unknown platform: {platform}")
+
+    @pytest.fixture
+    def rng(self, xp: TestNamespace) -> TestGenerator:
+        return default_rng(42, xp)
+
+    def kernel_dict(self, xp: TestNamespace) -> Dict[str, Kernel]:
         def biweight(x, sigma):
             return 0.9375 * xp.clip(1 - (x / sigma)**2, 0, xp.inf)**2
         def gaussian(x, sigma):
@@ -31,19 +49,13 @@ class TestDrawLine():
         return {'biweight': biweight, 'gaussian': gaussian, 'parabolic': parabolic,
                 'rectangular': rectangular, 'triangular': triangular}
 
-    @pytest.fixture(params=[(30, 80),])
-    def n_lines(self, request: pytest.FixtureRequest, rng: np.random.Generator) -> int:
-        vmin, vmax = request.param
-        return rng.integers(vmin, vmax)
-
-    @pytest.fixture(params=[(10, 50, 4),])
-    def shape(self, request: pytest.FixtureRequest, rng: np.random.Generator) -> Shape:
-        vmin, vmax, size = request.param
-        return tuple(rng.integers(vmin, vmax, size=size))
-
-    @pytest.fixture(params=[2, 3])
-    def ndim(self, request: pytest.FixtureRequest) -> int:
+    @pytest.fixture(params=[43,])
+    def n_lines(self, request: pytest.FixtureRequest) -> int:
         return request.param
+
+    @pytest.fixture
+    def out(self, shape: Shape, xp: TestNamespace) -> RealArray:
+        return xp.zeros(shape)
 
     @pytest.fixture(params=[10.0])
     def length(self, request: pytest.FixtureRequest) -> float:
@@ -54,93 +66,94 @@ class TestDrawLine():
         return request.param
 
     @pytest.fixture(params=[0, 3])
-    def kernel(self, rng: np.random.Generator, request: pytest.FixtureRequest,
-               xp: ArrayNamespace) -> str:
+    def kernel(self, rng: TestGenerator, request: pytest.FixtureRequest, xp: TestNamespace
+               ) -> str:
         keys = list(self.kernel_dict(xp).keys())
-        index = (rng.integers(0, len(keys)) + request.param) % len(keys)
+        index = int(rng.integers(0, len(keys)) + request.param) % len(keys)
         return keys[index]
 
     @pytest.fixture(params=[1.0, 10.0])
     def max_val(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
-    @pytest.fixture
-    def indices(self, rng: np.random.Generator, shape: Shape, ndim: int, n_lines: int,
-                xp: ArrayNamespace) -> IntArray:
-        return xp.sort(rng.integers(0, prod(shape[:-ndim]) - 1, size=n_lines))
+    @pytest.fixture(params=[10,])
+    def n_terms(self, request: pytest.FixtureRequest) -> int:
+        return request.param
 
     @pytest.fixture
-    def lines(self, rng: np.random.Generator, shape: Shape, ndim: int, n_lines: int,
-              length: float, xp: ArrayNamespace) -> Lines:
+    def terms(self, rng: TestGenerator, n_terms: int, n_lines: int) -> IntArray:
+        return rng.integers(0, n_terms - 1, size=n_lines)
+
+    @pytest.fixture
+    def frames(self, rng: TestGenerator, shape: Shape, ndim: int, n_terms: int) -> IntArray:
+        return rng.integers(0, prod(shape[:-ndim]) - 1, size=n_terms)
+
+    @pytest.fixture
+    def indices(self, terms: IntArray, frames: IntArray) -> IntArray:
+        return frames[terms]
+
+    @pytest.fixture
+    def lines(self, rng: TestGenerator, shape: Shape, ndim: int, n_lines: int,
+              length: float, xp: TestNamespace) -> Lines:
         lengths = length * rng.random((n_lines,))
         pt0 = xp.array(shape[:-ndim - 1:-1]) * rng.random((n_lines, ndim))
         vec = rng.normal(xp.zeros(ndim), size=(n_lines, ndim))
         pt1 = pt0 + vec * (lengths / xp.sqrt(xp.sum(vec**2, axis=-1)))[:, None]
-        return Lines(xp.concatenate((pt0, pt1), axis=-1))
+        return Lines(xp.concat((pt0, pt1), axis=-1))
 
     @pytest.fixture
-    def image(self, lines: Lines, width: float, indices: IntArray, shape: Shape, max_val: float,
-              kernel: str, xp: ArrayNamespace) -> RealArray:
-        image = draw_lines(lines.to_lines(width), shape, indices, max_val=max_val, kernel=kernel)
-        return xp.asarray(image)
+    def image(self, out: RealArray, lines: Lines, width: float, indices: IntArray, max_val: float,
+              kernel: str) -> RealArray:
+        return draw_lines(out, lines.to_lines(width), indices, max_val=max_val, kernel=kernel)
 
     @pytest.fixture
-    def accumulated(self, lines: Lines, width: float, indices: IntArray, shape: Shape,
-                    max_val: float, kernel: str, xp: ArrayNamespace) -> RealArray:
-        frames, counts = xp.unique(indices, return_counts=True)
-        image = accumulate_lines(lines.to_lines(width), shape, counts, frames, max_val, kernel)
-        return xp.asarray(image)
+    def accumulated(self, out: RealArray, lines: Lines, width: float, terms: IntArray,
+                    frames: IntArray, max_val: float, kernel: str) -> RealArray:
+        return accumulate_lines(out, lines.to_lines(width), terms, frames, max_val, kernel)
 
-    @pytest.fixture
-    def arrays(self, lines: Lines, width: float, indices: IntArray, shape: Shape, max_val: float,
-              kernel: str, xp: ArrayNamespace) -> WriteResult:
-        idxs, ids, values = write_lines(lines.to_lines(width), shape, indices, max_val=max_val,
-                                        kernel=kernel)
-        return xp.asarray(idxs), xp.asarray(ids), xp.asarray(values)
+    def test_ref_count(self, lines: Lines, width: float, shape: Shape, ndim: int,
+                       xp: TestNamespace):
+        out = xp.zeros(shape[-ndim:])
+        lines_array = lines.to_lines(width)
+        out_refcount = sys.getrefcount(out)
+        lines_refcount = sys.getrefcount(lines_array)
 
-    def test_empty_lines(self, shape: Shape, xp: ArrayNamespace):
-        image = draw_lines(xp.zeros((0, 5)), shape[-2:])
-        idxs, ids, values = write_lines(xp.zeros((0, 5)), shape[-2:])
+        out = draw_lines(out, lines_array)
+
+        assert out_refcount == sys.getrefcount(out)
+        assert lines_refcount == sys.getrefcount(lines_array)
+
+    def test_empty_lines(self, shape: Shape, ndim: int, xp: TestNamespace):
+        image = draw_lines(xp.zeros(shape[-ndim:]), xp.zeros((0, 2 * ndim + 1)))
         assert xp.sum(image) == 0.0
-        assert idxs.size == ids.size == values.size == 0
 
     @pytest.mark.xfail(raises=ValueError)
-    def test_image_wrong_size_lines(self, lines: Lines, width: float, indices: IntArray, shape: Shape):
-        image = draw_lines(lines.to_lines(width)[::2], shape, indices)
+    def test_image_wrong_size_lines(self, out: RealArray, lines: Lines, width: float,
+                                    indices: IntArray):
+        _ = draw_lines(out, lines.to_lines(width)[::2], indices)
 
-    @pytest.mark.xfail(raises=ValueError)
-    def test_table_wrong_size_lines(self, lines: Lines, width: float, indices: IntArray, shape: Shape):
-        idxs, ids, values = draw_lines(lines.to_lines(width)[::2], shape, indices)
-
-    def test_zero_width(self, lines: Lines, indices: IntArray, shape: Shape, kernel: str,
-                        xp: ArrayNamespace):
+    def test_zero_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
+                        xp: TestNamespace):
         zero_lines = lines.to_lines(0.0)
-        image = draw_lines(zero_lines, shape, indices, kernel=kernel)
-        idxs, ids, values = write_lines(zero_lines, shape, indices, kernel=kernel)
-        assert xp.sum(image) == 0
-        assert idxs.size == ids.size == values.size == 0
+        image = draw_lines(out, zero_lines, indices, kernel=kernel)
 
-    def test_negative_width(self, lines: Lines, indices: IntArray, shape: Shape, kernel: str,
-                            xp: ArrayNamespace):
-        neg_lines = lines.to_lines(-1.0)
-        image = draw_lines(neg_lines, shape, indices, kernel=kernel)
-        idxs, ids, values = write_lines(neg_lines, shape, indices, kernel=kernel)
         assert xp.sum(image) == 0
-        assert idxs.size == ids.size == values.size == 0
+
+    def test_negative_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
+                            xp: TestNamespace):
+        neg_lines = lines.to_lines(-1.0)
+        image = draw_lines(out, neg_lines, indices, kernel=kernel)
+
+        assert xp.sum(image) == 0
 
     @pytest.mark.slow
-    def test_max_val(self, image: RealArray, arrays: WriteResult, n_lines: int, max_val: float,
-                     xp: ArrayNamespace):
-        idxs, ids, values = arrays
+    def test_max_val(self, image: RealArray, n_lines: int, max_val: float, xp: TestNamespace):
         assert xp.min(image) == 0
         assert xp.all(xp.max(image, axis=(-2, -1)) <= n_lines * max_val)
-        assert xp.min(idxs) >= 0 and xp.max(idxs) < image.size
-        assert xp.min(ids) >= 0 and xp.max(ids) < n_lines
-        assert xp.min(values) >= 0.0 and xp.max(values) <= max_val
 
     @pytest.fixture
     def image_numpy(self, lines: Lines, width: float, indices: IntArray, shape: Shape, ndim: int,
-                    max_val: float, kernel: str, xp: ArrayNamespace) -> RealArray:
+                    max_val: float, kernel: str, xp: TestNamespace) -> RealArray:
         kernel_func = self.kernel_dict(xp)[kernel]
         pts = xp.meshgrid(*(xp.arange(length) for length in shape[-ndim:]), indexing='ij')
         pts = xp.stack(pts[::-1], axis=-1)[..., None, :]
@@ -154,12 +167,6 @@ class TestDrawLine():
         return xp.stack(frames).reshape(shape)
 
     def test_draw_line_image(self, image: RealArray, image_numpy: RealArray):
-        check_close(image, image_numpy)
-
-    def test_draw_line_table(self, arrays: WriteResult, image_numpy: RealArray, xp: ArrayNamespace):
-        image = xp.zeros(image_numpy.shape)
-        idxs, _, values = arrays
-        image = add_at(image, xp.unravel_index(idxs, image.shape), values, xp)
         check_close(image, image_numpy)
 
     def test_accumulate_lines(self, accumulated, image_numpy: RealArray):

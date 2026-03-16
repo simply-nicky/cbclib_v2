@@ -11,8 +11,9 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.12.1'
+version = '0.13.2'
 dependencies = [
+    'array_api_compat',
     'h5py',
     'hdf5plugin',
     'jax',
@@ -31,6 +32,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+cuda = ["cupy>=13.0.0"]
 dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio', 'scipy']
 
 [project.scripts]
@@ -47,3 +49,16 @@ markers = ["slow: mark a test that takes a long time to run.",
            "asyncio: mark a test as requiring asyncio."]
 testpaths = ["tests"]
 python_files = ["*_test.py", "test_*.py"]
+
+[tool.pylint.design]
+extension-pkg-allow-list = [
+    "cbclib_v2._src.src.bresenham",
+    "cbclib_v2._src.src.cuda_draw_lines",
+    "cbclib_v2._src.src.cuda_label",
+    "cbclib_v2._src.src.cuda_median",
+    "cbclib_v2._src.src.index",
+    "cbclib_v2._src.src.label",
+    "cbclib_v2._src.src.median",
+    "cbclib_v2._src.src.signal_proc",
+    "cbclib_v2._src.src.streak_finder"
+]

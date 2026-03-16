@@ -1,6 +1,6 @@
 #ifndef GEOMETRY_
 #define GEOMETRY_
-#include "array.hpp"
+#include "include.hpp"
 
 namespace cbclib {
 
@@ -265,9 +265,11 @@ auto amplitude(const Array<T, N> & a) -> decltype(std::sqrt(std::declval<T &>())
 }
 
 template <size_t N, class Container, typename T = typename Container::value_type>
-constexpr PointND<T, N> to_point(Container & a, size_t start)
+constexpr PointND<T, N> to_point(const Container & a, size_t start)
 {
-    return apply_to_sequence<N>([&a, start](auto... idxs) -> PointND<T, N> {return {a[start + idxs]...};});
+    PointND<T, N> point;
+    for (size_t i = 0; i < N; i++) point[i] = a[start + i];
+    return point;
 }
 
 template <typename T>
@@ -277,6 +279,12 @@ template <typename T, size_t N>
 struct LineND
 {
     PointND<T, N> pt0 {}, pt1 {};   // endpoints
+
+    template <typename V, typename = std::enable_if_t<std::is_constructible_v<T, V>>>
+    operator LineND<V, N>() const
+    {
+        return LineND<V, N>(static_cast<PointND<V, N>>(pt0), static_cast<PointND<V, N>>(pt1));
+    }
 
     LineND() = default;
 

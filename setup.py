@@ -1,7 +1,6 @@
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from typing import Iterable, Protocol
 from setuptools import setup, find_namespace_packages, Extension
@@ -13,7 +12,7 @@ IS_WINDOWS = sys.platform == 'win32'
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-__version__ = '0.12.1'
+__version__ = '0.13.2'
 
 def find_conda_home() -> str:
     """Find the Conda install path."""
@@ -36,26 +35,6 @@ def find_cuda_home() -> str | None:
 
 SKIP_CUDA = os.environ.get('CBCLIB_SKIP_CUDA', '0').lower() in ('1', 'true', 'yes')
 CUDA_HOME_FOUND = find_cuda_home() is not None and not SKIP_CUDA
-
-def find_fftw_paths() -> tuple[list[str], list[str]]:
-    """Find FFTW include and library directories using pkg-config."""
-    try:
-        include_dirs = subprocess.check_output(['pkg-config', '--cflags-only-I', 'fftw3'],
-                                               text=True).strip().split()
-        include_dirs = [d[2:] for d in include_dirs if d.startswith('-I')]
-
-        lib_dirs = subprocess.check_output(['pkg-config', '--libs-only-L', 'fftw3'],
-                                          text=True).strip().split()
-        lib_dirs = [d[2:] for d in lib_dirs if d.startswith('-L')]
-
-        return include_dirs, lib_dirs
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("ERROR: FFTW3 library not found. Install it with:")
-        print("  conda (recommended): conda install -c conda-forge fftw")
-        print("  Ubuntu/Debian: sudo apt-get install libfftw3-dev")
-        print("  macOS: brew install fftw")
-        print("  Fedora: sudo dnf install fftw-devel")
-        sys.exit(1)
 
 def cuda_include() -> str:
     """ Return the CUDA include path. """
@@ -112,15 +91,7 @@ class CPPExtension(Extension):
     git checkout, then set ``include_pybind11=False``.
     """
     STD_TMPL = "/std:c++{}" if IS_WINDOWS else "-std=c++{}"
-
-    # flags are prepended, so that they can be further overridden, e.g. by
-    # ``extra_compile_args=["-g"]``.
-
-    def add_compile_args(self, flags: list[str]) -> None:
-        self.extra_compile_args[:0] = flags
-
-    def add_link_args(self, flags: list[str]) -> None:
-        self.extra_link_args[:0] = flags
+    extra_compile_args: dict[str, list[str]]
 
     def __init__(
         self,
@@ -149,10 +120,19 @@ class CPPExtension(Extension):
         if language is None:
             language = "c++"
 
+        if isinstance(extra_compile_args, dict):
+            cxx_flags = extra_compile_args.get('cxx', [])
+            nvcc_flags = extra_compile_args.get('nvcc', [])
+        else:
+            cxx_flags = extra_compile_args or []
+            nvcc_flags = []
+
         super().__init__(name, sources, include_dirs, define_macros, undef_macros,
                          library_dirs, libraries, runtime_library_dirs, extra_objects,
-                         extra_compile_args, extra_link_args, export_symbols, swig_opts,
+                         cxx_flags, extra_link_args, export_symbols, swig_opts,
                          depends, language, optional, py_limited_api=py_limited_api)
+
+        self.extra_compile_args = {'cxx': cxx_flags, 'nvcc': nvcc_flags}
 
         # Include the installed package pybind11 headers
         if include_pybind11:
@@ -160,8 +140,12 @@ class CPPExtension(Extension):
         if include_numpy:
             self.include_dirs.append(numpy_get_include())
 
-        cflags = [self.STD_TMPL.format(cxx_std),]
-        ldflags = []
+        # Setting extra compile args, flags are prepended, so that they can be further
+        # overridden, e.g. by ``extra_compile_args=["-g"]``.
+
+        # Set C++ standard flags
+        self.extra_compile_args['cxx'][:0] += [self.STD_TMPL.format(cxx_std)]
+        self.extra_compile_args['nvcc'][:0] += [self.STD_TMPL.format(cxx_std)]
 
         if IS_MACOS and "MACOSX_DEPLOYMENT_TARGET" not in os.environ:
             # C++17 requires a higher min version of macOS. An earlier version
@@ -173,23 +157,40 @@ class CPPExtension(Extension):
             desired_macos = (10, 9) if cxx_std < 17 else (10, 14)
             macos_string = ".".join(str(x) for x in min(current_macos, desired_macos))
             macosx_min = f"-mmacosx-version-min={macos_string}"
-            cflags += [macosx_min]
-            ldflags += [macosx_min]
+            self.extra_compile_args['cxx'][:0] += [macosx_min]
+            self.extra_link_args[:0] += [macosx_min]
 
         if IS_WINDOWS:
-            cflags += ["/EHsc", "/bigobj"]
+            self.extra_compile_args['cxx'][:0] += ["/EHsc", "/bigobj"]
         if IS_MACOS:
-            cflags += ["-stdlib=libc++"]
+            self.extra_compile_args['cxx'][:0] += ["-stdlib=libc++"]
 
-        self.add_compile_args(cflags)
-        self.add_link_args(ldflags)
+class AnyExtension(Protocol):
+    name                    : str
+    sources                 : list[str]
+    include_dirs            : list[str]
+    define_macros           : list[tuple[str, str | None]]
+    undef_macros            : list[str]
+    library_dirs            : list[str]
+    libraries               : list[str]
+    runtime_library_dirs    : list[str]
+    extra_objects           : list[str]
+    extra_compile_args      : dict[str, list[str]] | list[str]
+    extra_link_args         : list[str]
 
 class BuildCPPExp(build_ext):
     compiler    : CCompiler
-    extensions  : list[Extension]
+    extensions  : list[AnyExtension]
 
-    def add_extra_args(self, extension: Extension, args: list[str]) -> None:
-        extension.extra_compile_args += args
+    def add_cxx_extra_args(self, extension: AnyExtension, args: list[str]) -> None:
+        if isinstance(extension.extra_compile_args, dict):
+            extension.extra_compile_args['cxx'] += args
+        else:
+            extension.extra_compile_args += args
+
+    def add_nvcc_extra_args(self, extension: AnyExtension, args: list[str]) -> None:
+        if isinstance(extension.extra_compile_args, dict):
+            extension.extra_compile_args['nvcc'] += args
 
     def build_extensions(self):
         # You can detect --debug via self.debug
@@ -199,11 +200,13 @@ class BuildCPPExp(build_ext):
         for ext in self.extensions:
             if self.debug:
                 # Add your debug flags here
-                self.add_extra_args(ext, ["-g", "-O0", "-D_FORTIFY_SOURCE=0", '-DCPP_LOG'])
+                self.add_cxx_extra_args(ext, ["-g", "-O0", "-D_FORTIFY_SOURCE=0"])
+                self.add_nvcc_extra_args(ext, ["-G"])
             else:
-                self.add_extra_args(ext, ["-O3"])
+                self.add_cxx_extra_args(ext, ["-O3"])
+                self.add_nvcc_extra_args(ext, ["-O3"])
                 if IS_LINUX:
-                    self.add_extra_args(ext, ["-fvisibility=hidden", "-g0"])
+                    self.add_cxx_extra_args(ext, ["-fvisibility=hidden", "-g0"])
 
             ext.library_dirs += [os.path.join(sys.prefix, 'lib')]
             ext.include_dirs += [os.path.join(sys.prefix, 'include')]
@@ -211,18 +214,39 @@ class BuildCPPExp(build_ext):
             ext.define_macros += [('VERSION_INFO', __version__)]
 
         def wrap_single_compile(obj: str, src: str, ext: str, cc_args: list[str],
-                                extra_postargs: list[str], pp_opts: list[str]) -> None:
+                                extra_postargs: list[str] | dict[str, list[str]] | None,
+                                pp_opts: list[str]) -> None:
             # Copy before we make any modifications.
             original_compiler = self.compiler.compiler_so
+            if extra_postargs is None:
+                extra_postargs = []
+
             try:
                 if src.endswith('.cu'):
                     nvcc = [os.path.join(find_conda_home(), 'bin', 'nvcc')]
                     self.compiler.set_executable('compiler_so', nvcc)
 
-                    cflags = extra_postargs
-                    cflags = ['--compiler-options', ','.join(['-fPIC'] + cflags)]
+                    # Handle both list and dict formats
+                    if isinstance(extra_postargs, dict):
+                        cuda_flags = extra_postargs.get('nvcc', [])
+                        host_flags = extra_postargs.get('cxx', [])
+                    else:
+                        # Fallback to heuristic for list format
+                        cuda_flags = []
+                        host_flags = extra_postargs
+
+                    if '-fPIC' not in host_flags:
+                        host_flags[:0] += ['-fPIC']
+
+                    cflags = cuda_flags
+                    if host_flags:
+                        cflags += ['--compiler-options', ','.join(host_flags)]
+
+                elif isinstance(extra_postargs, dict):
+                    cflags = extra_postargs.get('cxx', [])
                 else:
                     cflags = extra_postargs
+
                 original_compile(obj, src, ext, cc_args, cflags, pp_opts)
             finally:
                 # Put the original compiler back in place.
@@ -232,22 +256,10 @@ class BuildCPPExp(build_ext):
 
         super().build_extensions()
 
-# Find FFTW paths
-fftw_includes, fftw_libs = find_fftw_paths()
-
 extensions = [
     CPPExtension("cbclib_v2._src.src.bresenham",
                  sources=["cbclib_v2/_src/src/bresenham.cpp"],
                  cxx_std=17,
-                 extra_compile_args=['-fopenmp'],
-                 extra_link_args=['-lgomp']),
-    CPPExtension("cbclib_v2._src.src.fft_functions",
-                 sources=["cbclib_v2/_src/src/fft_functions.cpp"],
-                 cxx_std=17,
-                 include_dirs=fftw_includes,
-                 library_dirs=fftw_libs,
-                 libraries = ['fftw3', 'fftw3f', 'fftw3l', 'fftw3_omp',
-                              'fftw3f_omp', 'fftw3l_omp'],
                  extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.index",
@@ -263,11 +275,6 @@ extensions = [
                  cxx_std=17,
                  extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
-    CPPExtension("cbclib_v2._src.src.signal_proc",
-                 sources=["cbclib_v2/_src/src/signal_proc.cpp"],
-                 cxx_std=17,
-                 extra_compile_args=['-fopenmp'],
-                 extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.streak_finder",
                  sources=["cbclib_v2/_src/src/streak_finder.cpp"],
                  cxx_std=17,
@@ -279,14 +286,26 @@ extensions = [
 ]
 
 if CUDA_HOME_FOUND:
-    extensions.append(
-        CPPExtension("cbclib_v2._src.src.cuda_functions",
-                     sources=["cbclib_v2/_src/src/cuda_functions.cu",],
+    extensions += [
+        CPPExtension("cbclib_v2._src.src.cuda_draw_lines",
+                     sources=["cbclib_v2/_src/src/cuda_draw_lines.cu",],
+                     cxx_std=17,
+                     include_dirs=[cuda_include()],
+                     library_dirs=[cuda_library_path()],
+                     libraries=['cudart']),
+        CPPExtension("cbclib_v2._src.src.cuda_label",
+                     sources=["cbclib_v2/_src/src/cuda_label.cu",],
+                     cxx_std=17,
+                     include_dirs=[cuda_include()],
+                     library_dirs=[cuda_library_path()],
+                     libraries=['cudart']),
+        CPPExtension("cbclib_v2._src.src.cuda_median",
+                     sources=["cbclib_v2/_src/src/cuda_median.cu",],
                      cxx_std=17,
                      include_dirs=[cuda_include()],
                      library_dirs=[cuda_library_path()],
                      libraries=['cudart'])
-    )
+    ]
 
 setup(
     version=__version__,

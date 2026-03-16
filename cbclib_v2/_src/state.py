@@ -5,12 +5,12 @@ from dataclasses import MISSING, Field, fields
 from typing_extensions import dataclass_transform
 from jax.tree_util import register_pytree_with_keys
 from .data_container import Container
-from .annotations import KeyArray, PyTree
+from .annotations import AnyGenerator, PyTree
 
-Generator = Callable[[KeyArray], Any]
+Random = Callable[[AnyGenerator], Any]
 
 class DynamicField(Field):
-    random  : Generator | None
+    random  : Random | None
 
     def __init__(self, name, type, default, default_factory, random, init,
                  repr, hash, compare, metadata, kw_only):
@@ -36,7 +36,7 @@ def field(*, default_factory: Callable[[], T], random: Any=..., static: bool=...
     ...
 
 @overload
-def field(*, random: Callable[[KeyArray], T], static: bool=..., init: bool=...,
+def field(*, random: Callable[[AnyGenerator], T], static: bool=..., init: bool=...,
           repr: bool=..., hash: bool | None=..., compare: bool=...,
           metadata: Mapping[str, Any] | None=..., kw_only: bool=...) -> T:
     ...
@@ -116,22 +116,22 @@ class State(BaseState):
                 setattr(cls, attribute, MISSING)
 
     @classmethod
-    def _create_random(cls, generators: Dict[str, Generator], defaults: Dict[str, Any]):
-        def random(cls: Type[S], key: KeyArray) -> S:
-            return cls(**{attr: gen(key) for attr, gen in generators.items()},
+    def _create_random(cls, generators: Dict[str, Random], defaults: Dict[str, Any]):
+        def random(cls: Type[S], rng: AnyGenerator) -> S:
+            return cls(**{attr: gen(rng) for attr, gen in generators.items()},
                        **defaults)
 
         setattr(cls, 'random', classmethod(random))
 
     @classmethod
-    def _process_fields(cls) -> Tuple[Dict[str, Generator], Dict[str, Any]]:
+    def _process_fields(cls) -> Tuple[Dict[str, Random], Dict[str, Any]]:
         defaults : Dict[str, Any] = {}
         for fld in static_fields(cls):
             if fld.default is MISSING:
                 raise ValueError(f"default is missing for {fld.name}")
             defaults[fld.name] = fld.default
 
-        generators : Dict[str, Generator] = {}
+        generators : Dict[str, Random] = {}
         for fld in dynamic_fields(cls):
             if fld.random is None:
                 raise ValueError(f"random is missing for {fld.name}")
@@ -178,5 +178,5 @@ class State(BaseState):
         register_pytree_with_keys(cls, flatten_with_keys, unflatten, flatten)
 
     @classmethod
-    def random(cls: Type[S], key: KeyArray) -> S:
+    def random(cls: Type[S], rng: AnyGenerator) -> S:
         raise RuntimeError("the class is created without random")

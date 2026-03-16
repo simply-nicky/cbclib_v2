@@ -20,7 +20,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <fftw3.h>
 
 #include <numpy/numpyconfig.h>
 #ifdef NPY_1_7_API_VERSION
@@ -49,6 +48,15 @@ R<typename Sub::value_type> flatten(const Top & all)
 }
 
 // C++20 standard features
+
+template <typename ... Types>
+struct is_all_integral
+{
+    static constexpr bool value = (... && std::is_integral_v<Types>);
+};
+
+template <typename ... Types>
+constexpr bool is_all_integral_v = is_all_integral<Types...>::value;
 
 template <typename T>
 struct remove_cvref
@@ -429,6 +437,165 @@ public:
     }
 };
 
+/*----------------------------------------------------------------------------*/
+/*-------------------------------- Kernels -----------------------------------*/
+/*----------------------------------------------------------------------------*/
+/* All kernels defined with the support of [-1, 1]. */
+
+// 1 / sqrt(2 * pi)
+template <typename T>
+struct kernel_traits
+{
+    static constexpr double M_1_SQRT2PI = 0.3989422804014327;
+
+    static T biweight(T x) {return T(0.9375) * std::pow(std::max<T>(1 - std::pow(x, 2), T()), 2);}
+    static T gaussian(T x)
+    {
+        if (std::abs(x) <= T(1.0)) return M_1_SQRT2PI * std::exp(-std::pow(3 * x, 2) / 2);
+        return T();
+    }
+    static T parabolic(T x) {return T(0.75) * std::max<T>(1 - std::pow(x, 2), T());}
+    static T rectangular(T x) {return (std::abs(x) <= T(1.0)) ? T(1.0) : T();}
+    static T triangular(T x) {return std::max<T>(T(1.0) - std::abs(x), T());}
+
+    // Host-only stateless functors mirroring the static methods
+    // Used in a templated context
+    struct Rectangular { inline T operator()(T x) const { return rectangular(x); } };
+    struct Gaussian    { inline T operator()(T x) const { return gaussian(x); } };
+    struct Triangular  { inline T operator()(T x) const { return triangular(x); } };
+    struct Parabolic   { inline T operator()(T x) const { return parabolic(x); } };
+    struct Biweight    { inline T operator()(T x) const { return biweight(x); } };
+};
+
+struct kernels
+{
+    enum type
+    {
+        biweight = 0,
+        gaussian = 1,
+        parabolic = 2,
+        rectangular = 3,
+        triangular = 4
+    };
+
+    static const std::unordered_map<std::string, type> & kernel_names()
+    {
+        static const std::unordered_map<std::string, type> names = {
+            {"biweight",    biweight},
+            {"gaussian",    gaussian},
+            {"parabolic",   parabolic},
+            {"rectangular", rectangular},
+            {"triangular",  triangular}
+        };
+        return names;
+    }
+
+    // Host-only: parse human-readable name to enum for host dispatch
+    static inline type get_type(const std::string & name, bool throw_if_missing = true)
+    {
+        const auto & names = kernel_names();
+        auto it = names.find(name);
+        if (it != names.end()) return it->second;
+        if (throw_if_missing)
+            throw std::invalid_argument("kernel is missing for " + name);
+        return type::rectangular; // default
+    }
+};
+
+namespace detail {
+
+template <typename T, template <typename> class Traits, kernels::type K>
+struct kernel_selector;
+
+template <typename T, template <typename> class Traits>
+struct kernel_selector<T, Traits, kernels::biweight>
+{
+    using type = typename Traits<T>::Biweight;
+};
+
+template <typename T, template <typename> class Traits>
+struct kernel_selector<T, Traits, kernels::gaussian>
+{
+    using type = typename Traits<T>::Gaussian;
+};
+
+template <typename T, template <typename> class Traits>
+struct kernel_selector<T, Traits, kernels::parabolic>
+{
+    using type = typename Traits<T>::Parabolic;
+};
+
+template <typename T, template <typename> class Traits>
+struct kernel_selector<T, Traits, kernels::rectangular>
+{
+    using type = typename Traits<T>::Rectangular;
+};
+
+template <typename T, template <typename> class Traits>
+struct kernel_selector<T, Traits, kernels::triangular>
+{
+    using type = typename Traits<T>::Triangular;
+};
+
+} // namespace detail
+
+// Type trait to validate kernel traits at compile-time (C++17)
+template <typename T, template <typename> class Traits, typename = void>
+struct has_kernel_methods : std::false_type {};
+
+template <typename T, template <typename> class Traits>
+struct has_kernel_methods<T, Traits, std::void_t<
+    decltype(Traits<T>::rectangular(std::declval<T>())),
+    decltype(Traits<T>::gaussian(std::declval<T>())),
+    decltype(Traits<T>::triangular(std::declval<T>())),
+    decltype(Traits<T>::parabolic(std::declval<T>())),
+    decltype(Traits<T>::biweight(std::declval<T>()))
+>> : std::true_type {};
+
+template <typename T, template <typename> class Traits>
+constexpr bool has_kernel_methods_v = has_kernel_methods<T, Traits>::value;
+
+template <typename T, template <typename> class Traits = kernel_traits, typename = std::enable_if_t<
+    has_kernel_methods_v<T, Traits>
+>>
+struct kernels_t : public kernels
+{
+    // Zero-overhead stateless functors (reuse functors from Traits)
+    using Biweight    = typename Traits<T>::Biweight;
+    using Gaussian    = typename Traits<T>::Gaussian;
+    using Parabolic   = typename Traits<T>::Parabolic;
+    using Rectangular = typename Traits<T>::Rectangular;
+    using Triangular  = typename Traits<T>::Triangular;
+
+    // Compile-time kernel selector
+    template <kernels::type K>
+    static constexpr typename detail::kernel_selector<T, Traits, K>::type select()
+    {
+        return typename detail::kernel_selector<T, Traits, K>::type{};
+    }
+};
+
+// ------------------------------------------------------------------
+// Hashing helpers
+// Small utilities to combine value hashes into a single hash. These are
+// used by fixed-size array/tuple hashers implemented below.
+// ------------------------------------------------------------------
+
+namespace detail {
+
+static const size_t GOLDEN_RATIO = 0x9e3779b9;
+
+// Taken from the boost::hash_combine: https://www.boost.org/doc/libs/1_35_0/doc/html/boost/hash_combine_id241013.html
+template <class T>
+inline size_t hash_combine(size_t seed, const T & v)
+{
+    //  Golden Ratio constant used for better hash scattering
+    //  See https://softwareengineering.stackexchange.com/a/402543
+    return seed ^ (std::hash<T>()(v) + GOLDEN_RATIO + (seed << 6) + (seed >> 2));
 }
+
+} // namespace detail
+
+} // namespace cbclib
 
 #endif

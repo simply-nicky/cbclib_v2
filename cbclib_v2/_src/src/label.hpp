@@ -1,19 +1,9 @@
 #ifndef NEW_LABEL_H_
 #define NEW_LABEL_H_
-#include "array.hpp"
 #include "geometry.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
-
-// Image moments class
-template <typename T, size_t N>
-using PixelND = std::pair<PointND<long, N>, T>;
-
-template <typename T, size_t N>
-using PixelSetND = std::set<PixelND<T, N>>;
-
-template <typename T>
-using PixelSet = PixelSetND<T, 2>;
 
 namespace detail {
 
@@ -25,25 +15,503 @@ std::vector<T> get_x(const Container & c, size_t index)
     return x;
 }
 
+/* Returns a positive remainder of division */
+template <typename T, typename U, typename = std::enable_if_t<std::is_integral_v<T> && std::is_integral_v<U>>>
+constexpr auto modulo(T a, U b) -> decltype(a % b)
+{
+    return (a % b + b) % b;
 }
 
-template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-PixelND<T, N> make_pixel(const PointND<I, N> & point, const array<T> & data)
+/* Returns a positive remainder of division */
+template <typename T, typename U, typename = std::enable_if_t<std::is_floating_point_v<T> || std::is_floating_point_v<U>>>
+constexpr auto modulo(T a, U b) -> decltype(std::fmod(a, b))
 {
-    return std::make_pair(point, data.at(point.coordinate()));
+    return std::fmod(std::fmod(a, b) + b, b);
 }
 
-template <typename T, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-PixelND<T, N> make_pixel(PointND<I, N> && point, const array<T> & data)
-{
-    return std::make_pair(std::move(point), data.at(point.coordinate()));
 }
 
-template <typename... Ix, typename T, typename = std::enable_if_t<is_all_integral_v<Ix...>>>
-PixelND<T, sizeof...(Ix)> make_pixel(T value, Ix... xs)
+template <size_t N, typename Container, typename = std::enable_if_t<
+    std::is_integral_v<typename Container::value_type>
+>>
+PointND<long, N> make_point(long index, const Container & shape)
 {
-    return std::make_pair(PointND<long, sizeof...(Ix)>{xs...}, value);
+    PointND<long, N> point;
+    for (size_t n = N; n > 0; --n)
+    {
+        size_t zyx_n = shape.size() - N + n - 1, xyz_n = N - n;
+        point[xyz_n] = index % shape[zyx_n];
+        index /= shape[zyx_n];
+    }
+    return point;
 }
+
+// Connectivity structure class
+// Structure offsets follow zyx ordering
+
+template <bool IsConst>
+struct chunk_traits {};
+
+template <>
+struct chunk_traits<false>
+{
+    using size_type = size_t;
+    using iterator = long *;
+    using const_iterator = const long *;
+    using reference = long &;
+    using const_reference = const long &;
+    using pointer = long *;
+};
+
+template <>
+struct chunk_traits<true>
+{
+    using size_type = size_t;
+    using iterator = const long *;
+    using const_iterator = const long *;
+    using reference = const long &;
+    using const_reference = const long &;
+    using pointer = const long *;
+};
+
+struct Structure
+{
+protected:
+    template <bool IsConst>
+    class chunk_iterator;
+
+    template <bool IsConst>
+    class chunk
+    {
+    public:
+        using size_type = typename chunk_traits<IsConst>::size_type;
+        using value_type = long;
+
+        using iterator = typename chunk_traits<IsConst>::iterator;
+        using const_iterator = typename chunk_traits<IsConst>::const_iterator;
+
+        using reference = typename chunk_traits<IsConst>::reference;
+        using const_reference = typename chunk_traits<IsConst>::const_reference;
+
+        iterator begin() {return m_first;}
+        const_iterator begin() const {return m_first;}
+
+        iterator end() {return m_last;}
+        const_iterator end() const {return m_last;}
+
+        size_type size() const {return m_last - m_first;}
+
+        reference operator[](size_type index) {return m_first[index];}
+        const_reference operator[](size_type index) const {return m_first[index];}
+    protected:
+        using pointer = typename chunk_traits<IsConst>::pointer;
+        pointer m_first, m_last;
+
+        chunk(pointer first, pointer last) : m_first(first), m_last(last) {}
+
+        friend class chunk_iterator<IsConst>;
+    };
+
+    template <bool IsConst>
+    class chunk_iterator
+    {
+    public:
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = chunk<IsConst>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const value_type *;
+        using reference = value_type;
+
+        chunk_iterator() = default;
+
+        template <bool RHIsConst, typename = std::enable_if_t<IsConst || !RHIsConst>>
+        chunk_iterator(const chunk_iterator<RHIsConst> & rhs) : m_ptr(rhs.m_ptr), m_chunk_size(rhs.m_chunk_size) {}
+
+        bool operator==(const chunk_iterator & rhs) const {return m_ptr == rhs.m_ptr;}
+        bool operator!=(const chunk_iterator & rhs) const {return !(*this == rhs);}
+        bool operator<(const chunk_iterator & rhs) const {return m_ptr < rhs.m_ptr;}
+        bool operator>(const chunk_iterator & rhs) const {return m_ptr > rhs.m_ptr;}
+        bool operator<=(const chunk_iterator & rhs) const {return !(*this > rhs);}
+        bool operator>=(const chunk_iterator & rhs) const {return !(*this < rhs);}
+
+        chunk_iterator & operator+=(difference_type offset)
+        {
+            m_ptr += offset * m_chunk_size;
+            return *this;
+        }
+        chunk_iterator & operator-=(difference_type offset)
+        {
+            m_ptr -= offset * m_chunk_size;
+            return *this;
+        }
+        chunk_iterator & operator++()
+        {
+            m_ptr += m_chunk_size;
+            return *this;
+        }
+        chunk_iterator & operator--()
+        {
+            m_ptr -= m_chunk_size;
+            return *this;
+        }
+        chunk_iterator operator++(int)
+        {
+            auto saved = *this;
+            ++(*this);
+            return saved;
+        }
+        chunk_iterator operator--(int)
+        {
+            auto saved = *this;
+            --(*this);
+            return saved;
+        }
+        chunk_iterator operator+(difference_type offset) const
+        {
+            auto saved = *this;
+            return saved += offset;
+        }
+        chunk_iterator operator-(difference_type offset) const
+        {
+            auto saved = *this;
+            return saved -= offset;
+        }
+        difference_type operator-(const chunk_iterator & rhs) const
+        {
+            return (m_ptr - rhs.m_ptr) / static_cast<difference_type>(m_chunk_size);
+        }
+
+        reference operator[] (size_t offset) const
+        {
+            return *(*this + offset);
+        }
+        reference operator*() const
+        {
+            return chunk<IsConst>(m_ptr, m_ptr + m_chunk_size);
+        }
+    protected:
+        using ptr_t = typename chunk_traits<IsConst>::pointer;
+        ptr_t m_ptr;
+        size_t m_chunk_size = 0;
+
+        chunk_iterator(ptr_t ptr, size_t chunk_size) : m_ptr(ptr), m_chunk_size(chunk_size) {}
+
+        friend class Structure;
+    };
+
+    template <bool IsConst>
+    class chunk_range
+    {
+    public:
+        using iterator = chunk_iterator<IsConst>;
+        using size_type = typename chunk_traits<IsConst>::size_type;
+
+        chunk_range() = default;
+        chunk_range(iterator begin, iterator end) : m_begin(begin), m_end(end) {}
+
+        iterator begin() const {return m_begin;}
+        iterator end() const {return m_end;}
+
+    private:
+        iterator m_begin, m_end;
+    };
+
+public:
+
+    using iterator = chunk_iterator<false>;
+    using const_iterator = chunk_iterator<true>;
+    using range = chunk_range<false>;
+    using const_range = chunk_range<true>;
+    using size_type = size_t;
+    using reference = chunk<false>;
+    using const_reference = chunk<true>;
+
+    int connectivity;
+
+    template <typename Radii>
+    Structure(const Radii & radii, int connectivity) : connectivity(connectivity)
+    {
+        for (size_t n = 0; n < radii.size(); n++) m_shape.push_back(2 * radii[n] + 1);
+
+        // Fill in the center
+        for (size_t n = 0; n < radii.size(); n++) m_ctr.push_back(0);
+
+        // Fill out shifts within the connectivity
+        for (auto point : rectangle_range<std::vector<long>>(std::vector<long>(m_shape.begin(), m_shape.end())))
+        {
+            long abs = 0;
+            for (size_t n = 0; n < radii.size(); n++)
+            {
+                point[n] -= radii[n];
+                abs += std::abs(point[n]);
+            }
+            if (abs > 0 && abs <= connectivity)
+            {
+                m_ctr.insert(m_ctr.end(), point.begin(), point.end());
+            }
+        }
+    }
+
+    iterator begin() {return iterator(m_ctr.data(), rank());}
+    const_iterator begin() const {return const_iterator(m_ctr.data(), rank());}
+
+    iterator end() {return iterator(m_ctr.data() + rank() * size(), rank());}
+    const_iterator end() const {return const_iterator(m_ctr.data() + rank() * size(), rank());}
+
+    range shifts() {return range(std::next(begin()), end());}
+    const_range shifts() const {return const_range(std::next(begin()), end());}
+
+    size_type size() const {return m_ctr.size() / rank();}
+    size_type rank() const {return m_shape.size();}
+
+    const std::vector<size_t> & shape() const {return m_shape;}
+    size_t shape(size_t index) const {return m_shape[index];}
+
+    std::string info() const
+    {
+        return "<Structure, connectivity = " + std::to_string(connectivity) +
+               ", rank = " + std::to_string(rank()) + ", size = " +  std::to_string(size()) + ">";
+    }
+
+protected:
+    std::vector<long> m_ctr;
+    std::vector<size_t> m_shape;
+};
+
+// Extended interface of set of points - needed for Regions
+class Region
+{
+public:
+    using size_type = size_t;
+    using iterator = typename std::set<long>::iterator;
+    using const_iterator = typename std::set<long>::const_iterator;
+    using node_type = typename std::set<long>::node_type;
+
+    Region() = default;
+
+    template <typename Container, typename = std::enable_if_t<
+        std::is_integral_v<typename Container::value_type>
+    >>
+    Region(long index, const Structure & structure, const Container & shape)
+    {
+        for (auto shift : structure)
+        {
+            auto new_index = shift_index(index, shift, shape);
+            if (new_index >= 0) m_ctr.insert(new_index);
+        }
+    }
+
+    iterator begin() {return m_ctr.begin();}
+    const_iterator begin() const {return m_ctr.begin();}
+
+    iterator end() {return m_ctr.end();}
+    const_iterator end() const {return m_ctr.end();}
+
+    size_type size() const {return m_ctr.size();}
+
+    node_type extract(const_iterator pos)
+    {
+        return m_ctr.extract(pos);
+    }
+
+    std::pair<iterator, bool> insert(long index)
+    {
+        return m_ctr.insert(index);
+    }
+
+    iterator insert(iterator hint, long index)
+    {
+        return m_ctr.insert(hint, index);
+    }
+
+    iterator insert(const_iterator hint, node_type && node)
+    {
+        return m_ctr.insert(hint, std::move(node));
+    }
+
+    template <typename Func, typename Container, typename = std::enable_if_t<
+        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
+        std::is_integral_v<typename Container::value_type>
+    >>
+    void dilate(Func && func, const Structure & structure, const Container & shape)
+    {
+        std::vector<long> last_pixels {begin(), end()};
+        std::set<long> new_pixels;
+
+        while (last_pixels.size())
+        {
+            for (auto index : last_pixels)
+            {
+                // Iterating over non-zero shifts in the structure
+                for (const auto & shift : structure.shifts())
+                {
+                    // Add new index if in bounds
+                    long new_index = shift_index(index, shift, shape);
+                    if (new_index >= 0) new_pixels.insert(new_index);
+                }
+            }
+            last_pixels.clear();
+
+            for (auto index : new_pixels)
+            {
+                if (std::forward<Func>(func)(index))
+                {
+                    auto [iter, is_added] = m_ctr.insert(index);
+                    if (is_added) last_pixels.push_back(*iter);
+                }
+            }
+            new_pixels.clear();
+        }
+    }
+
+    template <typename Func, typename Stop, typename Container, typename = std::enable_if_t<
+        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
+        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const Region &> &&
+        std::is_integral_v<typename Container::value_type>
+    >>
+    void dilate(Func && func, const Structure & structure, Stop && stop, const Container & shape)
+    {
+        std::vector<long> last_pixels {begin(), end()};
+        std::set<long> new_pixels;
+
+        while (last_pixels.size() && std::forward<Stop>(stop)(*this))
+        {
+            for (auto index : last_pixels)
+            {
+                // Iterating over non-zero shifts in the structure
+                for (const auto & shift : structure.shifts())
+                {
+                    // Add new index if in bounds
+                    long new_index = shift_index(index, shift, shape);
+                    if (new_index >= 0) new_pixels.insert(new_index);
+                }
+            }
+            last_pixels.clear();
+
+            for (auto index : new_pixels)
+            {
+                if (std::forward<Func>(func)(index))
+                {
+                    auto [iter, is_added] = m_ctr.insert(index);
+                    if (is_added) last_pixels.push_back(*iter);
+                }
+            }
+            new_pixels.clear();
+        }
+    }
+
+    template <typename Func, typename Container, typename = std::enable_if_t<
+        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
+        std::is_integral_v<typename Container::value_type>
+    >>
+    void dilate(Func && func, const Structure & structure, size_t n_iter, const Container & shape)
+    {
+        std::vector<long> last_pixels {begin(), end()};
+        std::set<long> new_pixels;
+
+        for (size_t n = 0; n < n_iter; n++)
+        {
+            for (auto index : last_pixels)
+            {
+                // Iterating over non-zero shifts in the structure
+                for (const auto & shift : structure.shifts())
+                {
+                    // Add new index if in bounds
+                    long new_index = shift_index(index, shift, shape);
+                    if (new_index >= 0) new_pixels.insert(new_index);
+                }
+            }
+            last_pixels.clear();
+
+            for (auto index : new_pixels)
+            {
+                if (std::forward<Func>(func)(index))
+                {
+                    auto [iter, is_added] = m_ctr.insert(index);
+                    if (is_added) last_pixels.push_back(*iter);
+                }
+            }
+            new_pixels.clear();
+        }
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> & array, I value) const
+    {
+        for (auto index : m_ctr) array[index] = value;
+    }
+
+    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
+    void mask(array<I> && array, I value) const
+    {
+        mask(array, value);
+    }
+
+    long median() const
+    {
+        if (m_ctr.size()) return *std::next(m_ctr.begin(), m_ctr.size() / 2);
+        return -1;
+    }
+
+    std::string info() const
+    {
+        return "<Region, size = " +  std::to_string(size()) + ">";
+    }
+
+protected:
+    std::set<long> m_ctr;
+
+    template <typename Shift, typename Shape, typename = std::enable_if_t<
+        std::is_integral_v<typename Shift::value_type> &&
+        std::is_integral_v<typename Shape::value_type>
+    >>
+    long shift_index(long index, const Shift & shift, const Shape & shape) const
+    {
+        long new_index = 0;
+        long stride = 1;
+        for (size_t n = shift.size(); n > 0; --n)
+        {
+            long coord = index % shape[n - 1] + shift[n - 1];
+            if (coord < 0 || coord >= shape[n - 1]) return -1;
+
+            new_index += coord * stride;
+            index /= shape[n - 1];
+            stride *= shape[n - 1];
+        }
+        return new_index;
+    }
+};
+
+class LabelResult
+{
+public:
+    LabelResult(std::vector<py::ssize_t> && shape, std::vector<Region> && regions) :
+        m_shape(std::move(shape)), m_regions(std::move(regions)) {}
+
+    LabelResult(const std::vector<py::ssize_t> & shape, const std::vector<Region> & regions) :
+        m_shape(shape), m_regions(regions) {}
+
+    const std::vector<Region> & regions() const {return m_regions;}
+    std::vector<Region> & regions() {return m_regions;}
+
+    py::ssize_t coord_along_dim(py::ssize_t index, size_t dim) const
+    {
+        py::ssize_t coord = 0;
+        for (size_t n = m_shape.size(); n > dim; --n)
+        {
+            coord = index % m_shape[n - 1];
+            index /= m_shape[n - 1];
+        }
+        return coord;
+    }
+
+    const std::vector<py::ssize_t> & shape() const {return m_shape;}
+    py::ssize_t shape(size_t index) const {return m_shape[index];}
+
+protected:
+    std::vector<py::ssize_t> m_shape;
+    std::vector<Region> m_regions;
+};
 
 // Image moments class
 
@@ -54,18 +522,25 @@ template <typename T, size_t N>
 class CentralMomentsND
 {
 public:
+    // Returns the centroid of the object
+    // Coordinates are in the same order as the input data (zyx for 3D)
     std::array<T, N> first() const
     {
-        return mu_x + origin;
+        return (mu_x + origin).coordinate();
     }
 
+    // Returns the covariance matrix of the object in the form of a flat array in row-major order
+    // Matrix follows the input data order (zyx for 3D)
     std::array<T, N * N> second() const
     {
         std::array<T, N * N> cmat;
-        for (size_t n = 0; n < N; n++) cmat[n + N * n] = mu_xx[n];
+        for (size_t n = 0; n < N; n++) cmat[n + N * n] = mu_xx[N - n - 1];
         for (size_t n = 0; n < NumPairs; n++)
         {
+            // We need to reverse the order of indices since moments are stored in xyz order
+            // but covariance matrix is in zyx order
             auto [i, j] = UniquePairs<N>::instance().pairs(n);
+            i = N - i - 1; j = N - j - 1;
             cmat[i + N * j] = mu_xy[n]; cmat[j + N * i] = mu_xy[n];
         }
         return cmat;
@@ -73,7 +548,7 @@ public:
 
     // Angle between the largest eigenvector of the covariance matrix and x-axis
     // Can return nan if mu_xx[0] == mu_xx[1]
-    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
+    template <size_t M = N, typename = std::enable_if_t<(M > 1)>>
     T theta() const
     {
         T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
@@ -83,15 +558,15 @@ public:
 
     // Return line segment representing the major axis of the object
     // Returns a zero-length line if mu_xx[0] == mu_xx[1]
-    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
-    Line<T> line() const
+    template <size_t M = N, typename = std::enable_if_t<(M > 1)>>
+    LineND<T, N> line() const
     {
         T angle = theta();
-        if (std::isnan(angle)) return Line<T>{origin, origin};
-        Point<T> tau {std::cos(angle), std::sin(angle)};
+        if (std::isnan(angle)) return LineND<T, N>{origin, origin};
+        PointND<T, N> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
-        return Line<T>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
+        return LineND<T, N>{mu_x + origin + hw * tau, mu_x + origin - hw * tau};
     }
 
     friend std::ostream & operator<<(std::ostream & os, const CentralMomentsND & m)
@@ -103,6 +578,8 @@ public:
 
 private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
+
+    // All moments follow the point order (xyz), reversed from the input data (zyx)
     PointND<T, N> origin;               // centroid
     PointND<T, N> mu_x {}, mu_xx {};    // mu_x: first central moments, mu_xx: second central moments
     PointND<T, NumPairs> mu_xy {};      // cross second central moments
@@ -123,12 +600,12 @@ public:
     template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt>>>>
     MomentsND(Pt && pt) : org(std::forward<Pt>(pt)) {}
 
-    MomentsND(const PixelSetND<T, N> & pset)
+    MomentsND(const Region & region, const array<T> & data)
     {
-        if (pset.size())
+        if (region.size())
         {
-            org = std::next(pset.begin(), pset.size() / 2)->first;
-            insert(pset.begin(), pset.end());
+            org = make_point<N>(region.median(), data.shape());
+            for (auto index : region) insert(index, data);
         }
     }
 
@@ -154,9 +631,11 @@ public:
         return *this;
     }
 
-    template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    void insert(const PointND<V, N> & point, T val)
+    void insert(long index, array<T> data)
     {
+        auto point = make_point<N>(index, data.shape());
+        auto val = data[index];
+
         auto r = point - org;
 
         val = std::max(val, T());
@@ -168,20 +647,6 @@ public:
             auto [i, j] = UniquePairs<N>::instance().pairs(n);
             mu_xy[n] += r[i] * r[j] * val;
         }
-    }
-
-    template <typename V, typename = std::enable_if_t<std::is_convertible_v<T, V>>>
-    void insert(const PixelND<V, N> & pixel)
-    {
-        insert(std::get<0>(pixel), std::get<1>(pixel));
-    }
-
-    template <typename InputIt, typename Value = iter_value_t<InputIt>, typename V = typename Value::second_type,
-        typename = std::enable_if_t<std::is_same_v<PixelND<V, N>, Value> && std::is_convertible_v<T, V>>
-    >
-    void insert(InputIt first, InputIt last)
-    {
-        for (; first != last; ++first) insert(*first);
     }
 
     void move(const PointND<T, N> & point)
@@ -245,17 +710,24 @@ public:
     const PointND<T, N> & origin() const {return org;}
 
     T zeroth() const {return mu;}
-    std::array<T, N> first() const {return mu_x + org * mu;}
+
+    // Coordinates of the centroid in the same order as the input data (zyx for 3D)
+    std::array<T, N> first() const {return (mu_x + org * mu).coordinate();}
+
+    // Covariance matrix of the object in the form of a flat array in row-major order
+    // Matrix follows the input data order (zyx for 3D)
     std::array<T, N * N> second() const
     {
         std::array<T, N * N> matrix {};
         for (size_t n = 0; n < N; n++)
         {
-            matrix[n + N * n] = mu_xx[n] + 2 * org[n] * mu_x[n] + org[n] * org[n] * mu;
+            auto zyx_n = N - n - 1;
+            matrix[n + N * n] = mu_xx[zyx_n] + 2 * org[zyx_n] * mu_x[zyx_n] + org[zyx_n] * org[zyx_n] * mu;
         }
         for (size_t n = 0; n < NumPairs; n++)
         {
             auto [i, j] = UniquePairs<N>::instance().pairs(n);
+            i = N - i - 1; j = N - j - 1;
             auto m_xy = mu_xy[n] + org[i] * mu_x[j] + org[j] * mu_x[i] + org[i] * org[j] * mu;
             matrix[i + N * j] = m_xy; matrix[j + N * i] = m_xy;
         }
@@ -274,182 +746,6 @@ private:
 template <typename T>
 using Moments = MomentsND<T, 2>;
 
-// Connectivity structure class
-
-template <size_t N>
-struct StructureND : public WrappedContainer<std::vector<PointND<long, N>>>
-{
-public:
-    using WrappedContainer<std::vector<PointND<long, N>>>::begin;
-    using WrappedContainer<std::vector<PointND<long, N>>>::end;
-    using WrappedContainer<std::vector<PointND<long, N>>>::size;
-
-    int radius, rank;
-
-    StructureND(int radius, int rank) : radius(radius), rank(rank)
-    {
-        PointND<long, N> shape;
-        for (size_t i = 0; i < N; i++) shape[i] = 2 * radius + 1;
-        for (auto point : rectangle_range<PointND<long, N>>{std::move(shape)})
-        {
-            point -= radius;
-            long abs = 0;
-            for (size_t i = 0; i < N; i++) abs += std::abs(point[i]);
-            if (abs <= rank) m_ctr.emplace_back(std::move(point));
-        }
-    }
-
-    StructureND & sort()
-    {
-        auto compare = [](const PointND<long, N> & a, const PointND<long, N> & b)
-        {
-            return magnitude(a) < magnitude(b);
-        };
-        std::sort(begin(), end(), compare);
-        return *this;
-    }
-
-    std::string info() const
-    {
-        return "<StructureND, N = " + std::to_string(N) + ", radius = " + std::to_string(radius) +
-               ", rank = " + std::to_string(rank) + ", points = <PointsND, size = " +  std::to_string(size()) + ">>";
-    }
-
-protected:
-    using WrappedContainer<std::vector<PointND<long, N>>>::m_ctr;
-};
-
-using Structure = StructureND<2>;
-
-// Extended interface of set of points - needed for Regions
-
-template <size_t N>
-class PointSetND : public WrappedContainer<std::set<PointND<long, N>>>
-{
-public:
-    using WrappedContainer<std::set<PointND<long, N>>>::WrappedContainer;
-    using WrappedContainer<std::set<PointND<long, N>>>::begin;
-    using WrappedContainer<std::set<PointND<long, N>>>::end;
-    using WrappedContainer<std::set<PointND<long, N>>>::size;
-
-    PointSetND() = default;
-
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
-    void dilate(Func && func, const StructureND<N> & structure)
-    {
-        std::vector<PointND<long, N>> last_pixels {begin(), end()};
-        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
-
-        while (last_pixels.size())
-        {
-            for (const auto & point: last_pixels)
-            {
-                for (const auto & shift: structure)
-                {
-                    new_pixels.insert(point + shift);
-                }
-            }
-            last_pixels.clear();
-
-            for (auto && point: new_pixels)
-            {
-                if (std::forward<Func>(func)(point))
-                {
-                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
-                    if (is_added) last_pixels.push_back(*iter);
-                }
-            }
-            new_pixels.clear();
-        }
-    }
-
-    template <typename Func, typename Stop, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>> &&
-        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const PointSetND<N> &>
-    >>
-    void dilate(Func && func, const StructureND<N> & structure, Stop && stop)
-    {
-        std::vector<PointND<long, N>> last_pixels {begin(), end()};
-        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
-
-        while (last_pixels.size() && std::forward<Stop>(stop)(*this))
-        {
-            for (const auto & point: last_pixels)
-            {
-                for (const auto & shift: structure)
-                {
-                    new_pixels.insert(point + shift);
-                }
-            }
-            last_pixels.clear();
-
-            for (auto && point: new_pixels)
-            {
-                if (std::forward<Func>(func)(point))
-                {
-                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
-                    if (is_added) last_pixels.push_back(*iter);
-                }
-            }
-            new_pixels.clear();
-        }
-    }
-
-    template <typename Func, typename = std::enable_if_t<std::is_invocable_r_v<bool, remove_cvref_t<Func>, PointND<long, N>>>>
-    void dilate(Func && func, const StructureND<N> & structure, size_t n_iter)
-    {
-        std::vector<PointND<long, N>> last_pixels {begin(), end()};
-        std::unordered_set<PointND<long, N>, detail::PointHasher<long, N>> new_pixels;
-
-        for (size_t n = 0; n < n_iter; n++)
-        {
-            for (const auto & point: last_pixels)
-            {
-                for (const auto & shift: structure)
-                {
-                    new_pixels.insert(point + shift);
-                }
-            }
-            last_pixels.clear();
-
-            for (auto && point: new_pixels)
-            {
-                if (std::forward<Func>(func)(point))
-                {
-                    auto [iter, is_added] = m_ctr.insert(std::forward<decltype(point)>(point));
-                    if (is_added) last_pixels.push_back(*iter);
-                }
-            }
-            new_pixels.clear();
-        }
-    }
-
-    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> & array, bool value) const
-    {
-        for (const auto & pt : m_ctr)
-        {
-            if (array.is_inbound(pt.coordinate())) array.at(pt.coordinate()) = value;
-        }
-    }
-
-    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> && array, bool value) const
-    {
-        mask(array, value);
-    }
-
-    std::string info() const
-    {
-        return "<PointsSetND, N = " + std::to_string(N) + ", size = " + std::to_string(m_ctr.size()) + ">";
-    }
-
-protected:
-    using WrappedContainer<std::set<PointND<long, N>>>::m_ctr;
-};
-
-using PointSet = PointSetND<2>;
-
 // Set of [point, value] pairs
 
 template <typename T, size_t N>
@@ -458,31 +754,22 @@ class PixelsND
 public:
     PixelsND() = default;
 
-    PixelsND(const PixelSetND<T, N> & pset) : m_mnt(pset), m_pset(pset) {}
-    PixelsND(PixelSetND<T, N> && pset) : m_mnt(pset), m_pset(std::move(pset)) {}
-
-    PixelsND(const PointSetND<N> & points, const array<T> & data)
+    PixelsND(const Region & points, const array<T> & data) : m_rgn(points), m_mnt(points, data) {}
+    PixelsND(Region && points, const array<T> & data) : m_rgn(std::move(points))
     {
-        for (auto && pt : points)
-        {
-            if (data.is_inbound(pt.coordinate()))
-            {
-                m_pset.emplace_hint(m_pset.end(), make_pixel(std::forward<decltype(pt)>(pt), data));
-            }
-        }
-        m_mnt = m_pset;
+        m_mnt = MomentsND<T, N>(m_rgn, data);
     }
 
-    void merge(PixelsND & source)
+    void merge(PixelsND & source, const array<T> & data)
     {
-        auto first1 = m_pset.begin(), last1 = m_pset.end();
-        auto first2 = source.m_pset.begin(), last2 = source.m_pset.end();
+        auto first1 = m_rgn.begin(), last1 = m_rgn.end();
+        auto first2 = source.m_rgn.begin(), last2 = source.m_rgn.end();
         for (; first1 != last1 && first2 != last2;)
         {
             if (*first2 < *first1)
             {
-                m_mnt.insert(*first2);
-                m_pset.insert(first1, source.m_pset.extract(first2++));
+                m_mnt.insert(*first2, data);
+                m_rgn.insert(first1, source.m_rgn.extract(first2++));
             }
             else if (*first2 > *first1) ++first1;
             else
@@ -492,14 +779,14 @@ public:
         }
         for (; first2 != last2;)
         {
-            m_mnt.insert(*first2);
-            m_pset.insert(first1, source.m_pset.extract(first2++));
+            m_mnt.insert(*first2, data);
+            m_rgn.insert(first1, source.m_rgn.extract(first2++));
         }
     }
 
-    void merge(PixelsND && source)
+    void merge(PixelsND && source, const array<T> & data)
     {
-        merge(source);
+        merge(source, data);
     }
 
     template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
@@ -509,47 +796,16 @@ public:
         return {m_mnt.origin(), m_mnt.origin()};
     }
 
-    const PixelSetND<T, N> & pixels() const {return m_pset;}
+    const Region & region() const {return m_rgn;}
     const MomentsND<T, N> & moments() const {return m_mnt;}
 
 protected:
     MomentsND<T, N> m_mnt;
-    PixelSetND<T, N> m_pset;
+    Region m_rgn;
 };
 
 template <typename T>
 using Pixels = PixelsND<T, 2>;
-
-template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> & mask, const StructureND<N> & structure, size_t npts)
-{
-    std::vector<PointSetND<N>> regions;
-    auto func = [&mask](const PointND<long, N> & pt)
-    {
-        return mask.is_inbound(pt.coordinate()) && mask.at(pt.coordinate());
-    };
-
-    for (; first != last; ++first)
-    {
-        size_t index = mask.index_at(first->coordinate());
-        if (mask[index])
-        {
-            PointSetND<N> points;
-            points->insert(*first);
-            points.dilate(func, structure);
-            points.mask(mask, false);
-            if (points.size() >= npts) regions.emplace_back(std::move(points));
-        }
-    }
-
-    return regions;
-}
-
-template <typename InputIt, typename I, size_t N, typename = std::enable_if_t<std::is_integral_v<I>>>
-std::vector<PointSetND<N>> labelise(InputIt first, InputIt last, array<I> && mask, const StructureND<N> & structure, size_t npts)
-{
-    return labelise(first, last, mask, structure, npts);
-}
 
 // PyBind11 helper functions to wrap an std::vector derived classes
 

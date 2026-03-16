@@ -1,12 +1,11 @@
 from dataclasses import dataclass
-from math import prod
-from typing import Tuple, TypeVar
+from typing import Tuple
+from typing_extensions import Self
 import pandas as pd
-from .annotations import BoolArray, IntArray, RealArray, RealSequence, Shape
-from .data_container import ArrayContainer, ArrayNamespace, IndexedContainer, NumPy, array_namespace
-from .src.bresenham import draw_lines, write_lines
-
-L = TypeVar("L", bound='BaseLines')
+from .annotations import AnyNamespace, BoolArray, IntArray, NumPy, RealArray, RealSequence
+from .array_api import array_namespace, asnumpy
+from .data_container import ArrayContainer, IndexedContainer
+from .functions import draw_lines
 
 class BaseLines(ArrayContainer):
     lines       : RealArray
@@ -40,7 +39,7 @@ class BaseLines(ArrayContainer):
     def y(self) -> RealArray:
         return self.lines[..., 1::self.ndim]
 
-    def intersection(self: L, other: L) -> RealArray:
+    def intersection(self: Self, other: Self) -> RealArray:
         def vector_dot(a: RealArray, b: RealArray) -> RealArray:
             return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
 
@@ -73,7 +72,7 @@ class BaseLines(ArrayContainer):
             lines = self.lines
         else:
             widths = xp.broadcast_to(xp.asarray(width), self.lines.shape[:-1] + (1,))
-            lines = xp.concatenate((self.lines, widths), axis=-1)
+            lines = xp.concat((self.lines, widths), axis=-1)
 
         return lines
 
@@ -90,11 +89,11 @@ class BaseStreaks(IndexedContainer, BaseLines):
         return self.index
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=NumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=NumPy
                          ) -> Tuple[IntArray, RealArray]:
-        index = xp.asarray(df['index'].to_numpy())
-        lines = xp.stack((df['x_0'].to_numpy(), df['y_0'].to_numpy(),
-                          df['x_1'].to_numpy(), df['y_1'].to_numpy()), axis=-1)
+        index = xp.asarray(df['index'])
+        lines = xp.stack((xp.asarray(df['x_0']), xp.asarray(df['y_0']),
+                          xp.asarray(df['x_1']), xp.asarray(df['y_1'])), axis=-1)
         return index, lines
 
     @classmethod
@@ -104,42 +103,13 @@ class BaseStreaks(IndexedContainer, BaseLines):
         lines = xp.stack((x[..., 0], y[..., 0], x[..., 1], y[..., 1]), axis=-1)
         return index, lines
 
-    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                          num_threads: int=1) -> pd.DataFrame:
-        """Draw a pattern in the :class:`dict` format.
-
-        Args:
-            width : Lines width in pixels.
-            shape : Detector grid shape.
-            kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
-                are available:
-
-                * 'biweigth' : Quartic (biweight) kernel.
-                * 'gaussian' : Gaussian kernel.
-                * 'parabolic' : Epanechnikov (parabolic) kernel.
-                * 'rectangular' : Uniform (rectangular) kernel.
-                * 'triangular' : Triangular kernel.
-
-        Returns:
-            A pattern in dictionary format.
-        """
-        xp = self.__array_namespace__()
-        index, streak_id, value = write_lines(lines=self.to_lines(width=width), shape=shape,
-                                              idxs=xp.asarray(self.flat_index), kernel=kernel,
-                                              num_threads=num_threads)
-        normalised_shape = (prod(shape[:-2]),) + shape[-2:]
-        frames, y, x = xp.unravel_index(index, normalised_shape)
-
-        data = {'index': streak_id, 'frames': frames, 'y': y, 'x': x, 'value': value}
-        return pd.DataFrame(data)
-
-    def pattern_image(self, width: float, shape: Tuple[int, int], kernel: str='gaussian',
-                      num_threads: int=1) -> RealArray:
+    def pattern_image(self, out: RealArray, width: float, kernel: str='gaussian'
+                      ) -> RealArray:
         """Draw a pattern in the :class:`numpy.ndarray` format.
 
         Args:
+            out : Output array where the pattern will be drawn.
             width : Lines width in pixels.
-            shape : Detector grid shape.
             kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
                 are available:
 
@@ -153,8 +123,8 @@ class BaseStreaks(IndexedContainer, BaseLines):
             A pattern in :class:`numpy.ndarray` format.
         """
         xp = self.__array_namespace__()
-        return draw_lines(self.to_lines(width=width), idxs=xp.asarray(self.flat_index),
-                          shape=shape, kernel=kernel, num_threads=num_threads)
+        return draw_lines(out=out, lines=self.to_lines(width=width),
+                          idxs=xp.asarray(self.flat_index), kernel=kernel)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Export a streaks container into :class:`pandas.DataFrame`.
@@ -162,9 +132,9 @@ class BaseStreaks(IndexedContainer, BaseLines):
         Returns:
             A dataframe with all the data specified in :class:`cbclib_v2.Streaks`.
         """
-        return pd.DataFrame({'index': self.index,
-                             'x_0': self.x[:, 0], 'y_0': self.y[:, 0],
-                             'x_1': self.x[:, 1], 'y_1': self.y[:, 1]})
+        return pd.DataFrame({'index': asnumpy(self.index),
+                             'x_0': asnumpy(self.x[:, 0]), 'y_0': asnumpy(self.y[:, 0]),
+                             'x_1': asnumpy(self.x[:, 1]), 'y_1': asnumpy(self.y[:, 1])})
 
 @dataclass
 class Streaks(BaseStreaks):
@@ -172,7 +142,7 @@ class Streaks(BaseStreaks):
     lines       : RealArray
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: ArrayNamespace=NumPy) -> 'Streaks':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=NumPy) -> 'Streaks':
         index, lines = super(Streaks, cls).import_dataframe(df, xp)
         return cls(index=index, lines=lines)
 
@@ -183,7 +153,7 @@ class Streaks(BaseStreaks):
 
     def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float=0.33) -> BoolArray:
         xp = self.__array_namespace__()
-        centers = xp.mean(self.lines.reshape(-1, 2, 2), axis=1)
+        centers = xp.mean(self.lines.reshape((-1, 2, 2)), axis=1)
         norm = xp.stack([self.lines[:, 3] - self.lines[:, 1],
                          self.lines[:, 0] - self.lines[:, 2]], axis=-1)
         r = centers - xp.asarray([x_ctr, y_ctr])
@@ -201,10 +171,14 @@ class StackedStreaks(BaseStreaks):
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, num_modules: int=1,
-                         xp: ArrayNamespace=NumPy) -> 'StackedStreaks':
+                         xp: AnyNamespace=NumPy) -> 'StackedStreaks':
         index, lines = super(StackedStreaks, cls).import_dataframe(df, xp)
-        return cls(index=index, module_id=xp.asarray(df['module_id'].to_numpy()), lines=lines,
-                   num_modules=num_modules)
+        if num_modules > 1:
+            module_id = xp.asarray(df['module_id'])
+        else:
+            module_id = xp.zeros_like(index)
+        return cls(index=index, module_id=module_id, lines=lines, num_modules=num_modules)
+
     @classmethod
     def import_xy(cls, index: IntArray, module_id: IntArray, x: RealArray, y: RealArray,
                   num_modules: int=1) -> 'StackedStreaks':
@@ -214,14 +188,6 @@ class StackedStreaks(BaseStreaks):
     @property
     def flat_index(self) -> IntArray:
         return self.num_modules * self.index + self.module_id
-    def pattern_dataframe(self, width: float, shape: Shape, kernel: str='rectangular',
-                          num_threads: int=1) -> pd.DataFrame:
-        dataframe = super().pattern_dataframe(width, shape, kernel, num_threads)
-        if self.num_modules > 1:
-            dataframe['module_id'] = dataframe['frames'] % self.num_modules
-            dataframe['frames'] = dataframe['frames'] // self.num_modules
-            return dataframe.loc[:, ['index', 'frames', 'module_id', 'y', 'x', 'value']]
-        return dataframe
 
     def to_dataframe(self) -> pd.DataFrame:
         """Export a streaks container into :class:`pandas.DataFrame`.
@@ -231,5 +197,5 @@ class StackedStreaks(BaseStreaks):
         """
         dataframe = super().to_dataframe()
         if self.num_modules > 1:
-            dataframe['module_id'] = self.module_id
+            dataframe['module_id'] = asnumpy(self.module_id)
         return dataframe

@@ -8,8 +8,9 @@ import re
 from types import TracebackType
 from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, Literal,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import Array, ArrayNamespace, DataclassInstance, IntArray, NumPy, RealArray, Shape
-from .data_container import Container, array_namespace
+from .annotations import Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy, RealArray, Shape
+from .array_api import array_namespace, set_at
+from .data_container import Container
 from .streaks import StackedStreaks, Streaks
 from ..indexer import Patterns
 
@@ -624,7 +625,8 @@ class Panel(Container):
 
         roi = self.roi()
         if len(roi) == 3:
-            index = xp.expand_dims(coordinates[-3], list(range(1, dist.ndim)))
+            index = coordinates[-3]
+            index = xp.reshape(index, index.shape[:1] + (1,) * (dist.ndim - 1) + index.shape[1:])
             dist = xp.where(index == roi[0].start, dist, xp.inf)
 
         return dist
@@ -653,10 +655,10 @@ class Panel(Container):
                     ) -> Tuple[float, float, float]: ...
 
     @overload
-    def to_detector(self, ss: RealArray, fs: RealArray, half_pixel_shift: bool=True
+    def to_detector(self, ss: Array, fs: Array, half_pixel_shift: bool=True
                     ) -> Tuple[RealArray, RealArray, RealArray]: ...
 
-    def to_detector(self, ss: RealArray | float, fs: RealArray | float, half_pixel_shift: bool=True
+    def to_detector(self, ss: Array | float, fs: Array | float, half_pixel_shift: bool=True
                     ) -> Tuple[RealArray | float, RealArray | float, RealArray | float]:
         x = ss * self.ss.x + fs * self.fs.x + self.corner.x
         y = ss * self.ss.y + fs * self.fs.y + self.corner.y
@@ -674,9 +676,22 @@ class PixelIndices():
     def shape(self) -> Tuple[int, int]:
         return (int(self.ss.max()) + 1, int(self.fs.max()) + 1)
 
+    @overload
+    def __call__(self, frames: NDArray) -> NDArray: ...
+
+    @overload
+    def __call__(self, frames: Array) -> Array: ...
+
     def __call__(self, frames: Array) -> Array:
         xp = array_namespace(frames)
-        result = xp.zeros(frames.shape[:-self.ss.ndim] + self.shape)
+        frames = xp.reshape(frames, (-1,) + self.ss.shape)
+
+        n_frames = frames.size // self.ss.size
+        if n_frames > 1:
+            result = xp.zeros((n_frames,) + self.shape)
+        else:
+            result = xp.zeros(self.shape)
+
         result[..., self.ss, self.fs] = frames
         return result
 
@@ -714,7 +729,7 @@ class Detector():
             return 1.0 / panel.res
         raise RuntimeError('No pixel resolution data in the panels')
 
-    def indices(self, xp: ArrayNamespace=NumPy) -> PixelIndices:
+    def indices(self, xp: AnyNamespace=NumPy) -> PixelIndices:
         pix_x, pix_y, _ = self.pixel_map(xp=xp)
         pix_x = xp.asarray(xp.round(pix_x - pix_x.min()), dtype=int)
         pix_y = xp.asarray(xp.round(pix_y - pix_y.min()), dtype=int)
@@ -723,7 +738,7 @@ class Detector():
     def panel(self, module_id: int) -> Panel:
         return self.panels[list(self.panels.keys())[module_id]]
 
-    def pixel_map(self, half_pixel_shift: bool=True, xp: ArrayNamespace=NumPy):
+    def pixel_map(self, half_pixel_shift: bool=True, xp: AnyNamespace=NumPy):
         pixel_map = xp.zeros((3,) + self.shape)
         for panel in self.panels.values():
             roi = panel.roi()
@@ -741,14 +756,20 @@ class Detector():
                     ) -> Tuple[RealArray, RealArray, RealArray]:
         x_min, y_min = self.bounds[:2]
         xp = array_namespace(*coordinates)
-        ss, fs = coordinates[-2], coordinates[-1]
+
+        # We need to clip the coordinates to detector data shape
+        ss = xp.clip(coordinates[-2], 0, self.shape[-2] - 1)
+        fs = xp.clip(coordinates[-1], 0, self.shape[-1] - 1)
+        coordinates = coordinates[:-2] + (ss, fs)
+
         x, y, z = xp.zeros(ss.shape), xp.zeros(ss.shape), xp.zeros(ss.shape)
         for panel in self.panels.values():
             mask = panel.distance(*coordinates) < tolerance
             mask = xp.all(mask, axis=tuple(range(1, mask.ndim)))
-            x[mask], y[mask], z[mask] = panel.to_detector(ss[mask] - panel.region.roi[0],
-                                                          fs[mask] - panel.region.roi[2],
-                                                          half_pixel_shift)
+            x_new, y_new, z_new = panel.to_detector(ss[mask] - panel.region.roi[0],
+                                                    fs[mask] - panel.region.roi[2],
+                                                    half_pixel_shift)
+            x, y, z = set_at(x, mask, x_new), set_at(y, mask, y_new), set_at(z, mask, z_new)
         if units == 'pixel':
             unit = 1.0
         elif units == 'meter':
@@ -758,16 +779,18 @@ class Detector():
 
         return unit * (x - x_min), unit * (y - y_min), unit * z
 
-    def to_patterns(self, streaks: Streaks | StackedStreaks, half_pixel_shift: bool=True,
-                    tolerance: float=1.0) -> Patterns:
-        if isinstance(streaks, StackedStreaks):
+    def to_streaks(self, streaks: Streaks | StackedStreaks, half_pixel_shift: bool=True,
+                   tolerance: float=1.0) -> Streaks:
+        if isinstance(streaks, StackedStreaks) and streaks.num_modules > 1:
             x, y, _ = self.to_detector(streaks.module_id, streaks.y, streaks.x,
-                                       half_pixel_shift=half_pixel_shift, units='meter',
-                                       tolerance=tolerance)
-            return Patterns.import_xy(streaks.index, x, y)
-        if isinstance(streaks, Streaks):
-            return Patterns(streaks.index, streaks.lines * self.pixel_size)
-        raise TypeError(f'Invalid streaks type: {type(streaks)}')
+                                        half_pixel_shift=half_pixel_shift, tolerance=tolerance)
+        else:
+            x, y, _ = self.to_detector(streaks.y, streaks.x,
+                                       half_pixel_shift=half_pixel_shift, tolerance=tolerance)
+        return Streaks.import_xy(streaks.index, x, y)
+
+    def to_patterns(self, streaks: Streaks) -> Patterns:
+        return Patterns(streaks.index, streaks.lines * self.pixel_size)
 
 def read_crystfel(file: str) -> Detector:
     parsed = parse_crystfel_file(file)
