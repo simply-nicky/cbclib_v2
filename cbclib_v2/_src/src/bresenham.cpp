@@ -118,7 +118,7 @@ py::array_t<T> draw_lines_nd(py::array_t<T> out, py::array_t<T> lines, std::opti
         case kernels::triangular:
             return draw_lines_nd_impl<T, I, N, Update, kernels::triangular>(out, lines, idxs, max_val, threads);
         default:
-            throw std::invalid_argument("Invalid kernel type");
+            throw std::invalid_argument("Invalid kernel type: " + kernel_name);
     }
 }
 

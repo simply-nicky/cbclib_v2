@@ -540,7 +540,8 @@ class IndexingScript(BaseScript):
             streaks = StackedStreaks.import_dataframe(dataframe, num_modules=num_modules, xp=xp)
         else:
             streaks = Streaks.import_dataframe(dataframe, xp=xp)
-        patterns = geometry.to_patterns(streaks)
+        assembled = geometry.to_streaks(streaks)
+        patterns = geometry.to_patterns(assembled)
 
         if self.xtals:
             print(f"Loading crystal orientations from {self.xtals}...")

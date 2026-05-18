@@ -1,48 +1,62 @@
-from .annotations import NDRealArray
-from .functions import Structure, detect_peaks, detect_streaks, filter_peaks
-from .src.streak_finder import PatternList, PeaksList
+from typing import Tuple
+from math import log
+from .annotations import IntArray, RealArray
+from .array_api import array_namespace
+from .functions import (LabelResult, PeakLabels, Streaks, Structure, detect_peaks,
+                        detect_streaks, fit_linelets, label, line_fit, n_signal, p_values,
+                        peak_labels, streak_labels, to_lines)
 
 class PatternStreakFinder:
-    def __init__(self, data: NDRealArray, structure: Structure, min_size: float, lookahead: int=0,
-                 nfa: int=0):
-        self.data, self.structure = data, structure
-        self.min_size, self.lookahead, self.nfa = min_size, lookahead, nfa
+    def __init__(self, data: RealArray, structure: Structure, vmin: float):
+        self.data, self.structure, self.vmin = data, structure, vmin
+        self._p0 = None
 
-    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure=Structure([1, 1], 1),
-                     ) -> PeaksList:
-        """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
-        ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
-        between peaks is ``2 * structure.radius``.
+    @property
+    def p0(self) -> float:
+        if self._p0 is None:
+            xp = array_namespace(self.data)
+            self._p0 = float(xp.sum(self.data >= self.vmin) / self.data.size)
+        return self._p0
 
-        Args:
-            vmin : Peak threshold. All peaks with values lower than ``vmin`` are discarded.
-            npts : Support size threshold. The support structure is a connected set of pixels which
-                value is above the threshold ``vmin``. A peak is discarded is the size of support
-                set is lower than ``npts``.
-            connectivity : Connectivity structure used in finding a supporting set.
+    def detect_regions(self, npts: int, connectivity: Structure | None=None) -> LabelResult:
+        if connectivity is None:
+            connectivity = Structure([0] * (self.data.ndim - 2) + [1, 1], 1)
+        return label(self.data >= self.vmin, structure=connectivity, npts=npts)
 
-        Returns:
-            Set of detected peaks.
-        """
-        peaks = detect_peaks(self.data, self.structure.connectivity, vmin)
-        return filter_peaks(peaks, self.data, connectivity, vmin, npts)
+    def detect_peaks(self, regions: LabelResult) -> Tuple[PeakLabels, IntArray]:
+        peaks = detect_peaks(self.data, regions, self.structure.connectivity, self.vmin)
+        return peak_labels(peaks, self.data, self.structure.connectivity)
 
-    def detect_streaks(self, peaks: PeaksList, xtol: float, vmin: float) -> PatternList:
-        """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
-        extended with a connectivity structure.
+    def fit_linelets(self, labels: PeakLabels, peaks: IntArray) -> RealArray:
+        return fit_linelets(labels, peaks, self.data, self.structure, self.vmin)
 
-        Args:
-            peaks : A set of peaks used as seed locations for the streak growing algorithm.
-            xtol : Distance threshold. A new linelet is added to a streak if it's distance to the
-                streak is no more than ``xtol``.
-            vmin : Value threshold. A new linelet is added to a streak if it's value at the center
-                of mass is above ``vmin``.
-            min_size : Minimum number of linelets required in a detected streak.
-            lookahead : Number of linelets considered at the ends of a streak to be added to the
-                streak.
+    def detect_streaks(self, labels: PeakLabels, peaks: IntArray, linelets: RealArray,
+                       xtol: float, nfa: int = 0) -> Streaks:
+        return detect_streaks(labels, peaks, linelets, self.data, self.structure,
+                                  self.vmin, xtol, nfa)
 
-        Returns:
-            A list of detected streaks.
-        """
-        return detect_streaks(peaks, self.data, self.structure, xtol, vmin, self.min_size,
-                              self.lookahead, self.nfa)
+    def n_signal(self, streaks: Streaks, labels: PeakLabels, peaks: IntArray) -> IntArray:
+        return n_signal(streaks, labels, peaks, self.data, self.structure, self.vmin)
+
+    def ranking(self, streaks: Streaks, labels: PeakLabels, peaks: IntArray) -> IntArray:
+        counts = self.n_signal(streaks, labels, peaks)
+        xp = array_namespace(counts)
+        indices = xp.arange(counts.size)
+        order = xp.lexsort(xp.stack((indices, -counts)))
+        ranks = xp.empty(order.shape, dtype=peaks.dtype)
+        ranks[order] = indices
+        return ranks
+
+    def streak_labels(self, streaks: Streaks, ranks: IntArray, labels: PeakLabels, peaks: IntArray
+                      ) -> LabelResult:
+        xp = array_namespace(ranks)
+        out = xp.zeros(self.data.shape, dtype=peaks.dtype)
+        labeled = streak_labels(out, streaks, ranks, labels, peaks, self.structure)
+        radii = [0,] * (self.data.ndim - 2) + [1, 1]
+        return label(labeled, Structure(radii, 1))
+
+    def line_fit(self, labeled: LabelResult) -> RealArray:
+        return line_fit(labeled, self.data)
+
+    def min_support(self, labeled: LabelResult, lines: RealArray, xtol: float) -> RealArray:
+        return p_values(labeled, lines, self.data, self.p0, self.vmin, xtol) / log(self.p0)

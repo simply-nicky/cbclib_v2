@@ -1,0 +1,11 @@
+{
+  "include": ["cbclib_v2"],
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.10",
+  "reportPrivateImportUsage": false,
+  "reportMissingTypeStubs": false,
+  "reportUnusedImport": true,
+  "reportUnusedVariable": true,
+  "reportImplicitStringConcatenation": false,
+  "reportIncompatibleMethodOverride": false
+}

@@ -572,7 +572,7 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
     csize_t total_indices = 0;
     handle_cuda_error(cudaMemcpy(&total_indices, offsets.data() + context.grid().size(), sizeof(csize_t), cudaMemcpyDeviceToHost));
     DrawIndices indices (DeviceVector<csize_t>(total_indices), std::move(offsets));
-    max_counts.set(0);  // Reset max_counts to use as counters during filling
+    max_counts.fill(0);  // Reset max_counts to use as counters during filling
 
     // Third pass: fill in line indices
     fill_indices<T, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), context.view(), indices.view(), max_counts.view());
@@ -642,7 +642,7 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
     handle_cuda_error(cudaMemcpy(&total_indices, offsets.data() + n_frames * context.grid().size(), sizeof(csize_t), cudaMemcpyDeviceToHost));
 
     DrawIndices indices (DeviceVector<csize_t>(total_indices), std::move(offsets));
-    max_counts.set(0);  // Reset max_counts to use as counters during filling
+    max_counts.fill(0);  // Reset max_counts to use as counters during filling
 
     // Third pass: fill in line indices
     fill_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(idxs), n_frames, context.view(), indices.view(), max_counts.view());
@@ -721,7 +721,7 @@ DrawContext<AccumulateIndices, T, N> build_context(const array_view<T, py::ssize
         DeviceVector<csize_t>(total_indices),
         std::move(offsets)
     );
-    max_counts.set(0);  // Reset max_counts to use as counters during filling
+    max_counts.fill(0);  // Reset max_counts to use as counters during filling
 
     // Third pass: fill in line indices
     fill_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(terms), n_terms, cast_to_nd<I, 1>(frames), n_frames,

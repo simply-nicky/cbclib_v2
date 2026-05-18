@@ -1,110 +1,274 @@
-#include "log.hpp"
 #include "streak_finder.hpp"
-#include "zip.hpp"
 
-PYBIND11_MAKE_OPAQUE(std::vector<cbclib::Peaks>)
-PYBIND11_MAKE_OPAQUE(std::vector<cbclib::StreakWrapper>)
-PYBIND11_MAKE_OPAQUE(std::vector<std::vector<cbclib::StreakWrapper>>)
+PYBIND11_MAKE_OPAQUE(std::vector<cbclib::Streak>)
+
+static constexpr size_t L = 4; // Linelet size in 2D, should be 2 * N for N-dimensional data
 
 namespace cbclib {
 
-#pragma omp declare reduction(                                                                      \
-    vector_plus :                                                                                   \
-    std::vector<size_t> :                                                                           \
-    std::transform(omp_out.begin(), omp_out.end(), omp_in.begin(), omp_out.begin(), std::plus()))   \
-    initializer(omp_priv = decltype(omp_orig)(omp_orig.size()))
-
-template <typename T, typename U>
-py::array_t<py::ssize_t> local_maxima(py::array_t<T> inp, Structure structure, unsigned threads)
+struct PeakLabels
 {
-    if (structure.rank() != inp.ndim())
-        throw std::invalid_argument("structure rank does not match input dimensions");
+    py::array_t<long> labels;
+    size_t n_seeds, n_labels, n_good, radius;
+};
 
-    array<T> iarr (inp.request());
-    size_t repeats = iarr.size() / iarr.shape(iarr.ndim() - 1);
+template <typename T>
+py::array_t<lint_t> detect_peaks(py::array_t<lint_t> labels, py::array_t<T> data, Structure structure, size_t radius, T vmin, unsigned threads)
+{
+    if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
+    check_equal("labels and data must have the same shape", labels.shape(), labels.shape() + labels.ndim(), data.shape(), data.shape() + data.ndim());
 
-    std::vector<py::ssize_t> maxima;
+    array<lint_t> larr {labels.request()};
+    array<T> darr {data.request()};
+
+    PeaksIndexer indexer (darr.shape(), radius);
+    std::vector<py::ssize_t> shape {data.shape(), data.shape() + data.ndim() - 2};
+    shape.push_back(indexer.binned_shape(1));
+    shape.push_back(indexer.binned_shape(2));
+    py::array_t<lint_t> indices {shape};
+
+    array<lint_t> result {indices.request()};
+
+    size_t module_size = indexer.binned_shape(1) * indexer.binned_shape(2);
+    size_t repeats = indexer.binned_shape(0);
+    size_t n_chunks = threads / repeats + (threads % repeats > 0);
+
+    size_t chunk_size = module_size / n_chunks;
 
     thread_exception e;
 
     py::gil_scoped_release release;
 
-    #pragma omp parallel num_threads(threads)
+    #pragma omp parallel for num_threads(threads)
+    for (size_t i = 0; i < n_chunks * repeats; i++)
     {
-        std::vector<py::ssize_t> buffer;
-        MaximaND<T> finder (iarr, structure);
-
-        auto inserter = [&buffer](long index) { buffer.push_back(index); };
-
-        #pragma omp for schedule(static) nowait
-        for (size_t i = 0; i < repeats; i++)
+        e.run([&]
         {
-            e.run([&]
+            bint_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
+
+            bint_t first = frame * module_size + chunk_id * chunk_size;
+            bint_t last = (chunk_id == n_chunks - 1) ? (frame + 1) * module_size : first + chunk_size;
+
+            for (bint_t bin_idx = first; bin_idx < last; bin_idx++)
             {
-                finder.find(i, inserter);
-            });
-        }
+                auto start = make_point<3>(bin_idx, indexer.binned_shape());
+                start[0] *= radius; start[1] *= radius;
 
-        #pragma omp for schedule(static) ordered
-        for (unsigned i = 0; i < threads; i++)
-        {
-            #pragma omp ordered
-            maxima.insert(maxima.end(), buffer.begin(), buffer.end());
-        }
+                auto end = start;
+                end[0] = std::min(end[0] + radius, indexer.shape(2));
+                end[1] = std::min(end[1] + radius, indexer.shape(1));
+
+                bool is_good = false;
+                for (auto x = start[0]; x < end[0]; x++)
+                {
+                    for (auto y = start[1]; y < end[1]; y++)
+                    {
+                        auto running = indexer.index_at(frame, y, x);
+                        if (larr[running] != 0)
+                        {
+                            is_good = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!is_good) result[bin_idx] = -1; // Mark as not a peak and not usable for streak detection
+                else
+                {
+                    // unsigned peak_maximality = 0;
+                    lint_t peak_index = -1;
+                    T best_val = vmin;
+
+                    for (auto x = start[0]; x < end[0]; x++)
+                    {
+                        for (auto y = start[1]; y < end[1]; y++)
+                        {
+                            auto running = indexer.index_at(frame, y, x);
+
+                            T val = darr[running];
+                            if (val < vmin) continue;
+
+                            auto maximality = detail::maximality(running, structure, darr);
+                            if (maximality == structure.shifts().size() && val > best_val)
+                            {
+                                best_val = val;
+                                peak_index = running;
+                            }
+                        }
+                    }
+
+                    if (peak_index != -1) result[bin_idx] = peak_index;
+                    else result[bin_idx] = darr.size(); // Mark as can be used for streak detection, but not a peak itself
+                }
+            }
+        });
     }
 
     py::gil_scoped_acquire acquire;
 
     e.rethrow();
 
-    return as_pyarray(std::move(maxima));
+    return indices;
 }
 
-Sequence<long> init_axes(std::optional<std::array<py::ssize_t, 2>> ax, size_t ndim)
+enum class Direction
 {
-    Sequence<long> axes;
-    if (ax)
-    {
-        if (static_cast<ssize_t>(ax.value().size()) != 2)
-        {
-            auto err_txt = "axes size (" + std::to_string(ax.value().size()) +  ") must be equal to 2";
-            throw std::invalid_argument(err_txt);
-        }
-        axes = Sequence<long>{ax.value()}.unwrap(ndim);
-    }
-    else
-    {
-        for (long axis = ndim - 2; axis < ndim; axis++) axes->push_back(axis);
-    }
-    return axes;
+    None = 0u,
+    Forward = 1u,
+    Backward = 2u
+};
+
+inline constexpr Direction operator|(Direction lhs, Direction rhs)
+{
+    return static_cast<Direction>(static_cast<unsigned>(lhs) | static_cast<unsigned>(rhs));
+}
+
+inline constexpr Direction operator&(Direction lhs, Direction rhs)
+{
+    return static_cast<Direction>(static_cast<unsigned>(lhs) & static_cast<unsigned>(rhs));
+}
+
+inline constexpr bool is_none(Direction dir)
+{
+    return dir == Direction::None;
 }
 
 template <typename T>
-std::vector<Peaks> detect_peaks(py::array_t<T> data, Structure structure, size_t radius, T vmin, std::optional<std::array<py::ssize_t, 2>> ax, unsigned threads)
+py::array_t<T> line_fit(PeakLabels & labels, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T vmin, unsigned threads)
 {
-    if (data.ndim() < 2)
-        fail_container_check("wrong number of dimensions (" + std::to_string(data.ndim()) + " < 2)",
-                             std::vector<py::ssize_t>{data.shape(), data.shape() + data.ndim()});
+    if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
 
-    Sequence<long> axes = init_axes(ax, data.ndim());
-
-    data = axes.swap_back(data);
+    Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     array<T> darr {data.request()};
+    PeaksIndexer indexer (darr.shape(), labels.radius);
+    LineFitter<T> fitter (darr, structure, vmin, labels.radius);
 
-    size_t module_size = darr.shape(darr.ndim() - 1) * darr.shape(darr.ndim() - 2);
-    size_t repeats = darr.size() / module_size;
+    py::array_t<T> result (std::vector<py::ssize_t>{py::ssize_t(labels.n_good), py::ssize_t(L)});
+    fill_array<T>(result, T());
+
+    Linelets<T> linelets (result.request());
+
+    size_t module_size = indexer.binned_shape(1) * indexer.binned_shape(2);
+    size_t repeats = indexer.binned_shape(0);
     size_t n_chunks = threads / repeats + (threads % repeats > 0);
 
-    size_t y_size = darr.shape(darr.ndim() - 2);        // Frame size along y-axis
-    size_t chunk_size = y_size / n_chunks;              // Number of rows each thread will process
+    size_t chunk_size = module_size / n_chunks;
 
-    std::vector<Peaks> results;
-    std::vector<MaximaND<T>> finders;
-    for (size_t i = 0; i < repeats; i++)
+    std::vector<Direction> frontier (indexer.n_bins(), Direction::None);   // Current list of bins to process
+    std::vector<std::pair<PointIndex, Direction>> candidates;
+    size_t old_size = 0;
+
+    py::gil_scoped_release release;
+
+    thread_exception e;
+
+    #pragma omp parallel num_threads(threads)
     {
-        results.emplace_back(darr.shape(), radius);
-        finders.emplace_back(darr.slice_back(i, 2), structure);
+        std::vector<std::pair<PointIndex, Direction>> local_candidates; // Candidate points to write down to linelets buffer
+
+        #pragma omp for
+        for (size_t i = 0; i < n_chunks * repeats; i++)
+        {
+            bint_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
+
+            bint_t first = frame * module_size + chunk_id * chunk_size;
+            bint_t last = (chunk_id == n_chunks - 1) ? (frame + 1) * module_size : first + chunk_size;
+
+            for (bint_t bin_idx = first; bin_idx < last; bin_idx++)
+            {
+                if (peaks.is_peak(bin_idx))
+                {
+                    lint_t peak_index = peaks[bin_idx];
+                    auto linelet = fitter.fit_linelet(peak_index);
+                    auto is_inserted = linelets.insert(peaks.index(bin_idx), linelet);
+                    if (is_inserted) frontier[bin_idx] = Direction::Forward | Direction::Backward;
+                }
+            }
+        }
+
+        while (old_size < labels.n_labels)
+        {
+            local_candidates.clear();
+
+            #pragma omp for
+            for (size_t i = 0; i < n_chunks * repeats; i++)
+            {
+                bint_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
+
+                bint_t first = frame * module_size + chunk_id * chunk_size;
+                bint_t last = (chunk_id == n_chunks - 1) ? (frame + 1) * module_size : first + chunk_size;
+
+                for (bint_t bin_idx = first; bin_idx < last; bin_idx++)
+                {
+                    PointIndex neighbour {};
+                    auto direction = frontier[bin_idx];
+
+                    if (!is_none(direction & Direction::Backward))
+                    {
+                        auto is_good = fitter.neighbour_behind(bin_idx, linelets.line(peaks.index(bin_idx)), peaks, neighbour);
+                        if (is_good) local_candidates.push_back({neighbour, Direction::Backward});
+                    }
+
+                    if (!is_none(direction & Direction::Forward))
+                    {
+                        auto is_good = fitter.neighbour_ahead(bin_idx, linelets.line(peaks.index(bin_idx)), peaks, neighbour);
+                        if (is_good) local_candidates.push_back({neighbour, Direction::Forward});
+                    }
+
+                    frontier[bin_idx] = Direction::None; // Mark as processed
+                }
+            }
+
+            #pragma omp single
+            {
+                old_size = labels.n_labels;
+                candidates.clear();
+            }
+
+            #pragma omp critical
+            candidates.insert(candidates.end(), local_candidates.begin(), local_candidates.end());
+
+            #pragma omp barrier
+            #pragma omp single
+            {
+                for (const auto & [candidate, direction] : candidates)
+                {
+                    auto linelet = fitter.fit_linelet(candidate.index);
+                    if (linelet.pt0 == linelet.pt1) continue;
+
+                    frontier[candidate.bin] = frontier[candidate.bin] | direction; // Mark for processing in the next iteration if not marked as bad
+
+                    auto line_id = peaks.insert(candidate, darr);
+                    auto is_inserted = linelets.insert(line_id, linelet);
+                }
+            }
+        }
     }
+
+    e.rethrow();
+
+    py::gil_scoped_acquire acquire;
+
+    return result;
+}
+
+template <typename T>
+std::vector<Streak> detect_streaks(PeakLabels labels, py::array_t<lint_t> parray, py::array_t<T> larray, py::array_t<T> data, Structure structure, T vmin, T xtol, unsigned nfa, unsigned threads)
+{
+    if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
+
+    Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
+    Linelets<T> linelets (larray.request());
+
+    StreakFinder<T> finder (data.request(), structure, vmin, xtol, nfa, labels.radius);
+
+    size_t module_size = finder.indexer().binned_shape(1) * finder.indexer().binned_shape(2);
+    size_t repeats = finder.indexer().binned_shape(0);
+    size_t n_chunks = threads / repeats + (threads % repeats > 0);
+
+    size_t chunk_size = module_size / n_chunks;
+
+    std::vector<Streak> results (labels.n_seeds);
 
     thread_exception e;
 
@@ -112,272 +276,30 @@ std::vector<Peaks> detect_peaks(py::array_t<T> data, Structure structure, size_t
 
     #pragma omp parallel num_threads(threads)
     {
-        std::vector<Peaks> buffer;
-        for (size_t i = 0; i < repeats; i++) buffer.emplace_back(darr.shape(), radius);
-
         #pragma omp for nowait
         for (size_t i = 0; i < n_chunks * repeats; i++)
         {
             e.run([&]
             {
-                size_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
+                bint_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
 
-                // Calculate the y-axis range for this thread
-                size_t y_min = chunk_id * chunk_size;
-                size_t y_max = (chunk_id == n_chunks - 1) ? y_size : y_min + chunk_size;
+                bint_t first = frame * module_size + chunk_id * chunk_size;
+                bint_t last = (chunk_id == n_chunks - 1) ? (frame + 1) * module_size : first + chunk_size;
 
-                // Scanning through each row inside the chunk
-                for (size_t y = y_min; y < y_max; ++y)
+                for (bint_t bin_idx = first; bin_idx < last; bin_idx++)
                 {
-                    finders[frame].find(y, buffer[frame].inserter(finders[frame].data(), vmin));
-                }
-            });
-        }
-
-        if (n_chunks > 1)
-        {
-            #pragma omp critical
-            for (size_t i = 0; i < repeats; i++) results[i].merge(std::move(buffer[i]));
-        }
-        else
-        {
-            #pragma omp critical
-            for (size_t i = 0; i < repeats; i++) if (buffer[i].size()) results[i] = std::move(buffer[i]);
-        }
-    }
-
-    py::gil_scoped_acquire acquire;
-
-    e.rethrow();
-
-    return results;
-}
-
-template <typename T>
-void filter_peaks(std::vector<Peaks> & peaks, py::array_t<T> data, Structure structure, T vmin, size_t npts,
-                  std::optional<std::array<py::ssize_t, 2>> ax, unsigned threads)
-{
-    using PeakIterators = std::vector<Peaks::iterator>;
-    if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
-
-    if (data.ndim() < 2)
-        fail_container_check("wrong number of dimensions (" + std::to_string(data.ndim()) + " < 2)",
-                             std::vector<py::ssize_t>{data.shape(), data.shape() + data.ndim()});
-
-    Sequence<long> axes = init_axes(ax, data.ndim());
-
-    data = axes.swap_back(data);
-
-    array<T> darr {data.request()};
-
-    size_t module_size = darr.shape(darr.ndim() - 1) * darr.shape(darr.ndim() - 2);
-    size_t repeats = darr.size() / module_size;
-    if (repeats != peaks.size())
-        throw std::invalid_argument("Size of peaks list (" + std::to_string(peaks.size()) + ") is incompatible with data");
-
-    size_t n_chunks = threads / repeats + (threads % repeats > 0);
-
-    std::vector<FilterData<T>> peak_data;
-    for (size_t i = 0; i < repeats; i++) peak_data.emplace_back(darr.slice_back(i, 2));
-
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        std::vector<PeakIterators> buffers (repeats);
-
-        #pragma omp for
-        for (size_t i = 0; i < repeats * n_chunks; i++)
-        {
-            e.run([&]
-            {
-                size_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
-                size_t chunk_size = peaks[frame].size() / n_chunks;
-                auto first = std::next(peaks[frame].begin(), chunk_id * chunk_size);
-                auto last = (chunk_id == n_chunks - 1) ? peaks[frame].end() : std::next(first, chunk_size);
-                peak_data[frame].filter(first, last, buffers[frame], structure, vmin, npts);
-
-                if (n_chunks == 1)
-                {
-                    for (auto iter : buffers[frame]) peaks[i].erase(iter);
-                }
-            });
-        }
-
-        if (n_chunks > 1)
-        {
-            #pragma omp critical
-            for (size_t i = 0; i < repeats; i++) for (auto iter : buffers[i]) peaks[i].erase(iter);
-        }
-    }
-
-    py::gil_scoped_acquire acquire;
-
-    e.rethrow();
-}
-
-template  <typename T>
-auto p0_values(py::array_t<T> data, T vmin, std::optional<std::array<py::ssize_t, 2>> ax, unsigned threads)
-{
-    if (data.ndim() < 2)
-        fail_container_check("wrong number of dimensions (" + std::to_string(data.ndim()) + " < 2)",
-                             std::vector<py::ssize_t>{data.shape(), data.shape() + data.ndim()});
-
-    Sequence<long> axes = init_axes(ax, data.ndim());
-
-    data = axes.swap_back(data);
-
-    array<T> darr {data.request()};
-
-    std::vector<size_t> shape {darr.shape(darr.ndim() - 2), darr.shape(darr.ndim() - 1)};
-    size_t module_size = shape[0] * shape[1];
-    size_t repeats = darr.size() / module_size;
-
-    py::array_t<T> p0 {py::ssize_t(repeats)};
-    fill_array(p0, T());
-
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        std::vector<size_t> n_signal (repeats, 0);
-
-        #pragma omp for
-        for (size_t i = 0; i < darr.size(); i++)
-        {
-            size_t index = i / module_size;
-            if (darr[i] > vmin) n_signal[index]++;
-        }
-
-        #pragma omp critical
-        for (size_t i = 0; i < repeats; i++) p0.mutable_at(i) += T(n_signal[i]) / module_size;
-    }
-
-    return p0;
-}
-
-template <typename T>
-auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> p0, py::array_t<T> data, Structure structure, T xtol, T vmin, T min_size,
-                    unsigned lookahead, unsigned nfa, std::optional<std::array<py::ssize_t, 2>> ax, unsigned threads)
-{
-    if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
-    if (data.ndim() < 2)
-        fail_container_check("wrong number of dimensions (" + std::to_string(data.ndim()) + " < 2)",
-                             std::vector<py::ssize_t>{data.shape(), data.shape() + data.ndim()});
-
-    Sequence<long> axes = init_axes(ax, data.ndim());
-
-    data = axes.swap_back(data);
-
-    array<T> darr {data.request()};
-    array<T> p0_arr {p0.request()};
-
-    std::vector<size_t> shape {darr.shape(darr.ndim() - 2), darr.shape(darr.ndim() - 1)};
-    size_t module_size = shape[0] * shape[1];
-    size_t repeats = darr.size() / module_size;
-
-    if (repeats != peaks.size())
-        throw std::invalid_argument("Size of peaks list (" + std::to_string(peaks.size()) + ") must be equal to the number of data modules (" +
-                                     std::to_string(repeats) + ")");
-    if (repeats != p0.size())
-        throw std::invalid_argument("P0 array size (" + std::to_string(p0.size()) + ") must be equal to the number of data modules (" +
-                                     std::to_string(repeats) + ")");
-
-    size_t n_chunks = threads / repeats + (threads % repeats > 0);
-
-    std::vector<std::vector<StreakWrapper>> results (repeats);
-    std::vector<StreakFinderInput<T>> inputs;
-    for (size_t i = 0; i < repeats; i++)
-    {
-        inputs.emplace_back(peaks[i], darr.slice_back(i, 2), structure, lookahead, nfa);
-    }
-
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        std::vector<std::vector<StreakWrapper>> locals (repeats);
-        StreakMask buffer (shape);
-        auto compare = [](const StreakWrapper & a, const StreakWrapper & b){return a.size() < b.size();};
-
-        // Streak detection
-        #pragma omp for
-        for (size_t i = 0; i < repeats * n_chunks; i++)
-        {
-            e.run([&]
-            {
-                size_t frame = i / n_chunks, chunk_id = i - frame * n_chunks;
-                size_t chunk_size = inputs[frame].peaks().size() / n_chunks;
-                T log_eps = std::log(p0_arr[frame]) * min_size;
-
-                LOG(DEBUG) << "Processing frame " << frame << ", chunk " << chunk_id <<
-                              "/" << n_chunks - 1 << ": log_eps = " << log_eps;
-
-                auto first = chunk_id * chunk_size;
-                auto last = (chunk_id == n_chunks - 1) ? inputs[frame].peaks().size() : first + chunk_size;
-
-                for (auto seed : inputs[frame].seeds(first, last - first))
-                {
-                    if (buffer.is_free(seed))
+                    if (peaks.is_peak(bin_idx))
                     {
-                        auto streak = inputs[frame].get_streak(seed, xtol);
-
-                        LOG(DEBUG) << "Found streak with " << streak.pixels().size() << " points for seed point " <<
-                                       seed << " and line = " << streak.line();
-
-                        auto p_val = buffer.p_value(streak.region(), streak.line(), inputs[frame].data(), xtol, vmin, p0_arr[frame], StreakMask::not_used);
-                        if (p_val < log_eps)
+                        auto id = peaks.index(bin_idx);
+                        if (id < labels.n_seeds)
                         {
-                            buffer.add(streak.region(), streak.id());
-                            locals[frame].emplace_back(std::move(streak));
-
-                            LOG(DEBUG) << "Accepted streak for seed point " << seed << " with p_value = " << p_val;
+                            results[id].insert(bin_idx, linelets, peaks);
+                            auto is_good = finder.detect(results[id], linelets, peaks);
+                            if (!is_good) results[id] = Streak();
                         }
                     }
                 }
-                buffer.clear();
             });
-        }
-
-        // Streak assembly
-        #pragma omp critical
-        for (size_t i = 0; i < repeats; i++)
-        {
-            results[i].insert(results[i].end(),
-                std::make_move_iterator(locals[i].begin()),
-                std::make_move_iterator(locals[i].end())
-            );
-        }
-
-        // Streak filtering
-        #pragma omp barrier
-        #pragma omp for
-        for (size_t i = 0; i < repeats; i++)
-        {
-            std::sort(results[i].begin(), results[i].end(), compare);
-
-            for (const auto & streak : results[i]) buffer.add(streak.region(), streak.id());
-
-            T log_eps = std::log(p0_arr[i]) * min_size;
-            for (auto iter = results[i].begin(); iter != results[i].end();)
-            {
-            if (buffer.p_value(iter->region(), iter->line_as<T>(), inputs[i].data(), xtol, vmin, p0_arr[i], iter->id()) < log_eps) ++iter;
-                else
-                {
-                    buffer.remove(iter->region(), iter->id());
-                    iter = results[i].erase(iter);
-
-                    LOG(DEBUG) << "Rejected streak during filtering with seed " << iter->center()
-                               << " and line " << iter->line_as<T>();
-                }
-            }
-            buffer.clear();
         }
     }
 
@@ -388,91 +310,209 @@ auto detect_streaks(const std::vector<Peaks> & peaks, py::array_t<T> p0, py::arr
     return results;
 }
 
-template <typename T>
-py::array_t<T> p_value(const std::vector<StreakWrapper> & streaks, py::array_t<T> data, T p0, T xtol, T vmin)
+template <class InputIt, typename T>
+T p_value(InputIt first, InputIt last, const array<T> & data, T p0, T vmin, T xtol)
 {
-    array<T> darr {data.request()};
-    py::array_t<T> p_values (streaks.size());
-
-    if (darr.ndim() != 2)
-        fail_container_check("wrong number of dimensions (" + std::to_string(darr.ndim()) + " < 2)", darr.shape());
-
-    StreakMask buffer (darr.shape());
-    for (const auto & streak: streaks) buffer.add(streak.region(), streak.id());
-
-    size_t i = 0;
-    for (const auto & streak : streaks)
+    MomentsND<T, 2> moments;
+    for (auto iter = first; iter != last; ++iter)
     {
-        p_values.mutable_at(i++) = buffer.p_value(streak.region(), streak.line_as<T>(), darr, xtol, vmin, p0, streak.id());
+        moments.insert(*iter, data);
     }
+    auto line = moments.central().line();
 
-    return p_values;
-}
-
-template <typename T>
-void write_to_lines(py::array_t<T> & lines, const std::vector<StreakWrapper> & pattern)
-{
-    if (lines.shape(lines.ndim() - 1) != 4)
+    size_t n = 0, k = 0;
+    for (auto iter = first; iter != last; ++iter)
     {
-        auto err_txt = "last dimension of lines array must be 4 when width is not provided, but it is " + std::to_string(lines.shape(lines.ndim() - 1));
-        throw std::invalid_argument(err_txt);
-    }
-    if (lines.size() / 4 != pattern.size())
-    {
-        auto err_txt = "lines array has incompatible size of " + std::to_string(lines.size()) +
-                       " for " + std::to_string(pattern.size()) + " streaks";
-        throw std::invalid_argument(err_txt);
-    }
-
-    array<T> arr {lines.request()};
-
-    for (size_t i = 0; i < pattern.size(); i++)
-    {
-        auto line = pattern[i].line_as<T>();
-        arr[4 * i + 0] = line.pt0.x(); arr[4 * i + 1] = line.pt0.y();
-        arr[4 * i + 2] = line.pt1.x(); arr[4 * i + 3] = line.pt1.y();
-    }
-}
-
-template <typename T>
-void write_to_lines(py::array_t<T> & lines, const std::vector<std::vector<StreakWrapper>> & list)
-{
-    if (lines.shape(lines.ndim() - 1) != 4)
-    {
-        auto err_txt = "last dimension of lines array must be 4 when width is not provided, but it is " + std::to_string(lines.shape(lines.ndim() - 1));
-        throw std::invalid_argument(err_txt);
-    }
-
-    size_t total = 0;
-    for (const auto & pattern : list) total += pattern.size();
-
-    if (lines.size() / 4 != total)
-    {
-        auto err_txt = "lines array has incompatible size of " + std::to_string(lines.size()) +
-                       " for " + std::to_string(total) + " streaks";
-        throw std::invalid_argument(err_txt);
-    }
-
-    array<T> arr {lines.request()};
-
-    size_t offset = 0;
-    for (const auto & pattern : list)
-    {
-        for (const auto & streak : pattern)
+        auto point = make_point<2>(*iter, data.shape());
+        if (line.distance(point) < xtol)
         {
-            auto line = streak.line_as<T>();
-            arr[4 * offset + 0] = line.pt0.x(); arr[4 * offset + 1] = line.pt0.y();
-            arr[4 * offset + 2] = line.pt1.x(); arr[4 * offset + 3] = line.pt1.y();
-            ++offset;
+            n++;
+            if (data[*iter] >= vmin) k++;
         }
     }
+
+    return cbclib::detail::logbinom(n, k, p0);
 }
 
+template <typename T>
+py::array_t<T> p_values(const std::vector<Streak> & streaks, PeakLabels labels, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T p0, T vmin, T xtol, unsigned threads)
+{
+    if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
+
+    Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
+    array<T> darr {data.request()};
+
+    py::array_t<T> result (std::vector<py::ssize_t>{py::ssize_t(streaks.size())});
+    array<T> p_vals {result.request()};
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel for num_threads(threads)
+    for (size_t i = 0; i < streaks.size(); i++)
+    {
+        e.run([&]
+        {
+            const auto & streak = streaks[i];
+            std::vector<long> footprint;
+            footprint.reserve(streak.indices().size() * structure.size());
+
+            for (auto bin_idx : streak.indices())
+            {
+                long peak_idx = peaks[bin_idx];
+                for (const auto & shift : structure)
+                {
+                    auto neighbour_idx = cbclib::detail::shift_index(peak_idx, shift, darr.shape());
+                    if (neighbour_idx >= 0) footprint.push_back(neighbour_idx);
+                }
+            }
+
+            if (footprint.empty())
+            {
+                p_vals[i] = T();
+            }
+            else
+            {
+                std::sort(footprint.begin(), footprint.end());
+                auto end_unique = std::unique(footprint.begin(), footprint.end());
+
+                p_vals[i] = p_value(footprint.begin(), end_unique, darr, p0, vmin, xtol);
+            }
+        });
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    return result;
 }
+
+template <typename T>
+py::array_t<py::ssize_t> n_signal(const std::vector<Streak> & streaks, PeakLabels labels, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T vmin, unsigned threads)
+{
+    if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
+
+    Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
+    array<T> darr {data.request()};
+
+    py::array_t<py::ssize_t> result (std::vector<py::ssize_t>{py::ssize_t(streaks.size())});
+    array<py::ssize_t> counts {result.request()};
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel for num_threads(threads)
+    for (size_t i = 0; i < streaks.size(); i++)
+    {
+        e.run([&]
+        {
+            const auto & streak = streaks[i];
+            std::vector<long> footprint;
+            footprint.reserve(streak.indices().size() * structure.size());
+
+            for (auto bin_idx : streak.indices())
+            {
+                long peak_idx = peaks[bin_idx];
+                for (const auto & shift : structure)
+                {
+                    auto neighbour_idx = cbclib::detail::shift_index(peak_idx, shift, darr.shape());
+                    if (neighbour_idx >= 0) footprint.push_back(neighbour_idx);
+                }
+            }
+
+            if (footprint.empty())
+            {
+                counts[i] = 0;
+            }
+            else
+            {
+                std::sort(footprint.begin(), footprint.end());
+                auto end_unique = std::unique(footprint.begin(), footprint.end());
+
+                counts[i] = std::count_if(footprint.begin(), end_unique, [&darr, vmin](long idx)
+                {
+                    return darr[idx] >= vmin;
+                });
+            }
+        });
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    return result;
+}
+
+py::array_t<lint_t> streak_labels(py::array_t<lint_t> out, const std::vector<Streak> & streaks, py::array_t<py::ssize_t> ranking, PeakLabels labels, py::array_t<lint_t> parray, Structure structure, unsigned threads)
+{
+    if (structure.rank() != out.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(out.ndim()) + " to match labels dimensions");
+    if (streaks.size() != ranking.size()) throw std::invalid_argument("Size of ranking array must match number of streaks");
+
+    Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
+    array<py::ssize_t> ranks {ranking.request()};
+    array<lint_t> result {out.request()};
+    fill_array<lint_t>(out, 0);
+
+    PeaksIndexer indexer {result.shape(), labels.radius};
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        #pragma omp for
+        for (size_t i = 0; i < streaks.size(); i++)
+        {
+            e.run([&]
+            {
+                const auto & streak = streaks[i];
+                for (auto bin_idx : streak.indices())
+                {
+                    lint_t peak_idx = peaks[bin_idx];
+                    for (const auto & shift : structure)
+                    {
+                        auto neighbour_idx = cbclib::detail::shift_index(peak_idx, shift, result.shape());
+                        if (neighbour_idx >= 0)
+                        {
+                            // Keep 0 as background; among streak labels, the smallest sorted index wins.
+                            auto candidate = ranks[i] + 1;
+
+                            #pragma omp atomic compare
+                            if (result[neighbour_idx] == 0)
+                            {
+                                result[neighbour_idx] = candidate;
+                            }
+
+                            #pragma omp atomic compare
+                            if (candidate < result[neighbour_idx])
+                            {
+                                result[neighbour_idx] = candidate;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    return out;
+}
+
+} // namespace cbclib
 
 PYBIND11_MODULE(streak_finder, m)
 {
     using namespace cbclib;
+    namespace py = cbclib::py;
 
     try
     {
@@ -483,181 +523,77 @@ PYBIND11_MODULE(streak_finder, m)
         return;
     }
 
-    m.def("local_maxima", &local_maxima<int, int>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<int, std::vector<int>>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<long, int>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<long, std::vector<int>>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<unsigned, int>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<unsigned, std::vector<int>>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<size_t, int>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<size_t, std::vector<int>>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<float, int>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<float, std::vector<int>>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<double, int>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
-    m.def("local_maxima", &local_maxima<double, std::vector<int>>, py::arg("inp"), py::arg("structure"), py::arg("num_threads") = 1);
+    py::class_<PeakLabels>(m, "PeakLabels")
+        .def(py::init<py::array_t<long>, size_t, size_t, size_t, size_t>(), py::arg("labels"), py::arg("n_seeds"), py::arg("n_labels"), py::arg("n_good"), py::arg("radius"))
+        .def_readonly("labels", &PeakLabels::labels)
+        .def_readonly("n_seeds", &PeakLabels::n_seeds)
+        .def_readonly("n_labels", &PeakLabels::n_labels)
+        .def_readonly("n_good", &PeakLabels::n_good)
+        .def_readonly("radius", &PeakLabels::radius)
+        .def("keep_best", [](const PeakLabels & labels, double quantile)
+        {
+            return PeakLabels{labels.labels, size_t(labels.n_seeds * quantile), labels.n_labels, labels.n_good, labels.radius};
+        }, py::arg("quantile")=0.5);
 
-    py::class_<Peaks>(m, "Peaks")
-        .def(py::init<std::vector<py::ssize_t>, long>(), py::arg("shape"), py::arg("radius"))
-        .def(py::init([](py::list indices, std::array<py::ssize_t, 2> shape, long radius)
+    py::class_<Streak>(m, "Streak")
+        .def_property_readonly("indices", py::overload_cast<>(&Streak::indices, py::const_))
+        .def("line", [](const Streak & streak, PeakLabels labels, py::array_t<double> lines)
         {
-            Peaks peaks(shape, radius);
-            for (size_t i = 0; i < indices.size(); i++) peaks.insert(indices[i].cast<long>());
-            return peaks;
-        }), py::arg("indices"), py::arg("shape"), py::arg("radius"))
-       .def(py::init([](py::array_t<py::ssize_t> indices, std::array<py::ssize_t, 2> shape, long radius)
+            array<lint_t> lbarr {labels.labels.request()};
+            Linelets<double> linelets {lines.request()};
+            return streak.ends().line(linelets, lbarr).to_array();
+        }, py::arg("labels"), py::arg("linelets"))
+        .def("line", [](const Streak & streak, PeakLabels labels, py::array_t<float> lines)
         {
-            array<py::ssize_t> iarr {indices.request()};
-            Peaks peaks(shape, radius);
-            for (size_t i = 0; i < iarr.size(); i++) peaks.insert(iarr[i]);
-            return peaks;
-        }), py::arg("indices"), py::arg("shape"), py::arg("radius"))
-        .def_property("radius", [](const Peaks & peaks){return peaks.radius();}, nullptr)
-        .def_property("shape", [](const Peaks & peaks)
+            array<lint_t> lbarr {labels.labels.request()};
+            Linelets<float> linelets {lines.request()};
+            return streak.ends().line(linelets, lbarr).to_array();
+        }, py::arg("labels"), py::arg("linelets"));
+
+    py::class_<std::vector<Streak>> streaks_cls (m, "Streaks");
+    declare_list(streaks_cls, "Streaks");
+
+    streaks_cls.def("to_lines", [](const std::vector<Streak> & pattern, PeakLabels labels, py::array_t<double> lines)
         {
-            auto shape = peaks.shape();
-            return py::make_tuple(shape[0], shape[1]);
-        }, nullptr)
-        .def("__iter__", [](const Peaks & peaks)
-        {
-            return py::make_iterator(peaks.begin(), peaks.end());
-        }, py::keep_alive<0, 1>())
-        .def("__len__", [](const Peaks & peaks){return peaks.size();})
-        .def("__repr__", &Peaks::info)
-        .def("find_range", [](const Peaks & peaks, long index, long range)
-        {
-            auto point = make_point<2>(index, peaks.shape());
-            auto iter = peaks.find_range(point, range);
-            if (iter != peaks.end()) return *iter;
-            return long(-1);
-        }, py::arg("index"), py::arg("range"))
-        .def("append", [](Peaks & peaks, long index){peaks.insert(index);}, py::arg("index"), py::keep_alive<1, 2>())
-        .def("clear", [](Peaks & peaks){peaks.clear();})
-        .def("extend", [](Peaks & peaks, py::list indices)
-        {
-            for (size_t i = 0; i < indices.size(); i++)
+            array<lint_t> lbarr {labels.labels.request()};
+            Linelets<double> linelets {lines.request()};
+            std::vector<double> result;
+
+            for (const auto & streak : pattern)
             {
-                peaks.insert(indices[i].cast<long>());
+                auto line = streak.ends().line(linelets, lbarr).to_array();
+                result.insert(result.end(), line.begin(), line.end());
             }
-        }, py::arg("indices"), py::keep_alive<1, 2>())
-        .def("extend", [](Peaks & peaks, py::array_t<long> indices)
+            return as_pyarray(std::move(result), std::vector<py::ssize_t>{py::ssize_t(pattern.size()), L});
+        }, py::arg("labels"), py::arg("lines"))
+        .def("to_lines", [](const std::vector<Streak> & pattern, PeakLabels labels, py::array_t<float> lines)
         {
-            array<long> iarr {indices.request()};
-            for (size_t i = 0; i < iarr.size(); i++) peaks.insert(iarr[i]);
-        }, py::arg("indices"), py::keep_alive<1, 2>())
-        .def("remove", [](Peaks & peaks, long index)
-        {
-            auto point = make_point<2>(index, peaks.shape());
-            auto iter = peaks.find(point);
-            if (iter == peaks.end()) throw std::invalid_argument("Peaks.remove(index): index not in peaks");
-            peaks.erase(iter);
-        }, py::arg("index"));
+            array<lint_t> lbarr {labels.labels.request()};
+            Linelets<float> linelets {lines.request()};
+            std::vector<float> result;
 
-    py::class_<std::vector<Peaks>> list_cls (m, "PeaksList");
-    declare_list(list_cls, "PeaksList");
-
-    list_cls.def("index", [](const std::vector<Peaks> & list)
-        {
-            std::vector<py::ssize_t> indices;
-            for (size_t i = 0; i < list.size(); i++)
+            for (const auto & streak : pattern)
             {
-                for (size_t j = 0; j < list[i].size(); j++) indices.push_back(i);
+                auto line = streak.ends().line(linelets, lbarr).to_array();
+                result.insert(result.end(), line.begin(), line.end());
             }
-            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
-        })
-    .def("to_array", [](const std::vector<Peaks> & list)
-        {
-            std::vector<long> indices;
-            for (const auto & peaks : list) for (auto index : peaks) indices.push_back(index);
-            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
-        });
+            return as_pyarray(std::move(result), std::vector<py::ssize_t>{py::ssize_t(pattern.size()), L});
+        }, py::arg("labels"), py::arg("lines"));
 
-    py::class_<StreakWrapper>(m, "Streak")
-        .def(py::init([](py::ssize_t seed, Structure structure, py::array_t<float> data)
-        {
-            if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
+    m.def("detect_peaks", &detect_peaks<double>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("detect_peaks", &detect_peaks<float>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
 
-            array<float> darr {data.request()};
-            return StreakWrapper{Streak<float>{Region(seed, structure, darr.shape()), seed, darr}};
-        }), py::arg("seed"), py::arg("structure"), py::arg("data"))
-        .def(py::init([](py::ssize_t seed, Structure structure, py::array_t<double> data)
-        {
-            if (structure.rank() != 2) throw std::invalid_argument("Structure must have rank 2");
+    m.def("line_fit", &line_fit<double>, py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("line_fit", &line_fit<float>, py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("num_threads")=1);
 
-            array<double> darr {data.request()};
-            return StreakWrapper{Streak<double>{Region(seed, structure, darr.shape()), seed, darr}};
-        }), py::arg("seed"), py::arg("structure"), py::arg("data"))
-        .def_property("centers", [](const StreakWrapper & streak){ return streak.centers(); }, nullptr)
-        .def_property("ends", [](const StreakWrapper & streak){ return streak.ends(); }, nullptr)
-        .def_property("region", [](const StreakWrapper & streak){ return streak.region(); }, nullptr)
-        .def_property("id", [](const StreakWrapper & streak){return streak.id();}, nullptr)
-        .def("center", [](const StreakWrapper & streak){return streak.center().to_array();})
-        .def("central_line", [](const StreakWrapper & streak){return streak.central_line().to_array();})
-        .def("line", [](const StreakWrapper & streak){return streak.line_as<double>().to_array();});
+    m.def("detect_streaks", &detect_streaks<double>, py::arg("labels"), py::arg("peaks"), py::arg("linelets"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("xtol"), py::arg("nfa")=0, py::arg("num_threads")=1);
+    m.def("detect_streaks", &detect_streaks<float>, py::arg("labels"), py::arg("peaks"), py::arg("linelets"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("xtol"), py::arg("nfa")=0, py::arg("num_threads")=1);
 
-    py::class_<std::vector<StreakWrapper>> pattern_cls (m, "Pattern");
-    declare_list(pattern_cls, "Pattern");
+    m.def("p_values", &p_values<double>, py::arg("streaks"), py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"), py::arg("num_threads")=1);
+    m.def("p_values", &p_values<float>, py::arg("streaks"), py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"), py::arg("num_threads")=1);
 
-    pattern_cls.def("to_lines", [](const std::vector<StreakWrapper> & streaks, py::array_t<float> out)
-        {
-            write_to_lines(out, streaks);
-            return out;
-        }, py::arg("out"))
-        .def("to_lines", [](const std::vector<StreakWrapper> & streaks, py::array_t<double> out)
-        {
-            write_to_lines(out, streaks);
-            return out;
-        }, py::arg("out"))
-        .def("to_regions", [](const std::vector<StreakWrapper> & streaks)
-        {
-            std::vector<Region> regions;
-            for (const auto & streak : streaks)
-            {
-                regions.push_back(streak.region());
-            }
-            return regions;
-        });
+    m.def("n_signal", &n_signal<double>, py::arg("streaks"), py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("n_signal", &n_signal<float>, py::arg("streaks"), py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("num_threads")=1);
 
-    py::class_<std::vector<std::vector<StreakWrapper>>> patterns_cls (m, "PatternList");
-    declare_list(patterns_cls, "PatternList");
-
-    patterns_cls.def("total", [](const std::vector<std::vector<StreakWrapper>> & list)
-        {
-            size_t total = 0;
-            for (const auto & pattern : list) total += pattern.size();
-            return total;
-        })
-        .def("index", [](const std::vector<std::vector<StreakWrapper>> & list)
-        {
-            std::vector<py::ssize_t> indices;
-            for (size_t index = 0; index < list.size(); index++)
-            {
-                for (size_t i = 0; i < list[index].size(); i++) indices.push_back(index);
-            }
-            return as_pyarray(std::move(indices), std::array<size_t, 1>{indices.size()});
-        })
-        .def("to_lines", [](const std::vector<std::vector<StreakWrapper>> & list, py::array_t<float> out)
-        {
-            write_to_lines(out, list);
-            return out;
-        }, py::arg("out"))
-        .def("to_lines", [](const std::vector<std::vector<StreakWrapper>> & list, py::array_t<double> out)
-        {
-            write_to_lines(out, list);
-            return out;
-        }, py::arg("out"));
-
-    m.def("detect_peaks", &detect_peaks<double>, py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("detect_peaks", &detect_peaks<float>, py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-
-    m.def("filter_peaks", &filter_peaks<double>, py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("filter_peaks", &filter_peaks<float>, py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("npts"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-
-    m.def("p0_values", &p0_values<double>, py::arg("data"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("p0_values", &p0_values<float>, py::arg("data"), py::arg("vmin"), py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-
-    m.def("detect_streaks", &detect_streaks<double>, py::arg("peaks"), py::arg("p0"), py::arg("data"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-    m.def("detect_streaks", &detect_streaks<float>, py::arg("peaks"), py::arg("p0"), py::arg("data"), py::arg("structure"), py::arg("xtol"), py::arg("vmin"), py::arg("min_size"), py::arg("lookahead")=0, py::arg("nfa")=0, py::arg("axes")=std::nullopt, py::arg("num_threads")=1);
-
-    m.def("p_value", &p_value<double>, py::arg("streaks"), py::arg("data"), py::arg("p0"), py::arg("xtol"), py::arg("vmin"));
-    m.def("p_value", &p_value<float>, py::arg("streaks"), py::arg("data"), py::arg("p0"), py::arg("xtol"), py::arg("vmin"));
+    m.def("streak_labels", &streak_labels, py::arg("out"), py::arg("streaks"), py::arg("indices"), py::arg("labels"), py::arg("peaks"), py::arg("structure"), py::arg("num_threads")=1);
 }

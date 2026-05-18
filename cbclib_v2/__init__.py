@@ -16,6 +16,7 @@ from ._src.run import (RunConfig, BaseRun, XFELRunConfig, XFELRun, SwissFELConfi
                        open_run)
 from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
 from ._src.streaks import Lines, StackedStreaks, Streaks
+from . import annotations
 from . import indexer
 from . import label
 from . import ndimage

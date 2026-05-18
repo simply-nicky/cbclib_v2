@@ -73,7 +73,7 @@ auto dilate_with_mask(py::array_t<bool> input, Structure structure, size_t itera
 
     #pragma omp parallel num_threads(threads)
     {
-        auto func = [&marr](long index){ return true; };
+        auto func = [&marr](long index){ return marr[index]; };
 
         // Finding the chunk for each thread
         int thread_id = omp_get_thread_num();
@@ -106,16 +106,14 @@ auto dilate_with_mask(py::array_t<bool> input, Structure structure, size_t itera
     return output;
 }
 
-LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, unsigned threads)
+template <typename I>
+LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsigned threads)
 {
-    // Deep copy of input array
-    auto output = py::array_t<bool>{input.request()};
-    array<bool> out {output.request()};
-    array<bool> inp {input.request()};
+    array<I> inp {input.request()};
 
-    if (out.ndim() != structure.rank())
+    if (input.ndim() != structure.rank())
     {
-        throw std::invalid_argument("input array dimension (" + std::to_string(out.ndim()) +
+        throw std::invalid_argument("input array dimension (" + std::to_string(input.ndim()) +
                                     ") does not match structure rank (" + std::to_string(structure.rank()) + ")");
     }
 
@@ -128,39 +126,38 @@ LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, uns
 
     #pragma omp parallel num_threads(threads)
     {
-        auto func = [&inp](long index){ return inp[index]; };
-        std::vector<Region> buffer;
-
         // Finding the chunk for each thread
         int thread_id = omp_get_thread_num();
-        size_t chunk = (out.size() + threads - 1) / threads;
+        size_t chunk = (inp.size() + threads - 1) / threads;
 
         size_t thread_start = thread_id * chunk;
-        size_t thread_end = std::min((thread_id + 1) * chunk, out.size());
+        size_t thread_end = std::min((thread_id + 1) * chunk, inp.size());
+
+        std::vector<bool> visited(thread_end - thread_start, false);
 
         // Each thread processes its own chunk
         for (size_t index = thread_start; index < thread_end; index++)
         {
-            if (out[index])
+            if (!visited[index - thread_start] && inp[index])
             {
+                auto func = [&inp, root=index](long index){ return inp[index] == inp[root]; };
+
                 Region region;
                 region.insert(region.end(), index);
-                region.dilate(func, structure, out.shape());
+                region.dilate(func, structure, inp.shape());
 
                 for (auto index : region)
                 {
-                    if (index >= thread_start && index < thread_end) out[index] = false;
+                    if (index >= thread_start && index < thread_end) visited[index - thread_start] = true;
                 }
 
                 auto min_index = *region.begin();
                 if (region.size() >= npts && min_index >= thread_start && min_index < thread_end)
                 {
-                    buffer.emplace_back(std::move(region));
+                    thread_buffers[thread_id].emplace_back(std::move(region));
                 }
             }
         }
-
-        thread_buffers[thread_id] = std::move(buffer);
     }
 
     // I need to keep the order of regions in the output the same as in the input
@@ -174,12 +171,10 @@ LabelResult label(py::array_t<bool> input, Structure structure, size_t npts, uns
 
     e.rethrow();
 
-    return LabelResult(std::vector<py::ssize_t>(output.shape(), output.shape() + output.ndim()), std::move(result));
+    return LabelResult(std::vector<py::ssize_t>(input.shape(), input.shape() + input.ndim()), std::move(result));
 }
 
-template <typename T, size_t N, typename Func, typename = std::enable_if_t<
-    std::is_invocable_v<remove_cvref_t<Func>, PixelsND<T, N>>
->>
+template <typename T, size_t N, typename Func, typename Ret = std::invoke_result_t<remove_cvref_t<Func>, PixelsND<T, N>>, size_t M = std::tuple_size_v<Ret>>
 py::array_t<T> apply_impl(const std::vector<Region> & regions, py::array_t<T> data, Func && func)
 {
     array<T> darr {data.request()};
@@ -192,13 +187,10 @@ py::array_t<T> apply_impl(const std::vector<Region> & regions, py::array_t<T> da
         results.insert(results.end(), result.begin(), result.end());
     }
 
-    if (results.size())
-    {
-        auto item_size = results.size() / regions.size();
-        std::vector<size_t> shape {regions.size(), item_size};
-        return as_pyarray(std::move(results), shape);
-    }
-    return py::array_t<T>{};
+    std::vector<size_t> shape {regions.size(), M};
+
+    if (results.size()) return as_pyarray(std::move(results), shape);
+    return py::array_t<T>{shape};
 }
 
 template <typename T, typename Func>
@@ -220,10 +212,62 @@ py::array_t<T> apply(const std::vector<Region> & regions, py::array_t<T> data, F
 template <typename T, typename Func>
 void declare_region_func(py::module & m, Func && func, const std::string & funcstr)
 {
-    m.def(funcstr.c_str(), [f = std::forward<Func>(func)](LabelResult labels, py::array_t<T> data)
+    m.def(funcstr.c_str(), [f = std::forward<Func>(func)](const LabelResult & labels, py::array_t<T> data)
     {
         return apply(labels.regions(), std::move(data), f);
     }, py::arg("labels"), py::arg("data"));
+}
+
+template <typename T, size_t N>
+py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol)
+{
+    const auto & regions = labels.regions();
+    py::array_t<T> result (std::vector<py::ssize_t>{py::ssize_t(regions.size())});
+    array<T> out {result.request()};
+    array<T> lines {larray.request()};
+    array<T> darr {data.request()};
+
+    for (size_t i = 0; i < regions.size(); ++i)
+    {
+        // Lines have shape (n_lines, data.ndim() * 2) and follow xyz convention
+        LineND<T, N> line {to_point<N>(lines, 2 * i * N), to_point<N>(lines, 2 * i * N + N)};
+
+        size_t n = 0, k = 0;
+        for (auto index : regions[i])
+        {
+            auto point = make_point<N>(index, darr.shape());
+            if (line.distance(point) < xtol)
+            {
+                n++;
+                if (darr[index] >= vmin) k++;
+            }
+        }
+
+        out[i] = detail::logbinom(n, k, p0);
+    }
+
+    return result;
+}
+
+template <typename T>
+py::array_t<T> p_values(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol)
+{
+    if (larray.ndim() != 2 || larray.shape(1) != data.ndim() * 2)
+    {
+        throw std::invalid_argument("lines array must have shape (n_lines, data.ndim() * 2)");
+    }
+
+    switch (data.ndim())
+    {
+        case 2: return p_values_nd<T, 2>(labels, larray, data, p0, vmin, xtol);
+        case 3: return p_values_nd<T, 3>(labels, larray, data, p0, vmin, xtol);
+        case 4: return p_values_nd<T, 4>(labels, larray, data, p0, vmin, xtol);
+        case 5: return p_values_nd<T, 5>(labels, larray, data, p0, vmin, xtol);
+        case 6: return p_values_nd<T, 6>(labels, larray, data, p0, vmin, xtol);
+        case 7: return p_values_nd<T, 7>(labels, larray, data, p0, vmin, xtol);
+        default:
+            throw std::invalid_argument("Unsupported number of dimensions: " + std::to_string(data.ndim()));
+    }
 }
 
 }
@@ -352,9 +396,67 @@ PYBIND11_MODULE(label, m)
     declare_list(regions, "Regions");
 
     py::class_<LabelResult>(m, "LabelResult")
+        .def_static("from_array", [](py::array_t<py::ssize_t> labels, py::none index) -> LabelResult
+        {
+            array<py::ssize_t> larr {labels.request()};
+
+            py::ssize_t max_label = 0;
+            for (auto value : larr)
+            {
+                if (value > max_label) max_label = value;
+            }
+
+            std::vector<Region> regions(max_label);
+            for (size_t i = 0; i < larr.size(); ++i)
+            {
+                auto label_id = larr[i];
+                if (label_id <= 0) continue;
+
+                regions[label_id - 1].insert(regions[label_id - 1].end(), i);
+            }
+
+            for (auto iter = regions.begin(); iter != regions.end();)
+            {
+                if (iter->size() == 0) iter = regions.erase(iter);
+                else ++iter;
+            }
+
+            return LabelResult(std::vector<py::ssize_t>(labels.shape(), labels.shape() + labels.ndim()), std::move(regions));
+        }, py::arg("labels"), py::arg("index") = py::none())
+        .def_static("from_array", [](py::array_t<py::ssize_t> labels, py::array_t<py::ssize_t> index) -> LabelResult
+        {
+            array<py::ssize_t> larr {labels.request()};
+            array<py::ssize_t> iarr {index.request()};
+
+            std::unordered_map<py::ssize_t, size_t> positions;
+            positions.reserve(iarr.size());
+            for (size_t i = 0; i < iarr.size(); ++i)
+            {
+                if (iarr[i] <= 0)
+                {
+                    throw std::invalid_argument("index array must contain positive label ids");
+                }
+                positions.emplace(iarr[i], i);
+            }
+
+            std::vector<Region> regions (positions.size());
+            for (size_t i = 0; i < larr.size(); ++i)
+            {
+                auto label_id = larr[i];
+                if (label_id <= 0) continue;
+
+                auto iter = positions.find(label_id);
+                if (iter != positions.end())
+                {
+                    regions[iter->second].insert(regions[iter->second].end(), i);
+                }
+            }
+
+            return LabelResult(std::vector<py::ssize_t>(labels.shape(), labels.shape() + labels.ndim()), std::move(regions));
+        }, py::arg("labels"), py::arg("index"))
         .def_property("regions", [](const LabelResult & labels){ return labels.regions(); }, [](LabelResult & labels, std::vector<Region> regions){ labels.regions() = std::move(regions); })
         .def_property_readonly("shape", [](const LabelResult & labels){ return labels.shape(); })
-        .def("to_mask", [](const LabelResult & labels, py::array_t<py::ssize_t> index, py::none out) -> py::array_t<py::ssize_t>
+        .def("to_array", [](const LabelResult & labels, py::array_t<py::ssize_t> index, py::none out) -> py::array_t<py::ssize_t>
         {
             if (index.size() != static_cast<py::ssize_t>(labels.regions().size()))
                 throw std::invalid_argument("Index array size does not match number of regions");
@@ -371,7 +473,7 @@ PYBIND11_MODULE(label, m)
             }
             return result;
         }, py::arg("index"), py::arg("out") = py::none())
-        .def("to_mask", [](const LabelResult & labels, py::array_t<int> index, py::array_t<int> out) -> py::array_t<int>
+        .def("to_array", [](const LabelResult & labels, py::array_t<int> index, py::array_t<int> out) -> py::array_t<int>
         {
             if (index.size() != static_cast<py::ssize_t>(labels.regions().size()))
                 throw std::invalid_argument("Index array size does not match number of regions");
@@ -425,7 +527,9 @@ PYBIND11_MODULE(label, m)
     m.def("binary_dilation", &dilate, py::arg("inp"), py::arg("structure"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("num_threads") = 1);
     m.def("binary_dilation", &dilate_with_mask, py::arg("inp"), py::arg("structure"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("num_threads") = 1);
 
-    m.def("label", &label, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
+    m.def("label", &label<bool>, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
+    m.def("label", &label<int>, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
+    m.def("label", &label<py::ssize_t>, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
 
     auto total_mass = []<typename T, size_t N>(const PixelsND<T, N> & region)
     {
@@ -474,4 +578,7 @@ PYBIND11_MODULE(label, m)
 
     declare_region_func<double>(m, line_fit, "line_fit");
     declare_region_func<float>(m, line_fit, "line_fit");
+
+    m.def("p_values", &p_values<double>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"));
+    m.def("p_values", &p_values<float>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"));
 }

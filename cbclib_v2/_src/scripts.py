@@ -223,9 +223,8 @@ class StreakParameters(Container):
     structure   : StructureParameters
     xtol        : float
     vmin        : float
-    min_size    : int
+    min_size    : float
     nfa         : int
-    lookahead   : int
 
 @dataclass
 class StreakFinderConfig(BaseParameters):
@@ -240,12 +239,19 @@ def detect_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadat
     data = scale_background(frames, images, metadata, params.scaling)
 
     data = data.update_snr(params.std_min)
-    det_obj = data.streak_detector(params.streaks.structure.to_structure())
-    peaks = det_obj.detect_peaks(params.peaks.vmin, params.peaks.npts,
-                                 params.peaks.structure.to_structure())
-    streaks = det_obj.detect_streaks(peaks, params.streaks.xtol, params.streaks.vmin,
-                                     params.streaks.min_size, params.streaks.lookahead,
-                                     nfa=params.streaks.nfa)
+    ndim = data.snr.ndim
+    det_obj = data.streak_detector(params.streaks.structure.to_structure(ndim),
+                                   params.streaks.vmin)
+    regions = det_obj.detect_regions(params.peaks.npts,
+                                     params.peaks.structure.to_structure(ndim))
+    labels, peaks = det_obj.detect_peaks(regions)
+    linelets = det_obj.fit_linelets(labels, peaks)
+    result = det_obj.detect_streaks(labels, peaks, linelets, params.streaks.xtol,
+                                    nfa=params.streaks.nfa)
+    labeled = det_obj.streak_labels(result, labels, peaks)
+    lines = det_obj.line_fit(labeled)
+    scores = det_obj.min_support(labeled, lines, params.streaks.xtol)
+    streaks = det_obj.to_streaks(lines[scores >= params.streaks.min_size])
     if isinstance(frames, int):
         return streaks.replace(index=streaks.index + frames)
     return streaks.replace(index=frames[streaks.index])

@@ -19,7 +19,8 @@ from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform
 from .config import get_cpu_config
 from .src import bresenham, label as cpu_label, median as cpu_median, streak_finder
 from .src.label import Structure, LabelResult as NPLabelResult
-from .src.streak_finder import PatternList, Peaks, PeaksList
+from .src.streak_finder import PeakLabels as NPeakLabels, Streaks as NPStreaks
+from .src.cuda_streak_finder import PeakLabels as CPeakLabels, Streaks as CPStreaks
 
 def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
     """Dispatch to CPU or GPU implementation based on array namespace/device.
@@ -79,16 +80,13 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
     return decorator
 
 if CuPy is not None:
-    from .src import cuda_draw_lines, cuda_label, cuda_median
+    from .src import cuda_draw_lines, cuda_label, cuda_median, cuda_streak_finder
     from cupyx.scipy import ndimage as _ndimage
 
     class NDImageProtocol(Protocol):
         def binary_dilation(self, input: BoolArray, structure: BoolArray, iterations: int=1,
                             mask: BoolArray | None=None, output: BoolArray | None=None,
                             brute_force: bool=False) -> CPBoolArray: ...
-
-        def sum_labels(self, input: RealArray, labels: IntArray | None,
-                       index: IntSequence | None=None) -> CPRealArray: ...
 
         def minimum(self, input: RealArray | IntArray, labels: IntArray | None=None,
                     index: IntSequence | None=None) -> CPRealArray | CPIntArray: ...
@@ -120,10 +118,15 @@ else:
     cuda_label = None
     cuda_median = None
     cupy_ndimage = None
+    cuda_streak_finder = None
 
     def binary_structure(structure: Structure, shape: Sequence[int] | None=None) -> CPBoolArray:
         raise RuntimeError("CUDA backend is not available. Please, check if you have installed " \
                            "the cbclib_v2 with GPU support.")
+
+    def shift_axis(inp: Array, axis: Tuple[int, ...]) -> Array:
+        raise RuntimeError("CUDA backend is not available. Please, check if you have installed " \
+                            "the cbclib_v2 with GPU support.")
 
 def _accumulate_lines_cpu(out: RealArray, lines: RealArray, terms: IntArray,
                           frames: IntArray, max_val: float=1.0,
@@ -334,33 +337,35 @@ class CPLabelResult(NamedTuple):
 
 LabelResult = NPLabelResult | CPLabelResult
 
-def _label_cpu(inp: Array, structure: Structure, npts: int=1) -> NPLabelResult:
+def _label_cpu(inp: NDBoolArray | NDIntArray, structure: Structure, npts: int=1) -> NPLabelResult:
     num_threads = get_cpu_config().effective_num_threads()
     return cpu_label.label(inp=inp, structure=structure, npts=npts,
                            num_threads=num_threads)
 
-def _label_gpu(inp: Array, structure: Structure, npts: int=1) -> LabelResult:
+def _label_gpu(inp: CPBoolArray | CPIntArray, structure: Structure, npts: int=1) -> LabelResult:
     if cuda_label is None:
         raise RuntimeError("label is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
-    labels, n_labels = cuda_label.label(inp=inp, structure=structure, npts=npts)
-    return CPLabelResult(labels=labels, index=CuPy.arange(1, n_labels + 1, dtype=int))
+    xp = CuPy
+    labels = xp.empty_like(inp, dtype=xp.int32)
+    labels, n_labels = cuda_label.label(out=labels, inp=inp, structure=structure, npts=npts)
+    return CPLabelResult(labels=labels, index=xp.arange(1, n_labels + 1, dtype=int))
 
 @overload
-def label(inp: NDRealArray, structure: Structure, npts: int=1) -> NPLabelResult: ...
+def label(inp: NDBoolArray | NDIntArray, structure: Structure, npts: int=1) -> NPLabelResult: ...
 
 @overload
-def label(inp: CPRealArray, structure: Structure, npts: int=1) -> CPLabelResult: ...
+def label(inp: CPBoolArray | CPIntArray, structure: Structure, npts: int=1) -> CPLabelResult: ...
 
 @overload
-def label(inp: JaxRealArray, structure: Structure, npts: int=1) -> LabelResult: ...
+def label(inp: JaxBoolArray | JaxIntArray, structure: Structure, npts: int=1) -> LabelResult: ...
 
 @overload
-def label(inp: Array, structure: Structure, npts: int=1) -> LabelResult: ...
+def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> LabelResult: ...
 
 @array_dispatch("inp", cpu_impl=_label_cpu, gpu_impl=_label_gpu)
-def label(inp: Array, structure: Structure, npts: int=1) -> LabelResult:
+def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> LabelResult:
     """Label connected components in a binary array.
 
     Args:
@@ -377,21 +382,13 @@ def _center_of_mass_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArray:
     return cpu_label.center_of_mass(labels=labels, data=data)
 
 def _center_of_mass_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
-    if cupy_ndimage is None:
+    if cuda_label is None:
         raise RuntimeError("center_of_mass is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
     xp = CuPy
-    if labels.index.size == 0:
-        return xp.empty((0, data.ndim), dtype=data.dtype)
-
-    mu = cupy_ndimage.sum_labels(data, labels=labels.labels, index=labels.index)
-    grids = xp.ogrid[[slice(0, s) for s in data.shape]]
-    mu_x = []
-    for dim in range(data.ndim):
-        x = cupy_ndimage.sum_labels(grids[dim] * data, labels=labels.labels, index=labels.index)
-        mu_x.append(x)
-    return xp.stack(mu_x, axis=-1) / mu[:, None]
+    out = xp.empty((labels.index.shape[0], data.ndim), dtype=data.dtype)
+    return cuda_label.center_of_mass(out=out, labels=labels.labels, index=labels.index, data=data)
 
 @overload
 def center_of_mass(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
@@ -425,26 +422,14 @@ def _covariance_matrix_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArra
     return matrices.reshape(-1, data.ndim, data.ndim)
 
 def _covariance_matrix_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
-    if cupy_ndimage is None:
+    if cuda_label is None:
         raise RuntimeError("covariance_matrix is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
     xp = CuPy
-    if labels.index.size == 0:
-        return xp.empty((0, data.ndim, data.ndim), dtype=data.dtype)
-
-    mu = cupy_ndimage.sum_labels(data, labels=labels.labels, index=labels.index)
-    grids = xp.ogrid[[slice(0, s) for s in data.shape]]
-    mu_x = xp.stack([cupy_ndimage.sum_labels(grids[dim] * data, labels=labels.labels,
-                                             index=labels.index)
-                     for dim in range(data.ndim)])
-    mu_x /= mu
-    mu_xx = xp.stack([cupy_ndimage.sum_labels(grids[dim // data.ndim] *
-                                              grids[dim % data.ndim] * data,
-                                              labels=labels.labels, index=labels.index)
-                      for dim in range(data.ndim * data.ndim)])
-    mu_xx = xp.reshape(mu_xx, (data.ndim, data.ndim, -1)) / mu
-    return xp.permute_dims((mu_xx - mu_x[:, None, :] * mu_x[None, :, :]), (2, 0, 1))
+    out = xp.empty((labels.index.shape[0], data.ndim, data.ndim), dtype=data.dtype)
+    return cuda_label.covariance_matrix(out=out, labels=labels.labels, index=labels.index,
+                                        data=data)
 
 @overload
 def covariance_matrix(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
@@ -496,7 +481,7 @@ def labels(labels: CPLabelResult) -> CPIntArray: ...
 def labels(labels: LabelResult) -> NDIntArray | CPIntArray:
     """Get array of region labels."""
     if isinstance(labels, NPLabelResult):
-        return labels.to_mask(index(labels))
+        return labels.to_array(index(labels))
     if isinstance(labels, CPLabelResult):
         return labels.labels
     raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
@@ -544,7 +529,7 @@ def ellipse_fit(labels: LabelResult, data: RealArray) -> RealArray:
 def to_line(centers: RealArray, matrix: RealArray) -> RealArray:
     xp = array_namespace(centers, matrix)
     if centers.size == 0 and matrix.size == 0:
-        return xp.empty((0, 4), dtype=centers.dtype)
+        return xp.empty((0, 2 * centers.shape[-1]), dtype=centers.dtype)
 
     mu_xx, mu_xy, mu_yy = matrix[..., -1, -1], matrix[..., -1, -2], matrix[..., -2, -2]
     theta = 0.5 * xp.atan2(2 * mu_xy, (mu_xx - mu_yy))
@@ -585,9 +570,54 @@ def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
     if isinstance(labels, NPLabelResult):
         return cpu_label.line_fit(labels, data)
     if isinstance(labels, CPLabelResult):
-        centers = center_of_mass(labels, data)
-        covmat = covariance_matrix(labels, data)
+        centers = _center_of_mass_gpu(labels, data)
+        covmat = _covariance_matrix_gpu(labels, data)
         return to_line(centers, covmat)
+    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
+
+@overload
+def p_values(labels: NPLabelResult, lines: NDRealArray, data: NDRealArray, p0: float, vmin: float,
+             xtol: float) -> NDRealArray: ...
+
+@overload
+def p_values(labels: LabelResult, lines: JaxRealArray, data: JaxRealArray, p0: float, vmin: float,
+             xtol: float) -> JaxRealArray: ...
+
+@overload
+def p_values(labels: CPLabelResult, lines: CPRealArray, data: CPRealArray, p0: float, vmin: float,
+             xtol: float) -> CPRealArray: ...
+
+@overload
+def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, vmin: float,
+             xtol: float) -> RealArray: ...
+
+def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, vmin: float,
+             xtol: float) -> RealArray:
+    """Calculate p-values for each labeled region based on the data values.
+
+    Args:
+        labels: Labeled regions.
+        lines : Line parameters for each region. Must have shape (N, 2 * data.ndim) and follow xyz
+            format.
+        data: Input data array.
+        p0: Expected p-value for the null hypothesis.
+        vmin: Minimum data value to consider for p-value calculation.
+        xtol: Tolerance for convergence of p-value estimation.
+
+    Returns:
+        Array of p-values for each region.
+    """
+    if isinstance(labels, NPLabelResult):
+        return cpu_label.p_values(labels=labels, lines=lines, data=data, p0=p0, vmin=vmin,
+                                  xtol=xtol)
+    if isinstance(labels, CPLabelResult):
+        if cuda_label is None:
+            raise RuntimeError("label is not compiled for the current platform. "
+                               "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+        out = CuPy.empty(labels.index.shape, dtype=data.dtype)
+        return cuda_label.p_values(out=out, labels=labels.labels, index=labels.index, lines=lines,
+                                   data=data, p0=p0, vmin=vmin, xtol=xtol)
     raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
 
 @overload
@@ -597,16 +627,10 @@ def median(inp: NDRealArray, axis: IntSequence=0) -> NDRealArray: ...
 def median(inp: NDIntArray, axis: IntSequence=0) -> NDIntArray: ...
 
 @overload
-def median(inp: CPRealArray, axis: IntSequence=0) -> CPRealArray: ...
+def median(inp: CPRealArray | CPIntArray, axis: IntSequence=0) -> CPRealArray | CPIntArray: ...
 
 @overload
-def median(inp: CPIntArray, axis: IntSequence=0) -> CPIntArray: ...
-
-@overload
-def median(inp: JaxRealArray, axis: IntSequence=0) -> JaxRealArray: ...
-
-@overload
-def median(inp: JaxIntArray, axis: IntSequence=0) -> JaxIntArray: ...
+def median(inp: JaxRealArray | JaxIntArray, axis: IntSequence=0) -> JaxRealArray | JaxIntArray: ...
 
 def median(inp: RealArray | IntArray, axis: IntSequence=0) -> RealArray | IntArray:
     """Calculate a median along the axis.
@@ -660,7 +684,6 @@ def _robust_mean_gpu(inp: IntArray | RealArray, axis: int | Tuple[int, ...]=0, r
 
     for _ in range(n_iter):
         errors = (inp - mean) * (inp - mean)
-        # idxs = CuPy.argsort(errors, axis=-1)
         idxs = CuPy.argpartition(errors, (j0, j1), axis=-1)
         mean = CuPy.mean(CuPy.take_along_axis(inp, idxs[..., j0:j1], axis=-1),
                          axis=-1, keepdims=True)
@@ -795,225 +818,355 @@ def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: int | Tup
     """
     ...
 
-def _detect_peaks_cpu(data: RealArray, radius: int, vmin: float, axes: Tuple[int, int] | None=None
-                      ) -> PeaksList:
-    num_threads = get_cpu_config().effective_num_threads()
-    return streak_finder.detect_peaks(data=data, structure=Structure([1, 1], 1), radius=radius,
-                                      vmin=vmin, axes=axes, num_threads=num_threads)
+# New GPU-friendly streak detection algorithm
 
-def _detect_peaks_gpu(data: RealArray, radius: int, vmin: float, axes: Tuple[int, int] | None=None
-                      ) -> CPIntArray:
-    if cuda_label is None:
+def _detect_peaks_cpu(data: RealArray, labeled: NPLabelResult, radius: int, vmin: float) -> NDIntArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    xp = NumPy
+    labels_array = labeled.to_array(xp.arange(1, len(labeled.regions) + 1))
+    radii = [0,] * (data.ndim - 2) + [1, 1]
+
+    return streak_finder.detect_peaks(labels_array, data, Structure(radii, 1), radius, vmin,
+                                          num_threads=num_threads)
+
+def binned_shape(shape: Tuple[int, ...], radius: int) -> Tuple[int, ...]:
+    return shape[:-2] + ((shape[-2] + radius - 1) // radius, (shape[-1] + radius - 1) // radius)
+
+def _detect_peaks_gpu(data: RealArray, labeled: CPLabelResult, radius: int, vmin: float) -> CPIntArray:
+    if cuda_streak_finder is None:
         raise RuntimeError("detect_peaks is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
-    if axes is not None:
-        data = shift_axis(data, axes)
-
     xp = CuPy
-    peaks = xp.zeros(data.shape[:-2] + (data.shape[-2] // radius, data.shape[-1] // radius),
-                     dtype=int)
-    return cuda_label.detect_peaks(peaks=peaks, data=data, structure=Structure([1, 1], 1),
-                                   radius=radius, vmin=vmin)
+    radii = [0,] * (data.ndim - 2) + [1, 1]
+
+    out = xp.empty(binned_shape(data.shape, radius), dtype=xp.int32)
+    return cuda_streak_finder.detect_peaks(out, labeled.labels, data, Structure(radii, 1), radius,
+                                           vmin)
 
 @overload
-def detect_peaks(data: NDRealArray, radius: int, vmin: float, axes: Tuple[int, int] | None=None
-                 ) -> PeaksList: ...
+def detect_peaks(data: NDRealArray, labeled: NPLabelResult, radius: int, vmin: float) -> NDIntArray: ...
 
 @overload
-def detect_peaks(data: CPRealArray, radius: int, vmin: float, axes: Tuple[int, int] | None=None
-                 ) -> CPIntArray: ...
+def detect_peaks(data: CPRealArray, labeled: CPLabelResult, radius: int, vmin: float) -> CPIntArray: ...
 
 @overload
-def detect_peaks(data: JaxRealArray, radius: int, vmin: float, axes: Tuple[int, int] | None=None
-                 ) -> CPIntArray | PeaksList: ...
+def detect_peaks(data: JaxRealArray, labeled: LabelResult, radius: int, vmin: float
+                     ) -> NDIntArray | CPIntArray: ...
 
 @overload
-def detect_peaks(data: RealArray, radius: int, vmin: float, axes: Tuple[int, int] | None=None
-                 ) -> CPIntArray | PeaksList: ...
+def detect_peaks(data: RealArray, labeled: LabelResult, radius: int, vmin: float) -> NDIntArray | CPIntArray: ...
 
 @array_dispatch("data", cpu_impl=_detect_peaks_cpu, gpu_impl=_detect_peaks_gpu)
-def detect_peaks(data: RealArray, radius: int, vmin: float,axes: Tuple[int, int] | None=None
-                 ) -> CPIntArray | PeaksList:
-    """Detect sparse peaks in a set of images. The minimal distance between peaks is controlled
-    by the radius parameter.
+def detect_peaks(data: RealArray, labeled: LabelResult, radius: int, vmin: float
+                     ) -> NDIntArray | CPIntArray:
+    """Detect peaks in a set of images using the new GPU-friendly algorithm. The minimal distance
+    between peaks is controlled by the radius parameter.
 
     Args:
         data: Input data array.
+        labeled: Labeled regions used for peak detection.
         radius: Minimum distance between peaks. The distance is measured as a number of pixels
             along the axes specified by the axes parameter.
         vmin: Minimum value to consider a pixel as part of a peak.
-        axes: Axes along which to detect peaks. If None, last two axes are used.
 
     Returns:
-        List of detected peaks with their properties.
+        Array of bins with peak's index written in it. If the bin doesn't contain a peak, it is
+        filled with -1. The shape of the output array is the same as the input array, except for
+        the last two dimensions, which are divided by the radius.
     """
     ...
 
-def _filter_peaks_cpu(peaks: PeaksList, data: RealArray, structure: Structure, vmin: float,
-                      npts: int, axes: Tuple[int, int] | None=None) -> PeaksList:
-    streak_finder.filter_peaks(peaks=peaks, data=data, structure=structure, vmin=vmin, npts=npts,
-                               axes=axes)
-    return peaks
+PeakLabels = NPeakLabels | CPeakLabels
 
-def _filter_peaks_gpu(peaks: CPIntArray, data: RealArray, structure: Structure, vmin: float,
-                      npts: int, axes: Tuple[int, int] | None=None) -> CPIntArray:
-    if cuda_label is None:
-        raise RuntimeError("filter_peaks is not compiled for the current platform. "
-                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+def _cpu_peak_labels(indices: NDIntArray, data: RealArray, radius: int) -> Tuple[NPeakLabels, NDIntArray]:
+    xp = NumPy
+    labels = xp.full(indices.shape, -1, dtype=xp.int64)
+    labels[indices == data.size] = 0
+    mask = (indices >= 0) & (indices < data.size)
 
-    if axes is not None:
-        data = shift_axis(data, axes)
-    if structure.rank != 2:
-        raise ValueError("Only 2D connectivity structure is supported for filter_peaks.")
+    n_good, n_labels = int(xp.sum(indices >= 0)), int(mask.sum())
 
+    peaks = xp.full(n_good, -1, dtype=xp.int64)
+    sort_indices = xp.argsort(data.ravel()[indices[mask]])[::-1]
+    peaks[:n_labels] = indices[mask][sort_indices]
+
+    inverse = xp.empty_like(sort_indices)
+    inverse[sort_indices] = xp.arange(n_labels, dtype=xp.int64) + 1
+
+    labels[mask] = inverse
+
+    return NPeakLabels(labels, n_labels, n_labels, n_good, radius), peaks
+
+def _gpu_peak_labels(indices: CPIntArray, data: RealArray, radius: int) -> Tuple[CPeakLabels, CPIntArray]:
     xp = CuPy
-    structure = structure.expand_dims(list(range(data.ndim - 2)))
-    labels, _ = cuda_label.label(data > vmin, structure, npts)
-    mask = labels.reshape(-1)[peaks] > 0
-    return xp.where(mask, peaks, -1)
+    labels = xp.full(indices.shape, -1, dtype=xp.int32)
+    labels[indices == data.size] = 0
+    mask = (indices >= 0) & (indices < data.size)
+
+    n_good, n_labels = int(xp.sum(indices >= 0)), int(mask.sum())
+
+    peaks = xp.full(n_good, -1, dtype=xp.int32)
+    sort_indices = xp.argsort(data.ravel()[indices[mask]])[::-1]
+    peaks[:n_labels] = indices[mask][sort_indices]
+
+    inverse = xp.empty(sort_indices.shape, dtype=xp.int32)
+    inverse[sort_indices] = xp.arange(n_labels, dtype=xp.int32) + 1
+
+    labels[mask] = inverse
+
+    return CPeakLabels(labels, n_labels, n_labels, n_good, radius), peaks
 
 @overload
-def filter_peaks(peaks: PeaksList, data: NDRealArray, structure: Structure, vmin: float, npts: int,
-                 axes: Tuple[int, int] | None=None) -> PeaksList: ...
+def peak_labels(indices: NDIntArray, data: RealArray, radius: int
+                ) -> Tuple[NPeakLabels, NDIntArray]: ...
 
 @overload
-def filter_peaks(peaks: CPIntArray, data: CPRealArray, structure: Structure, vmin: float, npts: int,
-                 axes: Tuple[int, int] | None=None) -> CPIntArray: ...
+def peak_labels(indices: CPIntArray, data: RealArray, radius: int
+                ) -> Tuple[CPeakLabels, CPIntArray]: ...
 
 @overload
-def filter_peaks(peaks: CPIntArray | PeaksList, data: JaxRealArray, structure: Structure, vmin: float,
-                 npts: int, axes: Tuple[int, int] | None=None) -> CPIntArray | PeaksList: ...
+def peak_labels(indices: JaxIntArray, data: RealArray, radius: int
+                ) -> Tuple[PeakLabels, NDIntArray | CPIntArray]: ...
 
 @overload
-def filter_peaks(peaks: CPIntArray | PeaksList, data: RealArray, structure: Structure, vmin: float,
-                 npts: int, axes: Tuple[int, int] | None=None) -> CPIntArray | PeaksList: ...
+def peak_labels(indices: IntArray, data: RealArray, radius: int
+                ) -> Tuple[PeakLabels, IntArray]: ...
 
-@array_dispatch("data", cpu_impl=_filter_peaks_cpu, gpu_impl=_filter_peaks_gpu)
-def filter_peaks(peaks: CPIntArray | PeaksList, data: RealArray, structure: Structure, vmin: float,
-                 npts: int, axes: Tuple[int, int] | None=None) -> CPIntArray | PeaksList:
-    """Filter peaks by their local connectivity structure. A peak is kept if there are at least
-    npts connected pixels in the neighborhood above the vmin threshold.
+@array_dispatch("indices", cpu_impl=_cpu_peak_labels, gpu_impl=_gpu_peak_labels)
+def peak_labels(indices: IntArray, data: RealArray, radius: int
+                ) -> Tuple[PeakLabels, IntArray]:
+    """Convert an array of peak indices to a labeled array and a list of peaks.
 
     Args:
-        peaks : A set of peaks to be filtered.
-        data : A 2D rasterised image.
-        structure : A connectivity structure.
-        vmin : Value threshold.
-        npts : Size threshold. A peak is kept if there are at least npts connected pixels in its
-            neighborhood above vmin.
-        axes: Axes along which to filter peaks. If None, last two axes are used.
+        indices: Array of peak indices. The shape of the array is the same as the input data, except
+            for the last two dimensions, which are divided by the radius. The values in the array
+            are either -1 (if there is no peak in the corresponding bin) or an index of a peak in
+            the original data array.
+        data: Input data array.
+        radius: Radius used for peak detection.
 
     Returns:
-        A list of filtered peaks.
+        A tuple of (labels, peaks) where labels is an array of bin labels and peaks is a flat array
+        of peak indices in the original data array.
     """
     ...
 
 @overload
-def peaks_mask(peaks: PeaksList, data: RealArray) -> NDBoolArray: ...
+def fit_linelets(labels: NPeakLabels, peaks: NDIntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> NDRealArray: ...
 
 @overload
-def peaks_mask(peaks: CPIntArray, data: RealArray) -> CPBoolArray: ...
+def fit_linelets(labels: CPeakLabels, peaks: CPIntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> CPRealArray: ...
 
-def peaks_mask(peaks: CPIntArray | PeaksList, data: RealArray) -> NDBoolArray | CPBoolArray:
-    """Get indices of peaks in the original data array."""
-    if isinstance(peaks, PeaksList):
-        xp = NumPy
-        frames = peaks.index()
-        frame_indices = xp.concat([xp.asarray(list(pattern), dtype=int) for pattern in peaks])
-        indices = xp.unravel_index(frames, data.shape[:-2])
-        indices += xp.unravel_index(frame_indices, data.shape[-2:])
-        mask = xp.zeros(data.shape, dtype=bool)
-        mask[indices] = True
-        return mask
-    if isinstance(peaks, CPIntArray):
+@overload
+def fit_linelets(labels: PeakLabels, peaks: JaxIntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> NDRealArray | CPRealArray: ...
+
+@overload
+def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> RealArray: ...
+
+def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> RealArray:
+    """Fit linelets to the detected peaks.
+
+    Args:
+        labels: Array of bin labels. A bin with label -1 doesn't contain a peak, a bin with label
+            0 doesn't have an assigned peak yet.
+        peaks: Array of peak indices in the original data array.
+        data: Input data array.
+        structure: Connectivity structure used for linelet fitting.
+        vmin: Minimum value to consider a pixel as part of a linelet.
+        max_iter: Maximum number of iterations for linelet fitting.
+
+    Returns:
+        Array of linelet parameters. The shape of the array is (n_labels, 4) where n_labels is the
+        number of labeled peaks. The last dimension contains linelet parameters in the following
+        order: (x0, y0, x1, y1) where (x0, y0) and (x1, y1) are coordinates of the endpoints of the
+        linelet.
+    """
+    if isinstance(labels, NPeakLabels):
+        num_threads = get_cpu_config().effective_num_threads()
+        return streak_finder.line_fit(labels, peaks, data, structure, vmin,
+                                          num_threads=num_threads)
+    if isinstance(labels, CPeakLabels):
+        if cuda_streak_finder is None:
+            raise RuntimeError("fit_linelets is not compiled for the current platform. "
+                            "Please, check if you have installed the cbclib_v2 with GPU support.")
+
         xp = CuPy
-        indices = peaks[peaks >= 0]
-        mask = xp.zeros(data.shape, dtype=bool)
-        mask[xp.unravel_index(indices, data.shape)] = True
-        return mask
-    raise ValueError("Invalid peaks type. Expected CPIntArray or PeaksList.")
+        out = xp.zeros((labels.n_good, 4), dtype=data.dtype)
+        return cuda_streak_finder.line_fit(out, labels, peaks, data, structure, vmin)
+    raise ValueError("Invalid labels type. Expected NPeakLabels or CPeakLabels.")
 
-def to_peaks_list(peaks: CPIntArray, n_frames: int, shape: Tuple[int, int], radius: int) -> PeaksList:
-    xp = CuPy
-    indices = peaks[peaks > 0]
-    frames, frame_indices = divmod(indices, shape[0] * shape[1])
-    offsets = xp.searchsorted(frames, xp.arange(0, n_frames + 1))
-    starts, ends = offsets[:-1], offsets[1:]
-    return PeaksList(Peaks(asnumpy(frame_indices[start:end]), shape, radius)
-                     for start, end in zip(starts, ends))
-
-def _detect_streaks_cpu(peaks: PeaksList, data: RealArray, structure: Structure, xtol: float,
-                        vmin: float, min_size: int, lookahead: int=0, nfa: int=0,
-                        axes: Tuple[int, int] | None=None) -> PatternList:
-    num_threads = get_cpu_config().effective_num_threads()
-    p0 = streak_finder.p0_values(data, vmin, axes, num_threads=num_threads)
-    return streak_finder.detect_streaks(peaks, p0, data, structure, xtol, vmin, min_size,
-                                        lookahead, nfa, num_threads=num_threads)
-
-def _detect_streaks_gpu(peaks: CPIntArray, data: RealArray, structure: Structure, xtol: float,
-                        vmin: float, min_size: int, lookahead: int=0, nfa: int=0,
-                        axes: Tuple[int, int] | None=None) -> PatternList:
-    if CuPy is None:
-        raise RuntimeError("detect_streaks is not compiled for the current platform. "
-                           "Please, check if you have installed the cbclib_v2 with GPU support.")
-
-    if axes is None:
-        axes = (-2, -1)
-
-    xp = CuPy
-    shape = (data.shape[axes[0]], data.shape[axes[1]])
-    n_frames = data.size // prod(shape)
-
-    n_signal = xp.sum(data >= vmin, axis=axes).reshape(-1)
-    p0 = n_signal / prod(shape)
-
-    num_threads = get_cpu_config().effective_num_threads()
-    plist = to_peaks_list(peaks, n_frames, shape, structure.connectivity)
-    return streak_finder.detect_streaks(plist, asnumpy(p0), asnumpy(data), structure, xtol, vmin,
-                                        min_size, lookahead, nfa, num_threads=num_threads)
+Streaks = NPStreaks | CPStreaks
 
 @overload
-def detect_streaks(peaks: PeaksList, data: NDRealArray, structure: Structure, xtol: float, vmin: float,
-                   min_size: float, lookahead: int=0, nfa: int=0, axes: Tuple[int, int] | None=None
-                   ) -> PatternList: ...
+def detect_streaks(labels: NPeakLabels, peaks: NDIntArray, linelets: NDRealArray,
+                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                       ) -> NPStreaks: ...
 
 @overload
-def detect_streaks(peaks: CPIntArray, data: CPRealArray, structure: Structure, xtol: float, vmin: float,
-                   min_size: float, lookahead: int=0, nfa: int=0, axes: Tuple[int, int] | None=None
-                   ) -> PatternList: ...
+def detect_streaks(labels: CPeakLabels, peaks: CPIntArray, linelets: CPRealArray,
+                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                       ) -> CPStreaks: ...
 
 @overload
-def detect_streaks(peaks: CPIntArray | PeaksList, data: JaxRealArray, structure: Structure, xtol: float,
-                   vmin: float, min_size: float, lookahead: int=0, nfa: int=0,
-                   axes: Tuple[int, int] | None=None) -> PatternList: ...
+def detect_streaks(labels: PeakLabels, peaks: JaxIntArray, linelets: JaxRealArray,
+                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                       ) -> Streaks: ...
 
 @overload
-def detect_streaks(peaks: CPIntArray | PeaksList, data: RealArray, structure: Structure, xtol: float,
-                   vmin: float, min_size: float, lookahead: int=0, nfa: int=0,
-                   axes: Tuple[int, int] | None=None) -> PatternList: ...
+def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray,
+                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                       ) -> Streaks: ...
 
-@array_dispatch("data", cpu_impl=_detect_streaks_cpu, gpu_impl=_detect_streaks_gpu)
-def detect_streaks(peaks: CPIntArray | PeaksList, data: RealArray, structure: Structure, xtol: float,
-                   vmin: float, min_size: float, lookahead: int=0, nfa: int=0,
-                   axes: Tuple[int, int] | None=None) -> PatternList:
-    """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
-    extended with a connectivity structure.
+def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray, data: RealArray,
+                       structure: Structure, vmin: float, xtol: float, nfa: int) -> Streaks:
+    """Detect streaks using the new GPU-friendly algorithm.
 
     Args:
-        peaks : A set of peaks used as seed locations for the streak growing algorithm.
-        data : A 2D rasterised image.
-        structure : A connectivity structure.
-        xtol : Distance threshold. A new linelet is added to a streak if it's distance to the
+        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
+        peaks: Array of peak indices in the original data array.
+        linelets: Array of linelet parameters.
+        data: Input data array.
+        structure: Connectivity structure used for streak detection.
+        vmin: Minimum value to consider a pixel as part of a streak.
+        xtol: Distance threshold. A new linelet is added to a streak if it's distance to the
             streak is no more than ``xtol``.
-        vmin : Value threshold. A new linelet is added to a streak if it's value at the center of
-            mass is above ``vmin``.
-        log_eps : Detection threshold. A streak is added to the final list if it's p-value under
-            null hypothesis is below ``np.exp(log_eps)``.
-        lookahead : Number of linelets considered at the ends of a streak to be added to the streak.
-        nfa : Number of false alarms, allowed number of unaligned points in a streak.
+        nfa: Number of false alarms, allowed number of unaligned points in a streak.
 
     Returns:
         A list of detected streaks.
+    """
+    if isinstance(labels, NPeakLabels):
+        num_threads = get_cpu_config().effective_num_threads()
+        return streak_finder.detect_streaks(labels, peaks, linelets, data, structure, vmin,
+                                                xtol, nfa, num_threads=num_threads)
+    if isinstance(labels, CPeakLabels):
+        if cuda_streak_finder is None:
+            raise RuntimeError("detect_streaks is not compiled for the current platform. "
+                            "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+        return cuda_streak_finder.detect_streaks(labels, peaks, linelets, data, structure, vmin,
+                                                 xtol, nfa)
+
+def to_lines(streaks: Streaks, labels: PeakLabels, linelets: RealArray) -> RealArray:
+    """Convert streaks to line parameters.
+
+    Args:
+        streaks: Detected streaks.
+        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
+        linelets: Array of linelet parameters.
+
+    Returns:
+        Array of line parameters. The shape of the array is (n_streaks, 4) where n_streaks is the
+        number of detected streaks. The last dimension contains line parameters in the following
+        order: (x0, y0, x1, y1) where (x0, y0) and (x1, y1) are coordinates of the endpoints of the
+        line.
+    """
+    if isinstance(streaks, NPStreaks) and isinstance(labels, NPeakLabels):
+        return streaks.to_lines(labels, linelets)
+    if isinstance(streaks, CPStreaks) and isinstance(labels, CPeakLabels):
+        xp = CuPy
+        out = xp.empty((len(streaks), 4), dtype=linelets.dtype)
+        return streaks.to_lines(out, labels, linelets)
+    raise ValueError("Invalid input types. Expected (NPStreaks, NPeakLabels) or "
+                     "(CPStreaks, CPeakLabels).")
+
+@overload
+def n_signal(streaks: NPStreaks, labels: NPeakLabels, peaks: NDIntArray, data: RealArray,
+             structure: Structure, vmin: float) -> NDIntArray: ...
+
+@overload
+def n_signal(streaks: CPStreaks, labels: CPeakLabels, peaks: CPIntArray, data: RealArray,
+             structure: Structure, vmin: float) -> CPIntArray: ...
+
+@overload
+def n_signal(streaks: Streaks, labels: PeakLabels, peaks: JaxIntArray, data: RealArray,
+             structure: Structure, vmin: float) -> NDIntArray | CPIntArray: ...
+
+@overload
+def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealArray,
+             structure: Structure, vmin: float) -> IntArray: ...
+
+def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealArray,
+             structure: Structure, vmin: float) -> IntArray:
+    """Calculate the number of pixels above the vmin threshold in each detected streak.
+
+    Args:
+        streaks: Detected streaks.
+        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
+        peaks: Array of peak indices in the original data array.
+        data: Input data array.
+        structure: Connectivity structure used for streak detection.
+        vmin: Minimum value to consider a pixel as part of a streak.
+
+    Returns:
+        Array of the number of pixels above the vmin threshold in each detected streak.
+    """
+    if isinstance(streaks, NPStreaks) and isinstance(labels, NPeakLabels):
+        num_threads = get_cpu_config().effective_num_threads()
+        return streak_finder.n_signal(streaks, labels, peaks, data, structure, vmin,
+                                          num_threads=num_threads)
+    if isinstance(streaks, CPStreaks) and isinstance(labels, CPeakLabels):
+        if cuda_streak_finder is None:
+            raise RuntimeError("n_signal is not compiled for the current platform. "
+                               "Please, check if you have installed the cbclib_v2 with "
+                               "GPU support.")
+
+        xp = CuPy
+        out = xp.empty(len(streaks), dtype=xp.uint32)
+        return cuda_streak_finder.n_signal(out, streaks, labels, peaks, data, structure,
+                                           vmin)
+    raise ValueError("Invalid input types. Expected (NPStreaks, NPeakLabels) or "
+                     "(CPStreaks, CPeakLabels).")
+
+def _streak_labels_cpu(out: NDIntArray, streaks: NPStreaks, ranks: IntArray, labels: NPeakLabels,
+                       peaks: IntArray, structure: Structure) -> NDIntArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return streak_finder.streak_labels(out, streaks, ranks, labels, peaks, structure,
+                                            num_threads=num_threads)
+
+def _streak_labels_gpu(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, labels: CPeakLabels,
+                       peaks: IntArray, structure: Structure) -> CPIntArray:
+    if cuda_streak_finder is None:
+        raise RuntimeError("streaks_labels is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    xp = CuPy
+    return cuda_streak_finder.streak_labels(out.astype(xp.int32), streaks, ranks.astype(xp.int32),
+                                            labels, peaks, structure)
+
+@overload
+def streak_labels(out: NDIntArray, streaks: NPStreaks, ranks: IntArray, labels: NPeakLabels,
+                  peaks: IntArray, structure: Structure) -> NDIntArray: ...
+
+@overload
+def streak_labels(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, labels: CPeakLabels,
+                  peaks: IntArray, structure: Structure) -> CPIntArray: ...
+
+@overload
+def streak_labels(out: IntArray, streaks: Streaks, ranks: IntArray, labels: PeakLabels,
+                  peaks: IntArray, structure: Structure) -> IntArray: ...
+
+@array_dispatch("out", cpu_impl=_streak_labels_cpu, gpu_impl=_streak_labels_gpu)
+def streak_labels(out: IntArray, streaks: Streaks, ranks: IntArray, labels: PeakLabels,
+                  peaks: IntArray, structure: Structure) -> IntArray:
+    """Convert a list of detected streaks to a labeled array.
+
+    Args:
+        out: Output array. The shape of the array is the same as the input data.
+        streaks: Detected streaks.
+        ranks: Array of streak ranks. The shape of the array is (n_streaks,).
+        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
+        peaks: Array of peak indices in the original data array.
+        structure: Connectivity structure used for streak detection.
+
+    Returns:
+        Labeled array of the same shape as the input data, where each pixel is labeled with the
+        rank of the streak it belongs to, or -1 if it doesn't belong to any streak.
     """
     ...

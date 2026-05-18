@@ -1,8 +1,15 @@
 from typing import Tuple
-from ..annotations import BoolArray, CPIntArray, RealArray
+from ..annotations import BoolArray, CPIntArray, CPRealArray, IntArray, RealArray
 from .label import Structure
 
-def label(inp: BoolArray, structure: Structure, npts: int=1) -> Tuple[CPIntArray, int]: ...
+def label(out: CPIntArray, inp: BoolArray | IntArray, structure: Structure, npts: int=1
+          ) -> Tuple[CPIntArray, int]: ...
 
-def detect_peaks(peaks: CPIntArray, data: RealArray, structure: Structure, radius: int,
-                 vmin: float) -> CPIntArray: ...
+def center_of_mass(out: CPRealArray, labels: CPIntArray, index: CPIntArray, data: RealArray
+                   ) -> CPRealArray: ...
+
+def covariance_matrix(out: CPRealArray, labels: CPIntArray, index: CPIntArray, data: RealArray
+                      ) -> CPRealArray: ...
+
+def p_values(out: CPRealArray, labels: CPIntArray, index: CPIntArray, lines: RealArray,
+             data: RealArray, p0: float, vmin: float, xtol: float) -> CPRealArray: ...

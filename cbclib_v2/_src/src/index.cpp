@@ -26,11 +26,11 @@ public:
         auto index = py::array_t<I>::ensure(m_index);
         if (!index) throw std::invalid_argument("array and indices have incompatible dtypes");
 
-        const I * first = index.data();
-        const I * last = index.data() + index.size();
+        array<I> idarr {index.request()};
+        auto first = idarr.begin();
+        auto last = idarr.end();
 
-        const I * start;
-        const I * end;
+        typename array<I>::iterator start, end;
         if (is_increasing)
         {
             start = std::lower_bound(first, last, value, std::less());
@@ -55,30 +55,31 @@ public:
         auto index = py::array_t<I>::ensure(m_index);
         if (!index) throw std::invalid_argument("array and indices have incompatible dtypes");
 
+        array<I> idarr {index.request()};
         std::vector<py::ssize_t> indexer, new_index;
-        const I * first = index.data();
-        const I * last = index.data() + index.size();
+        auto first = idarr.begin();
+        auto last = idarr.end();
 
+        array<I> idsarr {idxs.request()};
         py::ssize_t idx = py::ssize_t();
-        for (const I * ptr = idxs.data(); ptr != idxs.data() + idxs.size(); ptr++, idx++)
+        for (auto iter = idsarr.begin(); iter != idsarr.end(); iter++, idx++)
         {
-            const I * start;
-            const I * end;
+            typename array<I>::iterator start, end;
             if (is_increasing)
             {
-                start = std::lower_bound(first, last, *ptr, std::less());
-                end = std::upper_bound(first, last, *ptr, std::less());
+                start = std::lower_bound(first, last, *iter, std::less());
+                end = std::upper_bound(first, last, *iter, std::less());
             }
             else
             {
-                start = std::lower_bound(first, last, *ptr, std::greater());
-                end = std::upper_bound(first, last, *ptr, std::greater());
+                start = std::lower_bound(first, last, *iter, std::greater());
+                end = std::upper_bound(first, last, *iter, std::greater());
             }
 
             if (start == last)
-                throw std::out_of_range(std::to_string(*ptr) + " is out of range");
+                throw std::out_of_range(std::to_string(*iter) + " is out of range");
             if (start == end)
-                throw std::out_of_range(std::to_string(*ptr) + " is not present");
+                throw std::out_of_range(std::to_string(*iter) + " is not present");
 
             for (auto elem = start; elem != end; elem++)
             {
@@ -96,24 +97,25 @@ public:
         auto index = py::array_t<I>::ensure(m_index);
         if (!index) throw std::invalid_argument("array and indices have incompatible dtypes");
 
+        array<I> idarr {index.request()};
         std::vector<py::ssize_t> to, from;
-        const I * first = index.data();
-        const I * last = index.data() + index.size();
+        auto first = idarr.begin();
+        auto last = idarr.end();
 
+        array<I> idsarr {idxs.request()};
         py::ssize_t idx = py::ssize_t();
-        for (const I * ptr = idxs.data(); ptr != idxs.data() + idxs.size(); ptr++, idx++)
+        for (auto iter = idsarr.begin(); iter != idsarr.end(); iter++, idx++)
         {
-            const I * start;
-            const I * end;
+            typename array<I>::iterator start, end;
             if (is_increasing)
             {
-                start = std::lower_bound(first, last, *ptr, std::less());
-                end = std::upper_bound(first, last, *ptr, std::less());
+                start = std::lower_bound(first, last, *iter, std::less());
+                end = std::upper_bound(first, last, *iter, std::less());
             }
             else
             {
-                start = std::lower_bound(first, last, *ptr, std::greater());
-                end = std::upper_bound(first, last, *ptr, std::greater());
+                start = std::lower_bound(first, last, *iter, std::greater());
+                end = std::upper_bound(first, last, *iter, std::greater());
             }
 
             if (start == last)
@@ -123,7 +125,7 @@ public:
                     to.push_back(py::ssize_t());
                     from.push_back(idx);
                 }
-                else if (*ptr < *first)
+                else if (*iter < *first)
                 {
                     to.push_back(py::ssize_t());
                     from.push_back(idx);
@@ -147,18 +149,19 @@ public:
 
 protected:
     template <typename I>
-    void is_monotonic(py::array_t<I> arr)
+    void is_monotonic(py::array_t<I> a)
     {
+        array<I> arr {a.request()};
         size_t size = arr.size();
 
         is_increasing = true, is_decreasing = true, is_unique = true;
 
         if (size > 2)
         {
-            I prev = *arr.data(), cur = I();
-            for (const I * ptr = arr.data(); ptr != arr.data() + size; ptr++)
+            I prev = arr[0], cur = I();
+            for (size_t i = 1; i < size; i++)
             {
-                cur = *ptr;
+                cur = arr[i];
                 if (cur < prev) is_increasing = false;
                 else if (cur > prev) is_decreasing = false;
                 else if (cur == prev) is_unique = false;
@@ -177,18 +180,19 @@ protected:
     }
 
     template <typename I>
-    void unique(py::array_t<I> arr)
+    void unique(py::array_t<I> a)
     {
+        array<I> arr {a.request()};
         std::vector<I> values;
 
-        const I * ptr = arr.data();
-        const I * first = arr.data();
-        const I * last = arr.data() + arr.size();
-        while (ptr != last)
+        auto iter = arr.begin();
+        auto first = iter;
+        auto last = arr.end();
+        while (iter != last)
         {
-            values.push_back(*ptr);
-            if (is_increasing) ptr = std::upper_bound(first, last, values.back(), std::less());
-            else ptr = std::upper_bound(first, last, values.back(), std::greater());
+            values.push_back(*iter);
+            if (is_increasing) iter = std::upper_bound(first, last, values.back(), std::less());
+            else iter = std::upper_bound(first, last, values.back(), std::greater());
         }
 
         m_unique = as_pyarray(std::move(values));

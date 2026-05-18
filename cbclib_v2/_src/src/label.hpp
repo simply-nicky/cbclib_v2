@@ -1,19 +1,12 @@
 #ifndef NEW_LABEL_H_
 #define NEW_LABEL_H_
+#include <limits>
 #include "geometry.hpp"
 #include "numpy.hpp"
 
 namespace cbclib {
 
 namespace detail {
-
-template <typename Container, typename Element = typename Container::value_type, typename T = typename Element::value_type>
-std::vector<T> get_x(const Container & c, size_t index)
-{
-    std::vector<T> x;
-    std::transform(c.begin(), c.end(), std::back_inserter(x), [index](const Element & elem){return elem[index];});
-    return x;
-}
 
 /* Returns a positive remainder of division */
 template <typename T, typename U, typename = std::enable_if_t<std::is_integral_v<T> && std::is_integral_v<U>>>
@@ -29,14 +22,79 @@ constexpr auto modulo(T a, U b) -> decltype(std::fmod(a, b))
     return std::fmod(std::fmod(a, b) + b, b);
 }
 
+template <typename I, typename Shift, typename Shape, typename = std::enable_if_t<
+    std::is_integral_v<typename Shift::value_type> &&
+    std::is_integral_v<typename Shape::value_type>
+>>
+long shift_index(I index, const Shift & shift, const Shape & shape)
+{
+    size_t delta = shape.size() - shift.size();
+
+    long new_index = 0;
+    long stride = 1;
+    for (size_t n = shape.size(); n > 0; --n)
+    {
+        long coord = index % shape[n - 1] + shift[n - 1 - delta];
+        if (coord < 0 || coord >= shape[n - 1]) return -1;
+
+        new_index += coord * stride;
+        index /= shape[n - 1];
+        stride *= shape[n - 1];
+    }
+    return new_index;
 }
 
-template <size_t N, typename Container, typename = std::enable_if_t<
-    std::is_integral_v<typename Container::value_type>
->>
-PointND<long, N> make_point(long index, const Container & shape)
+// Return log(binomial_tail(n, k, p))
+// binomial_tail(n, k, p) = sum_{i = k}^n bincoef(n, i) * p^i * (1 - p)^{n - i}
+// bincoef(n, k) = gamma(n + 1) / (gamma(k + 1) * gamma(n - k + 1))
+
+template <typename T>
+T logaddexp(T a, T b)
 {
-    PointND<long, N> point;
+    const T neg_inf = -std::numeric_limits<T>::infinity();
+
+    if (a == neg_inf) return b;
+    if (b == neg_inf) return a;
+
+    T m = (a > b) ? a : b;
+    return m + std::log(std::exp(a - m) + std::exp(b - m));
+};
+
+template <typename I, typename T>
+T logbinom(I n, I k, T p)
+{
+    const T neg_inf = -std::numeric_limits<T>::infinity();
+
+    if (k <= 0) return T(0.0);
+    if (k > n) return neg_inf;
+
+    if (p <= T(0.0)) return (k <= 0) ? T(0.0) : neg_inf;
+    if (p >= T(1.0)) return (k <= n) ? T(0.0) : neg_inf;
+
+    T log_p = std::log(p);
+    T log_q = std::log1p(-p);
+
+    T log_term = std::lgamma(n + 1) - std::lgamma(k + 1) - std::lgamma(n - k + 1) +
+                 k * log_p + (n - k) * log_q;
+    T log_tail = log_term;
+
+    for (I i = k + 1; i < n + 1; ++i)
+    {
+        log_term += std::log(n - i + 1) - std::log(i) + log_p - log_q;
+        log_tail = logaddexp(log_tail, log_term);
+    }
+
+    return log_tail;
+}
+
+}
+
+template <size_t N, typename Container, typename I, typename = std::enable_if_t<
+    std::is_integral_v<typename Container::value_type> && std::is_integral_v<I>
+>>
+PointND<I, N> make_point(I index, const Container & shape)
+{
+    PointND<I, N> point;
     for (size_t n = N; n > 0; --n)
     {
         size_t zyx_n = shape.size() - N + n - 1, xyz_n = N - n;
@@ -212,6 +270,8 @@ protected:
         iterator begin() const {return m_begin;}
         iterator end() const {return m_end;}
 
+        size_type size() const {return m_end - m_begin;}
+
     private:
         iterator m_begin, m_end;
     };
@@ -296,7 +356,7 @@ public:
     {
         for (auto shift : structure)
         {
-            auto new_index = shift_index(index, shift, shape);
+            auto new_index = detail::shift_index(index, shift, shape);
             if (new_index >= 0) m_ctr.insert(new_index);
         }
     }
@@ -346,7 +406,7 @@ public:
                 for (const auto & shift : structure.shifts())
                 {
                     // Add new index if in bounds
-                    long new_index = shift_index(index, shift, shape);
+                    long new_index = detail::shift_index(index, shift, shape);
                     if (new_index >= 0) new_pixels.insert(new_index);
                 }
             }
@@ -382,7 +442,7 @@ public:
                 for (const auto & shift : structure.shifts())
                 {
                     // Add new index if in bounds
-                    long new_index = shift_index(index, shift, shape);
+                    long new_index = detail::shift_index(index, shift, shape);
                     if (new_index >= 0) new_pixels.insert(new_index);
                 }
             }
@@ -417,7 +477,7 @@ public:
                 for (const auto & shift : structure.shifts())
                 {
                     // Add new index if in bounds
-                    long new_index = shift_index(index, shift, shape);
+                    long new_index = detail::shift_index(index, shift, shape);
                     if (new_index >= 0) new_pixels.insert(new_index);
                 }
             }
@@ -447,9 +507,9 @@ public:
         mask(array, value);
     }
 
-    long median() const
+    long first() const
     {
-        if (m_ctr.size()) return *std::next(m_ctr.begin(), m_ctr.size() / 2);
+        if (m_ctr.size()) return *m_ctr.begin();
         return -1;
     }
 
@@ -460,26 +520,6 @@ public:
 
 protected:
     std::set<long> m_ctr;
-
-    template <typename Shift, typename Shape, typename = std::enable_if_t<
-        std::is_integral_v<typename Shift::value_type> &&
-        std::is_integral_v<typename Shape::value_type>
-    >>
-    long shift_index(long index, const Shift & shift, const Shape & shape) const
-    {
-        long new_index = 0;
-        long stride = 1;
-        for (size_t n = shift.size(); n > 0; --n)
-        {
-            long coord = index % shape[n - 1] + shift[n - 1];
-            if (coord < 0 || coord >= shape[n - 1]) return -1;
-
-            new_index += coord * stride;
-            index /= shape[n - 1];
-            stride *= shape[n - 1];
-        }
-        return new_index;
-    }
 };
 
 class LabelResult
@@ -551,9 +591,7 @@ public:
     template <size_t M = N, typename = std::enable_if_t<(M > 1)>>
     T theta() const
     {
-        T theta = 0.5 * std::atan(2 * mu_xy[0] / (mu_xx[0] - mu_xx[1]));
-        if (mu_xx[1] > mu_xx[0]) theta += M_PI_2;
-        return detail::modulo(theta, M_PI);
+        return 0.5 * std::atan2(2 * mu_xy[0], mu_xx[0] - mu_xx[1]);
     }
 
     // Return line segment representing the major axis of the object
@@ -562,7 +600,7 @@ public:
     LineND<T, N> line() const
     {
         T angle = theta();
-        if (std::isnan(angle)) return LineND<T, N>{origin, origin};
+        if (std::isnan(angle)) return LineND<T, N>{mu_x + origin, mu_x + origin};
         PointND<T, N> tau {std::cos(angle), std::sin(angle)};
         T delta = std::sqrt(4 * mu_xy[0] * mu_xy[0] + (mu_xx[0] - mu_xx[1]) * (mu_xx[0] - mu_xx[1]));
         T hw = std::sqrt(2 * std::log(2) * (mu_xx[0] + mu_xx[1] + delta));
@@ -604,7 +642,7 @@ public:
     {
         if (region.size())
         {
-            org = make_point<N>(region.median(), data.shape());
+            org = make_point<N>(region.first(), data.shape());
             for (auto index : region) insert(index, data);
         }
     }
@@ -631,22 +669,27 @@ public:
         return *this;
     }
 
+    void insert(const PointND<T, N> & point, T value)
+    {
+        auto r = point - org;
+
+        value = std::max(value, T());
+        mu += value;
+        mu_x += r * value;
+        mu_xx += r * r * value;
+        for (size_t n = 0; n < NumPairs; n++)
+        {
+            auto [i, j] = UniquePairs<N>::instance().pairs(n);
+            mu_xy[n] += r[i] * r[j] * value;
+        }
+    }
+
     void insert(long index, array<T> data)
     {
         auto point = make_point<N>(index, data.shape());
         auto val = data[index];
 
-        auto r = point - org;
-
-        val = std::max(val, T());
-        mu += val;
-        mu_x += r * val;
-        mu_xx += r * r * val;
-        for (size_t n = 0; n < NumPairs; n++)
-        {
-            auto [i, j] = UniquePairs<N>::instance().pairs(n);
-            mu_xy[n] += r[i] * r[j] * val;
-        }
+        insert(point, val);
     }
 
     void move(const PointND<T, N> & point)
@@ -839,6 +882,22 @@ void declare_list(py::class_<List> & cls, const std::string & str)
             for (auto [_, py_index] : slice_range(slice, list.size())) sliced.push_back(list[py_index]);
             return sliced;
         }, py::arg("index"))
+        .def("__getitem__", [str](const List & list, py::array_t<py::ssize_t> indices)
+        {
+            List sliced;
+            for (auto index : array<py::ssize_t>(indices.request())) sliced.push_back(list[compute_index(index, list.size(), str)]);
+            return sliced;
+        }, py::arg("index"))
+        .def("__getitem__", [](const List & list, py::array_t<bool> mask)
+        {
+            if (mask.ndim() != 1 || mask.size() != list.size())
+                throw std::invalid_argument("Mask must be a 1D array of the same size as the list");
+
+            List sliced;
+            auto mask_ptr = mask.data();
+            for (size_t i = 0; i < list.size(); i++) if (mask_ptr[i]) sliced.push_back(list[i]);
+            return sliced;
+        }, py::arg("mask"))
         .def("__setitem__", [str](List & list, py::ssize_t index, Element elem)
         {
             list[compute_index(index, list.size(), str)] = std::move(elem);
