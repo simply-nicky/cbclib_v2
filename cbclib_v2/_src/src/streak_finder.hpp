@@ -207,7 +207,7 @@ public:
 
 protected:
     array<T> m_linelets;    // linelet array, shape (N_linelets, 2 * N), where linelet = {x0, y0, ..., x1, y1, ...}
-    size_t n_lines;
+    lint_t n_lines;
 };
 
 template <typename T, size_t N = 2>
@@ -334,8 +334,14 @@ protected:
             auto new_bin = m_indexer.bin_at(neighbour_idx);
             if (new_bin == start_bin) continue;
 
-            if constexpr (PeaksOnly) if (!peaks.is_peak(new_bin)) continue;
-            else if (peaks.is_bad(new_bin)) continue;
+            if constexpr (PeaksOnly)
+            {
+                if (!peaks.is_peak(new_bin)) continue;
+            }
+            else
+            {
+                if (peaks.is_bad(new_bin)) continue;
+            }
 
             neighbour = PointIndex{static_cast<bint_t>(neighbour_idx), new_bin};
             return true;

@@ -82,7 +82,7 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
     size_t n_rows = std::reduce(out_shape.begin(), out_shape.end(), 1, std::multiplies());
     size_t n_reduce = ibuf.size / n_rows;
 
-    if (std::reduce(inp.shape() + ax, inp.shape() + inp.ndim(), 1, std::multiplies()) != n_reduce)
+    if (std::reduce(inp.shape() + ax, inp.shape() + inp.ndim(), size_t(1), std::multiplies()) != n_reduce)
         throw std::invalid_argument("shape of input array is incompatible with the specified axis");
 
     if (return_std) out_shape.insert(out_shape.begin(), 2);

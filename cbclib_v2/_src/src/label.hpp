@@ -35,7 +35,7 @@ long shift_index(I index, const Shift & shift, const Shape & shape)
     for (size_t n = shape.size(); n > 0; --n)
     {
         long coord = index % shape[n - 1] + shift[n - 1 - delta];
-        if (coord < 0 || coord >= shape[n - 1]) return -1;
+        if (coord < 0 || coord >= static_cast<long>(shape[n - 1])) return -1;
 
         new_index += coord * stride;
         index /= shape[n - 1];
@@ -843,8 +843,8 @@ public:
     const MomentsND<T, N> & moments() const {return m_mnt;}
 
 protected:
-    MomentsND<T, N> m_mnt;
     Region m_rgn;
+    MomentsND<T, N> m_mnt;
 };
 
 template <typename T>
@@ -890,7 +890,7 @@ void declare_list(py::class_<List> & cls, const std::string & str)
         }, py::arg("index"))
         .def("__getitem__", [](const List & list, py::array_t<bool> mask)
         {
-            if (mask.ndim() != 1 || mask.size() != list.size())
+            if (mask.ndim() != 1 || mask.size() != static_cast<py::ssize_t>(list.size()))
                 throw std::invalid_argument("Mask must be a 1D array of the same size as the list");
 
             List sliced;

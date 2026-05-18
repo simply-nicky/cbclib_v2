@@ -239,7 +239,7 @@ py::array_t<T> line_fit(PeakLabels & labels, py::array_t<lint_t> parray, py::arr
                     frontier[candidate.bin] = frontier[candidate.bin] | direction; // Mark for processing in the next iteration if not marked as bad
 
                     auto line_id = peaks.insert(candidate, darr);
-                    auto is_inserted = linelets.insert(line_id, linelet);
+                    linelets.insert(line_id, linelet);
                 }
             }
         }
@@ -291,7 +291,7 @@ std::vector<Streak> detect_streaks(PeakLabels labels, py::array_t<lint_t> parray
                     if (peaks.is_peak(bin_idx))
                     {
                         auto id = peaks.index(bin_idx);
-                        if (id < labels.n_seeds)
+                        if (id < static_cast<lint_t>(labels.n_seeds))
                         {
                             results[id].insert(bin_idx, linelets, peaks);
                             auto is_good = finder.detect(results[id], linelets, peaks);
@@ -449,8 +449,14 @@ py::array_t<py::ssize_t> n_signal(const std::vector<Streak> & streaks, PeakLabel
 
 py::array_t<lint_t> streak_labels(py::array_t<lint_t> out, const std::vector<Streak> & streaks, py::array_t<py::ssize_t> ranking, PeakLabels labels, py::array_t<lint_t> parray, Structure structure, unsigned threads)
 {
-    if (structure.rank() != out.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(out.ndim()) + " to match labels dimensions");
-    if (streaks.size() != ranking.size()) throw std::invalid_argument("Size of ranking array must match number of streaks");
+    if (static_cast<py::ssize_t>(structure.rank()) != out.ndim())
+    {
+        throw std::invalid_argument("Structure must have rank " + std::to_string(out.ndim()) + " to match labels dimensions");
+    }
+    if (static_cast<py::ssize_t>(streaks.size()) != ranking.size())
+    {
+        throw std::invalid_argument("Size of ranking array must match number of streaks");
+    }
 
     Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     array<py::ssize_t> ranks {ranking.request()};

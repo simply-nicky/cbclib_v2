@@ -24,13 +24,13 @@ auto dilate(py::array_t<bool> input, Structure structure, size_t iterations, py:
 
         // Finding the chunk for each thread
         int thread_id = omp_get_thread_num();
-        size_t chunk = (out.size() + threads - 1) / threads;
+        long chunk = (out.size() + threads - 1) / threads;
 
-        size_t thread_start = thread_id * chunk;
-        size_t thread_end = std::min((thread_id + 1) * chunk, out.size());
+        long thread_start = thread_id * chunk;
+        long thread_end = std::min<long>((thread_id + 1) * chunk, out.size());
 
         // Each thread processes its own chunk
-        for (size_t index = thread_start; index < thread_end; index++)
+        for (long index = thread_start; index < thread_end; index++)
         {
             if (inp[index])
             {
@@ -38,9 +38,9 @@ auto dilate(py::array_t<bool> input, Structure structure, size_t iterations, py:
                 region.insert(region.end(), index);
                 region.dilate(func, structure, iterations, out.shape());
 
-                for (auto index : region)
+                for (auto pixel : region)
                 {
-                    if (index >= thread_start && index < thread_end) out[index] = true;
+                    if (pixel >= thread_start && pixel < thread_end) out[pixel] = true;
                 }
             }
         }
@@ -77,13 +77,13 @@ auto dilate_with_mask(py::array_t<bool> input, Structure structure, size_t itera
 
         // Finding the chunk for each thread
         int thread_id = omp_get_thread_num();
-        size_t chunk = (out.size() + threads - 1) / threads;
+        long chunk = (out.size() + threads - 1) / threads;
 
-        size_t thread_start = thread_id * chunk;
-        size_t thread_end = std::min((thread_id + 1) * chunk, out.size());
+        long thread_start = thread_id * chunk;
+        long thread_end = std::min<long>((thread_id + 1) * chunk, out.size());
 
         // Each thread processes its own chunk
-        for (size_t index = thread_start; index < thread_end; index++)
+        for (long index = thread_start; index < thread_end; index++)
         {
             if (inp[index])
             {
@@ -91,9 +91,9 @@ auto dilate_with_mask(py::array_t<bool> input, Structure structure, size_t itera
                 region.insert(region.end(), index);
                 region.dilate(func, structure, iterations, out.shape());
 
-                for (auto index : region)
+                for (auto pixel : region)
                 {
-                    if (index >= thread_start && index < thread_end) out[index] = true;
+                    if (pixel >= thread_start && pixel < thread_end) out[pixel] = true;
                 }
             }
         }
@@ -111,7 +111,7 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
 {
     array<I> inp {input.request()};
 
-    if (input.ndim() != structure.rank())
+    if (input.ndim() != static_cast<py::ssize_t>(structure.rank()))
     {
         throw std::invalid_argument("input array dimension (" + std::to_string(input.ndim()) +
                                     ") does not match structure rank (" + std::to_string(structure.rank()) + ")");
@@ -128,15 +128,15 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
     {
         // Finding the chunk for each thread
         int thread_id = omp_get_thread_num();
-        size_t chunk = (inp.size() + threads - 1) / threads;
+        long chunk = (inp.size() + threads - 1) / threads;
 
-        size_t thread_start = thread_id * chunk;
-        size_t thread_end = std::min((thread_id + 1) * chunk, inp.size());
+        long thread_start = thread_id * chunk;
+        long thread_end = std::min<long>((thread_id + 1) * chunk, inp.size());
 
         std::vector<bool> visited(thread_end - thread_start, false);
 
         // Each thread processes its own chunk
-        for (size_t index = thread_start; index < thread_end; index++)
+        for (long index = thread_start; index < thread_end; index++)
         {
             if (!visited[index - thread_start] && inp[index])
             {
@@ -146,9 +146,9 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
                 region.insert(region.end(), index);
                 region.dilate(func, structure, inp.shape());
 
-                for (auto index : region)
+                for (auto pixel : region)
                 {
-                    if (index >= thread_start && index < thread_end) visited[index - thread_start] = true;
+                    if (pixel >= thread_start && pixel < thread_end) visited[pixel - thread_start] = true;
                 }
 
                 auto min_index = *region.begin();
@@ -369,7 +369,7 @@ PYBIND11_MODULE(label, m)
                 throw std::invalid_argument("output array dimension (" + std::to_string(out.ndim()) +
                                             ") does not match structure rank (" + std::to_string(srt.rank()) + ")");
             }
-            for (size_t n = 0; n < out.ndim(); ++n)
+            for (py::ssize_t n = 0; n < out.ndim(); ++n)
             {
                 if (out.shape(n) < static_cast<py::ssize_t>(srt.shape(n)))
                 {
