@@ -587,7 +587,7 @@ class StreakDetector(DetectorBase):
     def detect_peaks(self, regions: LabelResult) -> Tuple[PeakLabels, IntArray]:
         return self.finder.detect_peaks(regions)
 
-    def fit_linelets(self, regions: PeakLabels, peaks: IntArray) -> RealArray:
+    def fit_linelets(self, regions: PeakLabels, peaks: IntArray) -> Tuple[RealArray, PeakLabels]:
         return self.finder.fit_linelets(regions, peaks)
 
     def detect_streaks(self, labels: PeakLabels, peaks: IntArray, linelets: RealArray,

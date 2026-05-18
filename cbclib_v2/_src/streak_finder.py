@@ -27,7 +27,7 @@ class PatternStreakFinder:
         peaks = detect_peaks(self.data, regions, self.structure.connectivity, self.vmin)
         return peak_labels(peaks, self.data, self.structure.connectivity)
 
-    def fit_linelets(self, labels: PeakLabels, peaks: IntArray) -> RealArray:
+    def fit_linelets(self, labels: PeakLabels, peaks: IntArray) -> Tuple[RealArray, PeakLabels]:
         return fit_linelets(labels, peaks, self.data, self.structure, self.vmin)
 
     def detect_streaks(self, labels: PeakLabels, peaks: IntArray, linelets: RealArray,

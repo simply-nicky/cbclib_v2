@@ -9,7 +9,8 @@ See Also:
 from functools import wraps
 from inspect import signature
 from math import prod
-from typing import Callable, NamedTuple, Optional, Protocol, Sequence, Tuple, cast, overload
+from typing import (TYPE_CHECKING, Callable, NamedTuple, Optional, Protocol, Sequence, Tuple,
+                    cast, overload)
 import warnings
 from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray, CPRealArray,
                           CuPy, IntArray, IntSequence, JaxArray, JaxBoolArray, JaxIntArray,
@@ -19,8 +20,7 @@ from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform
 from .config import get_cpu_config
 from .src import bresenham, label as cpu_label, median as cpu_median, streak_finder
 from .src.label import Structure, LabelResult as NPLabelResult
-from .src.streak_finder import PeakLabels as NPeakLabels, Streaks as NPStreaks
-from .src.cuda_streak_finder import PeakLabels as CPeakLabels, Streaks as CPStreaks
+from .src.streak_finder import Streaks as NPStreaks
 
 def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
     """Dispatch to CPU or GPU implementation based on array namespace/device.
@@ -79,9 +79,26 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
 
     return decorator
 
-if CuPy is not None:
+class PeakLabels(NamedTuple):
+    labels : IntArray
+    n_seeds : int
+    n_labels : int
+    n_good : int
+    radius : int
+
+    def keep_best(self, quantile: float = 0.5) -> 'PeakLabels':
+        return PeakLabels(self.labels, int(self.n_seeds * quantile), self.n_labels, self.n_good,
+                          self.radius)
+
+    def to_tuple(self) -> Tuple[IntArray, int, int, int, int]:
+        return self.labels, self.n_seeds, self.n_labels, self.n_good, self.radius
+
+if CuPy is not None or TYPE_CHECKING:
     from .src import cuda_draw_lines, cuda_label, cuda_median, cuda_streak_finder
     from cupyx.scipy import ndimage as _ndimage
+    from .src.cuda_streak_finder import Streaks as CPStreaks
+
+    Streaks = NPStreaks | CPStreaks
 
     class NDImageProtocol(Protocol):
         def binary_dilation(self, input: BoolArray, structure: BoolArray, iterations: int=1,
@@ -120,13 +137,15 @@ else:
     cupy_ndimage = None
     cuda_streak_finder = None
 
+    Streaks = NPStreaks
+
     def binary_structure(structure: Structure, shape: Sequence[int] | None=None) -> CPBoolArray:
         raise RuntimeError("CUDA backend is not available. Please, check if you have installed " \
                            "the cbclib_v2 with GPU support.")
 
     def shift_axis(inp: Array, axis: Tuple[int, ...]) -> Array:
         raise RuntimeError("CUDA backend is not available. Please, check if you have installed " \
-                            "the cbclib_v2 with GPU support.")
+                           "the cbclib_v2 with GPU support.")
 
 def _accumulate_lines_cpu(out: RealArray, lines: RealArray, terms: IntArray,
                           frames: IntArray, max_val: float=1.0,
@@ -877,9 +896,7 @@ def detect_peaks(data: RealArray, labeled: LabelResult, radius: int, vmin: float
     """
     ...
 
-PeakLabels = NPeakLabels | CPeakLabels
-
-def _cpu_peak_labels(indices: NDIntArray, data: RealArray, radius: int) -> Tuple[NPeakLabels, NDIntArray]:
+def _cpu_peak_labels(indices: NDIntArray, data: RealArray, radius: int) -> Tuple[PeakLabels, NDIntArray]:
     xp = NumPy
     labels = xp.full(indices.shape, -1, dtype=xp.int64)
     labels[indices == data.size] = 0
@@ -896,9 +913,9 @@ def _cpu_peak_labels(indices: NDIntArray, data: RealArray, radius: int) -> Tuple
 
     labels[mask] = inverse
 
-    return NPeakLabels(labels, n_labels, n_labels, n_good, radius), peaks
+    return PeakLabels(labels, n_labels, n_labels, n_good, radius), peaks
 
-def _gpu_peak_labels(indices: CPIntArray, data: RealArray, radius: int) -> Tuple[CPeakLabels, CPIntArray]:
+def _gpu_peak_labels(indices: CPIntArray, data: RealArray, radius: int) -> Tuple[PeakLabels, CPIntArray]:
     xp = CuPy
     labels = xp.full(indices.shape, -1, dtype=xp.int32)
     labels[indices == data.size] = 0
@@ -915,15 +932,15 @@ def _gpu_peak_labels(indices: CPIntArray, data: RealArray, radius: int) -> Tuple
 
     labels[mask] = inverse
 
-    return CPeakLabels(labels, n_labels, n_labels, n_good, radius), peaks
+    return PeakLabels(labels, n_labels, n_labels, n_good, radius), peaks
 
 @overload
 def peak_labels(indices: NDIntArray, data: RealArray, radius: int
-                ) -> Tuple[NPeakLabels, NDIntArray]: ...
+                ) -> Tuple[PeakLabels, NDIntArray]: ...
 
 @overload
 def peak_labels(indices: CPIntArray, data: RealArray, radius: int
-                ) -> Tuple[CPeakLabels, CPIntArray]: ...
+                ) -> Tuple[PeakLabels, CPIntArray]: ...
 
 @overload
 def peak_labels(indices: JaxIntArray, data: RealArray, radius: int
@@ -952,24 +969,43 @@ def peak_labels(indices: IntArray, data: RealArray, radius: int
     """
     ...
 
-@overload
-def fit_linelets(labels: NPeakLabels, peaks: NDIntArray, data: RealArray, structure: Structure,
-                 vmin: float) -> NDRealArray: ...
+def _cpu_fit_linelets(labels: PeakLabels, peaks: NDIntArray, data: RealArray, structure: Structure,
+                      vmin: float) -> Tuple[NDRealArray, PeakLabels]:
+    num_threads = get_cpu_config().effective_num_threads()
+    linelets, new_labels = streak_finder.line_fit(labels.to_tuple(), peaks, data, structure, vmin,
+                                                  num_threads=num_threads)
+    return linelets, PeakLabels(*new_labels)
+
+def _gpu_fit_linelets(labels: PeakLabels, peaks: CPIntArray, data: RealArray, structure: Structure,
+                      vmin: float) -> Tuple[CPRealArray, PeakLabels]:
+    if cuda_streak_finder is None:
+        raise RuntimeError("fit_linelets is not compiled for the current platform. "
+                        "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    xp = CuPy
+    out = xp.zeros((labels.n_good, 4), dtype=data.dtype)
+    linelets, new_labels = cuda_streak_finder.line_fit(out, labels, peaks, data, structure, vmin)
+    return linelets, PeakLabels(*new_labels)
 
 @overload
-def fit_linelets(labels: CPeakLabels, peaks: CPIntArray, data: RealArray, structure: Structure,
-                 vmin: float) -> CPRealArray: ...
+def fit_linelets(labels: PeakLabels, peaks: NDIntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> Tuple[NDRealArray, PeakLabels]: ...
+
+@overload
+def fit_linelets(labels: PeakLabels, peaks: CPIntArray, data: RealArray, structure: Structure,
+                 vmin: float) -> Tuple[CPRealArray, PeakLabels]: ...
 
 @overload
 def fit_linelets(labels: PeakLabels, peaks: JaxIntArray, data: RealArray, structure: Structure,
-                 vmin: float) -> NDRealArray | CPRealArray: ...
+                 vmin: float) -> Tuple[NDRealArray | CPRealArray, PeakLabels]: ...
 
 @overload
 def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure: Structure,
-                 vmin: float) -> RealArray: ...
+                 vmin: float) -> Tuple[RealArray, PeakLabels]: ...
 
+@array_dispatch("peaks", cpu_impl=_cpu_fit_linelets, gpu_impl=_gpu_fit_linelets)
 def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure: Structure,
-                 vmin: float) -> RealArray:
+                 vmin: float) -> Tuple[RealArray, PeakLabels]:
     """Fit linelets to the detected peaks.
 
     Args:
@@ -987,44 +1023,48 @@ def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure
         order: (x0, y0, x1, y1) where (x0, y0) and (x1, y1) are coordinates of the endpoints of the
         linelet.
     """
-    if isinstance(labels, NPeakLabels):
-        num_threads = get_cpu_config().effective_num_threads()
-        return streak_finder.line_fit(labels, peaks, data, structure, vmin,
-                                          num_threads=num_threads)
-    if isinstance(labels, CPeakLabels):
-        if cuda_streak_finder is None:
-            raise RuntimeError("fit_linelets is not compiled for the current platform. "
-                            "Please, check if you have installed the cbclib_v2 with GPU support.")
+    ...
 
-        xp = CuPy
-        out = xp.zeros((labels.n_good, 4), dtype=data.dtype)
-        return cuda_streak_finder.line_fit(out, labels, peaks, data, structure, vmin)
-    raise ValueError("Invalid labels type. Expected NPeakLabels or CPeakLabels.")
+def _cpu_detect_streaks(labels: PeakLabels, peaks: NDIntArray, linelets: NDRealArray,
+                        data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                        ) -> NPStreaks:
+    num_threads = get_cpu_config().effective_num_threads()
+    return streak_finder.detect_streaks(labels.to_tuple(), peaks, linelets, data, structure, vmin,
+                                        xtol, nfa, num_threads=num_threads)
 
-Streaks = NPStreaks | CPStreaks
+def _gpu_detect_streaks(labels: PeakLabels, peaks: CPIntArray, linelets: CPRealArray,
+                        data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                        ) -> CPStreaks:
+    if cuda_streak_finder is None:
+        raise RuntimeError("detect_streaks is not compiled for the current platform. "
+                        "Please, check if you have installed the cbclib_v2 with GPU support.")
 
-@overload
-def detect_streaks(labels: NPeakLabels, peaks: NDIntArray, linelets: NDRealArray,
-                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
-                       ) -> NPStreaks: ...
+    return cuda_streak_finder.detect_streaks(labels.to_tuple(), peaks, linelets, data, structure,
+                                             vmin, xtol, nfa)
 
 @overload
-def detect_streaks(labels: CPeakLabels, peaks: CPIntArray, linelets: CPRealArray,
-                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
-                       ) -> CPStreaks: ...
+def detect_streaks(labels: PeakLabels, peaks: NDIntArray, linelets: NDRealArray,
+                   data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                   ) -> NPStreaks: ...
+
+@overload
+def detect_streaks(labels: PeakLabels, peaks: CPIntArray, linelets: CPRealArray,
+                   data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                   ) -> CPStreaks: ...
 
 @overload
 def detect_streaks(labels: PeakLabels, peaks: JaxIntArray, linelets: JaxRealArray,
-                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
-                       ) -> Streaks: ...
+                   data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                   ) -> Streaks: ...
 
 @overload
 def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray,
-                       data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
-                       ) -> Streaks: ...
+                   data: RealArray, structure: Structure, vmin: float, xtol: float, nfa: int
+                   ) -> Streaks: ...
 
+@array_dispatch("peaks", cpu_impl=_cpu_detect_streaks, gpu_impl=_gpu_detect_streaks)
 def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray, data: RealArray,
-                       structure: Structure, vmin: float, xtol: float, nfa: int) -> Streaks:
+                   structure: Structure, vmin: float, xtol: float, nfa: int) -> Streaks:
     """Detect streaks using the new GPU-friendly algorithm.
 
     Args:
@@ -1041,19 +1081,22 @@ def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray, dat
     Returns:
         A list of detected streaks.
     """
-    if isinstance(labels, NPeakLabels):
-        num_threads = get_cpu_config().effective_num_threads()
-        return streak_finder.detect_streaks(labels, peaks, linelets, data, structure, vmin,
-                                                xtol, nfa, num_threads=num_threads)
-    if isinstance(labels, CPeakLabels):
-        if cuda_streak_finder is None:
-            raise RuntimeError("detect_streaks is not compiled for the current platform. "
-                            "Please, check if you have installed the cbclib_v2 with GPU support.")
+    ...
 
-        return cuda_streak_finder.detect_streaks(labels, peaks, linelets, data, structure, vmin,
-                                                 xtol, nfa)
+def _cpu_to_lines(streaks: NPStreaks, labels: NDIntArray, linelets: NDRealArray) -> NDRealArray:
+    return streaks.to_lines(labels, linelets)
 
-def to_lines(streaks: Streaks, labels: PeakLabels, linelets: RealArray) -> RealArray:
+def _gpu_to_lines(streaks: CPStreaks, labels: CPIntArray, linelets: CPRealArray) -> CPRealArray:
+    if cuda_streak_finder is None:
+        raise RuntimeError("to_lines is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    xp = CuPy
+    out = xp.empty((len(streaks), 4), dtype=linelets.dtype)
+    return streaks.to_lines(out, labels, linelets)
+
+@array_dispatch("labels", cpu_impl=_cpu_to_lines, gpu_impl=_gpu_to_lines)
+def to_lines(streaks: Streaks, labels: IntArray, linelets: RealArray) -> RealArray:
     """Convert streaks to line parameters.
 
     Args:
@@ -1067,21 +1110,31 @@ def to_lines(streaks: Streaks, labels: PeakLabels, linelets: RealArray) -> RealA
         order: (x0, y0, x1, y1) where (x0, y0) and (x1, y1) are coordinates of the endpoints of the
         line.
     """
-    if isinstance(streaks, NPStreaks) and isinstance(labels, NPeakLabels):
-        return streaks.to_lines(labels, linelets)
-    if isinstance(streaks, CPStreaks) and isinstance(labels, CPeakLabels):
-        xp = CuPy
-        out = xp.empty((len(streaks), 4), dtype=linelets.dtype)
-        return streaks.to_lines(out, labels, linelets)
-    raise ValueError("Invalid input types. Expected (NPStreaks, NPeakLabels) or "
-                     "(CPStreaks, CPeakLabels).")
+    ...
+
+def _cpu_n_signal(streaks: NPStreaks, labels: PeakLabels, peaks: NDIntArray, data: RealArray,
+                  structure: Structure, vmin: float) -> NDIntArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return streak_finder.n_signal(streaks, labels.to_tuple(), peaks, data, structure, vmin,
+                                  num_threads=num_threads)
+
+def _gpu_n_signal(streaks: CPStreaks, labels: PeakLabels, peaks: CPIntArray, data: RealArray,
+                  structure: Structure, vmin: float) -> CPIntArray:
+    if cuda_streak_finder is None:
+        raise RuntimeError("n_signal is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    xp = CuPy
+    out = xp.empty(len(streaks), dtype=xp.uint32)
+    return cuda_streak_finder.n_signal(out, streaks, labels.to_tuple(), peaks, data, structure,
+                                       vmin)
 
 @overload
-def n_signal(streaks: NPStreaks, labels: NPeakLabels, peaks: NDIntArray, data: RealArray,
+def n_signal(streaks: NPStreaks, labels: PeakLabels, peaks: NDIntArray, data: RealArray,
              structure: Structure, vmin: float) -> NDIntArray: ...
 
 @overload
-def n_signal(streaks: CPStreaks, labels: CPeakLabels, peaks: CPIntArray, data: RealArray,
+def n_signal(streaks: CPStreaks, labels: PeakLabels, peaks: CPIntArray, data: RealArray,
              structure: Structure, vmin: float) -> CPIntArray: ...
 
 @overload
@@ -1092,6 +1145,7 @@ def n_signal(streaks: Streaks, labels: PeakLabels, peaks: JaxIntArray, data: Rea
 def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealArray,
              structure: Structure, vmin: float) -> IntArray: ...
 
+@array_dispatch("peaks", cpu_impl=_cpu_n_signal, gpu_impl=_gpu_n_signal)
 def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealArray,
              structure: Structure, vmin: float) -> IntArray:
     """Calculate the number of pixels above the vmin threshold in each detected streak.
@@ -1107,30 +1161,15 @@ def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealAr
     Returns:
         Array of the number of pixels above the vmin threshold in each detected streak.
     """
-    if isinstance(streaks, NPStreaks) and isinstance(labels, NPeakLabels):
-        num_threads = get_cpu_config().effective_num_threads()
-        return streak_finder.n_signal(streaks, labels, peaks, data, structure, vmin,
-                                          num_threads=num_threads)
-    if isinstance(streaks, CPStreaks) and isinstance(labels, CPeakLabels):
-        if cuda_streak_finder is None:
-            raise RuntimeError("n_signal is not compiled for the current platform. "
-                               "Please, check if you have installed the cbclib_v2 with "
-                               "GPU support.")
+    ...
 
-        xp = CuPy
-        out = xp.empty(len(streaks), dtype=xp.uint32)
-        return cuda_streak_finder.n_signal(out, streaks, labels, peaks, data, structure,
-                                           vmin)
-    raise ValueError("Invalid input types. Expected (NPStreaks, NPeakLabels) or "
-                     "(CPStreaks, CPeakLabels).")
-
-def _streak_labels_cpu(out: NDIntArray, streaks: NPStreaks, ranks: IntArray, labels: NPeakLabels,
+def _streak_labels_cpu(out: NDIntArray, streaks: NPStreaks, ranks: IntArray, labels: PeakLabels,
                        peaks: IntArray, structure: Structure) -> NDIntArray:
     num_threads = get_cpu_config().effective_num_threads()
     return streak_finder.streak_labels(out, streaks, ranks, labels, peaks, structure,
                                             num_threads=num_threads)
 
-def _streak_labels_gpu(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, labels: CPeakLabels,
+def _streak_labels_gpu(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, labels: PeakLabels,
                        peaks: IntArray, structure: Structure) -> CPIntArray:
     if cuda_streak_finder is None:
         raise RuntimeError("streaks_labels is not compiled for the current platform. "
@@ -1141,11 +1180,11 @@ def _streak_labels_gpu(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, lab
                                             labels, peaks, structure)
 
 @overload
-def streak_labels(out: NDIntArray, streaks: NPStreaks, ranks: IntArray, labels: NPeakLabels,
+def streak_labels(out: NDIntArray, streaks: NPStreaks, ranks: IntArray, labels: PeakLabels,
                   peaks: IntArray, structure: Structure) -> NDIntArray: ...
 
 @overload
-def streak_labels(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, labels: CPeakLabels,
+def streak_labels(out: CPIntArray, streaks: CPStreaks, ranks: IntArray, labels: PeakLabels,
                   peaks: IntArray, structure: Structure) -> CPIntArray: ...
 
 @overload

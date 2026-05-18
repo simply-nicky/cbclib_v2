@@ -16,12 +16,6 @@ HOST_DEVICE inline void swap(T & a, T & b)
     b = tmp;
 }
 
-struct PeakLabels
-{
-    array_t<lint_t> labels;
-    py::ssize_t n_seeds, n_labels, n_good, radius;
-};
-
 struct PointIndex
 {
     csize_t index, bin;
@@ -616,7 +610,7 @@ __global__ void detect_peaks_kernel(ArrayViewND<lint_t, N> peaks, ArrayViewND<T,
 }
 
 template <typename T, csize_t N>
-array_t<lint_t> detect_peaks_nd(array_t<lint_t> peaks, array_t<lint_t> labels, array_t<T> data, Structure structure, size_t radius, T vmin)
+array_t<lint_t> detect_peaks_nd(array_t<lint_t> peaks, array_t<lint_t> labels, array_t<T> data, const Structure & structure, size_t radius, T vmin)
 {
     auto peaks_view = cast_to_nd<lint_t, N>(peaks.view());
     auto labels_view = cast_to_nd<lint_t, N>(labels.view());
@@ -666,6 +660,22 @@ array_t<lint_t> detect_peaks(array_t<lint_t> peaks, array_t<lint_t> labels, arra
         default: throw std::runtime_error("Unsupported number of dimensions: peaks.ndim = " + std::to_string(peaks.ndim()));
     }
 }
+
+using LabelsTuple = std::tuple<array_t<lint_t>, py::ssize_t, py::ssize_t, py::ssize_t, py::ssize_t>;
+
+struct PeakLabels
+{
+    array_t<lint_t> labels;
+    py::ssize_t n_seeds, n_labels, n_good, radius;
+
+    PeakLabels(std::tuple<array_t<lint_t>, py::ssize_t, py::ssize_t, py::ssize_t, py::ssize_t> tuple)
+        : labels(std::move(std::get<0>(tuple))), n_seeds(std::get<1>(tuple)), n_labels(std::get<2>(tuple)), n_good(std::get<3>(tuple)), radius(std::get<4>(tuple)) {}
+
+    LabelsTuple to_tuple() const
+    {
+        return std::make_tuple(labels, n_seeds, n_labels, n_good, radius);
+    }
+};
 
 template <typename T, csize_t N>
 __global__ void init_linelets_kernel(LineFitter<T, N> fitter, Peaks<N> peaks, Linelets<T> linelets, DeviceRange<Direction> visited)
@@ -758,7 +768,7 @@ __global__ void commit_frontier_kernel(LineFitter<T, N> fitter, Peaks<N> peaks, 
 }
 
 template <typename T, csize_t N>
-array_t<T> line_fit_nd(array_t<T> out, PeakLabels & labels, array_t<lint_t> parray, array_t<T> data, Structure structure, T vmin)
+std::tuple<array_t<T>, LabelsTuple> line_fit_nd(array_t<T> out, PeakLabels & labels, array_t<lint_t> parray, array_t<T> data, const Structure & structure, T vmin)
 {
     PeaksIndexer indexer (data.shape(), data.ndim(), labels.radius);
     auto shifts = all_nonzero_shifts(structure);
@@ -802,12 +812,14 @@ array_t<T> line_fit_nd(array_t<T> out, PeakLabels & labels, array_t<lint_t> parr
     }
 
     labels.n_labels = new_size;
-    return out;
+    return std::make_tuple(out, labels.to_tuple());
 }
 
 template <typename T>
-array_t<T> line_fit(array_t<T> out, PeakLabels & labels, array_t<lint_t> parray, array_t<T> data, Structure structure, T vmin)
+std::tuple<array_t<T>, LabelsTuple> line_fit(array_t<T> out, LabelsTuple tuple, array_t<lint_t> parray, array_t<T> data, Structure structure, T vmin)
 {
+    PeakLabels labels (std::move(tuple));
+
     if (structure.rank() != data.ndim())
     {
         throw std::invalid_argument("structure rank (" + std::to_string(structure.rank()) + ") must match data array dimension (" + std::to_string(data.ndim()) + ")");
@@ -1384,7 +1396,7 @@ __global__ void detect_streaks_kernel(StreakFinder<T, N> finder, Peaks<N> peaks,
 }
 
 template <typename T, csize_t N>
-Streaks detect_streaks_nd(PeakLabels labels, array_t<lint_t> parray, array_t<T> larray, array_t<T> data, Structure structure, T vmin, T xtol, unsigned nfa, unsigned keep_last)
+Streaks detect_streaks_nd(PeakLabels & labels, array_t<lint_t> parray, array_t<T> larray, array_t<T> data, const Structure & structure, T vmin, T xtol, unsigned nfa, unsigned keep_last)
 {
     auto shifts = all_nonzero_shifts(structure);
     csize_t n_shifts = shifts.size() / structure.rank();
@@ -1452,8 +1464,10 @@ Streaks detect_streaks_nd(PeakLabels labels, array_t<lint_t> parray, array_t<T> 
 }
 
 template <typename T>
-Streaks detect_streaks(PeakLabels labels, array_t<lint_t> parray, array_t<T> larray, array_t<T> data, Structure structure, T vmin, T xtol, unsigned nfa, unsigned keep_last)
+Streaks detect_streaks(LabelsTuple tuple, array_t<lint_t> parray, array_t<T> larray, array_t<T> data, Structure structure, T vmin, T xtol, unsigned nfa, unsigned keep_last)
 {
+    PeakLabels labels (std::move(tuple));
+
     if (structure.rank() != data.ndim())
     {
         throw std::invalid_argument("structure rank (" + std::to_string(structure.rank()) + ") must match data array dimension (" + std::to_string(data.ndim()) + ")");
@@ -1492,10 +1506,10 @@ __global__ void to_lines_kernel(Streaks::StreaksView<true> streaks, ArrayViewND<
 }
 
 template <typename T, csize_t N>
-array_t<T> to_lines_nd(const Streaks & streaks, array_t<T> out, PeakLabels labels, array_t<T> larray)
+array_t<T> to_lines_nd(const Streaks & streaks, array_t<T> out, array_t<lint_t> labels, array_t<T> larray)
 {
     auto out_view = cast_to_nd<T, 2>(out.view());
-    auto labels_view = cast_to_nd<lint_t, N>(labels.labels.view());
+    auto labels_view = cast_to_nd<lint_t, N>(labels.view());
     Linelets<T> linelets (cast_to_nd<T, 2>(larray.view()));
 
     csize_t block_size = BLOCK_SIZE;
@@ -1508,14 +1522,14 @@ array_t<T> to_lines_nd(const Streaks & streaks, array_t<T> out, PeakLabels label
 }
 
 template <typename T>
-array_t<T> to_lines(const Streaks & streaks, array_t<T> out, PeakLabels labels, array_t<T> larray)
+array_t<T> to_lines(const Streaks & streaks, array_t<T> out, array_t<lint_t> labels, array_t<T> larray)
 {
     if (out.ndim() != 2 || out.shape(1) != 4)
     {
         throw std::invalid_argument("Output array must have shape (n_streaks, 4)");
     }
 
-    switch (labels.labels.ndim())
+    switch (labels.ndim())
     {
         case 2: return to_lines_nd<T, 2>(streaks, out, labels, larray);
         case 3: return to_lines_nd<T, 3>(streaks, out, labels, larray);
@@ -1523,7 +1537,7 @@ array_t<T> to_lines(const Streaks & streaks, array_t<T> out, PeakLabels labels, 
         case 5: return to_lines_nd<T, 5>(streaks, out, labels, larray);
         case 6: return to_lines_nd<T, 6>(streaks, out, labels, larray);
         case 7: return to_lines_nd<T, 7>(streaks, out, labels, larray);
-        default: throw std::runtime_error("Unsupported number of dimensions: labels.labels.ndim = " + std::to_string(labels.labels.ndim()));
+        default: throw std::runtime_error("Unsupported number of dimensions: labels.ndim = " + std::to_string(labels.ndim()));
     }
 }
 
@@ -1607,7 +1621,7 @@ __global__ void count_signal_from_unique_kernel(ArrayViewND<csize_t, 1> counts,
 }
 
 template <typename T, csize_t N>
-array_t<csize_t> n_signal_nd(array_t<csize_t> out, const Streaks & streaks, PeakLabels labels, array_t<lint_t> parray, array_t<T> data, Structure structure, T vmin)
+array_t<csize_t> n_signal_nd(array_t<csize_t> out, const Streaks & streaks, PeakLabels & labels, array_t<lint_t> parray, array_t<T> data, const Structure & structure, T vmin)
 {
     auto shifts = all_shifts(structure);
     csize_t n_shifts = structure.size();
@@ -1684,8 +1698,10 @@ array_t<csize_t> n_signal_nd(array_t<csize_t> out, const Streaks & streaks, Peak
 }
 
 template <typename T>
-array_t<csize_t> n_signal(array_t<csize_t> out, const Streaks & streaks, PeakLabels labels, array_t<lint_t> parray, array_t<T> data, Structure structure, T vmin)
+array_t<csize_t> n_signal(array_t<csize_t> out, const Streaks & streaks, LabelsTuple tuple, array_t<lint_t> parray, array_t<T> data, Structure structure, T vmin)
 {
+    PeakLabels labels (std::move(tuple));
+
     if (structure.rank() != data.ndim())
     {
         throw std::invalid_argument("structure rank (" + std::to_string(structure.rank()) + ") must match data array dimension (" + std::to_string(data.ndim()) + ")");
@@ -1741,7 +1757,7 @@ __global__ void finalize_streak_labels_kernel(ArrayViewND<lint_t, N> out, lint_t
 }
 
 template <csize_t N>
-array_t<lint_t> streak_labels_nd(array_t<lint_t> out, const Streaks & streaks, array_t<lint_t> ranks, PeakLabels labels, array_t<lint_t> parray, Structure structure)
+array_t<lint_t> streak_labels_nd(array_t<lint_t> out, const Streaks & streaks, array_t<lint_t> ranks, PeakLabels & labels, array_t<lint_t> parray, const Structure & structure)
 {
     auto shifts = all_shifts(structure);
     csize_t n_shifts = shifts.size() / structure.rank();
@@ -1773,8 +1789,10 @@ array_t<lint_t> streak_labels_nd(array_t<lint_t> out, const Streaks & streaks, a
     return out;
 }
 
-array_t<lint_t> streak_labels(array_t<lint_t> out, const Streaks & streaks, array_t<lint_t> ranks, PeakLabels labels, array_t<lint_t> parray, Structure structure)
+array_t<lint_t> streak_labels(array_t<lint_t> out, const Streaks & streaks, array_t<lint_t> ranks, LabelsTuple tuple, array_t<lint_t> parray, Structure structure)
 {
+    PeakLabels labels (std::move(tuple));
+
     if (structure.rank() != out.ndim())
     {
         throw std::invalid_argument("structure rank (" + std::to_string(structure.rank()) + ") must match output array dimension (" + std::to_string(out.ndim()) + ")");
@@ -1812,22 +1830,10 @@ PYBIND11_MODULE(cuda_streak_finder, m)
         return;
     }
 
-    py::class_<cu::PeakLabels>(m, "PeakLabels")
-        .def(py::init<cu::array_t<cu::lint_t>, py::ssize_t, py::ssize_t, py::ssize_t, py::ssize_t>(), py::arg("labels"), py::arg("n_seeds"), py::arg("n_labels"), py::arg("n_good"), py::arg("radius"))
-        .def_readonly("labels", &cu::PeakLabels::labels)
-        .def_readonly("n_seeds", &cu::PeakLabels::n_seeds)
-        .def_readonly("n_labels", &cu::PeakLabels::n_labels)
-        .def_readonly("n_good", &cu::PeakLabels::n_good)
-        .def_readonly("radius", &cu::PeakLabels::radius)
-        .def("keep_best", [](const cu::PeakLabels & labels, double quantile)
-        {
-            return cu::PeakLabels{labels.labels, py::ssize_t(labels.n_seeds * quantile), labels.n_labels, labels.n_good, labels.radius};
-        }, py::arg("quantile") = 0.5);
-
     py::class_<cu::Streaks::HostStreak>(m, "HostStreak")
         .def_property_readonly("indices", [](const cu::Streaks::HostStreak & streak) { return streak.indices(); })
-        .def("line", [](const cu::Streaks::HostStreak & streak, cu::PeakLabels labels, cu::array_t<float> lines) { return streak.line(lines, labels.labels); })
-        .def("line", [](const cu::Streaks::HostStreak & streak, cu::PeakLabels labels, cu::array_t<double> lines) { return streak.line(lines, labels.labels); });
+        .def("line", [](const cu::Streaks::HostStreak & streak, cu::array_t<cu::lint_t> labels, cu::array_t<float> lines) { return streak.line(lines, labels); })
+        .def("line", [](const cu::Streaks::HostStreak & streak, cu::array_t<cu::lint_t> labels, cu::array_t<double> lines) { return streak.line(lines, labels); });
 
     py::class_<cu::Streaks>(m, "Streaks")
         .def("__len__", [](const cu::Streaks & streaks) { return streaks.size(); })
@@ -1836,8 +1842,8 @@ PYBIND11_MODULE(cuda_streak_finder, m)
             return py::make_iterator(cu::StreaksIterator(streaks), cu::StreaksIterator(streaks, streaks.size()));
         })
         .def("__getitem__", [](const cu::Streaks & streaks, cu::csize_t idx) { return streaks.to_host(idx); }, py::arg("index"))
-        .def("to_lines", [](const cu::Streaks & streaks, cu::array_t<float> out, cu::PeakLabels labels, cu::array_t<float> lines) { return cu::to_lines(streaks, out, labels, lines); })
-        .def("to_lines", [](const cu::Streaks & streaks, cu::array_t<double> out, cu::PeakLabels labels, cu::array_t<double> lines) { return cu::to_lines(streaks, out, labels, lines); });
+        .def("to_lines", [](const cu::Streaks & streaks, cu::array_t<float> out, cu::array_t<cu::lint_t> labels, cu::array_t<float> lines) { return cu::to_lines(streaks, out, labels, lines); })
+        .def("to_lines", [](const cu::Streaks & streaks, cu::array_t<double> out, cu::array_t<cu::lint_t> labels, cu::array_t<double> lines) { return cu::to_lines(streaks, out, labels, lines); });
 
     m.def("detect_peaks", &cu::detect_peaks<float>, py::arg("peaks"), py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"));
     m.def("detect_peaks", &cu::detect_peaks<double>, py::arg("peaks"), py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"));

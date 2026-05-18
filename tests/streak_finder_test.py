@@ -228,9 +228,17 @@ class TestNewStreakFinder:
         assert xp.all(values[1:] <= values[:-1])
 
     @pytest.fixture
-    def linelets(self, finder: PatternStreakFinder, labels: PeakLabels, peaks: IntArray
-                 ) -> RealArray:
+    def fit_linelets_result(self, finder: PatternStreakFinder, labels: PeakLabels, peaks: IntArray
+                        ) -> Tuple[RealArray, PeakLabels]:
         return finder.fit_linelets(labels, peaks)
+
+    @pytest.fixture
+    def linelets(self, fit_linelets_result: Tuple[RealArray, PeakLabels]) -> RealArray:
+        return fit_linelets_result[0]
+
+    @pytest.fixture
+    def new_labels(self, fit_linelets_result: Tuple[RealArray, PeakLabels]) -> PeakLabels:
+        return fit_linelets_result[1]
 
     def get_pixels(self, coord: IntArray, finder: PatternStreakFinder, xp: TestNamespace
                    ) -> Tuple[IntArray, RealArray]:
@@ -240,44 +248,44 @@ class TestNewStreakFinder:
         values[inbound] = finder.data[tuple(coords[inbound].T)]
         return coords, values
 
-    def test_linelets(self, linelets: RealArray, labels: PeakLabels, peaks: IntArray,
+    def test_linelets(self, linelets: RealArray, new_labels: PeakLabels, peaks: IntArray,
                       finder: PatternStreakFinder, xp: TestNamespace):
-        assert linelets.shape == (labels.n_good, 4)
-        assert xp.all(linelets[labels.n_labels:] == 0)
+        assert linelets.shape == (new_labels.n_good, 4)
+        assert xp.all(linelets[new_labels.n_labels:] == 0)
 
-        coords = xp.stack(xp.unravel_index(peaks[:labels.n_labels], finder.data.shape), axis=-1)
+        coords = xp.stack(xp.unravel_index(peaks[:new_labels.n_labels], finder.data.shape), axis=-1)
         pixels, values = self.get_pixels(coords, finder, xp)
         lines = self.line(pixels[..., -1], pixels[..., -2], values, xp)
-        assert xp.all(xp.isclose(linelets[:labels.n_labels], lines))
+        assert xp.all(xp.isclose(linelets[:new_labels.n_labels], lines))
 
     @pytest.fixture
-    def streaks(self, finder: PatternStreakFinder, labels: PeakLabels, peaks: IntArray,
+    def streaks(self, finder: PatternStreakFinder, new_labels: PeakLabels, peaks: IntArray,
                 linelets: RealArray, xtol: float) -> Streaks:
-        return finder.detect_streaks(labels, peaks, linelets, xtol)
+        return finder.detect_streaks(new_labels, peaks, linelets, xtol)
 
-    def test_streaks(self, streaks: Streaks, labels: PeakLabels, linelets: RealArray, xtol: float,
+    def test_streaks(self, streaks: Streaks, new_labels: PeakLabels, linelets: RealArray, xtol: float,
                      xp: TestNamespace):
-        assert len(streaks) == labels.n_seeds
+        assert len(streaks) == new_labels.n_seeds
 
-        for label, streak in zip(range(1, labels.n_seeds + 1), streaks):
-            seed = xp.where(labels.labels.ravel() == label)[0][0]
+        for label, streak in zip(range(1, new_labels.n_seeds + 1), streaks):
+            seed = xp.where(new_labels.labels.ravel() == label)[0][0]
             bins = xp.asarray(streak.indices)
             assert bins[0] == seed
 
             # Check that each index has it's own adjacent child
-            coords = xp.stack(xp.unravel_index(bins, labels.labels.shape), axis=-1)
+            coords = xp.stack(xp.unravel_index(bins, new_labels.labels.shape), axis=-1)
             dists = xp.abs(coords[..., None, :] - coords)
             assert xp.all(xp.any(xp.all(dists <= 1, axis=-1), axis=-1))
 
             # Check lines self-consistency
-            lines = Lines(linelets[labels.labels.ravel()[bins] - 1])
-            line = Lines(xp.asarray(streak.line(labels, linelets)))
+            lines = Lines(linelets[new_labels.labels.ravel()[bins] - 1])
+            line = Lines(xp.asarray(streak.line(new_labels.labels, linelets)))
             assert xp.all(line.distance(lines.points) < xtol)
 
     @pytest.fixture
-    def n_signal(self, finder: PatternStreakFinder, streaks: Streaks, labels: PeakLabels,
+    def n_signal(self, finder: PatternStreakFinder, streaks: Streaks, new_labels: PeakLabels,
                  peaks: IntArray) -> IntArray:
-        return n_signal(streaks, labels, peaks, finder.data, finder.structure, finder.vmin)
+        return n_signal(streaks, new_labels, peaks, finder.data, finder.structure, finder.vmin)
 
     @pytest.fixture
     def ranks(self, n_signal: IntArray, xp: TestNamespace) -> IntArray:
@@ -287,14 +295,14 @@ class TestNewStreakFinder:
         ranks[order] = indices
         return ranks
 
-    def test_n_signal(self, n_signal: IntArray, streaks: Streaks, labels: PeakLabels,
+    def test_n_signal(self, n_signal: IntArray, streaks: Streaks, new_labels: PeakLabels,
                       peaks: IntArray, finder: PatternStreakFinder, xp: TestNamespace):
-        assert n_signal.shape == (labels.n_seeds,)
+        assert n_signal.shape == (new_labels.n_seeds,)
 
         shifts = xp.array(list(finder.structure), dtype=int)
         for streak, num_points in zip(streaks, n_signal):
             bins = xp.asarray(streak.indices)
-            peak_indices = peaks[labels.labels.ravel()[bins] - 1]
+            peak_indices = peaks[new_labels.labels.ravel()[bins] - 1]
             peak_crds = xp.stack(xp.unravel_index(peak_indices, finder.data.shape), axis=-1)
             coords = peak_crds[..., None, :] + shifts
             inbound = xp.all((coords >= 0) & (coords < xp.array(finder.data.shape)), axis=-1)
@@ -304,11 +312,11 @@ class TestNewStreakFinder:
 
     @pytest.fixture
     def streak_labels(self, finder: PatternStreakFinder, streaks: Streaks, ranks: IntArray,
-                      labels: PeakLabels, peaks: IntArray, xp: TestNamespace) -> IntArray:
+                      new_labels: PeakLabels, peaks: IntArray, xp: TestNamespace) -> IntArray:
         out = xp.zeros(finder.data.shape, dtype=peaks.dtype)
-        return streak_labels(out, streaks, ranks, labels, peaks, finder.structure)
+        return streak_labels(out, streaks, ranks, new_labels, peaks, finder.structure)
 
-    def test_streak_labels(self, streak_labels: IntArray, streaks: Streaks, labels: PeakLabels,
+    def test_streak_labels(self, streak_labels: IntArray, streaks: Streaks, new_labels: PeakLabels,
                            peaks: IntArray, ranks: IntArray, finder: PatternStreakFinder,
                            xp: TestNamespace):
         assert streak_labels.shape == finder.data.shape
@@ -316,7 +324,7 @@ class TestNewStreakFinder:
         shifts = xp.array(list(finder.structure), dtype=int)
         for rank, streak in zip(ranks, streaks):
             bins = xp.asarray(streak.indices)
-            peak_indices = peaks[labels.labels.ravel()[bins] - 1]
+            peak_indices = peaks[new_labels.labels.ravel()[bins] - 1]
             peak_crds = xp.stack(xp.unravel_index(peak_indices, finder.data.shape), axis=-1)
             coords = peak_crds[..., None, :] + shifts
             inbound = xp.all((coords >= 0) & (coords < xp.array(finder.data.shape)), axis=-1)

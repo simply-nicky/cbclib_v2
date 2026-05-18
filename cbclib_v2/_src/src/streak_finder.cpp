@@ -6,12 +6,6 @@ static constexpr size_t L = 4; // Linelet size in 2D, should be 2 * N for N-dime
 
 namespace cbclib {
 
-struct PeakLabels
-{
-    py::array_t<long> labels;
-    size_t n_seeds, n_labels, n_good, radius;
-};
-
 template <typename T>
 py::array_t<lint_t> detect_peaks(py::array_t<lint_t> labels, py::array_t<T> data, Structure structure, size_t radius, T vmin, unsigned threads)
 {
@@ -111,6 +105,22 @@ py::array_t<lint_t> detect_peaks(py::array_t<lint_t> labels, py::array_t<T> data
     return indices;
 }
 
+using LabelsTuple = std::tuple<py::array_t<long>, py::ssize_t, py::ssize_t, py::ssize_t, py::ssize_t>;
+
+struct PeakLabels
+{
+    py::array_t<long> labels;
+    size_t n_seeds, n_labels, n_good, radius;
+
+    PeakLabels(const std::tuple<py::array_t<long>, py::ssize_t, py::ssize_t, py::ssize_t, py::ssize_t> & args)
+        : labels(std::get<0>(args)), n_seeds(std::get<1>(args)), n_labels(std::get<2>(args)), n_good(std::get<3>(args)), radius(std::get<4>(args)) {}
+
+    LabelsTuple to_tuple() const
+    {
+        return std::make_tuple(labels, n_seeds, n_labels, n_good, radius);
+    }
+};
+
 enum class Direction
 {
     None = 0u,
@@ -134,10 +144,14 @@ inline constexpr bool is_none(Direction dir)
 }
 
 template <typename T>
-py::array_t<T> line_fit(PeakLabels & labels, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T vmin, unsigned threads)
+std::tuple<py::array_t<T>, LabelsTuple> line_fit(LabelsTuple tuple, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T vmin, unsigned threads)
 {
-    if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
+    if (static_cast<py::ssize_t>(structure.rank()) != data.ndim())
+    {
+        throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
+    }
 
+    PeakLabels labels {tuple};
     Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     array<T> darr {data.request()};
     PeaksIndexer indexer (darr.shape(), labels.radius);
@@ -249,14 +263,15 @@ py::array_t<T> line_fit(PeakLabels & labels, py::array_t<lint_t> parray, py::arr
 
     py::gil_scoped_acquire acquire;
 
-    return result;
+    return std::make_tuple(result, labels.to_tuple());
 }
 
 template <typename T>
-std::vector<Streak> detect_streaks(PeakLabels labels, py::array_t<lint_t> parray, py::array_t<T> larray, py::array_t<T> data, Structure structure, T vmin, T xtol, unsigned nfa, unsigned threads)
+std::vector<Streak> detect_streaks(LabelsTuple tuple, py::array_t<lint_t> parray, py::array_t<T> larray, py::array_t<T> data, Structure structure, T vmin, T xtol, unsigned nfa, unsigned threads)
 {
     if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
 
+    PeakLabels labels {tuple};
     Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     Linelets<T> linelets (larray.request());
 
@@ -335,10 +350,11 @@ T p_value(InputIt first, InputIt last, const array<T> & data, T p0, T vmin, T xt
 }
 
 template <typename T>
-py::array_t<T> p_values(const std::vector<Streak> & streaks, PeakLabels labels, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T p0, T vmin, T xtol, unsigned threads)
+py::array_t<T> p_values(const std::vector<Streak> & streaks, LabelsTuple tuple, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T p0, T vmin, T xtol, unsigned threads)
 {
     if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
 
+    PeakLabels labels {tuple};
     Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     array<T> darr {data.request()};
 
@@ -390,10 +406,11 @@ py::array_t<T> p_values(const std::vector<Streak> & streaks, PeakLabels labels, 
 }
 
 template <typename T>
-py::array_t<py::ssize_t> n_signal(const std::vector<Streak> & streaks, PeakLabels labels, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T vmin, unsigned threads)
+py::array_t<py::ssize_t> n_signal(const std::vector<Streak> & streaks, LabelsTuple tuple, py::array_t<lint_t> parray, py::array_t<T> data, Structure structure, T vmin, unsigned threads)
 {
     if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
 
+    PeakLabels labels {tuple};
     Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     array<T> darr {data.request()};
 
@@ -447,7 +464,7 @@ py::array_t<py::ssize_t> n_signal(const std::vector<Streak> & streaks, PeakLabel
     return result;
 }
 
-py::array_t<lint_t> streak_labels(py::array_t<lint_t> out, const std::vector<Streak> & streaks, py::array_t<py::ssize_t> ranking, PeakLabels labels, py::array_t<lint_t> parray, Structure structure, unsigned threads)
+py::array_t<lint_t> streak_labels(py::array_t<lint_t> out, const std::vector<Streak> & streaks, py::array_t<py::ssize_t> ranking, LabelsTuple tuple, py::array_t<lint_t> parray, Structure structure, unsigned threads)
 {
     if (static_cast<py::ssize_t>(structure.rank()) != out.ndim())
     {
@@ -458,6 +475,7 @@ py::array_t<lint_t> streak_labels(py::array_t<lint_t> out, const std::vector<Str
         throw std::invalid_argument("Size of ranking array must match number of streaks");
     }
 
+    PeakLabels labels {tuple};
     Peaks peaks {labels.labels.request(), parray.request(), labels.n_labels};
     array<py::ssize_t> ranks {ranking.request()};
     array<lint_t> result {out.request()};
@@ -529,29 +547,17 @@ PYBIND11_MODULE(streak_finder, m)
         return;
     }
 
-    py::class_<PeakLabels>(m, "PeakLabels")
-        .def(py::init<py::array_t<long>, size_t, size_t, size_t, size_t>(), py::arg("labels"), py::arg("n_seeds"), py::arg("n_labels"), py::arg("n_good"), py::arg("radius"))
-        .def_readonly("labels", &PeakLabels::labels)
-        .def_readonly("n_seeds", &PeakLabels::n_seeds)
-        .def_readonly("n_labels", &PeakLabels::n_labels)
-        .def_readonly("n_good", &PeakLabels::n_good)
-        .def_readonly("radius", &PeakLabels::radius)
-        .def("keep_best", [](const PeakLabels & labels, double quantile)
-        {
-            return PeakLabels{labels.labels, size_t(labels.n_seeds * quantile), labels.n_labels, labels.n_good, labels.radius};
-        }, py::arg("quantile")=0.5);
-
     py::class_<Streak>(m, "Streak")
         .def_property_readonly("indices", py::overload_cast<>(&Streak::indices, py::const_))
-        .def("line", [](const Streak & streak, PeakLabels labels, py::array_t<double> lines)
+        .def("line", [](const Streak & streak, py::array_t<long> labels, py::array_t<double> lines)
         {
-            array<lint_t> lbarr {labels.labels.request()};
+            array<lint_t> lbarr {labels.request()};
             Linelets<double> linelets {lines.request()};
             return streak.ends().line(linelets, lbarr).to_array();
         }, py::arg("labels"), py::arg("linelets"))
-        .def("line", [](const Streak & streak, PeakLabels labels, py::array_t<float> lines)
+        .def("line", [](const Streak & streak, py::array_t<long> labels, py::array_t<float> lines)
         {
-            array<lint_t> lbarr {labels.labels.request()};
+            array<lint_t> lbarr {labels.request()};
             Linelets<float> linelets {lines.request()};
             return streak.ends().line(linelets, lbarr).to_array();
         }, py::arg("labels"), py::arg("linelets"));
@@ -559,9 +565,9 @@ PYBIND11_MODULE(streak_finder, m)
     py::class_<std::vector<Streak>> streaks_cls (m, "Streaks");
     declare_list(streaks_cls, "Streaks");
 
-    streaks_cls.def("to_lines", [](const std::vector<Streak> & pattern, PeakLabels labels, py::array_t<double> lines)
+    streaks_cls.def("to_lines", [](const std::vector<Streak> & pattern, py::array_t<long> labels, py::array_t<double> lines)
         {
-            array<lint_t> lbarr {labels.labels.request()};
+            array<lint_t> lbarr {labels.request()};
             Linelets<double> linelets {lines.request()};
             std::vector<double> result;
 
@@ -572,9 +578,9 @@ PYBIND11_MODULE(streak_finder, m)
             }
             return as_pyarray(std::move(result), std::vector<py::ssize_t>{py::ssize_t(pattern.size()), L});
         }, py::arg("labels"), py::arg("lines"))
-        .def("to_lines", [](const std::vector<Streak> & pattern, PeakLabels labels, py::array_t<float> lines)
+        .def("to_lines", [](const std::vector<Streak> & pattern, py::array_t<long> labels, py::array_t<float> lines)
         {
-            array<lint_t> lbarr {labels.labels.request()};
+            array<lint_t> lbarr {labels.request()};
             Linelets<float> linelets {lines.request()};
             std::vector<float> result;
 

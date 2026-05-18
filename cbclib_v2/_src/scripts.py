@@ -245,7 +245,7 @@ def detect_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadat
     regions = det_obj.detect_regions(params.peaks.npts,
                                      params.peaks.structure.to_structure(ndim))
     labels, peaks = det_obj.detect_peaks(regions)
-    linelets = det_obj.fit_linelets(labels, peaks)
+    linelets, labels = det_obj.fit_linelets(labels, peaks)
     result = det_obj.detect_streaks(labels, peaks, linelets, params.streaks.xtol,
                                     nfa=params.streaks.nfa)
     labeled = det_obj.streak_labels(result, labels, peaks)
