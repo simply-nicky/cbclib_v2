@@ -137,6 +137,7 @@ else:
     cupy_ndimage = None
     cuda_streak_finder = None
 
+    CPStreaks = None # type: ignore
     Streaks = NPStreaks
 
     def binary_structure(structure: Structure, shape: Sequence[int] | None=None) -> CPBoolArray:
