@@ -10,7 +10,7 @@ from typing import (Any, DefaultDict, Dict, Generic, Iterable, Iterator, List, P
                     Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints, overload)
 from typing_extensions import Self
 import numpy as np
-from .array_api import array_namespace, asjax, asnumpy
+from .array_api import array_namespace, ascupy, asjax, asnumpy
 from .src.index import Indexer
 from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, DType, Indices,
                           IntArray, IntSequence, MultiIndices, NDArray, NDIntArray, NumPy,
@@ -238,6 +238,23 @@ class DataContainer(Container):
             if isinstance(val, DataContainer) and len(val.contents()):
                 data[f.name] = val
         return data
+
+    def to_cupy(self: Self) -> Self:
+        """Return a copy of this container with NumPy arrays converted to CuPy.
+
+        Only attributes that are :class:`numpy.ndarray` are converted. Other
+        values are left unchanged.
+
+        Returns:
+            A new container instance with converted arrays.
+        """
+        data = {}
+        for attr, val in self.contents().items():
+            if isinstance(val, Array):
+                data[attr] = ascupy(val)
+            if isinstance(val, DataContainer):
+                data[attr] = val.to_cupy()
+        return self.replace(**data)
 
     def to_jax(self: Self) -> Self:
         """Return a copy of this container with NumPy arrays converted to JAX.

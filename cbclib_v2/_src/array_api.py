@@ -1,6 +1,6 @@
 from typing import Any, Literal, Tuple, Set, overload, cast
 import jax.numpy as jnp
-from jax import devices, random
+from jax import devices, device_put, dlpack as jdl, random
 import numpy as np
 from array_api_compat import array_namespace as get_array_namespace, device, numpy as np_array_api
 from .annotations import (AnyFloat, Array, ArrayLike, AnyNamespace, ArrayNamespace, CPArray,
@@ -11,7 +11,6 @@ from .annotations import (AnyFloat, Array, ArrayLike, AnyNamespace, ArrayNamespa
 if CuPy is not None:
     import cupy as cp
     from cupy import fromDlpack as from_dlpack
-    from jax import device_put, dlpack as jdl
     from array_api_compat import cupy as cp_array_api
 
     class CuPyGenerator(cp.random.RandomState):
@@ -192,13 +191,13 @@ class JaxGenerator:
                               maxval=jnp.asarray(high))
 
 @overload
-def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
+def add_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
 
 @overload
-def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
+def add_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
 
 @overload
-def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
+def add_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
 
 def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
     xp = array_namespace(a)
@@ -253,13 +252,13 @@ def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 @overload
-def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
+def set_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
 
 @overload
-def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
+def set_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
 
 @overload
-def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
+def set_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
 
 def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
     xp = array_namespace(a)
@@ -273,18 +272,6 @@ def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
         a[indices] = b
         return a
     raise ValueError(f"Unsupported array namespace: {xp}")
-
-@overload
-def default_rng(seed: int | None = None, xp: ArrayNamespace[CPArray] = ...
-                ) -> Generator[CPArray]: ...
-
-@overload
-def default_rng(seed: int | None = None, xp: ArrayNamespace[JaxArray] = ...
-                ) -> Generator[JaxArray]: ...
-
-@overload
-def default_rng(seed: int | None = None, xp: ArrayNamespace[NDArray] = ...
-                ) -> Generator[NDArray]: ...
 
 def default_rng(seed: int | None = None, xp: ArrayNamespace = NumPy) -> Generator:
     if xp is JaxNumPy:

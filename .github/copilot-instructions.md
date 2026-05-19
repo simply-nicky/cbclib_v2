@@ -1,229 +1,135 @@
 # Copilot Instructions for cbclib_v2
 
-## Project Overview
-**cbclib_v2** is a Python library for convergent beam crystallography (CBC) data processing. It combines **PyData ecosystem** (NumPy, Pandas, JAX) with **C++17 extensions** (pybind11) and optional **CUDA acceleration** for high-performance array operations on crystallography datasets.
+## Collaboration Policy
 
-## Critical Constraints
+**Do not jump to editing source code.** Any change — whether fixing a bug or adding a feature — must be preceded by a conversation that explores the root cause or weighs alternative solutions. Ask clarifying questions before touching files. Follow the existing code style precisely: strict Python type hints throughout, OOP design, and dataclass-based containers.
 
-### Environment Setup
-- **Development uses conda environments**:
-  - `cbc`: CPU-only setup (default environment, see [environment.yml](environment.yml))
-  - `cbc_cuda`: CUDA-supported setup with GPU acceleration
-- Always verify which environment is active when debugging GPU/CPU issues
+## Build
 
-### Code Modification Policy
-- **DO NOT modify CXI protocol or HDF5 data handling code** ([cxi_protocol.py](cbclib_v2/_src/cxi_protocol.py)) unless explicitly instructed
-- **DO NOT create extra files** (scripts, docs, configs) unless explicitly requested
-- When asked to implement features, modify existing files rather than creating new ones
+Two conda environments are used:
 
-### Formatting Rules (C++/CUDA)
-Codebase uses **Allman/BSD style** with strict whitespace conventions:
-- **Opening braces on new lines** for functions, classes, namespaces, control flow:
-  ```cpp
-  void function()
-  {
-      if (condition)
-      {
-          // code
-      }
-  }
-  ```
-- **Inline braces** only for single-statement lambdas: `[](auto x){ return x + 1; }`
-- **NO trailing whitespace or tabs** at end of lines
-- **Indentation**: Use tabs for C++ (inferred from existing code), spaces for Python (4 spaces)
-- **Line length**: Aim for <100 chars where practical (not strictly enforced)
+| Environment | Use |
+|-------------|-----|
+| `cbc`       | CPU-only development (default) |
+| `cbc_cuda`  | GPU-accelerated development with CuPy and CUDA extensions |
+
+```bash
+# CPU-only install
+conda activate cbc
+pip install -e ".[dev]"
+
+# Optional: build native extensions in-place only (skips full install)
+python setup.py build_ext -i
+
+# CUDA install
+conda activate cbc_cuda
+python setup.py build_ext -i
+pip install -e ".[dev]"
+
+# Skip CUDA extensions even when CUDA is present
+CBCLIB_SKIP_CUDA=1 pip install -e ".[dev]"
+```
+
+## Tests
+
+```bash
+# Full suite
+pytest tests/ -v
+
+# Single file
+pytest tests/streak_finder_test.py -v
+
+# With stdout captured and verbose
+pytest tests/ -vvs
+```
+
+Test files live under `tests/`, follow `*_test.py` naming, and are discovered by pytest with `--import-mode=importlib`.
 
 ## Architecture
 
-### Layered Structure
-- **Python API layer** ([cbclib_v2/](cbclib_v2/)): User-facing data classes and workflows
-- **Native extensions** ([cbclib_v2/_src/src/](cbclib_v2/_src/src/)): C++17 and CUDA kernels compiled via setuptools
-- **Intermediate Python** ([cbclib_v2/_src/](cbclib_v2/_src/)): Data containers, state management, parsing
+### Three-layer structure
 
-### Key Components
-1. **Data I/O**: [crystfel.py](cbclib_v2/_src/crystfel.py) (geometry parsing), [cxi_protocol.py](cbclib_v2/_src/cxi_protocol.py) (HDF5 dataset abstraction)
-2. **Geometry & Indexing**: [indexer/](cbclib_v2/indexer/) subpackage (crystal orientation optimization via JAX)
-3. **Streak Detection**: [streak_finder/](cbclib_v2/) (signal processing + label analysis)
-4. **Metadata Extraction**: [data_processing.py](cbclib_v2/_src/data_processing.py) (PCA, whitefield, variance estimation)
-5. **SLURM Integration**: [slurm/scripts.py](cbclib_v2/slurm/scripts.py) (batch processing orchestration for compute clusters)
-6. **Device Management**: [device.py](cbclib_v2/_src/device.py) (CPU/CUDA backend switching, JAX-like context API)
+```
+cbclib_v2/          ← Public API: re-exports, high-level data classes, subpackages
+cbclib_v2/_src/     ← Private implementation: data containers, parsing, processing logic
+cbclib_v2/_src/src/ ← Native extensions: C++17 (pybind11) and CUDA kernels
+```
 
-### JAX Integration (Critical Gotcha)
-- **JAX is lazily initialized**: `State` subclasses (e.g., `XtalState`, `FixedSetup`) register as JAX pytrees **only on first instance creation**, not on import
-- **Why**: JAX's `register_pytree_with_keys()` triggers GPU context init and ~12GB preallocation on first call. Lazy registration defers this until actually needed.
-- **Impact**: Package imports are GPU-safe; GPU memory is allocated only when JAX computations run.
-- **In [test_util.py](cbclib_v2/test_util.py)**: `get_random_xtal()` / `get_random_setup()` use lazy getters for module-level test fixtures
+The public layer ([cbclib_v2/\_\_init\_\_.py](cbclib_v2/__init__.py)) is thin — it only re-exports from `_src`. New Python-only functionality always goes into `_src/` first and is exposed via `__init__.py`.
 
-## Developer Workflows
+### Container hierarchy (`_src/data_container.py`)
 
-### Build
-CPU-only (cbc):
+All data abstractions are frozen-ish dataclasses that inherit from a clear hierarchy:
+
+```
+Container            ← dict/JSON serialisable; to_dict / from_dict / replace
+  DataContainer      ← holds arrays; knows its array namespace; to_numpy/to_jax/to_cupy
+    ArrayContainer   ← uniform-shape arrays; concatenate / stack / __getitem__ / reshape
+      IndexedContainer  ← adds an integer `index` field grouping rows into frames
+```
+
+`replace(**kwargs)` is the idiomatic way to produce a modified copy (mirrors `dataclasses.replace` but works on the concrete subclass).
+
+### Array-namespace portability
+
+Every array operation uses the `ArrayNamespace` protocol ([`_src/annotations.py`](cbclib_v2/_src/annotations.py)) rather than importing numpy/jax directly. The active namespace for a container or array is resolved at runtime via `array_namespace()` from [`_src/array_api.py`](cbclib_v2/_src/array_api.py):
+
+- `NumPy` — CPU, `np.ndarray`
+- `JaxNumPy` — CPU or GPU via XLA, `jax.Array`
+- `CuPy` — GPU, `cupy.ndarray` (optional, import-guarded)
+
+Always write `xp = array_namespace(self.data)` then call `xp.zeros(...)`, `xp.concat(...)`, etc. Never import `numpy` or `jax.numpy` directly inside a function that must stay device-agnostic. Use `asnumpy`, `asjax`, `ascupy` helpers for explicit conversions.
+
+### JAX pytree / `State` classes
+
+`State` subclasses (in `_src/state.py`) are JAX-compatible dataclasses. Use `field(static=True)` for geometry/config attributes that must not be differentiated. **JAX registration happens lazily on first instantiation**, not at import time — this avoids the ~12 GB GPU context preallocation during import.
+
+### Native extensions (`_src/src/`)
+
+- C++ CPU kernels: `bresenham`, `label`, `median`, `streak_finder`, `index`; compiled with `-fopenmp` where applicable.
+- CUDA GPU kernels: `cuda_draw_lines`, `cuda_label`, `cuda_median`, `cuda_streak_finder`; compiled with `nvcc`.
+- `_src/src/__init__.py` does a conditional import and sets `CUDA_AVAILABLE`.
+
+`CPPExtension` in [`setup.py`](setup.py) handles the custom nvcc dispatch (routes `.cu` files through nvcc, `.cpp` through the system C++ compiler).
+
+#### C++ / CUDA conventions
+
+- **Allman/BSD brace style**: opening brace on its own line for functions, classes, namespaces, and control flow. Inline braces only for single-statement lambdas.
+- **Indentation**: tabs in C++/CUDA, 4 spaces in Python.
+- **Precision dispatch**: use `math_traits<float>` / `math_traits<double>` specialisations (defined in `cuda_geometry.hpp`) inside kernels — never call `sqrtf` vs `::sqrt` directly.
+- **pybind11 binding pattern**: register one overload per type (`m.def("func", &func<float>, ...); m.def("func", &func<double>, ...)`).
+- **CPU arrays**: pass via non-owning `array<T>` view (from `array_view.hpp`); supports strided layouts.
+- **CUDA arrays**: extract raw pointers from `py::array_t<T>` and pass to kernels alongside `PointND`/`LineND` geometry types.
+
+### HDF5 / CXI protocol
+
+[`_src/cxi_protocol.py`](cbclib_v2/_src/cxi_protocol.py) defines the HDF5 dataset abstraction used for reading/writing CBC datasets. **Do not modify this file unless explicitly instructed.**
+
+### SLURM integration
+
+[`cbclib_v2/slurm/`](cbclib_v2/slurm/) provides batch-job orchestration for compute clusters. Entry point: `cbclib_cli` (see `pyproject.toml`).
+
+## Adding extensions
+
+| What | Where |
+|------|-------|
+| Python-only feature | `_src/<module>.py`, expose in `__init__.py` |
+| C++ CPU kernel | `_src/src/<name>.cpp` + `.pyi`, add `CPPExtension` entry to `setup.py` |
+| CUDA GPU kernel | `_src/src/cuda_<name>.cu` + `.pyi`, add to CUDA block in `setup.py` |
+| Tests | `tests/<name>_test.py` |
+
+## Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `CBCLIB_SKIP_CUDA` | Set to `1` to skip all CUDA extension builds |
+| `XLA_PYTHON_CLIENT_PREALLOCATE` | Set to `false` to disable JAX GPU memory preallocation |
+| `XLA_PYTHON_CLIENT_MEM_FRACTION` | Fraction of GPU memory JAX may use (e.g. `0.6`) |
+
+## Type checking
+
 ```bash
-conda activate cbc
-pip install -e ".[dev]"
-# Or build native extensions in-place first (optional)
-python setup.py build_ext -i
+pyright cbclib_v2/
 ```
 
-With CUDA (cbc_cuda):
-```bash
-conda activate cbc_cuda
-# Ensure CUDA toolkit is visible to the build
-python setup.py build_ext -i
-pip install -e ".[dev]"
-```
-
-### Test
-CPU-only (cbc):
-```bash
-conda activate cbc
-pytest tests/ -v
-```
-
-With CUDA (cbc_cuda):
-```bash
-conda activate cbc_cuda
-pytest tests/ -v
-```
-
-Extras:
-```bash
-# Verbose output + capture disabled
-pytest tests/ -vvs
-
-# Single file
-pytest tests/label_test.py -v
-```
-
-### Common Issues
-- **CUDA not found at build time**: Set `CBCLIB_SKIP_CUDA=1` to disable CUDA extension.
-- **JAX GPU preallocation**: Control via environment variables before import:
-  ```bash
-  export XLA_PYTHON_CLIENT_PREALLOCATE=false
-  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.6  # Use 60% of GPU
-  ```
-
-## Critical Patterns
-
-### State & JAX Pytrees
-Classes inheriting from `State` (in `_src/state.py`) are JAX-compatible dataclasses with **dynamic fields** (pytree leaves for differentiation) and **static fields** (hashed for control flow). Example:
-```python
-class XtalState(ArrayContainer, State):
-    lattice: RealArray  # Dynamic (traced by JAX)
-    cell: CrystCell = field(static=True)  # Static (compared by JAX)
-```
-Subclasses automatically register with JAX on first `__init__` call via `_register_pytree()`.
-
-### C++/CUDA Templating
-Native extensions use **math_traits specialization** for float/double precision dispatch:
-- **Template kernel**: Single generic template `template <typename T> void kernel(T* data, ...)`
-- **Type-specific math**: Define `math_traits<float>` and `math_traits<double>` structs in header (e.g., `cuda_geometry.hpp`):
-  ```cpp
-  template <> struct math_traits<float> {
-      static HOST_DEVICE float sqrt(float x) { return sqrtf(x); }
-      static HOST_DEVICE float max(float x, float y) { return fmaxf(x, y); }
-  };
-  template <> struct math_traits<double> {
-      static HOST_DEVICE double sqrt(double x) { return ::sqrt(x); }
-      static HOST_DEVICE double max(double x, double y) { return ::fmax(x, y); }
-  };
-  ```
-- **Multiple pybind11 definitions**: Register separate Python functions for each type (same name):
-  ```cpp
-  m.def("draw_lines", &cuda::draw_lines<float>, ...);
-  m.def("draw_lines", &cuda::draw_lines<double>, ...);
-  ```
-- **Usage in kernel**: `math_traits<T>::sqrt(x)` automatically selects float or double variant.
-- Example: `cbclib_v2/_src/src/cuda_geometry.hpp` (lines 20–56) defines traits; `cuda_functions.cu:287` uses them.
-
-### DataContainer & ArrayNamespace
-All data abstractions inherit from `DataContainer` and accept an `xp: ArrayNamespace` parameter (NumPy or JAX):
-```python
-class Detector(DataContainer):
-  def indices(self) -> 'PixelIndices':  # Return CPU-friendly indices
-  def to_patterns(self, streaks: Streaks, xp: ArrayNamespace = NumPy) -> Patterns:
-    # Use xp.array(), xp.dot(), etc. for GPU/JAX compatibility
-```
-This pattern enables seamless CPU → GPU portability.
-
-### Lightweight Array Class (`array<T>`) — CPU Only
-The `array<T>` template class (in [array.hpp](cbclib_v2/_src/src/array.hpp)) provides a non-owning view wrapper for multi-dimensional arrays with full support for **both contiguous and non-contiguous layouts**:
-- **Shape & stride metadata**: Tracks array dimensions, strides, and itemsize
-- **Iterator support**: `array_iterator<T, IsConst>` implements random-access iteration over both C-contiguous and strided arrays
-- **Indexing helpers**: Methods like `at()`, `slice()`, `slice_front()`, `slice_back()` work universally across any memory layout
-- **CPU-only**: All C++ CPU functions use `array<T>`; CUDA kernels use device-compatible types from `cuda_geometry.hpp`
-- **Python interop**: Implicit conversion to `py::array_t<T>` for pybind11; accepts NumPy arrays with arbitrary strides
-
-### Device-Friendly Geometry Types (CUDA)
-CUDA kernels use lightweight device-compatible types from [cuda_geometry.hpp](cbclib_v2/_src/src/cuda_geometry.hpp):
-- **`PointND<T, N>`**: N-dimensional point with arithmetic operations (addition, scaling, dot product)
-- **`LineND<T, N>`**: Line segment with distance/projection calculations
-- **`ThickLineND<T, N>`**: Line segment with thickness (width) for rendering operations
-- **`math_traits<float>` / `math_traits<double>`**: Type-specific math dispatch (sqrtf vs ::sqrt, fmaxf vs ::fmax, etc.)
-- All types support HOST_DEVICE compilation for both CPU and GPU targets
-
-### pybind11 Conventions
-- Module name matches extension name: `PYBIND11_MODULE(label, m)` → `cbclib_v2._src.src.label`
-- Use `.def()` for functions, `.def_readonly()` for C++ struct fields
-- NumPy arrays: bind via `py::array_t<T>` with format `c_style | forcecast`
-- Keep bindings minimal; use pybind11-generated type annotations (`.pyi` files auto-generated)
-- **Array wrapping**: Pass NumPy arrays to C++ via `array<T>` constructor accepting `py::buffer_info` for full stride support (CPU functions only)
-- **CUDA binding pattern**: Accept `py::array_t<T>` in bindings, extract raw pointers and metadata, pass to templated kernels expecting `PointND`, `LineND`, or raw pointers
-
-## Performance & Optimization
-
-### Spatial Indexing (CUDA Example)
-The [cuda_functions.cu](cbclib_v2/_src/src/cuda_functions.cu) `draw_thick_lines_3d()` kernel demonstrates:
-1. **CPU preprocessing**: Build spatial grid (CSR format) to cull candidate line segments
-2. **GPU point-parallel**: Each thread processes one voxel, queries grid, computes distance
-3. **Result**: 10–100× speedup vs naive all-pairs brute force
-
-When adding new CUDA kernels: preprocess on CPU to reduce device kernel branching.
-
-### Memory Management
-- CUDA device memory is **not explicitly freed** in Python bindings (relies on scope cleanup via pybind11)
-- For long-running processes: explicitly call `cudaFreeAll()` or Python's `gc.collect()` if needed.
-
-## File Organization
-
-```
-cbclib_v2/
-├── __init__.py              # Imports main API (Detector, State, etc.)
-├── _src/                    # "Private" implementation (but public imports)
-│   ├── state.py             # JAX State base class + pytree registration
-│   ├── crystfel.py          # Detector/Panel parsing
-│   ├── data_processing.py   # High-level workflows
-│   └── src/                 # C++/CUDA extensions
-│       ├── *.cpp            # CPU kernels (pybind11-wrapped)
-│       ├── cuda_functions.cu # GPU kernels
-│       └── *.hpp            # Template definitions (included in .cpp/.cu)
-├── indexer/                 # JAX-based crystal orientation optimization
-├── slurm/                   # Batch job orchestration
-└── streak_finder/           # Streak detection pipelines
-```
-
-## Editing Guidelines
-
-### When Adding Features
-1. **Python-only**: Add to [_src/](cbclib_v2/_src/) module, expose via [__init__.py](cbclib_v2/__init__.py)
-2. **C++ CPU kernel**: Create `_src/src/feature.cpp`, use pybind11, add to [setup.py](setup.py) extensions list
-3. **CUDA GPU kernel**: Add to [cuda_functions.cu](cbclib_v2/_src/src/cuda_functions.cu), template for float/double, expose in `PYBIND11_MODULE(cuda_functions, m)`
-4. **Tests**: Place in `tests/feature_test.py`, name functions `test_*` for pytest discovery
-
-### Modifying State Subclasses
-- Always use `State` base class (not raw `@dataclass`) for JAX compatibility
-- Use `field(static=True)` for non-differentiable attributes (geometry, config)
-- Do **not** manually call `_register_pytree()`; happens automatically on first instance
-
-### GPU Memory Control
-- Document environment variables in docstrings: e.g., "Respects `XLA_PYTHON_CLIENT_MEM_FRACTION`"
-- Test locally with `XLA_PYTHON_CLIENT_PREALLOCATE=false` before committing GPU-heavy code.
-
-## References
-- **State/JAX**: [state.py](cbclib_v2/_src/state.py) (lines 87–183)
-- **Pytree registration**: `_register_pytree()` method defers JAX init
-- **Array class**: [array.hpp](cbclib_v2/_src/src/array.hpp) (non-owning view with full stride support)
-- **CUDA templating**: [cuda_functions.cu](cbclib_v2/_src/src/cuda_functions.cu) (lines 1–50, 178–461)
-- **pybind11 example**: [label.cpp](cbclib_v2/_src/src/label.cpp) (line 464+)
-- **DataContainer pattern**: [data_container.py](cbclib_v2/_src/data_container.py)
-- **Build system**: [setup.py](setup.py) (CPPExtension class, conda CUDA paths)
+Config is in [`pyrightconfig.json`](pyrightconfig.json): mode `standard`, target Python 3.10, private import usage suppressed (internal `_src` imports are intentional).

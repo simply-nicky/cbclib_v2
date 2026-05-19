@@ -127,7 +127,7 @@ public:
         bool flag = true;
         for (I i = 0; first != last; ++first, ++i)
         {
-            flag &= *first >= 0 && *first < static_cast<I>(m_shape_ptr[i]);
+            flag &= *first >= 0 && static_cast<I>(*first) < m_shape_ptr[i];
         }
         return flag;
     }

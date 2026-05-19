@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.13.2'
+version = '0.13.3'
 dependencies = [
     'array_api_compat',
     'h5py',
@@ -45,6 +45,7 @@ Repository = "https://github.com/simply-nicky/cbclib_v2"
 addopts = [
     "--import-mode=importlib",
 ]
+pythonpath = ["."]
 markers = ["slow: mark a test that takes a long time to run.",
            "asyncio: mark a test as requiring asyncio."]
 testpaths = ["tests"]
@@ -56,6 +57,7 @@ extension-pkg-allow-list = [
     "cbclib_v2._src.src.cuda_draw_lines",
     "cbclib_v2._src.src.cuda_label",
     "cbclib_v2._src.src.cuda_median",
+    "cbclib_v2._src.src.cuda_streak_finder",
     "cbclib_v2._src.src.index",
     "cbclib_v2._src.src.label",
     "cbclib_v2._src.src.median",

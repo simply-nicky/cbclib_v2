@@ -2,5 +2,6 @@ graft tests
 graft cbclib_v2/_src/config
 graft cbclib_v2/_src/src
 include LICENSE
+include cbclib_v2/py.typed
 global-exclude *.py[cod]
 global-exclude *.so

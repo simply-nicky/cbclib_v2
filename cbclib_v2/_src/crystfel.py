@@ -765,7 +765,7 @@ class Detector():
         x, y, z = xp.zeros(ss.shape), xp.zeros(ss.shape), xp.zeros(ss.shape)
         for panel in self.panels.values():
             mask = panel.distance(*coordinates) < tolerance
-            mask = xp.all(mask, axis=tuple(range(1, mask.ndim)))
+            mask = xp.all(mask, axis=tuple(range(ss.ndim, mask.ndim)))
             x_new, y_new, z_new = panel.to_detector(ss[mask] - panel.region.roi[0],
                                                     fs[mask] - panel.region.roi[2],
                                                     half_pixel_shift)
@@ -781,12 +781,43 @@ class Detector():
 
     def to_streaks(self, streaks: Streaks | StackedStreaks, half_pixel_shift: bool=True,
                    tolerance: float=1.0) -> Streaks:
+        # We need to make sure that the distance between points stays the same
+        # Sometimes a streak can span over multiple panels, so we need to choose one panel
+        # for the whole streak
         if isinstance(streaks, StackedStreaks) and streaks.num_modules > 1:
-            x, y, _ = self.to_detector(streaks.module_id, streaks.y, streaks.x,
-                                        half_pixel_shift=half_pixel_shift, tolerance=tolerance)
+            coordinates = (streaks.module_id, streaks.y, streaks.x)
         else:
-            x, y, _ = self.to_detector(streaks.y, streaks.x,
-                                       half_pixel_shift=half_pixel_shift, tolerance=tolerance)
+            coordinates = (streaks.y, streaks.x)
+
+        xp = streaks.__array_namespace__()
+        distances = xp.stack([panel.distance(*coordinates) for panel in self.panels.values()])
+        module_ids = xp.argmin(xp.sum(distances, axis=-1), axis=0)
+        point_dists = xp.take_along_axis(distances, module_ids[None, ..., None], axis=0)[0]
+        point_ids = xp.argmin(point_dists, axis=-1)
+        other_ids = (point_ids + 1) % 2
+
+        fs0, ss0 = xp.take_along_axis(streaks.points, point_ids[..., None, None],
+                                      axis=-2)[..., 0, :].T
+        fs1, ss1 = xp.take_along_axis(streaks.points, other_ids[..., None, None],
+                                      axis=-2)[..., 0, :].T
+
+        x0, y0, _ = self.to_detector(*(coordinates[:-2] + (ss0, fs0)),
+                                     half_pixel_shift=half_pixel_shift, tolerance=tolerance)
+
+        # I need to convert dfs and dss to dx and dy first
+        panels_ss = xp.stack([xp.array([panel.ss.x, panel.ss.y])
+                              for panel in self.panels.values()], axis=-1)
+        panels_fs = xp.stack([xp.array([panel.fs.x, panel.fs.y])
+                              for panel in self.panels.values()], axis=-1)
+
+        ss_basis = xp.take_along_axis(panels_ss, module_ids[None, ...], axis=-1)
+        fs_basis = xp.take_along_axis(panels_fs, module_ids[None, ...], axis=-1)
+        dx, dy = ss_basis * (ss1 - ss0) + fs_basis * (fs1 - fs0)
+        x1, y1 = x0 + dx, y0 + dy
+
+        indices = xp.stack((point_ids, other_ids), axis=-1)
+        x = xp.take_along_axis(xp.stack((x0, x1), axis=-1), indices, axis=-1)
+        y = xp.take_along_axis(xp.stack((y0, y1), axis=-1), indices, axis=-1)
         return Streaks.import_xy(streaks.index, x, y)
 
     def to_patterns(self, streaks: Streaks) -> Patterns:

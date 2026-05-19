@@ -101,6 +101,13 @@ struct PointND : public std::array<T, N>
         return result;
     }
 
+    friend PointND<T, N> operator-(const PointND & rhs)
+    {
+        PointND<T, N> result;
+        for (size_t i = 0; i < N; i++) result[i] = -rhs[i];
+        return result;
+    }
+
     template <typename V, typename U = std::common_type_t<T, V>>
     friend PointND<U, N> operator-(const PointND & lhs, const PointND<V, N> & rhs)
     {
@@ -120,8 +127,8 @@ struct PointND : public std::array<T, N>
     template <typename V, typename U = std::common_type_t<T, V>>
     friend PointND<U, N> operator-(V lhs, const PointND & rhs)
     {
-        PointND<U, N> result = rhs;
-        result -= lhs;
+        PointND<U, N> result;
+        for (size_t i = 0; i < N; i++) result[i] = lhs - rhs[i];
         return result;
     }
 
@@ -168,8 +175,8 @@ struct PointND : public std::array<T, N>
     template <typename V, typename U = std::common_type_t<T, V>>
     friend PointND<U, N> operator/(V lhs, const PointND & rhs)
     {
-        PointND<U, N> result = rhs;
-        result /= lhs;
+        PointND<U, N> result;
+        for (size_t i = 0; i < N; i++) result[i] = lhs / rhs[i];
         return result;
     }
 
@@ -307,6 +314,7 @@ struct LineND
     }
 
     PointND<T, N> tangent() const {return pt1 - pt0;}
+    PointND<T, N> center() const {return (pt0 + pt1) / T(2);}
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
     PointND<W, N> project_to_streak(const PointND<V, N> & point) const
@@ -316,21 +324,21 @@ struct LineND
 
         if (mag)
         {
-            auto center = 0.5 * (pt0 + pt1);
-            auto r = point - center;
+            auto ctr = center();
+            auto r = point - ctr;
             auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            return std::clamp<W>(r_tau, -0.5, 0.5) * tau + center;
+            return std::clamp<W>(r_tau, -0.5, 0.5) * tau + ctr;
         }
         return pt0;
     }
 
-    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
     W distance(const PointND<V, N> & point) const
     {
         return amplitude(point - project_to_streak(point));
     }
 
-    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
     PointND<W, N> project_to_line(const PointND<V, N> & point) const
     {
         auto tau = tangent();
@@ -338,15 +346,15 @@ struct LineND
 
         if (mag)
         {
-            auto center = 0.5 * (pt0 + pt1);
-            auto r = point - center;
+            auto ctr = center();
+            auto r = point - ctr;
             auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            return r_tau * tau + center;
+            return r_tau * tau + ctr;
         }
         return pt0;
     }
 
-    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
     W normal_distance(const PointND<V, N> & point) const
     {
         return amplitude(point - project_to_line(point));

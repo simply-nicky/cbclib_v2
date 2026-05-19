@@ -42,44 +42,6 @@ class TestContainerSerialization:
 
         assert original == restored, "Restored ComplexContainer does not match the original"
 
-@dataclass
-class SimpleContainer(Container):
-    id : int
-
-@dataclass
-class ComplexContainer(Container):
-    a : List[int | str]
-    b : SimpleContainer
-    c : Dict[str, float]
-    d : SimpleContainer | None
-    e : List[SimpleContainer]
-    f : Tuple[SimpleContainer, ...]
-
-class TestContainerSerialization:
-    """Test serialization and deserialization of data containers."""
-    def test_simple_container(self):
-        """Test serialization/deserialization of a simple container."""
-        original = SimpleContainer(id=42)
-        data_dict = original.to_dict()
-        restored = SimpleContainer.from_dict(**data_dict)
-
-        assert original == restored, "Restored SimpleContainer does not match the original"
-
-    def test_complex_container(self):
-        """Test serialization/deserialization of a complex container."""
-        original = ComplexContainer(
-            a=[1, 2, 3],
-            b=SimpleContainer(id=7),
-            c={"pi": 3.14, "e": 2.71},
-            d=None,
-            e=[SimpleContainer(id=10), SimpleContainer(id=20)],
-            f=(SimpleContainer(id=30), SimpleContainer(id=40))
-        )
-        data_dict = original.to_dict()
-        restored = ComplexContainer.from_dict(**data_dict)
-
-        assert original == restored, "Restored ComplexContainer does not match the original"
-
 class TestDataContainers:
     """Test data container functionality."""
     @pytest.fixture

@@ -58,6 +58,10 @@ class BaseLines(ArrayContainer):
         r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
         return tau * r_tau + center
 
+    def distance(self, point: RealArray) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.sqrt(xp.sum((self.project(point) - point)**2, axis=-1))
+
     def to_lines(self, width: RealSequence | None=None) -> RealArray:
         """Export a streaks container into line parameters ``x0, y0, x1, y1, width``:
 

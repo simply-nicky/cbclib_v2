@@ -12,16 +12,16 @@ Examples:
 """
 from math import prod
 import os
-from typing import Literal, NamedTuple, Sequence, cast
+from typing import Literal, NamedTuple, Sequence, Tuple, cast
 from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
 import numpy as np
 from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
-from .streak_finder import PeaksList, detect_peaks, detect_streaks, filter_peaks
+from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
 from .streaks import StackedStreaks, Streaks
-from .annotations import (Array, ArrayLike, BoolArray, CPIntArray, Indices, IntArray, NumPy, RealArray, ReferenceType,
+from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
                           ROI, Shape)
 from .functions import (LabelResult, Structure, center_of_mass, covariance_matrix, ellipse_fit,
                         label, line_fit, median, robust_mean, robust_lsq)
@@ -358,20 +358,21 @@ class CrystData(CrystBase):
                 data_dict[attr] = getattr(self, attr)
         return self.replace(**data_dict)
 
-    def streak_detector(self, structure: Structure) -> 'StreakDetector':
-        """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR frames.
+    def streak_detector(self, structure: Structure, vmin: float) -> 'StreakDetector':
+        """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR
+        frames.
 
         Raises:
             ValueError : If there is no ``snr`` inside the container.
 
         Returns:
-            A CBC pattern detector based on bespoke streak detection algorithm.
+            A CBC pattern detector based on bespoke GPU-friendly streak detection algorithm.
         """
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
         parent = cast(ReferenceType[CrystData], ref(self))
-        return StreakDetector(data=self.snr, structure=structure, parent=parent)
+        return StreakDetector(data=self.snr, structure=structure, vmin=vmin, parent=parent)
 
     def update_mask(self, method: MaskMethod='no-bad', vmin: int=0, vmax: int=65535,
                     snr_max: float=3.0, roi: ROI | None=None) -> 'CrystData':
@@ -574,57 +575,46 @@ class DetectorBase(DataContainer):
 class StreakDetector(DetectorBase):
     data            : RealArray
     structure       : Structure
+    vmin            : float
     parent          : ReferenceType[CrystData]
 
-    def detect_peaks(self, vmin: float, npts: int, connectivity: Structure=Structure([1, 1], 1)
-                     ) -> CPIntArray | PeaksList:
-        """Find peaks in a pattern. Returns a sparse set of peaks which values are above a threshold
-        ``vmin`` that have a supporing set of a size larger than ``npts``. The minimal distance
-        between peaks is ``2 * structure.radius``.
+    def __post_init__(self):
+        self.finder = PatternStreakFinder(self.data, self.structure, self.vmin)
 
-        Args:
-            vmin : Peak threshold. All peaks with values lower than ``vmin`` are discarded.
-            npts : Support size threshold. The support structure is a connected set of pixels which
-                value is above the threshold ``vmin``. A peak is discarded is the size of support
-                set is lower than ``npts``.
-            connectivity : Connectivity structure used in finding a supporting set.
-            radius : Minimal distance between peaks. If ``None``, uses the connectivity radius.
+    def detect_regions(self, npts: int, connectivity: Structure | None=None) -> LabelResult:
+        return self.finder.detect_regions(npts, connectivity)
 
-        Returns:
-            Set of detected peaks.
-        """
-        peaks = detect_peaks(self.data, self.structure.connectivity, vmin)
-        return filter_peaks(peaks, self.data, connectivity, vmin, npts)
+    def detect_peaks(self, regions: LabelResult) -> Tuple[PeakLabels, IntArray]:
+        return self.finder.detect_peaks(regions)
 
-    def detect_streaks(self, peaks: PeaksList | CPIntArray, xtol: float, vmin: float,
-                       min_size: float, lookahead: int=0, nfa: int=0) -> StackedStreaks | Streaks:
-        """Streak finding algorithm. Starting from the set of seed peaks, the lines are iteratively
-        extended with a connectivity structure.
+    def fit_linelets(self, regions: PeakLabels, peaks: IntArray) -> Tuple[RealArray, PeakLabels]:
+        return self.finder.fit_linelets(regions, peaks)
 
-        Args:
-            peaks : A set of peaks used as seed locations for the streak growing algorithm.
-            xtol : Distance threshold. A new linelet is added to a streak if it's distance to the
-                streak is no more than ``xtol``.
-            vmin : Value threshold. A new linelet is added to a streak if it's value at the center
-                of mass is above ``vmin``.
-            min_size : Minimum number of linelets required in a detected streak.
-            lookahead : Number of linelets considered at the ends of a streak to be added to the
-                streak.
-            nfa : Number of linelet end points that can fail the distance threshold in a streak.
+    def detect_streaks(self, labels: PeakLabels, peaks: IntArray, linelets: RealArray,
+                       xtol: float, nfa: int = 0) -> StreakResult:
+        return self.finder.detect_streaks(labels, peaks, linelets, xtol, nfa)
 
-        Returns:
-            A list of detected streaks.
-        """
+    def streak_labels(self, streaks: StreakResult, labels: PeakLabels, peaks: IntArray
+                      ) -> LabelResult:
+        ranks = self.finder.ranking(streaks, labels, peaks)
+        return self.finder.streak_labels(streaks, ranks, labels, peaks)
+
+    def line_fit(self, labeled: LabelResult) -> RealArray:
+        return self.finder.line_fit(labeled)
+
+    def min_support(self, labeled: LabelResult, lines: RealArray, xtol: float) -> RealArray:
+        return self.finder.min_support(labeled, lines, xtol)
+
+    def to_streaks(self, lines: RealArray) -> StackedStreaks | Streaks:
         xp = self.__array_namespace__()
-        detected = detect_streaks(peaks, self.data, self.structure, xtol, vmin, min_size, lookahead,
-                                  nfa)
-        lines = NumPy.zeros((detected.total(), 4), dtype=self.data.dtype)
-        lines = xp.asarray(detected.to_lines(lines))
-        if self.parent().num_modules > 1:
-            return StackedStreaks(xp.asarray(detected.index() // self.parent().num_modules),
-                                  xp.asarray(detected.index() % self.parent().num_modules),
-                                  lines, self.parent().num_modules)
-        return Streaks(xp.asarray(detected.index()), lines)
+        points = lines.reshape((-1, 2, self.data.ndim))
+        indices = xp.round(xp.mean(points[:, :, 2:], axis=-2)).astype(int)
+        lines = points[:, :, :2].reshape((-1, 4))
+
+        num_modules = self.parent().num_modules
+        if num_modules > 1:
+            return StackedStreaks(indices[..., -1], indices[..., -2], lines, num_modules)
+        return Streaks(indices[..., -1], lines)
 
 @dataclass
 class RegionDetector(DetectorBase):

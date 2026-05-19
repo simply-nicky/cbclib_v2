@@ -25,6 +25,16 @@ void handle_cuda_error(cudaError_t error)
 
 namespace detail {
 
+template <typename T>
+__global__ void fill_kernel(T * data, csize_t size, T value)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size)
+    {
+        data[idx] = value;
+    }
+}
+
 // Convert linear index to N-D coordinate (row-major, last dimension fastest)
 template <typename I, csize_t N>
 HOST_DEVICE inline void index_to_coord(I idx, I * coord, const I * dims)
@@ -53,7 +63,49 @@ HOST_DEVICE inline csize_t coord_to_index(const PointND<I, N> & coord, const Poi
     return idx;
 }
 
+template <typename I>
+HOST_DEVICE I shift_index(csize_t index, const csize_t * shape, csize_t ndim, const I * shift, csize_t n_shifts)
+{
+    csize_t rest = index;
+    I new_index = 0;
+    csize_t stride = 1;
+
+    for (csize_t n = n_shifts; n > 0; --n)
+    {
+        csize_t dim_n = ndim + n - n_shifts;
+
+        I coord = rest % shape[dim_n - 1] + shift[n - 1];
+        if (coord < 0 || coord >= shape[dim_n - 1]) return -1;
+
+        new_index += coord * stride;
+        stride *= shape[dim_n - 1];
+        rest /= shape[dim_n - 1];
+    }
+
+    return new_index;
+}
+
 } // namespace detail
+
+// Compute point from flat index
+template <csize_t N, csize_t M, typename I, typename = std::enable_if_t<std::is_integral_v<I> && (M >= N)>>
+HOST_DEVICE PointND<I, N> make_point(I index, const csize_t * shape)
+{
+    PointND<I, N> point;
+    for (size_t n = N; n > 0; --n)
+    {
+        size_t zyx_n = M - N + n - 1, xyz_n = N - n;
+        point[xyz_n] = index % shape[zyx_n];
+        index /= shape[zyx_n];
+    }
+    return point;
+}
+
+template <csize_t N, csize_t M, typename I, typename = std::enable_if_t<std::is_integral_v<I> && (M >= N)>>
+HOST_DEVICE PointND<I, N> make_point(I index, const PointND<csize_t, M> & shape)
+{
+    return make_point<N, M, I>(index, shape.data());
+}
 
 // POD structures for easier use in device code.
 // Both ShapeND and ArrayIndexerND own shape and stride as C-arrays (PointND).
@@ -387,6 +439,22 @@ public:
         return reshape(std::vector<py::ssize_t>(new_shape));
     }
 
+    void fill(const T & value)
+    {
+        if (!this->m_ptr || this->size() == 0) return;
+
+        if (value == T())
+        {
+            handle_cuda_error(cudaMemset(this->m_ptr, 0, this->size() * sizeof(T)));
+        }
+        else
+        {
+            csize_t num_blocks = (this->size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            detail::fill_kernel<<<num_blocks, BLOCK_SIZE>>>(this->m_ptr, this->size(), value);
+            handle_cuda_error(cudaGetLastError());
+        }
+    }
+
     static array_t ensure(py::handle h)
     {
         auto interface = h.attr("__cuda_array_interface__");
@@ -458,13 +526,23 @@ struct DeviceRange
     HOST_DEVICE const T * begin() const { return _M_begin; }
     HOST_DEVICE T * end() { return _M_end; }
     HOST_DEVICE const T * end() const { return _M_end; }
+
     HOST_DEVICE T * data() { return _M_begin; }
+    HOST_DEVICE T * data(csize_t index) { return _M_begin + index; }
     HOST_DEVICE const T * data() const { return _M_begin; }
+    HOST_DEVICE const T * data(csize_t index) const { return _M_begin + index; }
 
     HOST_DEVICE const T & operator[](csize_t i) const { return _M_begin[i]; }
     HOST_DEVICE T & operator[](csize_t i) { return _M_begin[i]; }
 
     HOST_DEVICE csize_t size() const { return static_cast<csize_t>(_M_end - _M_begin);}
+
+    std::vector<std::remove_const_t<T>> to_host() const
+    {
+        std::vector<std::remove_const_t<T>> host_vec(size());
+        handle_cuda_error(cudaMemcpy(host_vec.data(), _M_begin, size() * sizeof(T), cudaMemcpyDeviceToHost));
+        return host_vec;
+    }
 };
 
 template <typename T, typename T_mutable = typename std::remove_const_t<T>>
@@ -482,14 +560,14 @@ public:
     {
         handle_cuda_error(cudaMalloc(&m_data, m_size * sizeof(T)));
     }
-    DeviceVector(csize_t size, int ch) : DeviceVector(size)
+    DeviceVector(csize_t size, const T & value) : DeviceVector(size)
     {
-        handle_cuda_error(cudaMemset(m_data, ch, m_size * sizeof(T)));
+        fill(value);
     }
 
     static DeviceVector<T> from_host(const T * host_data, csize_t size)
     {
-        DeviceVector<T> dev_array(size);
+        DeviceVector<T> dev_array (size);
         handle_cuda_error(cudaMemcpy(dev_array.m_data, host_data, size * sizeof(T), cudaMemcpyHostToDevice));
         return dev_array;
     }
@@ -535,7 +613,9 @@ public:
     }
 
     T * data() { return m_data; }
+    T * data(csize_t index) { return m_data + index; }
     const T * data() const { return m_data; }
+    const T * data(csize_t index) const { return m_data + index; }
 
     iterator begin() { return m_data; }
     const_iterator begin() const { return m_data; }
@@ -590,9 +670,22 @@ public:
         }
     }
 
-    void set(int ch = 0)
+    void fill(const T & value)
     {
-        handle_cuda_error(cudaMemset(m_data, ch, m_size * sizeof(T)));
+        if (!m_data || m_size == 0) return;
+
+        if constexpr (std::is_scalar_v<T> || std::is_enum_v<T> || std::is_pointer_v<T>)
+        {
+            if (value == T())
+            {
+                handle_cuda_error(cudaMemset(m_data, 0, m_size * sizeof(T)));
+                return;
+            }
+        }
+
+        csize_t num_blocks = (m_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        detail::fill_kernel<<<num_blocks, BLOCK_SIZE>>>(m_data, m_size, value);
+        handle_cuda_error(cudaGetLastError());
     }
 
 private:

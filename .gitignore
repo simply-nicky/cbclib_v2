@@ -139,3 +139,6 @@ dmypy.json
 
 #OS X temp files
 .DS_Store
+
+# CLAUDE settings
+.claude/

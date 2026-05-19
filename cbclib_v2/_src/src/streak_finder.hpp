@@ -4,820 +4,624 @@
 
 namespace cbclib {
 
+// Labeling index and peak type
+using lint_t = long;
+
+// Index and bin type
+using bint_t = size_t;
+
 namespace detail {
 
-// Return log(binomial_tail(n, k, p))
-// binomial_tail(n, k, p) = sum_{i = k}^n bincoef(n, i) * p^i * (1 - p)^{n - i}
-// bincoef(n, k) = gamma(n + 1) / (gamma(k + 1) * gamma(n - k + 1))
-
-template <typename I, typename T>
-T logbinom(I n, I k, T p)
+template <typename T, typename I, typename Func>
+unsigned maximality(I index, const Structure & str, const array<T> & array, Func && func)
 {
-    if (n == k) return n * std::log(p);
-
-    auto term = std::exp(std::lgamma(n + 1) - std::lgamma(k + 1) - std::lgamma(n - k + 1) +
-                         k * std::log(p) + (n - k) * std::log(T(1.0) - p));
-    auto bin_tail = term;
-    auto p_term = p / (T(1.0) - p);
-
-    for (I i = k + 1; i < n + 1; i++)
+    T val = array[index];
+    unsigned result = 0;
+    for (const auto & shift : str.shifts())
     {
-        term *= (n - i + 1) / i * p_term;
-        bin_tail += term;
+        auto neighbour_idx = cbclib::detail::shift_index(index, shift, array.shape());
+
+        if (neighbour_idx >= 0)
+        {
+            if (array[neighbour_idx] <= val)
+            {
+                result++;
+            }
+            else
+            {
+                std::forward<Func>(func)(neighbour_idx);
+            }
+        }
     }
 
-    return std::log(bin_tail);
+    return result;
+}
+
+template <typename T, typename I>
+unsigned maximality(I index, const Structure & str, const array<T> & array)
+{
+    T val = array[index];
+    unsigned result = 0;
+    for (const auto & shift : str.shifts())
+    {
+        auto neighbour_idx = cbclib::detail::shift_index(index, shift, array.shape());
+        if (neighbour_idx >= 0 && array[neighbour_idx] <= val) result++;
+    }
+
+    return result;
 }
 
 } // namespace detail
 
-// Local maxima finder for N-dimensional arrays, using a given structure element to determine neighbourhood
-
-template <typename T>
-class MaximaND
+struct PointIndex
 {
-public:
-    MaximaND(array<T> arr, Structure str) : m_arr(std::move(arr)), m_str(std::move(str)) {}
-
-    template <typename UnaryFunction, typename = std::enable_if_t<
-        std::is_invocable_v<remove_cvref_t<UnaryFunction>, long>
-    >>
-    UnaryFunction find(size_t first, size_t last, size_t index, UnaryFunction && unary_op)
-    {
-        // We slice the array along the last (fast) axis
-        auto line = m_arr.slice_back(index, m_arr.ndim() - 1);
-        return find_maxima(std::next(line.begin(), first), std::next(line.begin(), last), std::forward<UnaryFunction>(unary_op), index);
-    }
-
-    template <typename UnaryFunction, typename = std::enable_if_t<
-        std::is_invocable_v<remove_cvref_t<UnaryFunction>, long>
-    >>
-    UnaryFunction find(size_t index, UnaryFunction && unary_op)
-    {
-        // We slice the array along the last (fast) axis
-        auto line = m_arr.slice_back(index, m_arr.ndim() - 1);
-        return find_maxima(line.begin(), line.end(), std::forward<UnaryFunction>(unary_op), index);
-    }
-
-    const array<T> & data() const {return m_arr;}
-
-private:
-    array<T> m_arr;
-    Structure m_str;
-
-    size_t index_at(size_t rest, size_t last_index)
-    {
-        size_t stride = m_arr.shape(m_arr.ndim() - 1);
-        size_t index = last_index;
-
-        for (size_t n = m_arr.ndim() - 1; n > 0; --n)
-        {
-            auto coord = rest % m_arr.shape(n - 1);
-            index += coord * stride;
-            rest /= m_arr.shape(n - 1);
-            stride *= m_arr.shape(n - 1);
-        }
-
-        return index;
-    }
-
-    template <typename InputIt, typename UnaryFunction, typename = std::enable_if_t<
-        (std::is_base_of_v<typename array<T>::const_iterator, InputIt> ||
-         std::is_base_of_v<typename array<T>::iterator, InputIt>) &&
-        std::is_invocable_v<remove_cvref_t<UnaryFunction>, long>
-    >>
-    UnaryFunction find_maxima(InputIt first, InputIt last, UnaryFunction && unary_op, size_t index)
-    {
-        T last_val = std::numeric_limits<T>::lowest();
-        for (auto iter = first; iter < last; ++iter)
-        {
-            long running_idx = index_at(index, iter.index());
-
-            T val = m_arr[running_idx];
-
-            // If the current value is less than the last value, it cannot be a local maximum, so skip checking its neighbours
-            if (val < last_val)
-            {
-                last_val = val;
-                continue;
-            }
-            else last_val = val;
-
-            for (const auto & shift : m_str.shifts())
-            {
-                size_t rest = running_idx;
-                long neighbour_idx = 0;
-                size_t stride = 1;
-
-                // Converting linear index to multi-dimensional coordinate and applying shift
-                for (size_t n = m_arr.ndim(); n > 0; --n)
-                {
-                    auto coord = rest % m_arr.shape(n - 1) + shift[n - 1];
-                    if (coord < 0 || coord >= m_arr.shape(n - 1))
-                    {
-                        neighbour_idx = -1; // Out of bounds
-                        break;
-                    }
-                    neighbour_idx += coord * stride;
-                    rest /= m_arr.shape(n - 1);
-                    stride *= m_arr.shape(n - 1);
-                }
-
-                if (neighbour_idx < 0 || m_arr[neighbour_idx] > val)
-                {
-                    running_idx = -1;
-                    break;
-                }
-            }
-
-            if (running_idx >= 0)
-            {
-                std::forward<UnaryFunction>(unary_op)(running_idx);
-            }
-        }
-
-        return std::forward<UnaryFunction>(unary_op);
-    }
+    bint_t index, bin;
 };
 
-// Enum to select which member of a pair to extract
-enum class PairMember { First, Second };
-
-// General pair member iterator — select First or Second member of pairs via template parameter
-template <PairMember Member, typename Iterator>
-class PairRange
+// Indexing routines for converting between point indices and bin indices
+class PeaksIndexer
 {
 public:
-    class iterator
-    {
-    public:
-        using value_type = std::conditional_t<
-            Member == PairMember::First,
-            typename std::iterator_traits<Iterator>::value_type::first_type,
-            typename std::iterator_traits<Iterator>::value_type::second_type
-        >;
-        using iterator_category = typename std::iterator_traits<Iterator>::iterator_category;
-        using difference_type = iter_difference_t<Iterator>;
-        using reference = const value_type &;
-        using pointer = const value_type *;
-
-        iterator() = default;
-        iterator(Iterator && iter) : m_iter(std::move(iter)) {}
-        iterator(const Iterator & iter) : m_iter(iter) {}
-
-        template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-        iterator & operator++()
-        {
-            ++m_iter;
-            return *this;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-        iterator operator++(int)
-        {
-            return iterator(m_iter++);
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
-        iterator & operator--()
-        {
-            --m_iter;
-            return *this;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<bidirectional_iterator_v<I>>>
-        iterator operator--(int)
-        {
-            return iterator(m_iter--);
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        iterator & operator+=(difference_type offset)
-        {
-            m_iter += offset;
-            return *this;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        iterator operator+(difference_type offset) const
-        {
-            return iterator(m_iter + offset);
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        iterator & operator-=(difference_type offset)
-        {
-            m_iter -= offset;
-            return *this;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        iterator operator-(difference_type offset) const
-        {
-            return iterator(m_iter - offset);
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        difference_type operator-(const iterator & rhs) const
-        {
-            return m_iter - rhs.m_iter;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        reference operator[](difference_type offset) const
-        {
-            if constexpr (Member == PairMember::First)
-                return (m_iter + offset)->first;
-            else
-                return (m_iter + offset)->second;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-        bool operator==(const iterator & rhs) const
-        {
-            return m_iter == rhs.m_iter;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<forward_iterator_v<I>>>
-        bool operator!=(const iterator & rhs) const
-        {
-            return !(*this == rhs);
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        bool operator<(const iterator & rhs) const
-        {
-            return m_iter < rhs.m_iter;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        bool operator>(const iterator & rhs) const
-        {
-            return m_iter > rhs.m_iter;
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        bool operator<=(const iterator & rhs) const
-        {
-            return !(*this > rhs);
-        }
-
-        template <typename I = Iterator, typename = std::enable_if_t<random_access_iterator_v<I>>>
-        bool operator>=(const iterator & rhs) const
-        {
-            return !(*this < rhs);
-        }
-
-        reference operator*() const
-        {
-            if constexpr (Member == PairMember::First)
-                return m_iter->first;
-            else
-                return m_iter->second;
-        }
-
-        pointer operator->() const
-        {
-            if constexpr (Member == PairMember::First)
-                return &(m_iter->first);
-            else
-                return &(m_iter->second);
-        }
-
-        Iterator base() const { return m_iter; }
-
-    private:
-        Iterator m_iter;
-    };
-
-    PairRange() = default;
-    PairRange(Iterator begin, Iterator end) : m_begin(std::move(begin)), m_end(std::move(end)) {}
-
-    iterator begin() const { return m_begin; }
-    iterator end() const { return m_end; }
-
-private:
-    Iterator m_begin, m_end;
-};
-
-// Sparse 2D peaks
-
-struct Peaks
-{
-protected:
-    std::map<long, long> m_ctr;
-    std::array<size_t, 2> m_shape, m_nbins;
-    long m_radius;
-
-public:
-    using container_type = std::map<long, long>;
-    using value_type = long;
-    using size_type = typename container_type::size_type;
-
-    using iterator = typename PairRange<PairMember::Second, container_type::iterator>::iterator;
-    using const_iterator = typename PairRange<PairMember::Second, container_type::const_iterator>::iterator;
-
     template <typename Container, typename = std::enable_if_t<std::is_integral_v<typename Container::value_type>>>
-    Peaks(const Container & shape, long radius) : m_ctr(), m_shape(), m_nbins(), m_radius(radius)
+    PeaksIndexer(const Container & shape, size_t radius) : m_radius(radius)
     {
-        m_shape = {static_cast<size_t>(shape[shape.size() - 2]),
-                   static_cast<size_t>(shape[shape.size() - 1])};
-        m_nbins = {m_shape[0] / radius + (m_shape[0] % radius != 0),
-                   m_shape[1] / radius + (m_shape[1] % radius != 0)};
+        auto n_frames = std::reduce(shape.begin(), std::prev(shape.end(), 2), size_t(1), std::multiplies<>());
+
+        m_shape = std::array<size_t, 3>{n_frames, size_t(shape[shape.size() - 2]), size_t(shape[shape.size() - 1])};
+        m_binned_shape = std::array<size_t, 3>{n_frames, (m_shape[1] + radius - 1) / radius, (m_shape[2] + radius - 1) / radius};
     }
 
-    void clear() {m_ctr.clear();}
+    size_t radius() const {return m_radius;}
 
-    const_iterator find(const Point<long> & key) const
+    const std::array<size_t, 3> & shape() const {return m_shape;}
+    size_t shape(size_t dim) const {return m_shape[dim];}
+
+    size_t size() const {return m_shape[0] * m_shape[1] * m_shape[2];}
+
+    const std::array<size_t, 3> & binned_shape() const {return m_binned_shape;}
+    size_t binned_shape(size_t dim) const {return m_binned_shape[dim];}
+
+    size_t n_bins() const {return m_binned_shape[0] * m_binned_shape[1] * m_binned_shape[2];}
+
+    bint_t index_at(bint_t frame, bint_t y, bint_t x) const
     {
-        return m_ctr.find(to_index(key));
+        return frame * m_shape[1] * m_shape[2] + y * m_shape[2] + x;
     }
 
-    iterator find(const Point<long> & key)
+    bint_t index_at(const PointND<bint_t, 3> & point) const
     {
-        return m_ctr.find(to_index(key));
+        return index_at(point.z(), point.y(), point.x());
     }
 
-    const_iterator find_range(const Point<long> & key, long range) const
+    bint_t bin_at(bint_t frame, bint_t y, bint_t x) const
     {
-        auto start = (key - range) / m_radius;
-        auto end = (key + range) / m_radius + 1;
-        const_iterator iter = m_ctr.end();
-        for (long x = start[0]; x != end[0]; x++)
-        {
-            for (long y = start[1]; y != end[1]; y++)
-            {
-                iter = choose(iter, m_ctr.find(to_index(x, y)), key);
-            }
-        }
-
-        if (iter != m_ctr.end() && distance(*iter, key) < range * range) return iter;
-        return m_ctr.end();
+        return frame * m_binned_shape[1] * m_binned_shape[2] + (y / m_radius) * m_binned_shape[2] + (x / m_radius);
     }
 
-    std::pair<iterator, bool> insert(long index)
+    bint_t bin_at(const PointND<bint_t, 3> & point) const
     {
-        auto point = make_point<2>(index, m_shape);
-        auto [iter, is_inserted] = m_ctr.emplace(to_index(point), index);
-        return std::make_pair(iterator(iter), is_inserted);
+        return bin_at(point.z(), point.y(), point.x());
     }
+
+    bint_t bin_at(bint_t index) const
+    {
+        auto key = point_at(index);
+        return bin_at(key.z(), key.y(), key.x());
+    }
+
+    PointIndex point_id_at(const PointND<bint_t, 3> & point) const
+    {
+        return PointIndex{index_at(point), bin_at(point)};
+    }
+
+    PointND<bint_t, 3> point_at(bint_t index) const
+    {
+        return make_point<3>(index, m_shape);
+    }
+
+protected:
+    size_t m_radius;                      // Grid sampling interval, in pixels
+    std::array<size_t, 3> m_shape;        // Shape of the original array
+    std::array<size_t, 3> m_binned_shape; // Shape of the binned grid
+};
+
+class Peaks
+{
+public:
+    Peaks(array<lint_t> labels, array<lint_t> peaks, size_t & n_labels)
+        : m_labels(std::move(labels)), m_peaks(std::move(peaks)), m_nlabels(n_labels) {}
+
+    // Unsafe access to peak index by bin index, assumes the bin is a peak (label > 0)
+    lint_t operator[](bint_t bin_idx) const { return m_peaks[m_labels[bin_idx] - 1];}
+    lint_t & operator[](bint_t bin_idx) { return m_peaks[m_labels[bin_idx] - 1]; }
 
     template <typename T>
-    auto inserter(const array<T> & data, T vmin)
+    lint_t insert(const PointIndex & candidate, const array<T> & data)
     {
-        return [this, &data, vmin](long index)
+        if (m_nlabels < n_good() && is_good(candidate.bin))
         {
-            if (data[index] > vmin)
-            {
-                auto point = make_point<2>(index, m_shape);
-                auto bin_idx = to_index(point);
-
-                auto iter = m_ctr.find(bin_idx);
-                if (iter == m_ctr.end()) m_ctr.emplace(bin_idx, index);
-                else if (data[index] > data[iter->second]) iter->second = index;
-            }
-        };
+            m_labels[candidate.bin] = m_nlabels + 1;
+            m_peaks[m_nlabels] = candidate.index;
+            return m_nlabels++;
+        }
+        if (is_peak(candidate.bin) && data[candidate.index] > data[m_peaks[m_labels[candidate.bin] - 1]])
+        {
+            m_peaks[m_labels[candidate.bin] - 1] = candidate.index;
+            return m_labels[candidate.bin] - 1;
+        }
+        return -1;
     }
 
-    iterator erase(const_iterator pos)
+    lint_t index(bint_t bin_idx) const
     {
-        return m_ctr.erase(pos.base());
+        return m_labels[bin_idx] - 1;
     }
 
-    iterator erase(iterator pos)
-    {
-        return m_ctr.erase(pos.base());
-    }
+    bool is_peak(bint_t bin_idx) const {return m_labels[bin_idx] > 0;}
+    bool is_good(bint_t bin_idx) const {return m_labels[bin_idx] == 0;}
+    bool is_bad(bint_t bin_idx) const {return m_labels[bin_idx] < 0;}
 
-    void merge(Peaks & source)
-    {
-        if (source.m_radius == m_radius) m_ctr.merge(source.m_ctr);
-    }
+    size_t n_good() const {return m_peaks.size();}
+    size_t n_labels() const {return m_nlabels;}
 
-    void merge(Peaks && source)
-    {
-        if (source.m_radius == m_radius) m_ctr.merge(std::move(source.m_ctr));
-    }
-
-    const_iterator begin() const {return m_ctr.begin();}
-    iterator begin() {return m_ctr.begin();}
-    const_iterator end() const {return m_ctr.end();}
-    iterator end() {return m_ctr.end();}
-
-    size_type size() const {return m_ctr.size();}
-
-    long radius() const {return m_radius;}
-    const std::array<size_t, 2> & shape() const {return m_shape;}
-
-    std::string info() const
-    {
-        return "<Peaks, points = <Points, size = " + std::to_string(m_ctr.size()) + ">>";
-    }
-
-private:
-    const_iterator choose(const_iterator first, const_iterator second, const Point<long> & point) const
-    {
-        if (first == end()) return second;
-        if (second == end()) return first;
-
-        if (distance(*first, point) < distance(*second, point)) return first;
-        return second;
-    }
-
-    long to_index(long x, long y) const
-    {
-        return y * m_nbins[1] + x;
-    }
-
-    long to_index(const Point<long> & key) const
-    {
-        return (key.y() / m_radius) * m_nbins[1] + (key.x() / m_radius);
-    }
-
-    long distance(long index, const Point<long> & point) const
-    {
-        long x = index % m_shape[1];
-        index /= m_shape[1];
-        long y = index % m_shape[0];
-
-        return (x - point.x()) * (x - point.x()) + (y - point.y()) * (y - point.y());
-    }
+protected:
+    array<long> m_labels;               // Array of peak labels, shape (N_frames, NY_bins, NX_bins)
+    array<long> m_peaks;                // Flat array of peak indices, (N_good,) size (labels > 0)
+    size_t & m_nlabels;                 // Reference to the global number of labels currently in use
 };
 
-template <typename T>
-struct FilterData
+template <typename T, size_t N = 2>
+class Linelets
 {
 public:
-    FilterData(array<T> data) : m_good(data.shape(), 0), m_data(std::move(data)) {}
+    Linelets(array<T> linelets) : m_linelets(std::move(linelets)), n_lines(m_linelets.size() / (2 * N)) {}
 
-    template <typename InputIt, typename = std::enable_if_t<
-        std::is_base_of_v<typename Peaks::iterator, InputIt>
-    >>
-    void filter(InputIt first, InputIt last, std::vector<InputIt> & output, const Structure & srt, T vmin, size_t npts)
+    LineND<T, N> line(lint_t line_id) const
     {
-        auto func = [this, vmin](long index)
+        if (line_id >= 0 && line_id < n_lines)
         {
-            return m_data[index] > vmin;
-        };
-        auto stop = [npts](const Region & support)
-        {
-            return support.size() < npts;
-        };
-
-        for (auto iter = first; iter != last; ++iter)
-        {
-            if (!m_good[*iter])
-            {
-                Region support;
-                support.insert(*iter);
-                support.dilate(func, srt, stop, m_data.shape());
-
-                if (support.size() < npts) output.push_back(iter);
-                else support.mask(m_good, u_char(1));
-            }
+            return LineND<T, N>{to_point<N>(m_linelets, 2 * N * line_id), to_point<N>(m_linelets, 2 * N * line_id + N)};
         }
+        return LineND<T, N>{};
+    }
+
+    PointND<T, N> point(lint_t point_id) const
+    {
+        if (point_id >= 0 && point_id < 2 * n_lines)
+        {
+            return to_point<N>(m_linelets, N * point_id);
+        }
+        return PointND<T, N>{};
+    }
+
+    bool insert(lint_t index, const LineND<T, N> & line)
+    {
+        if (index >= 0 && index < n_lines)
+        {
+            auto line_points = line.to_array();
+            for (size_t j = 0; j < 2 * N; j++) m_linelets[2 * N * index + j] = line_points[j];
+            return true;
+        }
+        return false;
     }
 
 protected:
-    vector_array<unsigned char> m_good;
-    array<T> m_data;
+    array<T> m_linelets;    // linelet array, shape (N_linelets, 2 * N), where linelet = {x0, y0, ..., x1, y1, ...}
+    lint_t n_lines;
 };
 
-// Streak class
+template <typename T, size_t N = 2>
+class LineFitter
+{
+public:
+    LineFitter(array<T> data, Structure structure, T vmin, size_t radius) :
+        m_data(std::move(data)), m_structure(std::move(structure)), m_indexer(m_data.shape(), radius), m_vmin(vmin)
+    {
+        for (size_t i = 0; i < 3; i++) m_ubound[i] = m_indexer.shape(2 - i) - 1;
+    }
 
-template <typename T>
+    const PeaksIndexer & indexer() const { return m_indexer; }
+
+    bool neighbour_behind(bint_t bin_idx, const LineND<T, N> & line, const Peaks & peaks, PointIndex & neighbour) const
+    {
+        return locate_neighbour<false>(neighbour, line, bin_idx, peaks);
+    }
+
+    bool neighbour_ahead(bint_t bin_idx, const LineND<T, N> & line, const Peaks & peaks, PointIndex & neighbour) const
+    {
+        return locate_neighbour<true>(neighbour, line, bin_idx, peaks);
+    }
+
+    bool peak_behind(bint_t bin_idx, const LineND<T, N> & line, const Peaks & peaks, PointIndex & neighbour) const
+    {
+        return locate_peak<false>(neighbour, line, bin_idx, peaks);
+    }
+
+    bool peak_ahead(bint_t bin_idx, const LineND<T, N> & line, const Peaks & peaks, PointIndex & neighbour) const
+    {
+        return locate_peak<true>(neighbour, line, bin_idx, peaks);
+    }
+
+    LineND<T, N> fit_linelet(bint_t index) const
+    {
+        auto point = m_indexer.point_at(index);
+
+        PointND<T, N> origin;
+        for (size_t i = 0; i < N; i++) origin[i] = point[i];
+        MomentsND<T, N> moments (origin);
+
+        for (const auto & shift : m_structure)
+        {
+            auto neighbour_idx = cbclib::detail::shift_index(index, shift, m_data.shape());
+            if (neighbour_idx >= 0) moments.insert(neighbour_idx, m_data);
+        }
+
+        return moments.central().line();
+    }
+
+protected:
+    array<T> m_data;        // data array
+    Structure m_structure;  // structure element for finding linelets
+    PeaksIndexer m_indexer; // indexer for accessing peaks in the original array
+    T m_vmin;               // minimum data value
+    PointND<lint_t, 3> m_lbound {}, m_ubound {};
+
+    // Intersect ray start + tau * t (t > 0) with the nearest x/y bin boundary.
+    // Because we round floating coordinates to integer pixels, bin boundaries are
+    // centered between integer pixels at k * radius - 0.5.
+    T intersection(const PointND<T, N> & tau, const PointND<bint_t, 3> & start) const
+    {
+        T t_min = std::numeric_limits<T>::infinity();
+
+        for (size_t i = 0; i < N; i++)
+        {
+            if (std::abs(tau[i]) <= std::numeric_limits<T>::epsilon()) continue;
+
+            auto bin = start[i] / m_indexer.radius();
+            T boundary;
+            if (tau[i] > T())
+            {
+                // Move to the next boundary in the positive direction.
+                boundary = (bin + 1) * m_indexer.radius() - 0.5;
+            }
+            else
+            {
+                // Move to the previous boundary in the negative direction.
+                boundary = bin * m_indexer.radius() - 0.5;
+            }
+
+            T t = (boundary - start[i]) / tau[i];
+            if (t > T() && t < t_min) t_min = t;
+        }
+
+        return std::min<T>(t_min, m_indexer.radius());
+    }
+
+    PointND<bint_t, 3> next_point(const PointND<T, N> & tangent, const PointND<bint_t, 3> & start) const
+    {
+        auto tau = tangent / amplitude(tangent);
+
+        auto t = intersection(tau, start);
+        PointND<T, 3> next = start;
+        for (size_t i = 0; i < N; i++) next[i] += tau[i] * (t + 0.5);
+
+        // We need to cast to signed label index to avoid stack overflow
+        PointND<lint_t, 3> rounded = next.round();
+        return rounded.clamp(m_lbound, m_ubound);
+    }
+
+    template <bool IsForward>
+    PointIndex next_point_id(const LineND<T, N> & line, bint_t start_bin, const Peaks & peaks) const
+    {
+        auto peak_idx = peaks[start_bin];
+        auto start = m_indexer.point_at(peak_idx);
+
+        PointND<bint_t, 3> candidate;
+        if constexpr (IsForward) candidate = next_point(line.tangent(), start);
+        else candidate = next_point(-line.tangent(), start);
+
+        return m_indexer.point_id_at(candidate);
+    }
+
+    template <bool PeaksOnly>
+    bool search_neighbours(PointIndex & neighbour, bint_t index, bint_t start_bin, const Peaks & peaks) const
+    {
+        for (const auto & shift : m_structure.shifts())
+        {
+            auto neighbour_idx = cbclib::detail::shift_index(index, shift, m_indexer.shape());
+            if (neighbour_idx < 0 || m_data[neighbour_idx] < m_vmin) continue;
+
+            auto new_bin = m_indexer.bin_at(neighbour_idx);
+            if (new_bin == start_bin) continue;
+
+            if constexpr (PeaksOnly)
+            {
+                if (!peaks.is_peak(new_bin)) continue;
+            }
+            else
+            {
+                if (peaks.is_bad(new_bin)) continue;
+            }
+
+            neighbour = PointIndex{static_cast<bint_t>(neighbour_idx), new_bin};
+            return true;
+        }
+        return false;
+    }
+
+    template <bool IsForward>
+    bool locate_neighbour(PointIndex & neighbour, const LineND<T, N> & line, bint_t start_bin, const Peaks & peaks) const
+    {
+        if (!peaks.is_peak(start_bin)) return false;
+
+        neighbour = next_point_id<IsForward>(line, start_bin, peaks);
+
+        // Only if the neighbour was clipped from out of bounds to the start_bin
+        if (neighbour.bin == start_bin) return false;
+
+        if (peaks.is_bad(neighbour.bin) || m_data[neighbour.index] < m_vmin)
+        {
+            if (!search_neighbours<false>(neighbour, neighbour.index, start_bin, peaks)) return false;
+        }
+        return !peaks.is_bad(neighbour.bin) && m_data[neighbour.index] >= m_vmin;
+    }
+
+    template <bool IsForward>
+    bool locate_peak(PointIndex & neighbour, const LineND<T, N> & line, bint_t start_bin, const Peaks & peaks) const
+    {
+        if (!peaks.is_peak(start_bin)) return false;
+
+        neighbour = next_point_id<IsForward>(line, start_bin, peaks);
+
+        // Only if the neighbour was clipped from out of bounds to the start_bin
+        if (neighbour.bin == start_bin) return false;
+
+        if (!peaks.is_peak(neighbour.bin))
+        {
+            if (!search_neighbours<true>(neighbour, neighbour.index, start_bin, peaks)) return false;
+        }
+        return peaks.is_peak(neighbour.bin);
+    }
+};
+
+template <bool IsConst>
+struct StreakTraits {};
+
+template <>
+struct StreakTraits<false>
+{
+    using index_type = bint_t;
+    using index_reference = bint_t &;
+    using label_type = lint_t;
+    using label_reference = lint_t &;
+};
+
+template <>
+struct StreakTraits<true>
+{
+    using index_type = const bint_t;
+    using index_reference = const bint_t &;
+    using label_type = const lint_t;
+    using label_reference = const lint_t &;
+};
+
+struct EndValues
+{
+    lint_t start_id, end_id;
+};
+
+template <bool IsConst>
+class StreakEnds
+{
+public:
+    template <bool C = IsConst, typename = std::enable_if_t<!C>>
+    StreakEnds<IsConst> & operator=(const EndValues & values)
+    {
+        m_start_id = values.start_id;
+        m_end_id = values.end_id;
+        return *this;
+    }
+
+    bool valid() const { return m_start_id >= 0 && m_end_id >= 0; }
+    EndValues value() const { return EndValues{m_start_id, m_end_id}; }
+
+    lint_t start_bin() const { return m_start_id / 2; }
+    lint_t end_bin() const { return m_end_id / 2; }
+
+    template <typename T, size_t N = 2>
+    LineND<T, N> line(const Linelets<T, N> & linelets, const Peaks & peaks) const
+    {
+        return LineND<T, N>{linelets.point(2 * peaks.index(m_start_id / 2) + m_start_id % 2),
+                            linelets.point(2 * peaks.index(m_end_id / 2) + m_end_id % 2)};
+    }
+
+    template <typename T, size_t N = 2>
+    LineND<T, N> line(const Linelets<T, N> & linelets, const array<lint_t> & labels) const
+    {
+        return LineND<T, N>{linelets.point(2 * (labels[m_start_id / 2] - 1) + m_start_id % 2),
+                            linelets.point(2 * (labels[m_end_id / 2] - 1) + m_end_id % 2)};
+    }
+
+    template <typename T, size_t N, bool C = IsConst, typename = std::enable_if_t<!C>>
+    bool insert(bint_t bin_idx, const Linelets<T, N> & linelets, const Peaks & peaks)
+    {
+        if (!valid())
+        {
+            m_start_id = 2 * bin_idx;
+            m_end_id = 2 * bin_idx + 1;
+            return true;
+        }
+
+        auto old_line = line(linelets, peaks);
+        auto tau = old_line.tangent();
+        auto length = magnitude(tau);
+
+        auto linelet = linelets.line(peaks.index(bin_idx));
+        auto t0 = dot(tau, linelet.pt0 - old_line.pt0), t1 = dot(tau, linelet.pt1 - old_line.pt0);
+        auto id0 = 2 * bin_idx, id1 = 2 * bin_idx + 1;
+
+        if (t0 > t1)
+        {
+            std::swap(t0, t1);
+            std::swap(id0, id1);
+        }
+
+        if (t0 < T())
+        {
+            m_start_id = id0;
+            return true;
+        }
+        if (t1 > length)
+        {
+            m_end_id = id1;
+            return true;
+        }
+
+        return false;
+    }
+
+protected:
+    using reference = typename StreakTraits<IsConst>::label_reference;
+
+    // Indices of line ends:
+    // line_start = linelets[2 * N * m_indices[m_start_id / 2] + N * m_start_id % 2]
+    // line_end   = linelets[2 * N * m_indices[m_end_id / 2]   + N * m_end_id % 2]
+    reference m_start_id, m_end_id;
+
+    StreakEnds(reference start_id, reference end_id) : m_start_id(start_id), m_end_id(end_id) {}
+
+    friend class Streak;
+};
+
 class Streak
 {
 public:
-    Streak(const Region & points, long seed, const array<T> & data) : m_pxls(points, data)
+    Streak() = default;
+    Streak(std::vector<bint_t> && indices, lint_t start_id, lint_t end_id) : m_indices(std::move(indices)), m_start_id(start_id), m_end_id(end_id) {}
+    Streak(const std::vector<bint_t> & indices, lint_t start_id, lint_t end_id) : m_indices(indices), m_start_id(start_id), m_end_id(end_id) {}
+
+    StreakEnds<true> ends() const { return StreakEnds<true>{m_start_id, m_end_id}; }
+    StreakEnds<false> ends() { return StreakEnds<false>{m_start_id, m_end_id}; }
+
+    const std::vector<bint_t> & indices() const {return m_indices;}
+    std::vector<bint_t> & indices() {return m_indices; }
+
+    template <typename T, size_t N>
+    bool insert(bint_t bin_idx, const Linelets<T, N> & linelets, const Peaks & peaks)
     {
-        auto [pt0, pt1] = line().to_pair();
-        m_ctrs.emplace_back(make_point<2>(seed, data.shape()));
-        m_ends.emplace_back(std::move(pt0));
-        m_ends.emplace_back(std::move(pt1));
-        update_minmax();
+        auto is_inserted = ends().insert(bin_idx, linelets, peaks);
+        if (is_inserted) m_indices.push_back(bin_idx);
+        return is_inserted;
     }
-
-    Streak(Region && points, long seed, const array<T> & data) : m_pxls(std::move(points), data)
-    {
-        auto [pt0, pt1] = line().to_pair();
-        m_ctrs.emplace_back(make_point<2>(seed, data.shape()));
-        m_ends.emplace_back(std::move(pt0));
-        m_ends.emplace_back(std::move(pt1));
-        update_minmax();
-    }
-
-    void merge(Streak & streak, const array<T> & data)
-    {
-        m_pxls.merge(streak.m_pxls, data);
-        m_ctrs.insert(m_ctrs.end(), streak.m_ctrs.begin(), streak.m_ctrs.end());
-        m_ends.insert(m_ends.end(), streak.m_ends.begin(), streak.m_ends.end());
-        update_minmax();
-    }
-
-    void merge(Streak && streak, const array<T> & data)
-    {
-        merge(streak, data);
-    }
-
-    const Point<long> & center() const {return m_ctrs.front();}
-    long id() const {return center().x() + center().y();}
-
-    Line<long> central_line() const {return Line<long>{m_ctrs[m_min], m_ctrs[m_max]};}
-    Line<T> line() const {return m_pxls.line();}
-
-    const Region & region() const {return m_pxls.region();}
-    const Moments<T> & moments() const {return m_pxls.moments();}
-
-    const std::vector<Point<long>> & centers() const {return m_ctrs;}
-    const std::vector<Point<T>> & ends() const {return m_ends;}
 
 protected:
-    using iterator_t = std::vector<Point<long>>::const_iterator;
+    std::vector<bint_t> m_indices;            // Indices of peaks in the original array that belong to this streak
 
-    Pixels<T> m_pxls;
-    std::vector<Point<long>> m_ctrs;
-    std::vector<Point<T>> m_ends;
-    size_t m_min, m_max;
-
-    void update_minmax()
-    {
-        auto tau = line().tangent();
-        auto ctr = center();
-        auto compare = [tau, ctr](const Point<long> & pt0, const Point<long> & pt1)
-        {
-            return dot(tau, pt0 - ctr) < dot(tau, pt1 - ctr);
-        };
-        const auto [min, max] = std::minmax_element(m_ctrs.begin(), m_ctrs.end(), compare);
-        m_min = std::distance(m_ctrs.begin(), min), m_max = std::distance(m_ctrs.begin(), max);
-    }
+    // Indices of line ends:
+    // line_start = linelets[2 * N * m_indices[m_start_id / 2] + N * m_start_id % 2]
+    // line_end   = linelets[2 * N * m_indices[m_end_id / 2]   + N * m_end_id % 2]
+    lint_t m_start_id = -1, m_end_id = -1;
 };
 
-class StreakWrapper
+template <typename T, size_t N = 2>
+class StreakFinder : public LineFitter<T, N>
 {
 public:
-    template <typename T>
-    StreakWrapper(Streak<T> && streak) : m_streak(std::move(streak)) {}
+    using LineFitter<T, N>::peak_ahead;
+    using LineFitter<T, N>::peak_behind;
 
-    template <typename T>
-    StreakWrapper(const Streak<T> & streak) : m_streak(streak) {}
+    StreakFinder(array<T> data, Structure structure, T vmin, T xtol, unsigned nfa, size_t radius) :
+        LineFitter<T, N>(std::move(data), structure, vmin, radius), m_xtol(xtol), m_nfa(nfa) {}
 
-    // Accessors that work uniformly across both types
-    Point<long> center() const
+    bool detect(Streak & streak, const Linelets<T, N> & linelets, const Peaks & peaks) const
     {
-        return std::visit([](const auto & s) { return s.center(); }, m_streak);
-    }
+        if (!streak.indices().size()) return false;
 
-    long id() const
-    {
-        return std::visit([](const auto & s) { return s.id(); }, m_streak);
-    }
-
-    size_t size() const
-    {
-        return std::visit([](const auto & s) { return s.region().size(); }, m_streak);
-    }
-
-    Line<long> central_line() const
-    {
-        return std::visit([](const auto & s) { return s.central_line(); }, m_streak);
-    }
-
-    std::vector<std::array<long, 2>> centers() const
-    {
-        return std::visit([](const auto & s)
+        bool grows_ahead = true, grows_behind = true;
+        while (grows_ahead || grows_behind)
         {
-            std::vector<std::array<long, 2>> result;
-            for (const auto & pt : s.centers()) result.emplace_back(pt.to_array());
-            return result;
-        }, m_streak);
-    }
-
-    std::vector<std::array<double, 2>> ends() const
-    {
-        return std::visit([](const auto & s)
-        {
-            std::vector<std::array<double, 2>> result;
-            for (const auto & pt : s.ends()) result.emplace_back(std::array<double, 2>{pt.x(), pt.y()});
-            return result;
-        }, m_streak);
-    }
-
-    const Region & region() const
-    {
-        return *std::visit([](const auto & s) { return &s.region(); }, m_streak);
-    }
-
-    template <typename T>
-    Line<T> line_as() const
-    {
-        return std::visit([](const auto & s) { return Line<T>{s.line()}; }, m_streak);
-    }
-
-    template <typename T>
-    const Streak<T> & as() const
-    {
-        return *std::get_if<Streak<T>>(&m_streak);
-    }
-
-private:
-    std::variant<Streak<float>, Streak<double>> m_streak;
-};
-
-class StreakMask
-{
-protected:
-    using ShapeContainer = AnyContainer<size_t>;
-
-public:
-    enum flags
-    {
-        bad = -1,
-        not_used = 0
-    };
-
-    StreakMask() = default;
-    StreakMask(ShapeContainer sh) : m_flags(std::move(sh), not_used) {}
-
-    void remove(const Region & region, long id)
-    {
-        for (auto index : region) m_flags[index] -= id;
-    }
-
-    void add(const Region & region, long id)
-    {
-        for (auto index : region) m_flags[index] += id;
-    }
-
-    bool is_free(long index) const
-    {
-        return m_flags[index] == not_used;
-    }
-
-    template <typename T>
-    T p_value(const Region & region, const Line<T> & line, const array<T> & data, T xtol, T vmin, T p, int flag) const
-    {
-        size_t n = 0, k = 0;
-        for (auto index : region)
-        {
-            auto point = make_point<2>(index, m_flags.shape());
-            if (m_flags[index] == flag)
-            {
-                if (data[index] > T() && line.distance(point) < xtol)
-                {
-                    n++;
-                    if (data[index] > vmin) k++;
-                }
-            }
+            if (grows_ahead) grows_ahead = grow_ahead(streak, linelets, peaks);
+            if (grows_behind) grows_behind = grow_behind(streak, linelets, peaks);
         }
-
-        return detail::logbinom(n, k, p);
-    }
-
-    const vector_array<int> & flags() const {return m_flags;}
-    int flags(size_t index) const {return m_flags[index];}
-
-    void clear()
-    {
-        std::fill(m_flags.begin(), m_flags.end(), not_used);
+        return true;
     }
 
 protected:
-    vector_array<int> m_flags;
-};
+    using LineFitter<T, N>::m_indexer;
 
-template <typename T>
-struct StreakFinderInput
-{
-public:
-    static constexpr size_t MAX_NUM_ITER = 1000;
+    T m_xtol;               // maximum distance from the linelet to be considered part of the streak
+    unsigned m_nfa = 0;     // maximum number of unaligned points allowed
 
-    using const_iterator = std::vector<Point<long>>::const_iterator;
-    using iterator = std::vector<Point<long>>::iterator;
-
-    StreakFinderInput() = default;
-
-    StreakFinderInput(Peaks peaks, array<T> data, const Structure & structure, unsigned lookahead, unsigned nfa) :
-        m_peaks(std::move(peaks)), m_data(std::move(data)), m_structure(structure), m_lookahead(lookahead), m_nfa(nfa) {}
-
-    const array<T> & data() const {return m_data;}
-    const Peaks & peaks() const {return m_peaks;}
-
-    Streak<T> get_streak(long seed) const
+    bool is_aligned(const PointIndex & candidate, const Streak & streak, const Linelets<T, N> & linelets, const Peaks & peaks) const
     {
-        return Streak<T>{Region{seed, m_structure, m_data.shape()}, seed, m_data};
-    }
+        auto total_line = streak.ends().line(linelets, peaks);
 
-    Streak<T> get_streak(long seed, T xtol) const
-    {
-        auto streak = get_streak(seed);
+        unsigned num_unaligned = 0;
+        auto candidate_line = linelets.line(peaks.index(candidate.bin));
+        if (total_line.distance(candidate_line.pt0) > m_xtol) num_unaligned++;
+        if (total_line.distance(candidate_line.pt1) > m_xtol) num_unaligned++;
 
-        Line<long> old_line = Line<long>{}, line = streak.central_line();
-        size_t n_iter = 0;
-        while (old_line != line && n_iter++ < MAX_NUM_ITER)
+        for (auto bin_idx : streak.indices())
         {
-            old_line = line;
-
-            streak = grow_streak<false>(std::move(streak), old_line.pt0, xtol);
-            streak = grow_streak<true>(std::move(streak), old_line.pt1, xtol);
-            line = streak.central_line();
-        }
-        if (n_iter == MAX_NUM_ITER)
-        {
-            auto err_txt = "get_streak: Streak growth did not converge for seed index " +
-                           std::to_string(seed) + " after " + std::to_string(MAX_NUM_ITER) + " iterations.";
-            throw std::runtime_error(err_txt);
+            auto linelet = linelets.line(peaks.index(bin_idx));
+            if (total_line.distance(linelet.pt0) > m_xtol) num_unaligned++;
+            if (total_line.distance(linelet.pt1) > m_xtol) num_unaligned++;
+            if (num_unaligned > m_nfa) break;
         }
 
-        return streak;
+        return num_unaligned <= m_nfa;
     }
 
-    std::vector<long> seeds(size_t index, size_t size) const
+    bool insert_candidate(Streak & streak, const PointIndex & candidate, const Linelets<T, N> & linelets, const Peaks & peaks) const
     {
-        std::vector<long> points;
-        auto first = std::next(m_peaks.begin(), index);
-        auto last = std::next(first, size);
-        for (auto iter = first; iter != last; iter++) points.push_back(*iter);
+        auto old_ends = streak.ends().value();
+        auto is_inserted = streak.ends().insert(candidate.bin, linelets, peaks);
 
-        auto compare = [this](long a, long b)
+        if (!is_inserted) return false;
+
+        if (is_aligned(candidate, streak, linelets, peaks))
         {
-            return m_data[a] > m_data[b];
-        };
-        std::sort(points.begin(), points.end(), compare);
-        return points;
-    }
-
-protected:
-    Peaks m_peaks;              // sparse 2D peaks
-    array<T> m_data;            // 2D data array
-    Structure m_structure;      // connectivity structure
-    unsigned m_lookahead = 0;   // maximum number of lookahead steps
-    unsigned m_nfa = 0;         // maximum number of unaligned points allowed
-
-    template <bool IsForward>
-    Point<long> find_next_step(const Streak<T> & streak, const Point<long> & point, int n_steps) const
-    {
-        auto line = streak.line();
-        if (line.pt0 == line.pt1) return point; // zero-length line
-
-        auto tau = line.tangent();
-        tau /= amplitude(tau);
-
-        Point<long> pt2;
-        if constexpr (IsForward) pt2 = (point + tau * n_steps).round();
-        else pt2 = (point - tau * n_steps).round();
-        return pt2;
-    }
-
-    template <bool IsForward>
-    Streak<T> grow_streak(Streak<T> && streak, Point<long> point, T xtol) const
-    {
-        unsigned tries = 0;
-        while (tries <= m_lookahead)
-        {
-            Point<long> candidate = find_next_step<IsForward>(streak, point, m_structure.connectivity);
-            auto candidate_idx = m_data.index_at(candidate.coordinate());
-
-            // Find the closest peak in structure vicinity, if there is none, try the next point
-            auto iter = m_peaks.find_range(candidate, m_structure.connectivity);
-            if (iter != m_peaks.end())
-            {
-                auto peak = make_point<2>(*iter, m_data.shape());
-                if (peak != point)
-                {
-                    candidate = peak;
-                    candidate_idx = *iter;
-                }
-            }
-
-            // Try to add the point to the streak
-            auto new_streak = streak;
-            new_streak.merge(get_streak(candidate_idx), m_data);
-
-            // Check if the new streak is valid by counting the number of unaligned points
-            auto new_line = new_streak.line();
-            size_t num_unaligned = 0;
-            for (const auto & end : new_streak.ends())
-            {
-                if (new_line.distance(end) >= xtol)
-                {
-                    if (++num_unaligned > m_nfa) break;
-                }
-            }
-
-            // If the new streak is valid return it, otherwise try the next point
-            if (num_unaligned <= m_nfa) return new_streak;
-            else
-            {
-                tries++;
-                point = candidate;
-            }
+            streak.indices().push_back(candidate.bin);
+            return true;
         }
 
-        return streak;
+        // Revert the insertion if the candidate is not aligned with the streak
+        streak.ends() = old_ends;
+
+        return false;
+    }
+
+    bool grow_ahead(Streak & streak, const Linelets<T, N> & linelets, const Peaks & peaks) const
+    {
+        if (streak.indices().size() == 0) return false;
+
+        auto old_bin = streak.ends().end_bin();
+
+        PointIndex candidate;
+        auto is_found = peak_ahead(old_bin, streak.ends().line(linelets, peaks), peaks, candidate);
+
+        if (!is_found) return false;
+
+        // Check if the candidate point is aligned with the streak
+        return insert_candidate(streak, candidate, linelets, peaks);
+    }
+
+    bool grow_behind(Streak & streak, const Linelets<T, N> & linelets, const Peaks & peaks) const
+    {
+        if (streak.indices().size() == 0) return false;
+
+        auto old_bin = streak.ends().start_bin();
+
+        PointIndex candidate;
+        auto is_found = peak_behind(old_bin, streak.ends().line(linelets, peaks), peaks, candidate);
+
+        if (!is_found) return false;
+
+        // Check if the candidate point is aligned with the streak
+        return insert_candidate(streak, candidate, linelets, peaks);
     }
 };
 
-}
+} // namespace cbclib
 
-#endif
+#endif // STREAK_FINDER_
