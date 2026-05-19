@@ -2,6 +2,7 @@ name: cbc
 channels:
   - conda-forge
 dependencies:
+  - array-api-compat
   - cxx-compiler
   - h5py
   - hdf5plugin

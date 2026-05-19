@@ -34,6 +34,12 @@ classifiers = [
 [project.optional-dependencies]
 cuda = ["cupy>=13.0.0"]
 dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio', 'scipy']
+docs = [
+    'sphinx>=7',
+    'pydata-sphinx-theme>=0.15',
+    'numpydoc',
+    'sphinx-copybutton',
+]
 
 [project.scripts]
 cbclib_cli = 'cbclib_v2.slurm:main'
@@ -61,6 +67,5 @@ extension-pkg-allow-list = [
     "cbclib_v2._src.src.index",
     "cbclib_v2._src.src.label",
     "cbclib_v2._src.src.median",
-    "cbclib_v2._src.src.signal_proc",
     "cbclib_v2._src.src.streak_finder"
 ]
