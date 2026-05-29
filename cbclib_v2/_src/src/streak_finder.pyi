@@ -8,6 +8,13 @@ class Streak:
     def line(self, labels: NDIntArray, linelets: RealArray) -> List[float]: ...
 
 class Streaks:
+    """List of detected streaks returned by :func:`detect_streaks`.
+
+    Behaves as a mutable sequence of :class:`Streak` objects and supports
+    integer indexing, slicing, boolean-mask indexing, ``append``, and
+    ``extend``.  Use :meth:`to_lines` to convert the collection to a
+    line-endpoint array suitable for further processing.
+    """
     @overload
     def __init__(self): ...
     @overload
@@ -33,7 +40,19 @@ class Streaks:
 
     def extend(self, elem: 'Streaks') -> None: ...
 
-    def to_lines(self, labels: NDIntArray, lines: RealArray) -> NDRealArray: ...
+    def to_lines(self, labels: NDIntArray, lines: RealArray) -> NDRealArray:
+        """Return the endpoint coordinates of each streak as a 2-D array.
+
+        Args:
+            labels: Flat bin-label array returned by :func:`peak_labels`.
+            lines: Linelet endpoint array returned by :func:`fit_linelets`.
+
+        Returns:
+            Array of shape ``(N, 4)`` with ``(x0, y0, x1, y1)`` endpoints for
+            each streak, where the endpoints span the outermost linelets across
+            all bins in the streak.
+        """
+        ...
 
 LabelsTuple = Tuple[IntArray, int, int, int, int]
 
@@ -47,11 +66,12 @@ def detect_streaks(labels: LabelsTuple, peaks: IntArray, linelets: RealArray, da
                    structure: Structure, vmin: float, xtol: float, nfa: int=0, num_threads: int=1
                    ) -> Streaks: ...
 
-def p_values(streaks: Streaks, labels: LabelsTuple, peaks: IntArray, data: RealArray, structure: Structure,
-             p0: float, vmin: float, xtol: float, num_threads: int=1) -> NDRealArray: ...
+def p_values(streaks: Streaks, labels: LabelsTuple, peaks: IntArray, data: RealArray,
+             structure: Structure, p0: float, vmin: float, xtol: float, num_threads: int=1
+             ) -> NDRealArray: ...
 
-def n_signal(streaks: Streaks, labels: LabelsTuple, peaks: IntArray, data: RealArray, structure: Structure,
-             vmin: float, num_threads: int=1) -> NDIntArray: ...
+def n_signal(streaks: Streaks, labels: LabelsTuple, peaks: IntArray, data: RealArray,
+             structure: Structure, vmin: float, num_threads: int=1) -> NDIntArray: ...
 
-def streak_labels(out: NDIntArray, streaks: Streaks, indices: IntArray, labels: LabelsTuple, peaks: IntArray,
-                  structure: Structure, num_threads: int=1) -> NDIntArray: ...
+def streak_labels(out: NDIntArray, streaks: Streaks, indices: IntArray, labels: LabelsTuple,
+                  peaks: IntArray, structure: Structure, num_threads: int=1) -> NDIntArray: ...

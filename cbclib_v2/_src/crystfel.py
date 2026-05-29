@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -8,7 +9,8 @@ import re
 from types import TracebackType
 from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, Literal,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy, RealArray, Shape
+from .annotations import (Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy,
+                          RealArray, Shape)
 from .array_api import array_namespace, set_at
 from .data_container import Container
 from .streaks import StackedStreaks, Streaks
@@ -335,8 +337,7 @@ class MaskDataParser(ParsingContainer):
     mask_badbits        : BitIntParser = field(default_factory=BitIntParser)
 
 wl_units = {'A': Unit(1e-10), 'm': Unit()}
-E_units = {'A': Unit(1e-10), 'eV': Unit(1.239842e-06, 'inverse'),
-           'keV': Unit(1.239842e-03, 'inverse')}
+E_units = {'eV': Unit(), 'keV': Unit(1e-3)}
 length_units = {'mm': Unit(1e-3), 'm': Unit()}
 
 DEFAULT_WL = FloatParser(float('nan'), wl_units)
@@ -536,6 +537,44 @@ class MaskData(Container):
 
 @dataclass
 class Panel(Container):
+    """A single detector panel parsed from a CrystFEL ``.geom`` file.
+
+    Stores the physical geometry mapping raw (ss, fs) array coordinates to the
+    CrystFEL lab frame (+x right, +y up, +z along the beam).  All positions
+    and directions are in units of pixels unless otherwise noted.  Panels are
+    normally accessed via :attr:`Detector.panels` or :meth:`Detector.panel`
+    after calling :func:`read_crystfel`.
+
+    See the `CrystFEL geometry reference
+    <https://gitlab.desy.de/thomas.white/crystfel/-/blob/master/doc/man/crystfel_geometry.5.md>`_
+    for the full description of each field.
+
+    Attributes:
+        wavelength: Radiation wavelength in metres.
+        photon_energy: Photon energy in eV (accepts ``eV`` or ``keV`` units
+            in the ``.geom`` file).
+        clen: Camera length — overall z position of the detector in metres.
+        data: HDF5 dataset path for this panel.
+        region: Pixel bounding box selecting this panel from the raw array
+            (``min_ss``, ``max_ss``, ``min_fs``, ``max_fs``).
+        res: Detector resolution in pixels per metre.
+        corner: Corner position in lab-frame pixel units (``corner_x``,
+            ``corner_y``).
+        coffset: Additional z offset of the panel in metres.
+        fs: Fast-scan direction unit vector in lab-frame pixel units.
+        ss: Slow-scan direction unit vector in lab-frame pixel units.
+        dim: Ordered dimension labels (``'ss'``, ``'fs'``, or an integer
+            module index) mapping raw array axes to image coordinates.
+        masks: Per-panel mask dataset locations.
+
+    Example:
+        Read a CrystFEL geometry file from a ``.geom`` file and convert panel-local coordinates
+        to lab-frame coordinates:
+
+        >>> detector = read_crystfel('detector.geom')
+        >>> panel = detector.panel(0)
+        >>> x, y, z = panel.to_detector(0, 0)
+    """
     # Beam parameters
 
     # wavelength of the radiation
@@ -601,19 +640,35 @@ class Panel(Container):
 
     @property
     def shape(self) -> Tuple[int, ...]:
+        """Shape of this panel in the raw data array, one entry per non-``'%'`` axis in :attr:`dim`."""
         return tuple(slice.stop - slice.start for slice in self.roi())
 
     @property
     def z_offset(self) -> float:
+        """Z offset of the panel in pixels (``coffset * res``)."""
         return self.coffset * self.res
 
     @property
     def bounds(self) -> Tuple[float, float, float, float]:
+        """Bounding box ``(x_min, y_min, x_max, y_max)`` in lab-frame pixel units."""
         x0, y0, _ = self.to_detector(0, 0)
         x1, y1, _ = self.to_detector(self.shape[0] - 1, self.shape[1] - 1)
         return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
     def distance(self, *coordinates: IntArray | RealArray) -> RealArray:
+        """Distance from each coordinate to the nearest point on this panel.
+
+        Points inside the panel have distance zero.  Used by
+        :class:`Detector` to assign coordinates to their nearest panel.
+
+        Args:
+            *coordinates: Coordinate arrays in raw data index space.  Pass
+                ``(ss, fs)`` for a single-module detector or
+                ``(module_id, ss, fs)`` for a multi-module detector.
+
+        Returns:
+            Array of distances in pixels, same shape as the input coordinates.
+        """
         if len(coordinates) != len(self.shape):
             raise ValueError(f"The number of coordinates ({len(coordinates)}) "
                              f"must be equal to the number of dimensions ({len(self.shape)})")
@@ -632,6 +687,18 @@ class Panel(Container):
         return dist
 
     def roi(self) -> Tuple[slice, ...]:
+        """Slice tuple indexing this panel in the raw data array.
+
+        Each entry corresponds to one non-``'%'`` axis in :attr:`dim`:
+        ``'ss'`` and ``'fs'`` axes map to their ``min``/``max`` bounds from
+        :attr:`region`; integer labels map to a length-1 slice at that index.
+
+        Returns:
+            Tuple of slices into the raw data array for this panel.
+
+        Raises:
+            ValueError: If :attr:`dim` is empty.
+        """
         if not self.dim:
             raise ValueError('No panel dimension in the geometry data')
 
@@ -660,6 +727,26 @@ class Panel(Container):
 
     def to_detector(self, ss: Array | float, fs: Array | float, half_pixel_shift: bool=True
                     ) -> Tuple[RealArray | float, RealArray | float, RealArray | float]:
+        """Convert panel-local (ss, fs) coordinates to lab-frame (x, y, z).
+
+        Applies the panel's ``ss``/``fs`` unit vectors and corner offset to
+        map pixel positions to the CrystFEL lab frame (+x right, +y up,
+        +z along the beam).
+
+        Args:
+            ss: Slow-scan pixel coordinate(s) relative to the panel corner.
+            fs: Fast-scan pixel coordinate(s) relative to the panel corner.
+            half_pixel_shift: Add a 0.5-pixel shift to place coordinates at
+                pixel centres when ``True`` (default).
+
+        Returns:
+            Tuple ``(x, y, z)`` in lab-frame pixel units.
+
+        Example:
+            Convert the panel-local origin to lab-frame coordinates:
+
+            >>> x, y, z = panel.to_detector(0, 0)
+        """
         x = ss * self.ss.x + fs * self.fs.x + self.corner.x
         y = ss * self.ss.y + fs * self.fs.y + self.corner.y
         z = ss * self.ss.z + fs * self.fs.z + self.z_offset
@@ -668,7 +755,7 @@ class Panel(Container):
         return x, y, z
 
 @dataclass
-class PixelIndices():
+class Assembler():
     ss              : IntArray
     fs              : IntArray
 
@@ -697,12 +784,41 @@ class PixelIndices():
 
 @dataclass
 class Detector():
+    """Full detector geometry parsed from a CrystFEL ``.geom`` file.
+
+    Holds an ordered collection of :class:`Panel` objects and bad-pixel
+    regions, and provides methods to assemble stacked module data into a
+    single lab-frame image and to convert raw array coordinates to physical
+    coordinates.  Normally created by :func:`read_crystfel`.
+
+    Attributes:
+        panels: Ordered mapping of panel name to :class:`Panel`.
+        bad_regions: Ordered mapping of region name to bad-pixel or
+            coordinate-space bad region.
+        groups: Mapping of group name to list of panel names.
+
+    Example:
+        Read a CrystFEL geometry file from a ``.geom`` file:
+
+        >>> detector = read_crystfel('detector.geom')
+
+        Assemble stacked module data into a single image:
+
+        >>> assembler = detector.assembler()
+        >>> assembled = assembler(frames)
+
+        Convert raw pixel indices to lab-frame coordinates in pixels:
+
+        >>> ss = np.arange(512); fs = np.arange(512)
+        >>> x, y, z = detector.to_detector(ss, fs)
+    """
     panels          : OrderedDictType[str, Panel] = field(default_factory=OrderedDict)
     bad_regions     : OrderedDictType[str, Region] = field(default_factory=OrderedDict)
     groups          : Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def bounds(self) -> Tuple[float, float, float, float]:
+        """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame pixel units."""
         x, y = [], []
         for panel in self.panels.values():
             x0, y0, x1, y1 = panel.bounds
@@ -712,6 +828,7 @@ class Detector():
 
     @property
     def shape(self) -> Shape:
+        """Shape of the raw detector data array inferred from panel ROIs."""
         shape : DefaultDict[int, List] = defaultdict(list)
 
         for panel in self.panels.values():
@@ -721,24 +838,65 @@ class Detector():
 
     @property
     def num_modules(self) -> int:
+        """Number of detector modules (product of all axes except the last two ss/fs axes)."""
         return prod(self.shape) // prod(self.shape[-2:])
 
     @property
     def pixel_size(self) -> float:
+        """Pixel size in metres, taken from the first panel's resolution."""
         for panel in self.panels.values():
             return 1.0 / panel.res
         raise RuntimeError('No pixel resolution data in the panels')
 
-    def indices(self, xp: AnyNamespace=NumPy) -> PixelIndices:
+    def assembler(self, xp: AnyNamespace=NumPy) -> Assembler:
+        """Build an assembler that places stacked module data onto a single lab-frame image.
+
+        Computes a rounded pixel map for all panels and returns an
+        :class:`Assembler` callable.  Each call to the assembler takes
+        stacked module data and writes each module's pixels to its correct
+        position in the lab coordinate system.
+
+        Args:
+            xp: Array namespace used to build the pixel map; defaults to NumPy.
+
+        Returns:
+            :class:`Assembler` callable; pass stacked module data to get a
+            single assembled image of shape ``(H, W)`` or ``(N, H, W)``.
+
+        Example:
+            Assemble stacked module data into a single image:
+
+            >>> assembler = detector.assembler()
+            >>> assembled = assembler(frames)
+        """
         pix_x, pix_y, _ = self.pixel_map(xp=xp)
         pix_x = xp.asarray(xp.round(pix_x - pix_x.min()), dtype=int)
         pix_y = xp.asarray(xp.round(pix_y - pix_y.min()), dtype=int)
-        return PixelIndices(pix_y, pix_x)
+        return Assembler(pix_y, pix_x)
 
     def panel(self, module_id: int) -> Panel:
+        """Return the panel for a given zero-based module index.
+
+        Args:
+            module_id: Zero-based index into the ordered :attr:`panels` mapping.
+
+        Returns:
+            :class:`Panel` at position ``module_id``.
+        """
         return self.panels[list(self.panels.keys())[module_id]]
 
     def pixel_map(self, half_pixel_shift: bool=True, xp: AnyNamespace=NumPy):
+        """Compute the (x, y, z) lab-frame coordinate map for all panels.
+
+        Args:
+            half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
+                pixel centres when ``True`` (default).
+            xp: Array namespace; defaults to NumPy.
+
+        Returns:
+            Array of shape ``(3, *detector_shape)`` with x, y, z coordinates
+            in lab-frame pixel units.
+        """
         pixel_map = xp.zeros((3,) + self.shape)
         for panel in self.panels.values():
             roi = panel.roi()
@@ -754,6 +912,37 @@ class Detector():
     def to_detector(self, *coordinates: IntArray | RealArray, half_pixel_shift: bool=True,
                     units: Literal['pixel', 'meter']='pixel', tolerance: float=1.0
                     ) -> Tuple[RealArray, RealArray, RealArray]:
+        """Convert raw array coordinates to lab-frame (x, y, z).
+
+        Each input point is assigned to the nearest panel by distance and
+        transformed to CrystFEL lab-frame coordinates.  The output origin is
+        the bottom-left corner of the detector bounding box.
+
+        Args:
+            *coordinates: Raw data array indices.  Pass ``(ss, fs)`` for a
+                single-module detector or ``(module_id, ss, fs)`` for a
+                multi-module detector.
+            half_pixel_shift: Add a 0.5-pixel shift to place coordinates at
+                pixel centres when ``True`` (default).
+            units: ``'pixel'`` (default) returns coordinates in pixel units;
+                ``'meter'`` scales by :attr:`pixel_size`.
+            tolerance: Maximum pixel distance from a panel edge for a point
+                to be assigned to that panel (default ``1.0``).
+
+        Returns:
+            Tuple ``(x, y, z)`` of arrays with the same shape as the input
+            coordinates.
+
+        Example:
+            Convert raw pixel indices to lab-frame coordinates in pixels for
+            a single-module detector:
+
+            >>> x, y, z = detector.to_detector(ss, fs)
+
+            And for a multi-module detector with module indices:
+
+            >>> x, y, z = detector.to_detector(module_id, ss, fs, units='meter')
+        """
         x_min, y_min = self.bounds[:2]
         xp = array_namespace(*coordinates)
 
@@ -781,6 +970,30 @@ class Detector():
 
     def to_streaks(self, streaks: Streaks | StackedStreaks, half_pixel_shift: bool=True,
                    tolerance: float=1.0) -> Streaks:
+        """Convert pixel-space streaks to lab-frame (x, y) coordinates.
+
+        Assigns each streak to its nearest panel and applies the panel's
+        ``ss``/``fs``-to-lab transform.  When a streak spans a panel boundary
+        the panel closest to the streak's midpoint is used for the whole
+        streak.
+
+        Args:
+            streaks: Pixel-space streaks (:class:`~cbclib_v2.Streaks` or
+                :class:`~cbclib_v2.StackedStreaks`).
+            half_pixel_shift: Add a 0.5-pixel shift to streak endpoints when
+                ``True`` (default).
+            tolerance: Maximum pixel distance for panel assignment
+                (default ``1.0``).
+
+        Returns:
+            :class:`~cbclib_v2.Streaks` with endpoints in lab-frame pixel
+            units.
+
+        Example:
+            Convert pixel-space streaks to lab-frame pixel coordinates:
+
+            >>> lab_streaks = detector.to_streaks(pixel_streaks)
+        """
         # We need to make sure that the distance between points stays the same
         # Sometimes a streak can span over multiple panels, so we need to choose one panel
         # for the whole streak
@@ -821,9 +1034,44 @@ class Detector():
         return Streaks.import_xy(streaks.index, x, y)
 
     def to_patterns(self, streaks: Streaks) -> Patterns:
+        """Convert lab-frame streaks to diffraction patterns in metres.
+
+        Scales streak line coordinates by :attr:`pixel_size` to produce
+        :class:`~cbclib_v2.indexer.Patterns` in physical units suitable for
+        indexing.
+
+        Args:
+            streaks: Lab-frame streaks in pixel units (e.g. from
+                :meth:`to_streaks`).
+
+        Returns:
+            :class:`~cbclib_v2.indexer.Patterns` with coordinates in metres.
+
+        Example:
+            Convert lab-frame pixel coordinates to metres for indexing:
+
+            >>> patterns = detector.to_patterns(detector.to_streaks(pixel_streaks))
+        """
         return Patterns(streaks.index, streaks.lines * self.pixel_size)
 
 def read_crystfel(file: str) -> Detector:
+    """Parse a CrystFEL ``.geom`` file and return a :class:`Detector`.
+
+    The file format follows the `CrystFEL geometry convention
+    <https://gitlab.desy.de/thomas.white/crystfel/-/blob/master/doc/man/crystfel_geometry.5.md>`_.
+
+    Args:
+        file: Path to the CrystFEL ``.geom`` geometry file.
+
+    Returns:
+        :class:`Detector` populated with panel geometry and bad-pixel regions.
+
+    Example:
+        Read a CrystFEL geometry file and print the number of modules and pixel size:
+
+        >>> detector = read_crystfel('detector.geom')
+        >>> print(detector.num_modules, detector.pixel_size)
+    """
     parsed = parse_crystfel_file(file)
     detector = Detector()
     for name, panel in parsed.panels.items():

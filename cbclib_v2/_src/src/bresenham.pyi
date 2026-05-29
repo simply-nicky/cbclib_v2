@@ -21,7 +21,8 @@ def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
 
         idxs : An array of indices that specify to what frame each of the lines belong.
         max_val : Maximum pixel value of a drawn line.
-        kernel : Choose one of the supported kernel functions [Krn]_. The following kernels
+        kernel : Choose one of the supported `kernel functions
+            <https://en.wikipedia.org/wiki/Kernel_(statistics)>`_. The following kernels
             are available:
 
             * 'biweigth' : Quartic (biweight) kernel.

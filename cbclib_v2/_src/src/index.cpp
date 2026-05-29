@@ -206,6 +206,8 @@ protected:
 PYBIND11_MODULE(index, m)
 {
     using namespace cbclib;
+    py::options options;
+    options.disable_function_signatures();
 
     try
     {

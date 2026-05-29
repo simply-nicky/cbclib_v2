@@ -1,5 +1,10 @@
-cbclib_v2
-=========
+cbclib documentation
+====================
+
+| **Version**: |release|
+| **Useful links**: `Source code in GitHub <https://github.com/simply-nicky/cbclib_v2>`__ | `Mail to the maintainer <mailto:nikolay.ivanov@desy.de>`__
+
+----
 
 **cbclib_v2** is a Python library for processing serial crystallography datasets
 measured at free-electron lasers (FELs) such as EuXFEL, SwissFEL, and LCLS.
@@ -16,35 +21,52 @@ background.
 Processing pipeline
 -------------------
 
-- **Pattern pre-processing** — background estimation, variance analysis, and
-  PCA-based whitefield correction (``CrystData``, ``CrystMetadata``).
-- **Streak detection** — connected-component labelling and line-fitting in
-  C++/CUDA (``cbclib_v2.label``, ``cbclib_v2.streak_finder``).
-- **Indexing** — JAX-based optimisation of crystal orientation and unit-cell
-  parameters (``cbclib_v2.indexer``).
-- **Intensity scaling** — planned.
+The data processing pipeline of crystallography datasets the following stages that are
+implemented in **cbclib_v2**:
 
-Installation
-------------
+1. **Data I/O** — loads experimental frames and metadata from facility HDF5
+   files (:class:`~cbclib_v2.H5Protocol`, :class:`~cbclib_v2.H5Handler`,
+   :func:`~cbclib_v2.open_run`).
 
-CPU-only (default)::
+2. **Background estimation** — separates the crystal diffraction signal from
+   diffuse scatter using variance analysis and PCA-based whitefield correction
+   (:class:`~cbclib_v2.CrystData`, :class:`~cbclib_v2.CrystMetadata`).
 
-   pip install cbclib_v2
+3. **Hit finding and streak detection** — identifies frames that contain
+   diffraction features and detects the streaks characteristic of convergent
+   beam diffraction (:class:`~cbclib_v2.StreakDetector`,
+   :doc:`usage example<streak_detection>`, and :doc:`API reference<api_streak_finder>`).
 
-With CUDA support::
+4. **Preliminary indexing** — provides an initial estimate of the crystal
+   orientation from the detected streaks (not documented yet).
 
-   python setup.py build_ext -i
-   pip install cbclib_v2
+5. **Full indexing and geometry refinement** — refines the orientation and
+   detector geometry to match the observed diffraction patterns using
+   JAX-based optimisation (not documented yet).
 
-To skip CUDA compilation when CUDA headers are present but unwanted::
-
-   CBCLIB_SKIP_CUDA=1 pip install cbclib_v2
+6. **Intensity scaling** — combines integrated signal from detected hits into
+   a common table of structure factors (not implemented yet).
 
 .. toctree::
    :maxdepth: 1
    :hidden:
+   :caption: Getting started
 
-.. Note: API reference pages will be added here once the page layout is decided.
+   getting_started
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+   :caption: Key concepts
+
+   key_concepts
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+   :caption: API Reference
+
+   api
 
 References
 ----------

@@ -4,11 +4,11 @@
 
 (c) Nikolay Ivanov, 2024
 """
-from ._src.array_api import (add_at, argmin_at, array_namespace, ascupy, asjax, asnumpy,
-                             default_rng, min_at, set_at)
+from ._src.array_api import (add_at, array_namespace, ascupy, asjax, asnumpy, default_api, default_rng,
+                             min_at, set_at)
 from ._src.config import CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config
 from ._src.crystfel import Detector, Panel, read_crystfel
-from ._src.cxi_protocol import H5Protocol, H5Handler, Kinds, read_hdf, write_hdf
+from ._src.cxi_protocol import H5Files, H5Protocol, H5Handler, Kinds, LoadIndices, read_hdf, write_hdf
 from ._src.data_container import (Container, DataContainer, ArrayContainer, IndexArray, split,
                                   to_list)
 from ._src.data_processing import CrystData, CrystMetadata, StreakDetector, RegionDetector

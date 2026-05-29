@@ -313,6 +313,8 @@ py::array_t<T> accumulate_lines(py::array_t<T> out, py::array_t<T> lines, py::ar
 PYBIND11_MODULE(bresenham, m)
 {
     using namespace cbclib;
+    py::options options;
+    options.disable_function_signatures();
 
     try
     {

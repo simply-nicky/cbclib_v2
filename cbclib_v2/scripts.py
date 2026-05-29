@@ -1,6 +1,7 @@
 from ._src.scripts import (BaseParameters, BackgroundParameters, IndexingConfig, CrystMetadata, MaskParameters,
                            MetadataParameters, PeakParameters, RegionFinderConfig, RegionParameters, ROIParameters,
                            ScalingParameters, StreakFinderConfig, StreakParameters, StructureParameters)
+from .slurm.scripts import DetectConfig, MetadataConfig, MetaListConfig, ScanConfig, SetupConfig, SystemConfig
 from ._src.scripts import (concentric_only, create_background, create_metadata, indexing_candidates, index_patterns,
                            detect_regions, detect_streaks, run_detection, run_indexing, pool_detection, pool_indexing,
                            scale_background)

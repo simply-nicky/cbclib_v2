@@ -3,7 +3,7 @@
 fields in a H5 file. The class is fully customizable so you can tailor it to your particular data
 structure of H5 file.
 
-Examples:
+Example:
     Generate the default built-in H5 protocol as follows:
 
     >>> import cbclib as cbc
@@ -205,11 +205,31 @@ T_Indices = TypeVar('T_Indices', bound=DataIndices)
 
 @dataclass
 class LoadIndices(Generic[T_Indices]):
+    """Index table for a single HDF5 attribute across one or more files.
+
+    Returned by :meth:`H5Handler.indices`; passed to :meth:`H5Handler.load`.
+    Supports subscripting and iteration so a subset of frames can be selected
+    before loading.
+
+    Attributes:
+        data_path: HDF5 dataset path resolved for this attribute.
+        indices: Per-file frame or slice indices.
+        attr: Attribute name; carried from :meth:`H5Handler.indices` so
+            :meth:`H5Handler.load` does not need it as a separate argument.
+
+    Example:
+        Read the first 100 frames of the 'data' attribute from 'run_001.h5':
+
+        >>> indices = handler.indices('run_001.h5', 'data')
+        >>> first_100 = indices[:100]
+        >>> frames = handler.load(first_100)
+    """
     data_path   : str
     indices     : T_Indices
+    attr        : str = ''
 
     def __getitem__(self, key: Indices) -> "LoadIndices[T_Indices]":
-        return LoadIndices(data_path=self.data_path, indices=self.indices[key])
+        return LoadIndices(data_path=self.data_path, indices=self.indices[key], attr=self.attr)
 
     @overload
     def __iter__(self: 'LoadIndices[StackIndices]') -> Iterator[Tuple[str, int]]: ...
@@ -226,6 +246,22 @@ class LoadIndices(Generic[T_Indices]):
 AnyLoadIndices = LoadIndices[StackIndices] | LoadIndices[FrameIndices]
 
 class Kinds(str, Enum):
+    """Data dimensionality kind for HDF5 dataset attributes.
+
+    Controls which index dimensions :meth:`H5Handler.load` supports when
+    reading a dataset.
+
+    Attributes:
+        scalar: Single value per file; loaded whole, no index subsetting.
+        sequence: 1-D array per file; supports selecting elements by frame
+            index.
+        frame: Single 2-D image; supports pixel ROI selection via slow-scan
+            and fast-scan indices.
+        stack: 3-D stack of frames; supports both frame-index subsetting and
+            pixel ROI.
+        no_kind: Attribute not defined in the protocol; loading raises
+            :exc:`ValueError`.
+    """
     scalar = 'scalar'
     sequence = 'sequence'
     frame = 'frame'
@@ -242,12 +278,30 @@ FrameAttributes = Literal['flatfield', 'mask', 'std', 'whitefield']
 
 @dataclass
 class H5Protocol(Container):
-    """H5 protocol class. Contains a H5 file tree path with the paths written to all the data
-    attributes necessary for the :class:`cbclib_v2.CrystData` detector data container, their
-    corresponding attributes' data types, and data structure.
+    """HDF5 file-tree protocol for a :class:`CrystData` detector dataset.
 
-    Args:
-        paths : Dictionary with attributes' H5 default file paths.
+    Maps each data attribute to one or more candidate HDF5 paths and to its
+    :class:`Kinds` dimensionality.  Pass the protocol to :class:`H5Handler`
+    to load and save those attributes from HDF5 files.
+
+    The protocol is normally loaded from a JSON or INI file with :meth:`H5Protocol.read`;
+    it can also be constructed directly by supplying ``paths`` and ``kinds``
+    dictionaries.
+
+    Attributes:
+        paths: Mapping from attribute name to a list of candidate HDF5
+            dataset paths searched in order when locating the attribute in a
+            file.
+        kinds: Mapping from attribute name to its :class:`Kinds` value
+            (stored as a string and resolved via :meth:`get_kind`).
+
+    Example:
+        Read a protocol from a JSON file and use it to create an H5Handler for loading data:
+
+        >>> protocol = H5Protocol.read('cbc_protocol.json')
+        >>> protocol.get_kind('data')
+        <Kinds.stack: 'stack'>
+        >>> handler = H5Handler(protocol)
     """
     paths       : Dict[str, List[str]]
     kinds       : Dict[str, str]
@@ -257,9 +311,27 @@ class H5Protocol(Container):
         self.paths = {attr: remove_slash(paths) for attr, paths in self.paths.items()}
 
     def get_kind(self, attr: Attribute) -> Kinds:
+        """Get the kind of a given attribute.
+
+        Args:
+            attr: The attribute name.
+
+        Returns:
+            The :class:`Kinds` value for the attribute. If the attribute is not found,
+            returns :attr:`Kinds.no_kind`.
+        """
         return Kinds(self.kinds.get(attr, 'none'))
 
     def has_kind(self, *attributes: str, kind: Kinds=Kinds.stack) -> bool:
+        """Check if any of the given attributes has the specified kind.
+
+        Args:
+            *attributes: The attribute names to check.
+            kind: The kind to check for.
+
+        Returns:
+            True if any of the attributes has the specified kind, False otherwise.
+        """
         for attr in attributes:
             if self.get_kind(attr) is kind:
                 return True
@@ -267,10 +339,19 @@ class H5Protocol(Container):
 
     @classmethod
     def read(cls, file: str) -> 'H5Protocol':
-        """Return the default :class:`H5Protocol` object.
+        """Load a protocol from a JSON or INI file.
+
+        Args:
+            file: Path to the protocol file.
 
         Returns:
-            A :class:`H5Protocol` object with the default parameters.
+            :class:`H5Protocol` populated with the paths and kinds read from
+            ``file``.
+
+        Example:
+            Read a protocol from a JSON file:
+
+            >>> protocol = H5Protocol.read('cbc_protocol.json')
         """
         parser = from_file(file, cls)
         return cls.from_dict(**parser.read(file))
@@ -373,10 +454,11 @@ class H5Protocol(Container):
                 raise ValueError(f"Attribute '{attr}' not found in file '{cxi_file.filename}'")
 
         if kind in [Kinds.stack, Kinds.sequence]:
-            return LoadIndices(data_path, StackIndices(file_indices=indices))
-        return LoadIndices(data_path, FrameIndices(file_indices=indices))
+            return LoadIndices(data_path, StackIndices(file_indices=indices), attr)
+        return LoadIndices(data_path, FrameIndices(file_indices=indices), attr)
 
-cxi_worker : Callable[[Tuple[str, Indices]], NDArray]
+WorkerType = Callable[[Tuple[str, Indices]], NDArray]
+cxi_worker : WorkerType
 
 @dataclass
 class H5ReadWorker(LoadWorker[NDArray]):
@@ -401,13 +483,14 @@ class H5ReadWorker(LoadWorker[NDArray]):
             else:
                 chunk = xp.asarray(dset[idx])
 
-            # Replace NaNs with zeros
-            chunk[xp.where(xp.isnan(chunk))] = 0
+        # Reshape the chunk to remove the leading dimension if it's 1
+        chunk = xp.reshape(chunk, (-1,) + chunk.shape[-2:])
 
-            # Reshape the chunk to remove the leading dimension if it's 1
-            chunk = xp.reshape(chunk, (-1,) + chunk.shape[-2:])
-            if chunk.shape[0] == 1:
-                chunk = chunk.squeeze(axis=0)
+        # Replace NaNs with zeros
+        chunk[xp.where(xp.isnan(chunk))] = 0
+
+        if chunk.shape[0] == 1:
+            chunk = chunk.squeeze(axis=0)
 
         return chunk
 
@@ -425,26 +508,26 @@ class H5Reader():
     protocol : H5Protocol
 
     @overload
-    def load_stack(self, attr: Attribute, indices: AnyLoadIndices, ss_idxs: Indices,
+    def load_stack(self, indices: AnyLoadIndices, ss_idxs: Indices,
                    fs_idxs: Indices, processes: int, verbose: bool, xp: ArrayNamespace[CPArray]
                    ) -> CPArray: ...
 
     @overload
-    def load_stack(self, attr: Attribute, indices: AnyLoadIndices, ss_idxs: Indices,
+    def load_stack(self, indices: AnyLoadIndices, ss_idxs: Indices,
                    fs_idxs: Indices, processes: int, verbose: bool, xp: ArrayNamespace[JaxArray]
                    ) -> JaxArray: ...
 
     @overload
-    def load_stack(self, attr: Attribute, indices: AnyLoadIndices, ss_idxs: Indices,
+    def load_stack(self, indices: AnyLoadIndices, ss_idxs: Indices,
                    fs_idxs: Indices, processes: int, verbose: bool, xp: ArrayNamespace[NDArray]
                    ) -> NDArray: ...
 
     @overload
-    def load_stack(self, attr: Attribute, indices: AnyLoadIndices, ss_idxs: Indices,
+    def load_stack(self, indices: AnyLoadIndices, ss_idxs: Indices,
                    fs_idxs: Indices, processes: int, verbose: bool, xp: AnyNamespace
                    ) -> Array: ...
 
-    def load_stack(self, attr: Attribute, indices: AnyLoadIndices, ss_idxs: Indices,
+    def load_stack(self, indices: AnyLoadIndices, ss_idxs: Indices,
                    fs_idxs: Indices, processes: int, verbose: bool, xp: AnyNamespace) -> Array:
         stack = []
 
@@ -452,12 +535,12 @@ class H5Reader():
             with Pool(processes=processes, initializer=H5ReadWorker.initializer,
                     initargs=(indices.data_path, ss_idxs, fs_idxs)) as pool:
                 for frame in tqdm(pool.imap(H5ReadWorker.run, iter(indices)), total=len(indices),
-                                  disable=not verbose, desc=f'Loading {attr:s}'):
+                                  disable=not verbose, desc=f'Loading {indices.attr:s}'):
                     stack.append(frame)
         else:
             worker = H5ReadWorker(indices.data_path, ss_idxs, fs_idxs)
             for index in tqdm(indices, total=len(indices), disable=not verbose,
-                              desc=f'Loading {attr:s}'):
+                              desc=f'Loading {indices.attr:s}'):
                 stack.append(worker(index))
 
         if len(stack) == 1:
@@ -465,27 +548,27 @@ class H5Reader():
         return xp.asarray(NumPy.stack(stack, axis=0))
 
     @overload
-    def load_sequence(self, attr: Attribute, indices: AnyLoadIndices, verbose: bool,
+    def load_sequence(self, indices: AnyLoadIndices, verbose: bool,
                       xp: ArrayNamespace[CPArray]) -> CPArray: ...
 
     @overload
-    def load_sequence(self, attr: Attribute, indices: AnyLoadIndices, verbose: bool,
+    def load_sequence(self, indices: AnyLoadIndices, verbose: bool,
                       xp: ArrayNamespace[JaxArray]) -> JaxArray: ...
 
     @overload
-    def load_sequence(self, attr: Attribute, indices: AnyLoadIndices, verbose: bool,
+    def load_sequence(self, indices: AnyLoadIndices, verbose: bool,
                       xp: ArrayNamespace[NDArray]) -> NDArray: ...
 
     @overload
-    def load_sequence(self, attr: Attribute, indices: AnyLoadIndices, verbose: bool,
+    def load_sequence(self, indices: AnyLoadIndices, verbose: bool,
                       xp: AnyNamespace) -> Array: ...
 
-    def load_sequence(self, attr: Attribute, indices: AnyLoadIndices, verbose: bool,
+    def load_sequence(self, indices: AnyLoadIndices, verbose: bool,
                       xp: AnyNamespace) -> Array:
         sequence = []
         worker = H5ReadWorker(indices.data_path, None, None)
         for index in tqdm(indices, total=len(indices), disable=not verbose,
-                          desc=f'Loading {attr:s}'):
+                          desc=f'Loading {indices.attr:s}'):
             sequence.append(worker(index))
         return xp.array(sequence)
 
@@ -547,6 +630,24 @@ class H5Writer():
 
 @dataclass
 class H5Files():
+    """Ordered collection of HDF5 file paths opened on demand.
+
+    Pass a single path or a list of paths; the files are sorted and opened
+    one at a time by :meth:`visit_files`.  Used by :meth:`H5Handler.indices`
+    and :meth:`H5Handler.load` to iterate over multi-file runs without
+    keeping all files open simultaneously.
+
+    Attributes:
+        names: Path or list of paths to the HDF5 files.
+        mode: h5py file open mode (default ``'r'``).
+
+    Example:
+        Visit the files 'run_001.h5' and 'run_002.h5' and print their filenames and keys:
+
+        >>> files = H5Files(['run_001.h5', 'run_002.h5'])
+        >>> for hf in files.visit_files():
+        ...     print(hf.filename, list(hf.keys()))
+    """
     names   : InitVar[str | List[str]]
     mode    : FileMode = 'r'
 
@@ -556,35 +657,47 @@ class H5Files():
         self.files = sorted(names)
 
     def visit_files(self) -> Iterator[h5py.File]:
+        """Generator that yields h5py.File objects for each file in the collection,
+        opened in the specified mode.
+
+        Yields:
+            h5py.File objects for each file in the collection, opened in the specified
+            mode.
+        """
         for name in self.files:
             with h5py.File(name, self.mode) as file:
                 yield file
 
 @dataclass
 class H5Handler:
-    """File handler class for H5 and H5 files. Provides an interface to save and load data
-    attributes to a file. Support multiple files. The handler saves data to the first file.
+    """Protocol-aware interface for reading and writing HDF5 datasets.
 
-    Args:
-        names : Paths to the files.
-        mode : Mode in which to open file; one of ('w', 'r', 'r+', 'a', 'w-').
-        protocol : H5 protocol. Uses the default protocol if not provided.
+    Wraps an :class:`H5Protocol` and exposes :meth:`load` and :meth:`save`
+    methods that dispatch on the attribute's :class:`Kinds`, so callers never
+    need to manage dataset paths or array layout directly.
+
+    The typical workflow is to first call :meth:`indices` to build an index
+    table of all data elements stored across one or more files.  The returned
+    :class:`LoadIndices` object supports indexing and iteration, so a subset
+    of frames can be selected before passing it to :meth:`load`.
 
     Attributes:
-        files : Dictionary of paths to the files and their file
-            objects.
-        protocol : :class:`cbclib_v2.H5Protocol` protocol object.
-        mode : File mode. Valid modes are:
+        protocol: The :class:`H5Protocol` that describes paths and
+            dimensionality for each attribute.
 
-            * 'r' : Readonly, file must exist (default).
-            * 'r+' : Read/write, file must exist.
-            * 'w' : Create file, truncate if exists.
-            * 'w-' or 'x' : Create file, fail if exists.
-            * 'a' : Read/write if exists, create otherwise.
+    Example:
+        Load the first 100 frames of the 'data' attribute from 'run_001.h5' using a
+        protocol read from a JSON file:
+
+        >>> protocol = H5Protocol.read('cbc_protocol.json')
+        >>> handler = H5Handler(protocol)
+        >>> indices = handler.indices('run_001.h5', 'data')
+        >>> frames = handler.load(indices[:100])
     """
     protocol    : H5Protocol
 
     def attributes(self) -> List[str]:
+        """Return the list of attribute names defined in the protocol."""
         return list(self.protocol.paths)
 
     @overload
@@ -599,50 +712,80 @@ class H5Handler:
     def indices(self, files: str | List[str] | H5Files, attr: str) -> AnyLoadIndices: ...
 
     def indices(self, files: str | List[str] | H5Files, attr: Attribute) -> AnyLoadIndices:
+        """Build an index table for an attribute across one or more HDF5 files.
+
+        Scans ``files`` to locate the dataset path for ``attr`` and records
+        the per-file frame counts.  The returned :class:`LoadIndices` object
+        supports indexing and iteration, allowing a subset of frames to be
+        selected before passing the result to :meth:`load`.
+
+        Args:
+            files: Path, list of paths, or :class:`H5Files` object.
+            attr: Attribute name as defined in the protocol.
+
+        Returns:
+            :class:`LoadIndices` carrying file locations, frame counts, and
+            the attribute name.
+
+        Example:
+            Index the 'data' attribute across 'run_001.h5' and 'run_002.h5', then load
+            frames 10 to 19:
+
+            >>> indices = handler.indices(['run_001.h5', 'run_002.h5'], 'data')
+            >>> frames = handler.load(indices[10:20])
+        """
         if isinstance(files, (str, list)):
             files = H5Files(files)
         return self.protocol.read_indices(attr, files.visit_files())
 
     @overload
-    def load(self, attr: Attribute, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
+    def load(self, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), processes: int=1, verbose: bool=True,
              xp: ArrayNamespace[CPArray]) -> CPArray: ...
 
     @overload
-    def load(self, attr: Attribute, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
+    def load(self, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), processes: int=1, verbose: bool=True,
              xp: ArrayNamespace[JaxArray]) -> JaxArray: ...
 
     @overload
-    def load(self, attr: Attribute, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
+    def load(self, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), processes: int=1, verbose: bool=True,
              xp: ArrayNamespace[NDArray]) -> NDArray: ...
 
     @overload
-    def load(self, attr: Attribute, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
+    def load(self, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), processes: int=1, verbose: bool=True) -> NDArray: ...
 
-    def load(self, attr: Attribute, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
+    def load(self, idxs: AnyLoadIndices, *, ss_idxs: Indices=slice(None),
              fs_idxs: Indices=slice(None), processes: int=1, verbose: bool=True,
              xp: AnyNamespace=NumPy) -> Array:
         """Load a data attribute from the files.
 
         Args:
-            attr : Attribute's name to load.
-            idxs : A list of frames' indices to load.
-            verbose : Set the verbosity of the loading process.
+            idxs: Index table returned by :meth:`indices`; carries both the
+                file locations and the attribute name.
+            ss_idxs: Slow-scan (row) pixel indices for ROI selection.
+            fs_idxs: Fast-scan (column) pixel indices for ROI selection.
+            processes: Number of parallel worker processes.
+            verbose: Show a progress bar when ``True``.
 
         Raises:
-            ValueError : If the attribute's kind is invalid.
-            RuntimeError : If the files are not opened.
+            ValueError: If the attribute kind is not defined in the protocol.
 
         Returns:
-            Attribute's data array.
+            Array of loaded data with shape ``(n_frames, *frame_shape)``.
+
+        Example:
+            Load the first 100 frames of the 'data' attribute from 'run_001.h5':
+
+            >>> indices = handler.indices('run_001.h5', 'data')
+            >>> frames = handler.load(indices[:100])
         """
-        kind = self.protocol.get_kind(attr)
+        kind = self.protocol.get_kind(idxs.attr)
 
         if kind == Kinds.no_kind:
-            raise ValueError(f'Invalid attribute: {attr:s}')
+            raise ValueError(f'Invalid attribute: {idxs.attr:s}')
 
         reader = H5Reader(self.protocol)
 
@@ -650,35 +793,45 @@ class H5Handler:
             return xp.array([])
 
         if kind in (Kinds.stack, Kinds.frame):
-            return reader.load_stack(attr=attr, indices=idxs, processes=processes,
-                                     ss_idxs=ss_idxs, fs_idxs=fs_idxs, verbose=verbose,
-                                     xp=xp)
+            return reader.load_stack(indices=idxs, processes=processes, ss_idxs=ss_idxs,
+                                     fs_idxs=fs_idxs, verbose=verbose, xp=xp)
         if kind == Kinds.scalar:
-            return reader.load_sequence(attr, idxs, False, xp)
+            return reader.load_sequence(idxs, False, xp)
         if kind == Kinds.sequence:
-            return reader.load_sequence(attr, idxs, verbose, xp)
+            return reader.load_sequence(idxs, verbose, xp)
 
         raise ValueError("Wrong kind: " + str(kind))
 
     def save(self, attr: Attribute, data: Array, file: h5py.File, mode: str='overwrite',
              chunk: Shape | None=None, idxs: Indices | None=None):
-        """Save a data array pertained to the data attribute into the first file.
+        """Save a data array for an attribute into an open HDF5 file.
 
         Args:
-            attr : Attribute's name.
-            data : Data array.
-            mode : Writing mode:
+            attr: Attribute name as defined in the protocol.
+            data: Array to write.
+            file: Open :class:`h5py.File` object to write into.
+            mode: Dataset write mode:
 
-                * `append` : Append the data array to already existing dataset.
-                * `insert` : Insert the data under the given indices ``idxs``.
-                * `overwrite` : Overwrite the existing dataset.
+                * ``'overwrite'`` — replace any existing dataset (default).
+                * ``'append'`` — extend an existing dataset along axis 0.
+                * ``'insert'`` — write into specific frame positions given by
+                  ``idxs``.
 
-            idxs : Indices where the data is saved. Used only if ``mode`` is set to 'insert'.
+            chunk: HDF5 chunk shape.  Inferred from ``data`` when ``None``.
+            idxs: Frame positions to write into; required when
+                ``mode='insert'``.
 
         Raises:
-            ValueError : If the attribute's kind is invalid.
-            ValueError : If the file is opened in read-only mode.
-            RuntimeError : If the file is not opened.
+            ValueError: If the attribute kind is not defined in the protocol,
+                the file is read-only, or ``idxs`` is missing for
+                ``mode='insert'``.
+
+        Example:
+            Write a stack of frames to the 'data' attribute in 'output.h5' using a
+            protocol read from a JSON file:
+
+            >>> with h5py.File('output.h5', 'w') as f:
+            ...     handler.save('data', frames, f)
         """
         if not file:
             raise ValueError(f'File {file.filename} are closed')
@@ -722,21 +875,36 @@ OptIntSequence = IntSequence | None
 def read_hdf(filenames: str | List[str], handler: H5Handler, *attributes: str,
              indices: OptIntSequence | Tuple[OptIntSequence, Indices, Indices]=None,
              processes: int=1, verbose: bool=True) -> Dict[str, Any]:
-    """Load data attributes from the input files in `files` file handler object.
+    """Load data attributes from HDF5 files.
 
     Args:
-        attributes : List of attributes to load. Loads all the data attributes contained in
-            the file(s) by default.
-        idxs : List of frame indices to load.
-        processes : Number of parallel workers used during the loading.
-        verbose : Set the verbosity of the loading process.
-
-    Raises:
-        ValueError : If attribute is not existing in the input file(s).
-        ValueError : If attribute is invalid.
+        filenames: Path or list of paths to the HDF5 files.
+        handler: :class:`H5Handler` that resolves attribute paths and loading
+            behaviour.
+        *attributes: Attribute names to load.  All attributes defined in the
+            protocol are loaded when none are supplied.
+        indices: Frame or pixel indices to select.  Pass a bare integer
+            sequence to select frames; pass a 3-tuple
+            ``(frames, ss_idxs, fs_idxs)`` to additionally restrict the
+            slow-scan and fast-scan pixel ROI.
+        processes: Number of parallel worker processes.
+        verbose: Show a progress bar when ``True``.
 
     Returns:
-        New :class:`CrystData` object with the attributes loaded.
+        Dictionary mapping each attribute name to its loaded array.
+
+    Raises:
+        ValueError: If an attribute is not defined in the protocol or not
+            found in the files.
+
+    Example:
+        Read the first 100 frames of the 'data' and 'mask' attributes from
+        'run_001.h5':
+
+        >>> arrays = read_hdf('run_001.h5', handler, 'data', 'mask',
+        ...                   indices=slice(0, 100))
+        >>> arrays['data'].shape
+        (100, 512, 512)
     """
     xp = NumPy
 
@@ -767,7 +935,7 @@ def read_hdf(filenames: str | List[str], handler: H5Handler, *attributes: str,
         if handler.protocol.get_kind(attr) in [Kinds.stack, Kinds.sequence]:
             idxs = idxs[frames]
 
-        data = handler.load(attr, idxs=idxs, ss_idxs=ss_idxs, fs_idxs=fs_idxs,
+        data = handler.load(idxs, ss_idxs=ss_idxs, fs_idxs=fs_idxs,
                             processes=processes, verbose=verbose)
 
         data_dict[attr] = data
@@ -782,22 +950,30 @@ def read_hdf(filenames: str | List[str], handler: H5Handler, *attributes: str,
 
 def write_hdf(container: DataContainer, filename: str, handler: H5Handler, *attributes: str,
               mode: str='overwrite', file_mode: FileMode='w', indices: Indices | None=None):
-    """Save data arrays of the data attributes contained in the container to an output file.
+    """Save data attributes from a container to an HDF5 file.
 
     Args:
-        attributes : List of attributes to save. Saves all the data attributes contained in
-            the container by default.
-        apply_transform : Apply `transform` to the data arrays if True.
-        mode : Writing modes. The following keyword values are allowed:
+        container: Data container whose attributes are written.
+        filename: Path to the output HDF5 file.
+        handler: :class:`H5Handler` that resolves attribute paths and writing
+            behaviour.
+        *attributes: Attribute names to save.  All non-empty attributes in
+            the container are saved when none are supplied.
+        mode: Dataset write mode:
 
-            * `append` : Append the data array to already existing dataset.
-            * `insert` : Insert the data under the given indices `idxs`.
-            * `overwrite` : Overwrite the existing dataset.
+            * ``'overwrite'`` — replace any existing dataset (default).
+            * ``'append'`` — extend an existing dataset along axis 0.
+            * ``'insert'`` — write into specific frame positions given by
+              ``indices``.
 
-        idxs : Indices where the data is saved. Used only if ``mode`` is set to 'insert'.
+        file_mode: h5py file open mode (``'w'``, ``'r+'``, ``'a'``, …).
+        indices: Frame positions to write into; required when
+            ``mode='insert'``.
 
-    Raises:
-        ValueError : If the ``output_file`` is not defined inside the container.
+    Example:
+        Save the 'data' and 'mask' attributes from a container to 'output.h5':
+
+        >>> write_hdf(cryst_data, 'output.h5', handler, 'data', 'mask')
     """
     if not attributes:
         attributes = tuple(container.contents())

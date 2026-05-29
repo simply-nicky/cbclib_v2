@@ -1,15 +1,15 @@
-""":class:`cbclib_v2.CrystData` stores all the data necessarry to process measured convergent
-beam crystallography patterns and provides a suite of data processing tools to wor with the
-detector data.
+""":class:`cbclib_v2.CrystData` and :class:`cbclib_v2.CrystMetadata` implement the
+core data processing pipeline for convergent beam crystallography detector data,
+covering bad-pixel masking, background subtraction, SNR computation, and diffraction
+streak detection.
 
-Examples:
-    Load all the necessary data using a :func:`cbclib_v2.CrystData.load` function.
-
-    >>> import cbclib as cbc
-    >>> inp_file = cbc.H5Handler('data.cxi')
-    >>> data = cbc.CrystData(inp_file)
-    >>> data = data.load()
+Raw detector frames are wrapped in :class:`cbclib_v2.CrystData`, which exposes methods
+for bad-pixel masking, whitefield estimation, SNR computation, and launching streak
+detectors. :class:`cbclib_v2.CrystMetadata` stores a reusable background model —
+optionally decomposed into PCA principal components — that can be applied to new frame
+batches.
 """
+from __future__ import annotations
 from math import prod
 import os
 from typing import Literal, NamedTuple, Sequence, Tuple, cast
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
 import numpy as np
+from .array_api import array_namespace
 from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
@@ -76,6 +77,41 @@ class PCAProjection(NamedTuple):
 
 @dataclass
 class CrystMetadata(CrystBase):
+    """Background model for CBC detector data.
+
+    Stores the pixel mask, noise standard deviation, and one or more whitefield
+    images estimated from background frames. Optionally holds a PCA decomposition
+    of whitefield variability for per-frame dynamic background subtraction.
+
+    Instances are typically created via :meth:`from_data` rather than directly.
+    The container can be saved to and loaded from HDF5 files using
+    :func:`~cbclib_v2.write_hdf` and :func:`~cbclib_v2.read_hdf` with the
+    default protocol returned by :meth:`default_protocol`.
+
+    Attributes:
+        eigen_field: Principal-component whitefield images,
+            shape ``(N, *frame_shape)``. Populated by :meth:`pca`.
+        eigen_value: Normalised eigenvalues (sum to 1) for each principal
+            component. Populated by :meth:`pca`.
+        flatfield: Mean background image, shape ``frame_shape``. Initialised
+            as the mean of ``whitefields`` when not supplied explicitly.
+        frames: Frame indices associated with the stored whitefields.
+        mask: Bad-pixel mask, shape ``frame_shape``. ``True`` = good pixel.
+        std: Per-pixel noise standard deviation, shape ``frame_shape``.
+        whitefields: Stack of individual background estimates,
+            shape ``(N, *frame_shape)``.
+
+    Example:
+        Merge background estimates, decompose with PCA, and apply per-frame
+        dynamic background subtraction:
+
+        >>> metadata = cbc.CrystMetadata.from_data(data_a, data_b, data_c)
+        >>> metadata = metadata.pca()
+        >>> proj = metadata.projection(frames, method='lsq')
+        >>> whitefields = metadata.project(proj)
+        >>> data = metadata.to_data(frames, whitefield=whitefields)
+        >>> data = data.update_snr(std_min=0.5)
+    """
     eigen_field : RealArray = field(default_factory=lambda: np.array([]))
     eigen_value : RealArray = field(default_factory=lambda: np.array([]))
     flatfield   : RealArray = field(default_factory=lambda: np.array([]))
@@ -98,12 +134,104 @@ class CrystMetadata(CrystBase):
 
     @classmethod
     def default_protocol(cls) -> H5Protocol:
+        """Return the built-in :class:`~cbclib_v2.H5Protocol` for this container.
+
+        Used by :func:`~cbclib_v2.write_hdf` and :func:`~cbclib_v2.read_hdf`
+        to resolve attribute names to HDF5 dataset paths.  The default
+        protocol maps attributes to the following dataset paths:
+
+        .. code-block:: text
+
+            /entry/crystallography/mask          ← mask
+            /entry/crystallography/std           ← std
+            /entry/metadata/flatfield            ← flatfield
+            /entry/metadata/whitefields          ← whitefields
+            /entry/metadata/eigen_fields         ← eigen_field
+            /entry/metadata/eigen_values         ← eigen_value
+
+        Returns:
+            The default :class:`~cbclib_v2.H5Protocol` read from the built-in
+            INI configuration file.
+        """
         return H5Protocol.read(METADATA_PROTOCOL)
 
-    def import_data(self, data: RealArray, frames: IntArray | int=np.array([], dtype=int),
-                    whitefield: RealArray=np.array([])) -> 'CrystData':
+    @classmethod
+    def from_data(cls, *data_containers: 'CrystData') -> CrystMetadata:
+        """Build a :class:`CrystMetadata` from one or more :class:`CrystData` containers.
+
+        The mask is the element-wise AND of all individual masks. The standard
+        deviation is the quadratic mean across containers. The individual
+        whitefields are stacked along a new leading axis.
+
+        Args:
+            *data_containers: One or more :class:`CrystData` objects that each
+                contain a ``whitefield`` and ``std``, produced by
+                :meth:`~CrystData.update_metadata`.
+
+        Raises:
+            ValueError: If no containers are supplied.
+
+        Returns:
+            A new :class:`CrystMetadata` with combined ``mask``, ``std``, and
+            stacked ``whitefields``.
+
+        Example:
+            Merge three background batches into a single metadata object:
+
+            >>> metadata = cbc.CrystMetadata.from_data(data_a, data_b, data_c)
+        """
+        if not data_containers:
+            raise ValueError('At least one CrystData container is required to create CrystMetadata')
+        xp = array_namespace(*data_containers)
+        mask, var = xp.ones(1, dtype=bool), xp.zeros(1)
+        whitefields = []
+
+        protocol = cls.default_protocol()
+        for data in data_containers:
+            metadata = data.metadata()
+            mask = mask & metadata.mask
+            var = var + metadata.std ** 2
+            whitefields.append(metadata.flatfield)
+
+        return cls(mask=mask, std=xp.sqrt(var / len(data_containers)),
+                   whitefields=xp.stack(whitefields, axis=0), protocol=protocol)
+
+    def to_data(self, data: RealArray, frames: IntArray | int | None=None,
+                whitefield: RealArray=np.array([])) -> 'CrystData':
+        """Attach this background model to a new array of detector frames.
+
+        Creates a :class:`CrystData` container populated with ``mask`` and
+        ``std`` from this model. When ``whitefield`` is omitted, ``flatfield``
+        is used as a static background for every frame. When a per-frame
+        ``whitefield`` stack is supplied (e.g. from :meth:`project`), it is
+        stored as a frame-wise stack inside the returned container.
+
+        Args:
+            data: Raw detector data, shape ``(N, *frame_shape)`` or
+                ``(*batch_shape, *frame_shape)``.
+            frames: Integer frame indices. Inferred from the leading dimensions
+                of ``data`` when ``None``.
+            whitefield: Per-frame whitefield array, shape ``(N, *frame_shape)``.
+                Defaults to ``flatfield`` (static subtraction) when empty.
+
+        Raises:
+            ValueError: If ``whitefield`` is empty and ``flatfield`` is absent.
+            ValueError: If the size of ``whitefield`` does not match ``data``.
+
+        Returns:
+            A new :class:`CrystData` with ``data``, ``frames``, ``mask``,
+            ``std``, and ``whitefield`` set.
+
+        Example:
+            Apply static and dynamic background subtraction:
+
+            >>> data = metadata.to_data(frames)                          # static
+            >>> data = metadata.to_data(frames, whitefield=whitefields)  # dynamic
+        """
         xp = self.__array_namespace__()
-        if not isinstance(frames, Array):
+        if frames is None:
+            frames = xp.arange(prod(data.shape[:-len(self.frame_shape)]), dtype=int)
+        elif not isinstance(frames, Array):
             frames = xp.array([frames,], dtype=int)
         data = xp.reshape(data, (frames.size,) + self.frame_shape)
 
@@ -123,6 +251,27 @@ class CrystMetadata(CrystBase):
                          whitefield=xp.reshape(whitefield, data.shape), protocol=protocol)
 
     def pca(self) -> 'CrystMetadata':
+        """Decompose whitefield variability into principal components.
+
+        Computes the eigendecomposition of the covariance matrix of zero-mean
+        whitefield fluctuations :math:`\\Delta W_k = W_k - \\bar{W}` and stores
+        the resulting eigen fields and normalised eigenvalues in the container.
+
+        Raises:
+            ValueError: If ``whitefields`` is absent.
+            ValueError: If fewer than two whitefields are present.
+
+        Returns:
+            A new :class:`CrystMetadata` with ``eigen_field`` and
+            ``eigen_value`` populated.
+
+        Example:
+            Decompose a set of background estimates and inspect the explained
+            variance:
+
+            >>> metadata = metadata.pca()
+            >>> print(metadata.eigen_value)
+        """
         if self.is_empty(self.whitefields):
             raise ValueError('no whitefield in the container')
         if self.whitefields.shape[0] == 1:
@@ -139,33 +288,42 @@ class CrystMetadata(CrystBase):
     def projection(self, data: RealArray, good_fields: Indices=slice(None),
                    method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
                    lm: float=9.0) -> PCAProjection:
-        """Return a new :class:`CrystData` object with a new set of whitefields. A set of
-        backgrounds is generated by robustly fitting a design matrix `W` to the measured
-        patterns.
+        """Project detector frames onto the PCA basis.
+
+        Fits the residual :math:`D - \\bar{W}` for each frame to a linear
+        combination of the stored eigen fields and returns the projection
+        coefficients. Pass the result to :meth:`project` to reconstruct a
+        per-frame background.
 
         Args:
-            method : Choose one of the following methods to scale the white-field:
+            data: Raw detector data, shape ``(N, *frame_shape)``.
+            good_fields: Indices of eigen fields to include in the fit.
+                All fields are used by default.
+            method: Fitting method:
 
-                * "lsq" : By taking a least squares fit of data and whitefield.
-                * "robust-lsq" : By solving a least-squares problem with truncated
-                  with the fast least k-th order statistics (FLkOS) estimator.
+                * ``'lsq'`` — ordinary least squares.
+                * ``'robust-lsq'`` — least squares with FLkOS outlier rejection.
 
-            r0 : A lower bound guess of ratio of inliers. We'd like to make a sample
-                out of worst inliers from data points that are between `r0` and `r1`
-                of sorted residuals.
-            r1 : An upper bound guess of ratio of inliers. Choose the `r0` to be as
-                high as you are sure the ratio of data is inlier.
-            n_iter : Number of iterations of fitting a gaussian with the FLkOS
-                algorithm.
-            lm : How far (normalized by STD of the Gaussian) from the mean of the
-                Gaussian, data is considered inlier.
+            r0: Lower bound on the expected inlier fraction (FLkOS).
+            r1: Upper bound on the expected inlier fraction (FLkOS).
+            n_iter: Number of Gaussian-fitting iterations (FLkOS).
+            lm: Outlier threshold in units of the estimated standard deviation
+                (FLkOS).
 
         Raises:
-            ValueError : If there is no ``data`` inside the container.
-            ValueError : If there is no ``whitefield`` inside the container.
+            ValueError: If ``flatfield`` is absent.
+            ValueError: If ``eigen_field`` is absent (call :meth:`pca` first).
 
         Returns:
-            An array of scale factors for each frame in the container.
+            A :class:`PCAProjection` with fields ``good_fields`` (selected
+            component indices) and ``projection`` (per-frame coefficient array,
+            shape ``(N, n_fields)``).
+
+        Example:
+            Project frames onto the two dominant PCA components:
+
+            >>> proj = metadata.projection(frames, good_fields=[0, 1], method='lsq')
+            >>> whitefields = metadata.project(proj)
         """
         if self.is_empty(self.flatfield):
             raise ValueError('No flatfield in the container')
@@ -189,6 +347,28 @@ class CrystMetadata(CrystBase):
         return PCAProjection(good_fields=good_fields, projection=projection)
 
     def project(self, projection: PCAProjection) -> RealArray:
+        """Reconstruct per-frame whitefields from PCA projection coefficients.
+
+        Computes :math:`\\bar{W} + \\sum_k c_{ik} e_k` for each frame
+        :math:`i`, where :math:`c_{ik}` are the projection coefficients and
+        :math:`e_k` are the eigen fields.
+
+        Args:
+            projection: A :class:`PCAProjection` returned by :meth:`projection`.
+
+        Raises:
+            ValueError: If ``eigen_field`` is absent.
+
+        Returns:
+            Per-frame whitefield array, shape ``(N, *frame_shape)``.
+
+        Example:
+            Reconstruct per-frame backgrounds and attach them to new data:
+
+            >>> proj = metadata.projection(frames, method='lsq')
+            >>> whitefields = metadata.project(proj)
+            >>> data = metadata.to_data(frames, whitefield=whitefields)
+        """
         if self.is_empty(self.eigen_field):
             raise ValueError('No eigen_field in the container')
 
@@ -199,18 +379,35 @@ class CrystMetadata(CrystBase):
 
 @dataclass
 class CrystData(CrystBase):
-    """Convergent beam crystallography data container class. Takes a :class:`cbclib_v2.H5Handler`
-    file handler. Provides an interface to work with the detector images and detect the diffraction
-    streaks. Also provides an interface to load from a file and save to a file any of the data
-    attributes. The data frames can be tranformed using any of the :class:`cbclib_v2.Transform`
-    classes.
+    """Detector data container for a single CBC frame stack.
 
-    Args:
-        data : Detector raw data.
-        mask : Bad pixels mask.
-        frames : List of frame indices inside the container.
-        whitefield : Measured frames' white-field.
-        snr : Signal-to-noise ratio.
+    Holds raw detector frames together with the bad-pixel mask, whitefield,
+    noise standard deviation, and the resulting SNR frames. All mutating
+    operations return a new :class:`CrystData` rather than modifying in place.
+    The container can be saved to and loaded from HDF5 files using
+    :func:`~cbclib_v2.write_hdf` and :func:`~cbclib_v2.read_hdf` with the
+    default protocol returned by :meth:`default_protocol`.
+
+    Attributes:
+        data: Raw detector frames, shape ``(n_frames, *frame_shape)``.
+        whitefield: Background model, shape ``frame_shape`` (static) or
+            ``(n_frames, *frame_shape)`` (per-frame).
+        std: Per-pixel noise standard deviation, shape ``frame_shape``.
+        snr: Background-corrected signal-to-noise ratio, shape
+            ``(n_frames, *frame_shape)``. Computed by :meth:`update_snr`.
+        frames: Integer indices of the frames in this container.
+        mask: Bad-pixel mask, shape ``frame_shape``. ``True`` = good pixel.
+
+    Example:
+        Load frames, estimate the background, compute SNR, and launch streak
+        detection:
+
+        >>> frames = run.data(indices[:20])
+        >>> data = cbc.CrystData(frames)
+        >>> data = data.update_mask(method='range', vmin=0, vmax=10_000_000)
+        >>> data = data.update_metadata(method='robust-mean-scale',
+        ...                             r0=0.5, r1=0.95, n_iter=2, lm=9.0)
+        >>> data = data.update_snr(std_min=0.5)
     """
     data        : RealArray = field(default_factory=lambda: np.array([]))
 
@@ -232,6 +429,7 @@ class CrystData(CrystBase):
 
     @property
     def num_frames(self) -> int:
+        """Number of frames in this container."""
         current, old = 0, 0
         for attr, data in self.contents().items():
             kind = self.protocol.get_kind(attr)
@@ -247,17 +445,44 @@ class CrystData(CrystBase):
 
     @property
     def num_whitefields(self) -> int:
+        """Number of whitefield images stored (1 for static, N for per-frame)."""
         return self.whitefield.size // prod(self.frame_shape)
 
     @property
     def shape(self) -> Shape:
+        """Full shape of the data array: ``(n_frames, *frame_shape)``."""
         return (self.num_frames,) + self.frame_shape
 
     @classmethod
     def default_protocol(cls) -> H5Protocol:
+        """Return the built-in :class:`~cbclib_v2.H5Protocol` for this container.
+
+        Used by :func:`~cbclib_v2.write_hdf` and :func:`~cbclib_v2.read_hdf`
+        to resolve attribute names to HDF5 dataset paths.  The default
+        protocol maps attributes to the following dataset paths:
+
+        .. code-block:: text
+
+            /entry/data/data                     ← data
+            /entry/crystallography/frames        ← frames
+            /entry/crystallography/mask          ← mask
+            /entry/crystallography/whitefield    ← whitefield
+            /entry/crystallography/std           ← std
+            /entry/crystallography/snr           ← snr
+
+        Returns:
+            The default :class:`~cbclib_v2.H5Protocol` read from the built-in
+            INI configuration file.
+        """
         return H5Protocol.read(DATA_PROTOCOL)
 
     def apply_mask(self) -> 'CrystData':
+        """Return a new :class:`CrystData` with ``whitefield``, ``std``, and
+        ``snr`` zeroed at bad pixels.
+
+        Returns:
+            New :class:`CrystData` with masked arrays.
+        """
         attributes = {}
         if not self.is_empty(self.whitefield):
             attributes['whitefield'] = self.whitefield * self.mask
@@ -316,7 +541,40 @@ class CrystData(CrystBase):
         mask[roi[0]:roi[1], roi[2]:roi[3]] = False
         return self.replace(mask=mask).apply_mask()
 
+    def metadata(self) -> CrystMetadata:
+        """Extract a :class:`CrystMetadata` from this container.
+
+        Creates a single-whitefield metadata object from the current ``mask``,
+        ``std``, and ``whitefield`` (stored as ``flatfield``).
+
+        Raises:
+            ValueError: If ``whitefield`` is absent.
+            ValueError: If ``std`` is absent.
+
+        Returns:
+            A :class:`CrystMetadata` with ``mask``, ``std``, and ``flatfield``
+            set.
+        """
+        if self.is_empty(self.whitefield):
+            raise ValueError('no whitefield in the container')
+        if self.is_empty(self.std):
+            raise ValueError('no std in the container')
+
+        return CrystMetadata(mask=self.mask, std=self.std, flatfield=self.whitefield)
+
     def region_detector(self, structure: Structure) -> 'RegionDetector':
+        """Return a :class:`RegionDetector` for connected-region streak detection.
+
+        Args:
+            structure: 2-D connectivity structure for region growing and line
+                fitting (see :mod:`cbclib_v2.label`).
+
+        Raises:
+            ValueError: If ``snr`` is absent (call :meth:`update_snr` first).
+
+        Returns:
+            A :class:`RegionDetector` operating on the current SNR frames.
+        """
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
 
@@ -336,19 +594,22 @@ class CrystData(CrystBase):
         return self.replace(mask=xp.array([], dtype=bool))
 
     def select(self, idxs: Indices | None=None):
-        """Return a new :class:`CrystData` object with the new mask.
+        """Return a new :class:`CrystData` containing a subset of frames.
+
+        Indexes all ``stack``- and ``sequence``-kind attributes along the
+        leading axis; frame-level attributes (``mask``, ``whitefield``,
+        ``std``) are carried over unchanged.
 
         Args:
-            mask : New mask array.
-            update : Multiply the new mask and the old one if 'multiply', use the
-                new one if 'reset'.
-
-        Raises:
-            ValueError : If the mask shape is incompatible with the data.
-            ValueError : If there is no ``data`` inside the container.
+            idxs: Frame indices. Accepts integer, slice, or array-like index.
 
         Returns:
-            New :class:`CrystData` object with the updated ``mask``.
+            New :class:`CrystData` with the selected frames.
+
+        Example:
+            Select three specific frames from the container:
+
+            >>> hits = data.select([0, 5, 12])
         """
         data_dict = {}
         for attr in self.contents():
@@ -359,14 +620,19 @@ class CrystData(CrystBase):
         return self.replace(**data_dict)
 
     def streak_detector(self, structure: Structure, vmin: float) -> 'StreakDetector':
-        """Return a new :class:`cbclib_v2.StreakDetector` object that detects lines in SNR
-        frames.
+        """Return a :class:`StreakDetector` for diffraction streak detection.
+
+        Args:
+            structure: Connectivity structure used for peak detection and
+                linelet fitting (see :mod:`cbclib_v2.label`).
+            vmin: SNR threshold used to assess the statistical significance of
+                detected streaks.
 
         Raises:
-            ValueError : If there is no ``snr`` inside the container.
+            ValueError: If ``snr`` is absent (call :meth:`update_snr` first).
 
         Returns:
-            A CBC pattern detector based on bespoke GPU-friendly streak detection algorithm.
+            A :class:`StreakDetector` operating on the current SNR frames.
         """
         if self.is_empty(self.snr):
             raise ValueError('no snr in the container')
@@ -438,14 +704,23 @@ class CrystData(CrystBase):
         return self.replace(mask=new_mask)
 
     def update_snr(self, std_min: float=0.0) -> 'CrystData':
-        """Return a new :class:`CrystData` object with new background corrected detector
-        images.
+        """Return a new :class:`CrystData` with background-corrected SNR frames.
+
+        Computes ``SNR = (data * mask - whitefield) / max(std, std_min)`` for
+        each frame.
+
+        Args:
+            std_min: Noise floor applied before division to prevent near-zero
+                denominators. A value of ``0.5`` is typical for photon-counting
+                detectors.
 
         Raises:
-            ValueError : If there is no ``whitefield`` inside the container.
+            ValueError: If ``mask`` is absent.
+            ValueError: If ``std`` is absent.
+            ValueError: If ``whitefield`` is absent.
 
         Returns:
-            New :class:`CrystData` object with the updated ``cor_data``.
+            New :class:`CrystData` with ``snr`` populated.
         """
         if self.is_empty(self.mask):
             raise ValueError('no mask in the container')
@@ -461,6 +736,40 @@ class CrystData(CrystBase):
 
     def update_metadata(self, method: MDMethod='robust-mean-scale', frames: Indices | None=None,
                         r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0) -> 'CrystData':
+        """Estimate whitefield and noise std jointly from the frame stack.
+
+        A convenience wrapper that calls :meth:`update_whitefield` and
+        :meth:`update_std` together using a consistent estimation strategy.
+
+        Args:
+            method: Joint estimation method:
+
+                * ``'robust-mean-scale'`` (default) — robust mean for both
+                  whitefield and std using the FLkOS estimator.
+                * ``'median-poisson'`` — pixel-wise median whitefield with
+                  Poisson noise (``std = √whitefield``).
+                * ``'robust-mean-poisson'`` — robust mean whitefield with
+                  Poisson noise.
+
+            frames: Frame indices to use. All frames are used when ``None``.
+            r0: Lower bound on the expected inlier fraction (FLkOS).
+            r1: Upper bound on the expected inlier fraction (FLkOS).
+            n_iter: Number of Gaussian-fitting iterations (FLkOS).
+            lm: Outlier threshold in units of the estimated standard deviation
+                (FLkOS).
+
+        Raises:
+            ValueError: If ``method`` is not one of the allowed values.
+
+        Returns:
+            New :class:`CrystData` with ``whitefield`` and ``std`` updated.
+
+        Example:
+            Estimate background from 20 frames using the robust mean:
+
+            >>> data = data.update_metadata(method='robust-mean-scale',
+            ...                             r0=0.5, r1=0.95, n_iter=2, lm=9.0)
+        """
         if method == 'median-poisson':
             data = self.update_whitefield('median', frames)
             return data.update_std('poisson', frames)
@@ -483,6 +792,31 @@ class CrystData(CrystBase):
     def update_std(self, method: STDMethod='robust-scale', frames: Indices | None=None,
                    r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0
                    ) -> 'CrystData':
+        """Estimate the per-pixel noise standard deviation.
+
+        Args:
+            method: Noise estimation method:
+
+                * ``'robust-scale'`` (default) — derives std from the robust
+                  spread of the frame stack using the FLkOS estimator.
+                * ``'poisson'`` — assumes Poisson statistics:
+                  ``std = √mean(whitefield)``.
+
+            frames: Frame indices to use. All frames are used when ``None``.
+            r0: Lower bound on the expected inlier fraction (FLkOS).
+            r1: Upper bound on the expected inlier fraction (FLkOS).
+            n_iter: Number of Gaussian-fitting iterations (FLkOS).
+            lm: Outlier threshold in units of the estimated standard deviation
+                (FLkOS).
+
+        Raises:
+            ValueError: If ``data`` or ``mask`` are absent (``'robust-scale'``).
+            ValueError: If ``whitefield`` is absent (``'poisson'``).
+            ValueError: If ``method`` is not one of the allowed values.
+
+        Returns:
+            New :class:`CrystData` with ``std`` updated.
+        """
         xp = self.__array_namespace__()
         if frames is None:
             frames = xp.arange(self.num_frames)
@@ -557,22 +891,43 @@ class CrystData(CrystBase):
         return self.replace(whitefield=whitefield, protocol=self.default_protocol())
 
 class DetectorBase(DataContainer):
+    """Base class for SNR-frame detectors returned by :class:`CrystData`."""
+
     data            : RealArray
     parent          : ReferenceType[CrystData]
 
     @property
     def shape(self) -> Shape:
+        """Shape of the SNR data array."""
         return self.data.shape
 
     def __getitem__(self: Self, idxs: Indices) -> Self:
         return self.replace(data=self.data[idxs])
 
     def clip(self: Self, vmin: ArrayLike, vmax: ArrayLike) -> Self:
+        """Return a new detector with SNR values clipped to ``[vmin, vmax]``."""
         xp = self.__array_namespace__()
         return self.replace(data=xp.clip(self.data, vmin, vmax))
 
 @dataclass
 class StreakDetector(DetectorBase):
+    """Streak detector operating on SNR frames from a :class:`CrystData` container.
+
+    Thin wrapper around :class:`~cbclib_v2.streak_finder.PatternStreakFinder`
+    that exposes a step-by-step pipeline: connected-region detection, peak
+    finding, linelet fitting, and streak assembly.  Obtain an instance from
+    :meth:`CrystData.streak_detector`.
+
+    See :class:`~cbclib_v2.streak_finder.PatternStreakFinder` for the full
+    algorithmic description and parameter details.
+
+    Attributes:
+        data: SNR frame stack, shape ``(n_frames, *frame_shape)``.
+        structure: Connectivity structure for peak detection and linelet
+            fitting.
+        vmin: SNR threshold for streak significance testing.
+    """
+
     data            : RealArray
     structure       : Structure
     vmin            : float
@@ -618,6 +973,19 @@ class StreakDetector(DetectorBase):
 
 @dataclass
 class RegionDetector(DetectorBase):
+    """Region-based detector operating on SNR frames from a :class:`CrystData` container.
+
+    Detects connected regions of elevated SNR and fits geometric primitives
+    (lines, ellipses) to their pixel distributions. A simpler alternative to
+    :class:`StreakDetector` when streaks are broad or arc-shaped.  Obtain an
+    instance from :meth:`CrystData.region_detector`.
+
+    Attributes:
+        data: SNR frame stack, shape ``(n_frames, *frame_shape)``.
+        structure: 2-D connectivity structure, automatically expanded to match
+            the data dimensionality.
+    """
+
     data            : RealArray
     structure       : Structure
     parent          : ReferenceType[CrystData]
@@ -628,9 +996,39 @@ class RegionDetector(DetectorBase):
         self.structure = self.structure.expand_dims(list(range(self.data.ndim - 2)))
 
     def detect_regions(self, vmin: float, npts: int) -> LabelResult:
+        """Label connected regions in the SNR frame stack.
+
+        This function is similar to :func:`scipy.ndimage.label`: all pixels
+        whose SNR exceeds *vmin* are treated as foreground.  Connected
+        foreground pixels are assigned the same integer label; background
+        pixels are labeled 0.  Connectivity is determined by
+        :attr:`structure`.  Regions with fewer than *npts* pixels are
+        discarded (their pixels reset to 0).
+
+        Args:
+            vmin: SNR threshold.  Pixels with ``data > vmin`` are foreground.
+            npts: Minimum region size.  Regions with fewer pixels are removed.
+
+        Returns:
+            Labeled regions.
+        """
         return label(self.data > vmin, structure=self.structure, npts=npts)
 
     def detect_streaks(self, regions: LabelResult) -> StackedStreaks | Streaks:
+        """Fit lines to labeled regions and return a streak collection.
+
+        Each region is represented by the major axis of its intensity
+        distribution, computed via :meth:`line_fit`.  The frame and module
+        coordinates of each streak are taken from the region's center of mass
+        along the non-spatial axes.
+
+        Args:
+            regions: Labeled regions returned by :meth:`detect_regions`.
+
+        Returns:
+            :class:`~cbclib_v2.Streaks` for single-module data or
+            :class:`~cbclib_v2.StackedStreaks` for stacked multi-module data.
+        """
         xp = self.__array_namespace__()
         points = self.line_fit(regions).reshape((-1, 2, self.data.ndim))
 
@@ -643,13 +1041,78 @@ class RegionDetector(DetectorBase):
         return Streaks(indices[..., -1], lines)
 
     def ellipse_fit(self, regions: LabelResult) -> RealArray:
+        """Fit an ellipse to each labeled region using image moments.
+
+        The ellipse parameters are derived from the second-order central
+        `image moments <https://en.wikipedia.org/wiki/Image_moment>`_ of
+        each region, weighted by the SNR values in :attr:`data`.  The
+        covariance matrix of the spatial coordinates is decomposed into its
+        eigenvectors; the semi-axes of the ellipse correspond to the FWHM
+        along those eigenvectors.
+
+        Args:
+            regions: Labeled regions returned by :meth:`detect_regions`.
+
+        Returns:
+            Array of shape ``(N, 3)`` where each row is ``(a, b, theta)``:
+            *a* and *b* are the FWHM of the major and minor axes, and
+            *theta* is the orientation angle in radians.
+        """
         return ellipse_fit(regions, self.data)
 
     def line_fit(self, regions: LabelResult) -> RealArray:
+        """Fit a line to each labeled region using image moments.
+
+        The line is the major axis of the intensity-weighted covariance
+        ellipse computed from second-order central
+        `image moments <https://en.wikipedia.org/wiki/Image_moment>`_.  The
+        eigenvector corresponding to the largest eigenvalue of the covariance
+        matrix gives the orientation; the endpoints are placed at the
+        extremes of the region along that axis.
+
+        Args:
+            regions: Labeled regions returned by :meth:`detect_regions`.
+
+        Returns:
+            Array of shape ``(N, 4)`` where each row is
+            ``(x1, y1, x2, y2)``, the pixel coordinates of the two endpoints
+            of the fitted line segment.
+        """
         return line_fit(regions, self.data)
 
     def center_of_mass(self, regions: LabelResult) -> RealArray:
+        """Compute the intensity-weighted center of mass for each labeled region.
+
+        The center of mass is the first-order
+        `image moment <https://en.wikipedia.org/wiki/Image_moment>`_
+        normalised by the total intensity (zeroth-order moment):
+        ``c = M_10 / M_00`` along each axis, where
+        ``M_ij = Σ x^i y^j · w(x, y)`` and *w* are the SNR values from
+        :attr:`data`.
+
+        Args:
+            regions: Labeled regions returned by :meth:`detect_regions`.
+
+        Returns:
+            Array of shape ``(N, ndim)`` with the center-of-mass coordinates
+            for each region.
+        """
         return center_of_mass(regions, self.data)
 
     def covariance_matrix(self, regions: LabelResult) -> RealArray:
+        """Compute the intensity-weighted covariance matrix for each labeled region.
+
+        The covariance matrix is built from second-order central
+        `image moments <https://en.wikipedia.org/wiki/Image_moment>`_
+        weighted by the SNR values in :attr:`data`:
+        ``Cov[i, j] = μ_ij / M_00``, where
+        ``μ_ij = Σ (x - x̄)^i (y - ȳ)^j · w(x, y)``.
+
+        Args:
+            regions: Labeled regions returned by :meth:`detect_regions`.
+
+        Returns:
+            Array of shape ``(N, ndim, ndim)`` with the covariance matrix for
+            each region.
+        """
         return covariance_matrix(regions, self.data)

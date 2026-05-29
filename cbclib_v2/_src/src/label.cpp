@@ -395,7 +395,7 @@ PYBIND11_MODULE(label, m)
     py::class_<std::vector<Region>> regions (m, "Regions");
     declare_list(regions, "Regions");
 
-    py::class_<LabelResult>(m, "LabelResult")
+    py::class_<LabelResult>(m, "NPLabelResult")
         .def_static("from_array", [](py::array_t<py::ssize_t> labels, py::none index) -> LabelResult
         {
             array<py::ssize_t> larr {labels.request()};
