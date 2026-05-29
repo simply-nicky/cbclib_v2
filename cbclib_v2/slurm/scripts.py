@@ -24,6 +24,18 @@ from .slurm_manager import SLURMScript, ScriptSpec
 
 @dataclass
 class SystemConfig(BaseParameters):
+    """Compute backend and thread-count configuration.
+
+    Corresponds to the ``"system"`` section of ``scan.json`` (see
+    :doc:`/workflows`).  Controls the compute backend and OpenMP thread
+    count for every CLI and SLURM batch-pipeline step.
+
+    Attributes:
+        platform: Compute backend — ``'cpu'`` or ``'gpu'``.
+        num_threads: Number of OpenMP threads.  ``0`` or negative values
+            are replaced by :func:`multiprocessing.cpu_count` at
+            initialisation.
+    """
     platform        : Platform
     num_threads     : int
 
@@ -34,55 +46,167 @@ class SystemConfig(BaseParameters):
             raise ValueError(f"Invalid platform: {self.platform}")
 
     def cpu_config(self) -> CPUConfig:
+        """Return a :class:`~cbclib_v2.CPUConfig` context manager for this thread count."""
         return CPUConfig(num_threads=self.num_threads)
 
     def array_api(self) -> AnyNamespace:
+        """Return the array namespace matching :attr:`platform` (NumPy or CuPy)."""
         return default_api(self.platform)
 
 @dataclass
 class DetectConfig(BaseParameters):
+    """Hit-finding thresholds and output directories.
+
+    Corresponds to the ``"detect"`` section of ``scan.json`` (see
+    :doc:`/workflows`).  Used by ``cbclib_cli detect`` and the SLURM
+    detection array job to decide which frames count as hits and where to
+    write results.
+
+    A frame is classified as a *hit* when the number of detected streaks (or
+    regions) exceeds :attr:`hit_threshold`.
+
+    Attributes:
+        hit_threshold: Minimum number of detections per frame required to
+            count as a hit.
+        streaks_dir: Root directory for per-chunk streak detection output
+            files.
+        regions_dir: Root directory for per-chunk region detection output
+            files.
+    """
+
     hit_threshold   : int
     streaks_dir     : str
     regions_dir     : str
 
 @dataclass
 class MetadataConfig(BaseParameters):
+    """Parameters for the background-whitefield computation step.
+
+    Corresponds to the ``"metadata"`` section of ``scan.json`` (see
+    :doc:`/workflows`).  Used by ``cbclib_cli metadata`` to control how many
+    frames are sampled and where the resulting HDF5 metadata file is written.
+
+    Attributes:
+        n_frames: Number of frames randomly sampled from the run to
+            average into the background whitefield.
+        output_dir: Directory where the metadata HDF5 file is written.
+    """
+
     n_frames        : int
     output_dir      : str
 
 @dataclass
 class MetaListConfig(BaseParameters):
+    """Parameters for the PCA metalist computation step.
+
+    Corresponds to the ``"metalist"`` section of ``scan.json`` (see
+    :doc:`/workflows`).  Used by ``cbclib_cli metalist`` and the SLURM
+    metalist array job to build the collection of background estimates that
+    drives PCA-based background subtraction.
+
+    Attributes:
+        n_frames: Number of consecutive frames averaged per background
+            estimate.
+        spacing: Number of events between consecutive background-estimate
+            centres.
+        output_dir: Root directory for per-chunk metalist HDF5 files.
+    """
+
     n_frames        : int
     spacing         : int
     output_dir      : str
 
 @dataclass
 class SetupConfig(BaseParameters):
+    """Crystal geometry and unit-cell file paths.
+
+    Corresponds to the ``"setup"`` section of ``scan.json`` (see
+    :doc:`/workflows`).  Used by ``cbclib_cli index`` and the SLURM
+    indexing job to locate the detector geometry and crystal unit-cell
+    files.
+
+    Attributes:
+        setup_file: Path to the detector geometry JSON file (read by
+            :class:`~cbclib_v2.indexer.FixedSetup`).
+        unit_file: Path to the crystal unit-cell JSON file (read by
+            :class:`~cbclib_v2.indexer.XtalCell`).
+        xtals_dir: Directory where per-chunk indexing results are written.
+    """
+
     setup_file      : str
     unit_file       : str
     xtals_dir       : str
 
     def unit_cell(self, xp: AnyNamespace=NumPy) -> XtalCell:
+        """Load the crystal unit cell from :attr:`unit_file`.
+
+        Args:
+            xp: Array namespace for the loaded arrays.
+
+        Returns:
+            :class:`~cbclib_v2.indexer.XtalCell` instance.
+
+        Raises:
+            ValueError: If :attr:`unit_file` is empty.
+        """
         if self.unit_file == str():
             raise ValueError("No crystal file provided")
         return XtalCell.read(self.unit_file, xp)
 
     def xtal(self, xp: AnyNamespace=NumPy) -> XtalState:
+        """Return the crystal unit cell as a reciprocal-basis :class:`~cbclib_v2.indexer.XtalState`.
+
+        Args:
+            xp: Array namespace for the loaded arrays.
+
+        Returns:
+            :class:`~cbclib_v2.indexer.XtalState` with basis vectors.
+        """
         return self.unit_cell(xp).to_basis()
 
     def setup(self) -> FixedSetup:
+        """Load the fixed detector geometry from :attr:`setup_file`.
+
+        Returns:
+            :class:`~cbclib_v2.indexer.FixedSetup` instance.
+
+        Raises:
+            ValueError: If :attr:`setup_file` is empty.
+        """
         if self.setup_file == str():
             raise ValueError("No setup file provided")
         return FixedSetup.read(self.setup_file)
 
 @dataclass
 class ScanFiles(BaseParameters):
+    """Scan-specific file and directory naming utilities.
+
+    Provides helpers that translate a ``(scan_num, image_kind)`` pair into
+    the canonical file and directory names used throughout the pipeline.
+
+    Attributes:
+        scan_num: Run number identifying the scan.
+        image_kind: Image layout — ``'full'`` for assembled lab-frame
+            images, ``'stacked'`` for per-module stacks.
+    """
+
     scan_num            : int
     image_kind          : Literal['full', 'stacked']
     dir_pattern         : ClassVar[str] = 'scan_{scan_num:d}_{kind}'
     file_pattern        : ClassVar[str] = 'scan_{scan_num:d}_{kind}'
 
     def list_files(self, dir: str) -> Iterator[str]:
+        """Yield paths of scan files found in *dir*.
+
+        Matches files whose name follows the canonical
+        ``scan_{num}_{kind}[_f{index}][_{suffix}]{ext}`` pattern.
+
+        Args:
+            dir: Directory to search.
+
+        Yields:
+            Absolute paths of matching files.
+        """
         path = self.file_pattern.format(scan_num=self.scan_num, kind=self.image_kind)
         filename, extension = os.path.splitext(path)
         pattern = filename
@@ -95,6 +219,17 @@ class ScanFiles(BaseParameters):
                 yield os.path.join(dir, filename)
 
     def list_dirs(self, dir: str) -> Iterator[str]:
+        """Yield paths of scan subdirectories found in *dir*.
+
+        Matches directories whose name follows the canonical
+        ``scan_{num}_{kind}[_{suffix}]`` pattern.
+
+        Args:
+            dir: Parent directory to search.
+
+        Yields:
+            Absolute paths of matching subdirectories.
+        """
         pattern = self.dir_pattern.format(scan_num=self.scan_num, kind=self.image_kind)
         pattern += r'(_([^.]+))?'
 
@@ -104,16 +239,51 @@ class ScanFiles(BaseParameters):
                 yield path
 
     def scan_dir(self, suffix: str=str()) -> str:
+        """Return the canonical scan directory name (without a parent path).
+
+        Args:
+            suffix: Optional suffix appended after an underscore.
+
+        Returns:
+            Directory name string, e.g. ``'scan_373_stacked'``.
+        """
         dir = self.dir_pattern.format(scan_num=self.scan_num, kind=self.image_kind)
         if suffix:
             dir += f'_{suffix}'
         return dir
 
     def scan_subdir(self, dir: str, suffix: str=str()) -> str:
+        """Return the absolute path to the canonical scan subdirectory inside *dir*.
+
+        Args:
+            dir: Parent directory.
+            suffix: Optional suffix for the subdirectory name.
+
+        Returns:
+            Absolute path string.
+        """
         return os.path.join(dir, self.scan_dir(suffix))
 
     def scan_file(self, file_index: int | None=None, /, *, suffix: str=str(), extension: str='.h5',
                   dir: str | None=None) -> str:
+        """Build the canonical output file path for this scan.
+
+        The returned path follows the pattern
+        ``{dir}/scan_{num}_{kind}[_f{index:04d}][_{suffix}]{extension}``.
+
+        Args:
+            file_index: Optional zero-based chunk index appended as
+                ``_f{index:04d}``.  ``None`` omits the chunk suffix.
+            suffix: Optional string appended after the chunk index.
+            extension: File extension including the leading dot.
+                Defaults to ``'.h5'``.
+            dir: Parent directory.  When provided, the file is placed
+                inside :meth:`scan_subdir` (if *file_index* is given) or
+                directly in *dir* (if *file_index* is ``None``).
+
+        Returns:
+            File path string.
+        """
         def get_filename(file_index: int | None, suffix: str, extension: str) -> str:
             filename = self.file_pattern.format(scan_num=self.scan_num, kind=self.image_kind)
             if file_index is not None:
@@ -134,6 +304,24 @@ class ScanFiles(BaseParameters):
 
 @dataclass
 class ScanConfig(ScanFiles):
+    """Top-level experiment configuration shared by all three workflows.
+
+    Aggregates all per-step configurations and provides helpers for opening
+    the run, locating metadata files, and building output paths.  Loaded from
+    a JSON file via :meth:`~cbclib_v2.scripts.BaseParameters.read`.
+
+    See :doc:`/workflows` for the JSON format and a worked example.
+
+    Attributes:
+        data: Facility data source configuration (HDF5 layout, geometry
+            file, module count).
+        setup: Crystal geometry and unit-cell file paths.
+        detect: Hit-finding thresholds and output directories.
+        metadata: Background-whitefield computation parameters.
+        metalist: PCA metalist computation parameters.
+        system: Compute backend and thread count.
+    """
+
     data            : RunConfig
     setup           : SetupConfig
     detect          : DetectConfig
@@ -143,6 +331,11 @@ class ScanConfig(ScanFiles):
 
     @property
     def apply_geometry(self) -> bool:
+        """Whether to assemble per-module stacks into lab-frame images on load.
+
+        ``True`` for ``image_kind == 'full'``; ``False`` for
+        ``image_kind == 'stacked'``.
+        """
         if self.image_kind == 'full':
             return True
         if self.image_kind == 'stacked':
@@ -158,6 +351,22 @@ class ScanConfig(ScanFiles):
             raise ValueError("Metadata and metalist must be saved to different folders")
 
     def find_metadata(self, file_index: int | None=None) -> str:
+        """Return the path to the best available metadata file for *file_index*.
+
+        Searches in priority order: per-chunk metalist file → combined
+        metalist file → single metadata file.
+
+        Args:
+            file_index: Chunk index.  When provided, the per-chunk metalist
+                file is tried first.
+
+        Returns:
+            Path to the first existing metadata or metalist HDF5 file.
+
+        Raises:
+            ValueError: If no metadata file is found for the given scan and
+                chunk.
+        """
         if file_index is not None:
             metalist_path = self.scan_file(file_index, dir=self.metalist.output_dir)
             if os.path.isfile(metalist_path):
@@ -177,10 +386,21 @@ class ScanConfig(ScanFiles):
         raise ValueError(err_txt)
 
     def run(self) -> BaseRun[TrainIndices]:
+        """Open the facility run and return a :class:`~cbclib_v2.BaseRun`.
+
+        Dispatches to the appropriate run class based on
+        ``data.facility`` (e.g. :class:`~cbclib_v2.XFELRun` for EuXFEL,
+        :class:`~cbclib_v2.SwissFELRun` for SwissFEL).
+
+        Returns:
+            Opened run object.
+        """
         return open_run(self.scan_num, self.data)
 
 @dataclass
 class BaseScript:
+    """Abstract base class for ``cbclib_cli`` pipeline scripts."""
+
     @classmethod
     def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
         raise NotImplementedError
@@ -200,6 +420,17 @@ DetectionKind = Literal['streaks', 'regions']
 
 @dataclass
 class CompileStreaks(BaseScript):
+    """Implements ``cbclib_cli compile``.
+
+    Reads all per-chunk streak or region HDF5 files from the scan directory
+    and concatenates them into a single merged HDF5 file.
+
+    Attributes:
+        kind: ``'streaks'`` or ``'regions'`` — selects which output
+            directory to read from.
+        scan_file: Path to the scan configuration JSON file.
+    """
+
     kind        : DetectionKind
     scan_file   : str
 
@@ -243,6 +474,17 @@ class CompileStreaks(BaseScript):
 
 @dataclass
 class CreateMetadata(BaseScript):
+    """Implements ``cbclib_cli metadata``.
+
+    Randomly samples frames from the run, computes the background
+    whitefield, and writes the result to an HDF5 metadata file used by all
+    subsequent detection steps.
+
+    Attributes:
+        scan: Scan configuration.
+        params: Metadata computation parameters (mask and background method).
+    """
+
     scan        : ScanConfig
     params      : MetadataParameters
 
@@ -289,6 +531,19 @@ class CreateMetadata(BaseScript):
 
 @dataclass
 class CreateMetaList(BaseScript):
+    """Implements ``cbclib_cli metalist``.
+
+    Computes background whitefields at regularly-spaced points across a data
+    chunk, runs PCA on the collection, and writes the eigen-fields and
+    supporting arrays to a per-chunk HDF5 metalist file.
+
+    Attributes:
+        scan: Scan configuration.
+        params: Metadata computation parameters.
+        chunk_id: Zero-based index of this chunk (``None`` = whole scan).
+        n_chunks: Total number of chunks (``None`` = whole scan).
+    """
+
     scan        : ScanConfig
     params      : MetadataParameters
     chunk_id    : int | None
@@ -378,6 +633,23 @@ class CreateMetaList(BaseScript):
 
 @dataclass
 class DetectHits(BaseScript):
+    """Implements ``cbclib_cli detect``.
+
+    Loads a data chunk, runs streak or region detection via
+    :func:`~cbclib_v2.scripts.pool_detection`, filters by
+    :attr:`~DetectConfig.hit_threshold`, and writes per-hit streak data (or
+    a frame-only CSV) to the output directory.
+
+    Attributes:
+        scan: Scan configuration.
+        params: Detection configuration (:class:`~cbclib_v2.scripts.StreakFinderConfig`
+            or :class:`~cbclib_v2.scripts.RegionFinderConfig`).
+        chunk_id: Zero-based chunk index (``None`` = whole scan).
+        n_chunks: Total number of chunks (``None`` = whole scan).
+        frames_only: When ``True``, save only the list of hit frame indices
+            (CSV) instead of the full streak table.
+    """
+
     scan        : ScanConfig
     params      : FinderConfig
     chunk_id    : int | None
@@ -422,6 +694,7 @@ class DetectHits(BaseScript):
 
     @property
     def kind(self) -> DetectionKind:
+        """Detection kind derived from the type of :attr:`params`."""
         if isinstance(self.params, StreakFinderConfig):
             return 'streaks'
         if isinstance(self.params, RegionFinderConfig):
@@ -468,8 +741,14 @@ class DetectHits(BaseScript):
             else:
                 print("Preparing the file...")
                 df = hits.to_dataframe()
-                pulse_ids = run.metadata('pulse_id', chunk[hits.index_array.unique()])
-                df['pulse_id'] = pulse_ids[hits.index_array.reset()]
+                hit_indices = xp.where(xp.isin(xp.array(list(chunk.index())), hit_frames))[0]
+                pulse_ids = run.metadata('pulse_id', chunk[hit_indices])
+                pulse_ids = pulse_ids[hits.index_array.reset()]
+                # If data for each module is saved in a separate file
+                # pulse_ids for each module will be stacked along the second axis
+                if pulse_ids.ndim > 1:
+                    pulse_ids = pulse_ids[:, 0]
+                df['pulse_id'] = pulse_ids
 
                 if self.kind == 'streaks':
                     output_dir = self.scan.detect.streaks_dir
@@ -486,6 +765,22 @@ class DetectHits(BaseScript):
 
 @dataclass
 class IndexingScript(BaseScript):
+    """Implements ``cbclib_cli index``.
+
+    Loads a per-chunk streak file, assembles patterns, and indexes them via
+    :func:`~cbclib_v2.scripts.pool_indexing`.  Crystal orientations can be
+    seeded from a prior indexing run or derived from the unit cell.
+
+    Attributes:
+        scan: Scan configuration.
+        params: Indexing configuration.
+        xtals: Path to an HDF5 file with initial crystal orientations.
+            Empty string → use the unit cell from :attr:`~ScanConfig.setup`.
+        suffix: Suffix appended to the output directory name.
+        chunk_id: Zero-based chunk index (``None`` = whole scan).
+        n_chunks: Total number of chunks (``None`` = whole scan).
+    """
+
     scan        : ScanConfig
     params      : IndexingConfig
     xtals       : str
@@ -573,10 +868,28 @@ class IndexingScript(BaseScript):
             output_file['files/setup_file'] = self.scan.setup.setup_file
 
 class SBatchScripts:
+    """Factory for single ``sbatch`` job scripts.
+
+    Each classmethod assembles a ``cbclib_cli <subcommand> …`` shell command,
+    reads SLURM parameters from *script_file*, and returns a
+    :class:`~cbclib_v2.slurm.SLURMScript` ready for submission via
+    :meth:`~cbclib_v2.slurm.SLURMJobManager.submit`.
+    """
+
     main        : ClassVar[str] = 'cbclib_cli'
 
     @classmethod
     def compile(cls, kind: DetectionKind, scan_file: str, script_file: str) -> SLURMScript:
+        """Build a ``cbclib_cli compile`` script.
+
+        Args:
+            kind: ``'streaks'`` or ``'regions'``.
+            scan_file: Path to the scan configuration JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` for the compile step.
+        """
         command = f"{cls.main} compile {quote(kind)} {quote(scan_file)}"
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="compile", command=command, parameters=script_spec)
@@ -585,6 +898,21 @@ class SBatchScripts:
     def index(cls, scan_file: str, params_file: str, xtals: str, suffix: str,
               script_file: str, chunk_id: int | None=None, n_chunks: int | None=None
               ) -> SLURMScript:
+        """Build a ``cbclib_cli index`` script.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the indexing parameters JSON.
+            xtals: Path to an initial crystal orientations HDF5 file
+                (empty string → use unit cell).
+            suffix: Output directory suffix.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            chunk_id: Optional chunk index for chunked processing.
+            n_chunks: Optional total chunk count.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` for the indexing step.
+        """
         command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} " \
                   f"{quote(xtals)} {quote(suffix)}"
         if chunk_id is not None and n_chunks is not None:
@@ -596,6 +924,17 @@ class SBatchScripts:
     @classmethod
     def metadata(cls, scan_file: str, params_file: str, script_file: str,
                  frames: List[int] | None=None) -> SLURMScript:
+        """Build a ``cbclib_cli metadata`` script.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the metadata parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            frames: Optional explicit list of frame indices to use.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` for the metadata step.
+        """
         command = f"{cls.main} metadata {quote(scan_file)} {quote(params_file)}"
         if frames is not None:
             command += f' --frames {frames}'
@@ -605,6 +944,18 @@ class SBatchScripts:
     @classmethod
     def metalist(cls, scan_file: str, params_file: str, script_file: str,
                  chunk_id: int | None=None, n_chunks: int | None=None) -> SLURMScript:
+        """Build a ``cbclib_cli metalist`` script.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the metadata parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            chunk_id: Optional chunk index.
+            n_chunks: Optional total chunk count.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` for the metalist step.
+        """
         command = f"{cls.main} metalist {quote(scan_file)} {quote(params_file)}"
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
@@ -616,6 +967,21 @@ class SBatchScripts:
     def detect(cls, kind: DetectionKind, scan_file: str, params_file: str, script_file: str,
                chunk_id: int | None=None, n_chunks: int | None=None, frames_only: bool=False
                ) -> SLURMScript:
+        """Build a ``cbclib_cli detect`` script.
+
+        Args:
+            kind: ``'streaks'`` or ``'regions'``.
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the detection parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            chunk_id: Optional chunk index.
+            n_chunks: Optional total chunk count.
+            frames_only: Pass ``--frames-only`` to save only hit frame
+                indices rather than the full streak table.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` for the detection step.
+        """
         command = f"{cls.main} detect {quote(kind)} {quote(scan_file)} {quote(params_file)}"
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
@@ -626,11 +992,32 @@ class SBatchScripts:
         return SLURMScript(job_name="detect", command=command, parameters=script_spec)
 
 class SBatchArrayScripts:
+    """Factory for ``sbatch --array`` job scripts.
+
+    Like :class:`SBatchScripts` but each script injects
+    ``FILE_INDEX=${SLURM_ARRAY_TASK_ID}`` so that the chunk index is taken
+    from the SLURM task ID at runtime.  Use with
+    :meth:`~cbclib_v2.slurm.SLURMJobManager.submit_array`.
+    """
+
     main        : ClassVar[str] = 'cbclib_cli'
 
     @classmethod
     def index(cls, scan_file: str, params_file: str, xtals: str, suffix: str,
               script_file: str, n_chunks: int) -> SLURMScript:
+        """Build a ``cbclib_cli index`` array script for *n_chunks* tasks.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the indexing parameters JSON.
+            xtals: Path to an initial crystal orientations HDF5 file.
+            suffix: Output directory suffix.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            n_chunks: Total number of array tasks.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
+        """
         command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} {quote(xtals)} "\
                   f"{quote(suffix)} --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
         script_spec = ScriptSpec.read(script_file)
@@ -640,6 +1027,17 @@ class SBatchArrayScripts:
     @classmethod
     def metalist(cls, scan_file: str, params_file: str, script_file: str, n_chunks: int
                  ) -> SLURMScript:
+        """Build a ``cbclib_cli metalist`` array script for *n_chunks* tasks.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the metadata parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            n_chunks: Total number of array tasks.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
+        """
         command = f"{cls.main} metalist {quote(scan_file)} {quote(params_file)}" \
                    f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
         script_spec = ScriptSpec.read(script_file)
@@ -649,6 +1047,18 @@ class SBatchArrayScripts:
     @classmethod
     def detect(cls, kind: DetectionKind, scan_file: str, params_file: str, script_file: str,
                n_chunks: int) -> SLURMScript:
+        """Build a ``cbclib_cli detect`` array script for *n_chunks* tasks.
+
+        Args:
+            kind: ``'streaks'`` or ``'regions'``.
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the detection parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            n_chunks: Total number of array tasks.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
+        """
         command = f"{cls.main} detect {quote(kind)} {quote(scan_file)} {quote(params_file)}" \
                   f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
         script_spec = ScriptSpec.read(script_file)
@@ -656,6 +1066,25 @@ class SBatchArrayScripts:
         return SLURMScript(job_name="detect_array", command=command, parameters=script_spec)
 
 class Scripts:
+    """Namespace exposing all ``cbclib_cli`` pipeline scripts and the CLI parser.
+
+    Each attribute is the class implementing the corresponding subcommand.
+    :attr:`sbatch` and :attr:`sbatch_array` are factories for building
+    :class:`~cbclib_v2.slurm.SLURMScript` objects ready for submission via
+    :class:`~cbclib_v2.slurm.SLURMJobManager`.
+
+    Attributes:
+        sbatch: :class:`SBatchScripts` — single-job ``sbatch`` script
+            factory.
+        sbatch_array: :class:`SBatchArrayScripts` — ``sbatch --array``
+            script factory.
+        compile: :class:`CompileStreaks` — merge per-chunk results.
+        metadata: :class:`CreateMetadata` — compute background whitefield.
+        metalist: :class:`CreateMetaList` — compute PCA metalist.
+        detect: :class:`DetectHits` — run streak or region detection.
+        index: :class:`IndexingScript` — index detected patterns.
+    """
+
     sbatch          : ClassVar[Type[SBatchScripts]] = SBatchScripts
     sbatch_array    : ClassVar[Type[SBatchArrayScripts]] = SBatchArrayScripts
     compile         : ClassVar[Type[CompileStreaks]] = CompileStreaks
@@ -666,6 +1095,14 @@ class Scripts:
 
     @classmethod
     def parser(cls) -> ArgumentParser:
+        """Return the top-level :class:`~argparse.ArgumentParser` for ``cbclib_cli``.
+
+        Registers a subparser for every :class:`BaseScript` subclass found
+        on this class.
+
+        Returns:
+            Configured :class:`~argparse.ArgumentParser`.
+        """
         parser = ArgumentParser(description='Process CBD patterns')
         subparsers = parser.add_subparsers(help='Available subcommands', dest='command')
 

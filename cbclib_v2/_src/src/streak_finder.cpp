@@ -537,6 +537,8 @@ PYBIND11_MODULE(streak_finder, m)
 {
     using namespace cbclib;
     namespace py = cbclib::py;
+    py::options opts;
+    opts.disable_function_signatures();
 
     try
     {

@@ -1820,6 +1820,8 @@ PYBIND11_MODULE(cuda_streak_finder, m)
 {
     using namespace cbclib;
     namespace cu = cbclib::cuda;
+    py::options options;
+    options.disable_function_signatures();
 
     try
     {

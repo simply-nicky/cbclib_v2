@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import (Any, Callable, ClassVar, Dict, Hashable, Iterable, Mapping, Tuple,
                     Type, TypeVar, overload)
 import dataclasses

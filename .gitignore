@@ -142,3 +142,6 @@ dmypy.json
 
 # CLAUDE settings
 .claude/
+
+# Auto generated RST files from docstrings
+docs/generated

@@ -1,0 +1,19 @@
+name: cbclib_docs
+channels:
+  - conda-forge
+dependencies:
+  - array-api-compat
+  - gxx_linux-64>=12
+  - h5py
+  - hdf5plugin
+  - jax
+  - llvm-openmp
+  - numpy>=2.1.0
+  - numpydoc
+  - pandas
+  - pydata-sphinx-theme>=0.15
+  - pybind11>=2.10.0
+  - python=3.12
+  - sphinx>=7
+  - sphinx-copybutton
+  - tqdm

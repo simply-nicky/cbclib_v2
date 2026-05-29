@@ -9,7 +9,8 @@ def median(inp: RealArray, axis: IntSequence=0, num_threads: int=1) -> NDRealArr
 def median(inp: IntArray, axis: IntSequence=0, num_threads: int=1) -> NDIntArray:
     ...
 
-def median(inp: RealArray | IntArray, axis: IntSequence=0, num_threads: int=1) -> NDRealArray | NDIntArray:
+def median(inp: RealArray | IntArray, axis: IntSequence=0, num_threads: int=1
+           ) -> NDRealArray | NDIntArray:
     """Calculate a median along the `axis`.
 
     Args:
@@ -67,8 +68,9 @@ def robust_mean(inp: RealArray | IntArray, axis: IntSequence=0, r0: float=0.0, r
     """
     ...
 
-def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: IntSequence=-1, r0: float=0.0,
-               r1: float=0.5, n_iter: int=12, lm: float=9.0, num_threads: int=1) -> NDRealArray:
+def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: IntSequence=-1,
+               r0: float=0.0, r1: float=0.5, n_iter: int=12, lm: float=9.0, num_threads: int=1
+               ) -> NDRealArray:
     """Robustly solve a linear least-squares problem with the fast least kth order statistics
     (FLkOS [FLKOS]_) algorithm.
 

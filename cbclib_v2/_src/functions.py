@@ -19,7 +19,7 @@ from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray, CP
 from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform
 from .config import get_cpu_config
 from .src import bresenham, label as cpu_label, median as cpu_median, streak_finder
-from .src.label import Structure, LabelResult as NPLabelResult
+from .src.label import Structure, NPLabelResult
 from .src.streak_finder import Streaks as NPStreaks
 
 def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
@@ -80,6 +80,26 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
     return decorator
 
 class PeakLabels(NamedTuple):
+    """Bin-state descriptor produced by :func:`peak_labels`.
+
+    Encodes the result of the peak-detection step: for each grid bin it
+    records whether a local maximum was found (peak), a foreground pixel
+    exists but no strict maximum (good), or the bin is empty (bad).
+
+    Attributes:
+        labels: Integer array of shape ``(*frame_shape[:-2], NY_bins, NX_bins)``.
+            Positive values are 1-based peak indices; 0 marks a *good* bin;
+            -1 marks a *bad* bin.
+        n_seeds: Number of seed peaks that will be used as starting points
+            for streak growing.  Controlled via :meth:`keep_best`.
+        n_labels: Total number of bins that have been assigned a linelet
+            (updated by :func:`fit_linelets` as propagation fills good bins).
+        n_good: Number of bins that overlap at least one foreground region
+            (peaks + good bins).
+        radius: Bin side length in pixels; equals ``structure.connectivity``
+            passed to :func:`detect_peaks`.
+    """
+
     labels : IntArray
     n_seeds : int
     n_labels : int
@@ -87,8 +107,22 @@ class PeakLabels(NamedTuple):
     radius : int
 
     def keep_best(self, quantile: float = 0.5) -> 'PeakLabels':
-        return PeakLabels(self.labels, int(self.n_seeds * quantile), self.n_labels, self.n_good,
-                          self.radius)
+        """Restrict streak growing to the top fraction of peaks by intensity.
+
+        Returns a copy of this descriptor with ``n_seeds`` reduced to
+        ``int(n_seeds * quantile)``.  Only the first ``n_seeds`` entries of
+        the peaks array (sorted by descending intensity) are used as seeds
+        during :func:`detect_streaks`.
+
+        Args:
+            quantile: Fraction of peaks to keep.  ``0.5`` keeps the
+                brightest half; ``1.0`` keeps all peaks.
+
+        Returns:
+            Updated :class:`PeakLabels` with a smaller ``n_seeds``.
+        """
+        return PeakLabels(self.labels, int(self.n_seeds * quantile), self.n_labels,
+                          self.n_good, self.radius)
 
     def to_tuple(self) -> Tuple[IntArray, int, int, int, int]:
         return self.labels, self.n_seeds, self.n_labels, self.n_good, self.radius
@@ -340,6 +374,12 @@ def binary_dilation(inp: BoolArray, structure: Structure, iterations: int=1,
                     mask: Optional[BoolArray]=None) -> BoolArray:
     """Binary dilation of 2D binary image.
 
+    Dispatches to the CPU or GPU implementation based on the Array API namespace of
+    ``inp``. The CPU backend supports concurrent execution through the configured
+    OpenMP thread count controlled by :func:`~cbclib_v2.set_cpu_config`; the GPU
+    backend uses CuPy's CUDA implementation, following the behavior of
+    :func:`scipy.ndimage.binary_dilation`.
+
     Args:
         inp: Input binary array.
         structure: Structuring element used for dilation.
@@ -348,10 +388,26 @@ def binary_dilation(inp: BoolArray, structure: Structure, iterations: int=1,
 
     Returns:
         Dilated binary array.
+
+    See Also:
+        :doc:`/array_api`: Array API backend selection and conversion utilities.
+        :func:`~cbclib_v2.set_cpu_config`: Configure the CPU thread count.
     """
     ...
 
 class CPLabelResult(NamedTuple):
+    """Result of a connected-component labeling operation (GPU/CuPy backend).
+
+    Stores the label map as a dense CuPy integer array together with a
+    1-D array of the region indices that are present.  Mirrors the interface
+    of :class:`~cbclib_v2.label.LabelResult` for the CPU backend.
+
+    Attributes:
+        labels: CuPy integer array of the same shape as the input, with
+            each pixel set to its region index (0 for background).
+        index: 1-D CuPy integer array of region indices ``[1, …, n_labels]``.
+    """
+
     labels      : CPIntArray
     index       : CPIntArray
 
@@ -386,15 +442,24 @@ def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> Label
 
 @array_dispatch("inp", cpu_impl=_label_cpu, gpu_impl=_label_gpu)
 def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> LabelResult:
-    """Label connected components in a binary array.
+    """Label connected regions in a boolean or integer array.
+
+    This function is similar to :func:`scipy.ndimage.label`: all non-zero
+    pixels in *inp* are treated as foreground.  Connected foreground pixels
+    are assigned the same positive integer label; background pixels are
+    labeled 0.  Connectivity is determined by the structuring element
+    *structure*.  Regions with fewer than *npts* pixels are discarded (their
+    pixels reset to 0).
 
     Args:
-        inp: Input binary array.
-        structure: Structuring element defining connectivity.
-        npts: Minimum number of points for a region to be labeled.
+        inp: Input boolean or integer array.  Non-zero values are foreground.
+        structure: Structuring element that defines which pixels are
+            considered neighbours (i.e. what counts as "connected").
+        npts: Minimum region size in pixels.  Regions with fewer pixels are
+            removed from the result.
 
     Returns:
-        List of labeled regions.
+        Labeled regions as a :class:`LabelResult`.
     """
     ...
 
@@ -424,16 +489,22 @@ def center_of_mass(labels: LabelResult, data: RealArray) -> RealArray: ...
 
 @array_dispatch("data", cpu_impl=_center_of_mass_cpu, gpu_impl=_center_of_mass_gpu)
 def center_of_mass(labels: LabelResult, data: RealArray) -> RealArray:
-    """Calculate center of mass for each labeled region.
+    """Compute the intensity-weighted center of mass for each labeled region.
 
-    Automatically dispatches to CPU or CUDA backend based on current device context.
+    The center of mass is the first-order
+    `image moment <https://en.wikipedia.org/wiki/Image_moment>`_ normalised
+    by the total intensity (zeroth-order moment):
+    ``c_k = M_k / M_00`` along each axis *k*, where
+    ``M_ij = Σ x^i y^j · w(x, y)`` and *w* are the values from *data*.
 
     Args:
-        labels: Labeled regions.
-        data: Input data array.
+        labels: Labeled regions returned by :func:`label`.
+        data: Intensity (weight) array with the same spatial shape as the
+            label array.
 
     Returns:
-        Array of center of mass coordinates for each region.
+        Array of shape ``(N, ndim)`` with the center-of-mass coordinates for
+        each of the *N* labeled regions.
     """
     ...
 
@@ -465,16 +536,23 @@ def covariance_matrix(labels: LabelResult, data: RealArray) -> RealArray: ...
 
 @array_dispatch("data", cpu_impl=_covariance_matrix_cpu, gpu_impl=_covariance_matrix_gpu)
 def covariance_matrix(labels: LabelResult, data: RealArray) -> RealArray:
-    """Calculate covariance matrix for each labeled region.
+    """Compute the intensity-weighted covariance matrix for each labeled region.
 
-    Automatically dispatches to CPU or CUDA backend based on current device context.
+    The covariance matrix is built from second-order central
+    `image moments <https://en.wikipedia.org/wiki/Image_moment>`_ weighted
+    by the values in *data*:
+    ``Cov[i, j] = μ_ij / M_00``, where
+    ``μ_ij = Σ (x_i - x̄_i)(x_j - x̄_j) · w(x)`` and *w* are the values
+    from *data*.
 
     Args:
-        labels: Labeled regions.
-        data: Input data array.
+        labels: Labeled regions returned by :func:`label`.
+        data: Intensity (weight) array with the same spatial shape as the
+            label array.
 
     Returns:
-        Array of covariance matrices for each region.
+        Array of shape ``(N, ndim, ndim)`` with the covariance matrix for
+        each of the *N* labeled regions.
     """
     ...
 
@@ -485,7 +563,20 @@ def index(labels: NPLabelResult) -> NDIntArray: ...
 def index(labels: CPLabelResult) -> CPIntArray: ...
 
 def index(labels: LabelResult) -> NDIntArray | CPIntArray:
-    """Get array of region indices."""
+    """Return a 1-D integer array of the region indices present in *labels*.
+
+    For the CPU backend (:class:`~cbclib_v2.label.LabelResult`) this is
+    ``[1, 2, …, n_regions]``; for the GPU backend
+    (:class:`~cbclib_v2.label.CPLabelResult`) it is the stored
+    :attr:`~cbclib_v2.label.CPLabelResult.index` array.
+
+    Args:
+        labels: Labeled regions returned by :func:`label`.
+
+    Returns:
+        1-D integer array of length *n_regions* containing the label
+        index of each region.
+    """
     if isinstance(labels, NPLabelResult):
         return NumPy.arange(1, len(labels.regions) + 1, dtype=int)
     if isinstance(labels, CPLabelResult):
@@ -499,7 +590,23 @@ def labels(labels: NPLabelResult) -> NDIntArray: ...
 def labels(labels: CPLabelResult) -> CPIntArray: ...
 
 def labels(labels: LabelResult) -> NDIntArray | CPIntArray:
-    """Get array of region labels."""
+    """Return the dense per-pixel label array from a :class:`~cbclib_v2.label.LabelResult`.
+
+    Each pixel in the returned array contains the integer index of the
+    region it belongs to, or ``0`` for background.  For the CPU backend
+    this materialises the sparse :class:`~cbclib_v2.label.Regions`
+    representation via :meth:`~cbclib_v2.label.LabelResult.to_array`; for
+    the GPU backend it returns the stored
+    :attr:`~cbclib_v2.label.CPLabelResult.labels` array directly.
+
+    Args:
+        labels: Labeled regions returned by :func:`label`.
+
+    Returns:
+        Integer array of the same spatial shape as the original input to
+        :func:`label`, with each pixel set to its region index (0 for
+        background).
+    """
     if isinstance(labels, NPLabelResult):
         return labels.to_array(index(labels))
     if isinstance(labels, CPLabelResult):
@@ -531,17 +638,24 @@ def ellipse_fit(labels: LabelResult, data: JaxRealArray) -> JaxRealArray: ...
 def ellipse_fit(labels: LabelResult, data: RealArray) -> RealArray: ...
 
 def ellipse_fit(labels: LabelResult, data: RealArray) -> RealArray:
-    """ Fit ellipses to connected 2D regions in data. The fitted ellipse is defined by its
-    major and minor axes (FWHM) and orientation.
+    """Fit an ellipse to each labeled region using image moments.
 
-    Parameters:
-        labels: List of connected 2D regions.
-        data: List of 2D arrays of data values.
+    The ellipse parameters are derived from the second-order central
+    `image moments <https://en.wikipedia.org/wiki/Image_moment>`_ weighted
+    by the values in *data*.  The covariance matrix of the spatial
+    coordinates is decomposed into its eigenvectors; the semi-axes of the
+    ellipse correspond to the FWHM of the intensity distribution along those
+    eigenvectors.
+
+    Args:
+        labels: Labeled regions returned by :func:`label`.
+        data: Intensity (weight) array with the same spatial shape as the
+            label array.
 
     Returns:
-        Array of shape (N, 3) where N is the number of regions. Each ellipse is represented by
-        (a, b, theta) where a and b are the FWHM of the major and minor axes, and theta is the
-        orientation angle in radians.
+        Array of shape ``(N, 3)`` where each row is ``(a, b, theta)``:
+        *a* and *b* are the FWHM of the major and minor axes, and *theta*
+        is the orientation angle in radians.
     """
     covmat = covariance_matrix(labels, data)
     return to_ellipse(covmat)
@@ -576,16 +690,24 @@ def line_fit(labels: CPLabelResult, data: CPRealArray) -> CPRealArray: ...
 def line_fit(labels: LabelResult, data: RealArray) -> RealArray: ...
 
 def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
-    """ Fit lines to connected 2D regions in data. The fitted line equals to the major axis of the
-    covariance ellipse.
+    """Fit a line to each labeled region using image moments.
 
-    Parameters:
-        labels: List of connected 2D regions.
-        data: 2D array of data values.
+    The line is the major axis of the intensity-weighted covariance ellipse
+    computed from second-order central
+    `image moments <https://en.wikipedia.org/wiki/Image_moment>`_.  The
+    eigenvector corresponding to the largest eigenvalue of the covariance
+    matrix gives the orientation; the half-length of the segment is the FWHM
+    of the distribution along that eigenvector.
+
+    Args:
+        labels: Labeled regions returned by :func:`label`.
+        data: Intensity (weight) array with the same spatial shape as the
+            label array.
 
     Returns:
-        Array of shape (N, 4) where N is the number of regions. Each line is represented by
-        (x1, y1, x2, y2) coordinates of its endpoints.
+        Array of shape ``(N, 2 * ndim)`` where each row is the concatenation
+        of the two endpoint coordinates ``(x1, ..., x2, ...)`` of the fitted
+        line segment.
     """
     if isinstance(labels, NPLabelResult):
         return cpu_label.line_fit(labels, data)
@@ -613,19 +735,40 @@ def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, 
 
 def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, vmin: float,
              xtol: float) -> RealArray:
-    """Calculate p-values for each labeled region based on the data values.
+    """Compute the log-binomial tail probability for each labeled streak region.
+
+    For each labeled region the function:
+
+    1. Builds a footprint: the union of *structure* neighbourhoods around
+       the region's peak pixels.
+    2. Restricts the footprint to pixels within *xtol* of the fitted line,
+       yielding *n* candidate pixels and *k* pixels above *vmin*.
+    3. Returns ``log P(X ≥ k)`` for ``X ~ Binomial(n, p0)``, evaluated with
+       the log-survival function of the binomial distribution.
+
+    The returned values are the raw log tail probabilities.  Dividing by
+    ``log(p0)`` converts them to the minimal-support score used by
+    :meth:`~cbclib_v2.streak_finder.PatternStreakFinder.min_support`.
 
     Args:
-        labels: Labeled regions.
-        lines : Line parameters for each region. Must have shape (N, 2 * data.ndim) and follow xyz
-            format.
-        data: Input data array.
-        p0: Expected p-value for the null hypothesis.
-        vmin: Minimum data value to consider for p-value calculation.
-        xtol: Tolerance for convergence of p-value estimation.
+        labels: Labeled streak regions returned by
+            :func:`streak_labels` (after re-labeling with :func:`label`).
+        lines: Fitted line endpoints of shape ``(N, 2 * data.ndim)`` in
+            ``(x0, y0, x1, y1, ...)`` order, one row per labeled region.
+        data: SNR frame stack of shape ``(n_frames, *frame_shape)``.
+        p0: Background pixel probability — fraction of pixels above *vmin*
+            across the full stack; used as the success probability of the
+            null-hypothesis binomial.
+        vmin: SNR threshold.  Pixels at or above *vmin* count as foreground
+            in the binomial statistic.
+        xtol: Distance tolerance in pixels matching the value used during
+            streak growing.  Only pixels within *xtol* of the fitted line
+            are included in the footprint count.
 
     Returns:
-        Array of p-values for each region.
+        Float array of length *N* containing ``log P(X ≥ k)`` for each
+        region.  Values are negative; a more negative value indicates
+        stronger statistical evidence for a real streak.
     """
     if isinstance(labels, NPLabelResult):
         return cpu_label.p_values(labels=labels, lines=lines, data=data, p0=p0, vmin=vmin,
@@ -655,7 +798,10 @@ def median(inp: JaxRealArray | JaxIntArray, axis: IntSequence=0) -> JaxRealArray
 def median(inp: RealArray | IntArray, axis: IntSequence=0) -> RealArray | IntArray:
     """Calculate a median along the axis.
 
-    Automatically dispatches to CPU or CUDA backend based on current device context.
+    Dispatches to NumPy, CuPy, or JAX based on the input array's Array API backend.
+    The NumPy backend supports concurrent execution through the configured OpenMP
+    thread count controlled by :func:`~cbclib_v2.set_cpu_config`, while CuPy and
+    JAX use their native accelerator-aware median implementations.
 
     Args:
         inp: Input array. Must be one of the following types: np.float64, np.float32, np.int32,
@@ -666,6 +812,8 @@ def median(inp: RealArray | IntArray, axis: IntSequence=0) -> RealArray | IntArr
         Array of medians along the given axis.
 
     See Also:
+        :doc:`/array_api`: Array API backend selection and conversion utilities.
+        :func:`~cbclib_v2.set_cpu_config`: Configure the CPU thread count.
         :func:`median_filter`: Multidimensional median filter.
         :func:`maximum_filter`: Multidimensional maximum filter.
     """
@@ -880,20 +1028,36 @@ def detect_peaks(data: RealArray, labeled: LabelResult, radius: int, vmin: float
 @array_dispatch("data", cpu_impl=_detect_peaks_cpu, gpu_impl=_detect_peaks_gpu)
 def detect_peaks(data: RealArray, labeled: LabelResult, radius: int, vmin: float
                      ) -> NDIntArray | CPIntArray:
-    """Detect peaks in a set of images using the new GPU-friendly algorithm. The minimal distance
-    between peaks is controlled by the radius parameter.
+    """Find local maxima within each grid bin of the SNR frame stack.
+
+    The frame is divided into a regular grid of *radius* x *radius* bins.
+    Within each bin that overlaps at least one labeled foreground region, the
+    algorithm searches for the brightest pixel that is a **strict local
+    maximum** — its SNR value exceeds every neighbour in the 3x3 spatial
+    neighbourhood. Each bin is assigned one of three states:
+
+    * **Peak** (``index >= 0 and index < data.size``) — flat pixel index of
+      the local maximum.
+    * **Good** (``index == data.size``) — bin overlaps a foreground region
+      but contains no strict local maximum; can receive a linelet via
+      propagation in :func:`fit_linelets`.
+    * **Bad** (``index == -1``) — no foreground pixels in the bin; ignored
+      in all later stages.
 
     Args:
-        data: Input data array.
-        labeled: Labeled regions used for peak detection.
-        radius: Minimum distance between peaks. The distance is measured as a number of pixels
-            along the axes specified by the axes parameter.
-        vmin: Minimum value to consider a pixel as part of a peak.
+        data: SNR frame stack of shape ``(n_frames, *frame_shape)``.
+        labeled: Foreground regions returned by :func:`label`.  Only bins
+            that overlap at least one labeled region are searched for peaks.
+        radius: Bin side length in pixels.  Sets the minimum spacing between
+            peaks and should equal ``structure.connectivity``.
+        vmin: SNR threshold.  Pixels below *vmin* are not considered as peak
+            candidates.
 
     Returns:
-        Array of bins with peak's index written in it. If the bin doesn't contain a peak, it is
-        filled with -1. The shape of the output array is the same as the input array, except for
-        the last two dimensions, which are divided by the radius.
+        Integer array of shape ``(*data.shape[:-2], NY_bins, NX_bins)``
+        containing the raw bin state for each grid bin (flat pixel index,
+        ``data.size`` sentinel, or ``-1``).  Pass to :func:`peak_labels` to
+        obtain the :class:`PeakLabels` descriptor.
     """
     ...
 
@@ -954,19 +1118,27 @@ def peak_labels(indices: IntArray, data: RealArray, radius: int
 @array_dispatch("indices", cpu_impl=_cpu_peak_labels, gpu_impl=_gpu_peak_labels)
 def peak_labels(indices: IntArray, data: RealArray, radius: int
                 ) -> Tuple[PeakLabels, IntArray]:
-    """Convert an array of peak indices to a labeled array and a list of peaks.
+    """Convert raw bin-state indices from :func:`detect_peaks` into a
+    :class:`PeakLabels` descriptor.
+
+    Assigns a positive 1-based label to every peak bin (sorted by descending
+    intensity so that the strongest peaks have the lowest label indices),
+    0 to every *good* bin, and -1 to every *bad* bin.  Also collects the
+    flat pixel indices of all detected peaks into a 1-D array sorted by
+    descending SNR value.
 
     Args:
-        indices: Array of peak indices. The shape of the array is the same as the input data, except
-            for the last two dimensions, which are divided by the radius. The values in the array
-            are either -1 (if there is no peak in the corresponding bin) or an index of a peak in
-            the original data array.
-        data: Input data array.
-        radius: Radius used for peak detection.
+        indices: Raw bin-state array returned by :func:`detect_peaks`, shape
+            ``(*data.shape[:-2], NY_bins, NX_bins)``.
+        data: SNR frame stack used for sorting peaks by intensity.
+        radius: Bin side length in pixels; stored in the returned
+            :class:`PeakLabels` for use by downstream functions.
 
     Returns:
-        A tuple of (labels, peaks) where labels is an array of bin labels and peaks is a flat array
-        of peak indices in the original data array.
+        A tuple ``(labels, peaks)`` where *labels* is a :class:`PeakLabels`
+        describing the state of every grid bin, and *peaks* is a 1-D integer
+        array of flat pixel indices of the detected peaks sorted by
+        descending intensity.
     """
     ...
 
@@ -1007,22 +1179,41 @@ def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure
 @array_dispatch("peaks", cpu_impl=_cpu_fit_linelets, gpu_impl=_gpu_fit_linelets)
 def fit_linelets(labels: PeakLabels, peaks: IntArray, data: RealArray, structure: Structure,
                  vmin: float) -> Tuple[RealArray, PeakLabels]:
-    """Fit linelets to the detected peaks.
+    """Fit a linelet to each reachable grid bin and propagate to neighbours.
+
+    For every peak bin, a *linelet* — a short line segment
+    ``(x0, y0, x1, y1)`` — is fitted to the intensity distribution in the
+    local neighbourhood defined by *structure* using intensity-weighted image
+    moments.  The linelet direction is the eigenvector of the covariance
+    matrix of pixel coordinates (weighted by SNR) corresponding to the larger
+    eigenvalue; the half-length equals the FWHM of the distribution along
+    that axis.
+
+    Starting from each peak, the algorithm then **propagates** the linelet
+    table forward and backward: at each step it traces the current linelet
+    direction to the nearest bin boundary (ray–boundary intersection), fits a
+    linelet at the new location if the pixel is above *vmin*, and writes it
+    into the table.  *Good* bins encountered during propagation are promoted
+    to labeled peaks and become eligible seeds for :func:`detect_streaks`.
 
     Args:
-        labels: Array of bin labels. A bin with label -1 doesn't contain a peak, a bin with label
-            0 doesn't have an assigned peak yet.
-        peaks: Array of peak indices in the original data array.
-        data: Input data array.
-        structure: Connectivity structure used for linelet fitting.
-        vmin: Minimum value to consider a pixel as part of a linelet.
-        max_iter: Maximum number of iterations for linelet fitting.
+        labels: Bin-state descriptor returned by :func:`peak_labels`.
+        peaks: Flat pixel indices of detected peaks returned by
+            :func:`peak_labels`, sorted by descending intensity.
+        data: SNR frame stack used for moment computation and the *vmin*
+            threshold.
+        structure: Structuring element defining the local pixel neighbourhood
+            for linelet fitting and the propagation step size (via
+            ``structure.connectivity``).
+        vmin: SNR threshold.  Only pixels at or above *vmin* are included in
+            the moment calculation and propagation.
 
     Returns:
-        Array of linelet parameters. The shape of the array is (n_labels, 4) where n_labels is the
-        number of labeled peaks. The last dimension contains linelet parameters in the following
-        order: (x0, y0, x1, y1) where (x0, y0) and (x1, y1) are coordinates of the endpoints of the
-        linelet.
+        A tuple ``(linelets, labels)`` where *linelets* is an array of shape
+        ``(n_labels, 4)`` containing ``(x0, y0, x1, y1)`` endpoint
+        coordinates for each linelet, and *labels* is an updated
+        :class:`PeakLabels` whose ``n_labels`` has grown to include bins
+        filled during propagation.
     """
     ...
 
@@ -1066,21 +1257,41 @@ def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray,
 @array_dispatch("peaks", cpu_impl=_cpu_detect_streaks, gpu_impl=_gpu_detect_streaks)
 def detect_streaks(labels: PeakLabels, peaks: IntArray, linelets: RealArray, data: RealArray,
                    structure: Structure, vmin: float, xtol: float, nfa: int) -> Streaks:
-    """Detect streaks using the new GPU-friendly algorithm.
+    """Grow streaks from seed peaks by aggregating aligned linelet bins.
+
+    For each seed peak (the first ``labels.n_seeds`` entries of *peaks*), a
+    streak is initialised from that single bin and then extended one bin at a
+    time in both directions.  The current extent of a streak is the line
+    connecting the two outermost linelet endpoints across all bins in the
+    streak.  A candidate neighbouring bin is accepted when its linelet
+    satisfies a **self-consistency check**: both endpoints must lie within
+    *xtol* pixels of this total streak line, with at most *nfa* endpoint
+    violations tolerated across the whole streak.  Growth stops when no
+    aligned neighbour can be found in either direction.
 
     Args:
-        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
-        peaks: Array of peak indices in the original data array.
-        linelets: Array of linelet parameters.
-        data: Input data array.
-        structure: Connectivity structure used for streak detection.
-        vmin: Minimum value to consider a pixel as part of a streak.
-        xtol: Distance threshold. A new linelet is added to a streak if it's distance to the
-            streak is no more than ``xtol``.
-        nfa: Number of false alarms, allowed number of unaligned points in a streak.
+        labels: Bin-state descriptor returned by :func:`fit_linelets`.
+            Use :meth:`~PeakLabels.keep_best` to restrict seeds to the
+            strongest peaks.
+        peaks: Flat pixel indices of detected peaks returned by
+            :func:`peak_labels`, sorted by descending intensity.
+        linelets: Linelet endpoint array of shape ``(n_labels, 4)`` returned
+            by :func:`fit_linelets`.
+        data: SNR frame stack (used internally for neighbour lookup).
+        structure: Structuring element defining the bin radius and pixel
+            neighbourhood for streak extension.
+        vmin: SNR threshold.  Pixels below *vmin* are not considered as
+            valid streak bins.
+        xtol: Collinearity tolerance in pixels.  A candidate bin is accepted
+            only if all linelet endpoints of the updated streak lie within
+            *xtol* of the total streak line.  A value of 0.5–0.75 x
+            ``structure.connectivity`` works well in practice.
+        nfa: Maximum number of false alarms — linelet endpoints allowed to
+            exceed *xtol* while still being accepted.  ``nfa=0`` enforces
+            strict collinearity; ``nfa=1`` allows one outlier endpoint.
 
     Returns:
-        A list of detected streaks.
+        List of detected :class:`Streaks`, one per seed peak.
     """
     ...
 
@@ -1098,18 +1309,24 @@ def _gpu_to_lines(streaks: CPStreaks, labels: CPIntArray, linelets: CPRealArray)
 
 @array_dispatch("labels", cpu_impl=_cpu_to_lines, gpu_impl=_gpu_to_lines)
 def to_lines(streaks: Streaks, labels: IntArray, linelets: RealArray) -> RealArray:
-    """Convert streaks to line parameters.
+    """Extract the endpoint coordinates of each detected streak.
+
+    Each streak's extent is represented by the line connecting the two
+    outermost linelet endpoints across all bins in that streak.  This
+    function looks up those endpoints from the *linelets* table using the
+    bin-label indices stored in each streak object.
 
     Args:
-        streaks: Detected streaks.
-        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
-        linelets: Array of linelet parameters.
+        streaks: Detected streaks returned by :func:`detect_streaks`.
+        labels: Bin-label array from :class:`PeakLabels` (``labels.labels``),
+            used to map bin indices to linelet table entries.
+        linelets: Linelet endpoint array of shape ``(n_labels, 4)`` returned
+            by :func:`fit_linelets`.
 
     Returns:
-        Array of line parameters. The shape of the array is (n_streaks, 4) where n_streaks is the
-        number of detected streaks. The last dimension contains line parameters in the following
-        order: (x0, y0, x1, y1) where (x0, y0) and (x1, y1) are coordinates of the endpoints of the
-        line.
+        Array of shape ``(n_streaks, 4)`` where each row is
+        ``(x0, y0, x1, y1)``, the pixel coordinates of the two endpoints
+        of the fitted line segment for that streak.
     """
     ...
 
@@ -1149,18 +1366,28 @@ def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealAr
 @array_dispatch("peaks", cpu_impl=_cpu_n_signal, gpu_impl=_gpu_n_signal)
 def n_signal(streaks: Streaks, labels: PeakLabels, peaks: IntArray, data: RealArray,
              structure: Structure, vmin: float) -> IntArray:
-    """Calculate the number of pixels above the vmin threshold in each detected streak.
+    """Count above-threshold pixels in each streak's footprint.
+
+    The footprint of a streak is the union of the *structure* neighbourhood
+    around every peak pixel belonging to that streak.  Pixels appearing in
+    more than one peak's neighbourhood are counted only once.  The resulting
+    count is used by :func:`~cbclib_v2.streak_finder.PatternStreakFinder.ranking`
+    to rank streaks by signal strength.
 
     Args:
-        streaks: Detected streaks.
-        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
-        peaks: Array of peak indices in the original data array.
-        data: Input data array.
-        structure: Connectivity structure used for streak detection.
-        vmin: Minimum value to consider a pixel as part of a streak.
+        streaks: Detected streaks returned by :func:`detect_streaks`.
+        labels: Bin-state descriptor returned by :func:`peak_labels`.
+        peaks: Flat pixel indices of detected peaks returned by
+            :func:`peak_labels`.
+        data: SNR frame stack used for the *vmin* threshold check.
+        structure: Structuring element defining the pixel neighbourhood
+            around each peak that forms the streak's footprint.
+        vmin: SNR threshold.  A footprint pixel is counted as signal if its
+            value is ≥ *vmin*.
 
     Returns:
-        Array of the number of pixels above the vmin threshold in each detected streak.
+        Integer array of length ``len(streaks)`` with the number of
+        above-threshold pixels in each streak's footprint.
     """
     ...
 
@@ -1195,18 +1422,32 @@ def streak_labels(out: IntArray, streaks: Streaks, ranks: IntArray, labels: Peak
 @array_dispatch("out", cpu_impl=_streak_labels_cpu, gpu_impl=_streak_labels_gpu)
 def streak_labels(out: IntArray, streaks: Streaks, ranks: IntArray, labels: PeakLabels,
                   peaks: IntArray, structure: Structure) -> IntArray:
-    """Convert a list of detected streaks to a labeled array.
+    """Paint ranked streaks onto a label image.
+
+    For each streak, every pixel in its footprint (the *structure*
+    neighbourhood around its peak pixels) is written to *out* with the
+    streak's rank + 1 as its label.  When two streaks share a footprint
+    pixel the one with the **lower rank** (higher signal count) wins,
+    so stronger streaks are never overwritten by weaker ones.
+
+    The result is a raw integer image suitable for re-labeling with
+    :func:`label` to obtain clean connected regions for line fitting.
 
     Args:
-        out: Output array. The shape of the array is the same as the input data.
-        streaks: Detected streaks.
-        ranks: Array of streak ranks. The shape of the array is (n_streaks,).
-        labels: Array of bin labels. A bin with label <= 0 doesn't contain a peak.
-        peaks: Array of peak indices in the original data array.
-        structure: Connectivity structure used for streak detection.
+        out: Pre-allocated integer array of the same shape as the SNR frame
+            stack; initialised to 0 (background) before painting.
+        streaks: Detected streaks returned by :func:`detect_streaks`.
+        ranks: Rank array of length ``len(streaks)``; rank 0 is the strongest
+            streak.  Typically produced by
+            :meth:`~cbclib_v2.streak_finder.PatternStreakFinder.ranking`.
+        labels: Bin-state descriptor returned by :func:`peak_labels`.
+        peaks: Flat pixel indices of detected peaks returned by
+            :func:`peak_labels`.
+        structure: Structuring element defining the footprint around each
+            peak pixel.
 
     Returns:
-        Labeled array of the same shape as the input data, where each pixel is labeled with the
-        rank of the streak it belongs to, or -1 if it doesn't belong to any streak.
+        *out* with streak footprints painted in rank order; background
+        pixels remain 0.
     """
     ...

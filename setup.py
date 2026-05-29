@@ -2,7 +2,7 @@ import os
 import platform
 import shutil
 import sys
-from typing import Iterable, Protocol
+from typing import Iterable, NamedTuple, Protocol
 from setuptools import setup, find_namespace_packages, Extension
 from setuptools.command.build_ext import build_ext
 from numpy import get_include as numpy_get_include
@@ -21,7 +21,7 @@ def find_conda_home() -> str:
         raise RuntimeError("Could not find Conda installation home folder.")
     return conda_home
 
-def find_cuda_home() -> str | None:
+def find_cuda() -> str | None:
     """Find the CUDA install path."""
     # Guess #1
     cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
@@ -33,30 +33,35 @@ def find_cuda_home() -> str | None:
 
     return cuda_home
 
-SKIP_CUDA = os.environ.get('CBCLIB_SKIP_CUDA', '0').lower() in ('1', 'true', 'yes')
-CUDA_HOME_FOUND = find_cuda_home() is not None and not SKIP_CUDA
+class CUDAPaths(NamedTuple):
+    nvcc    : str
+    include : str
+    lib     : str
 
-def cuda_include() -> str:
-    """ Return the CUDA include path. """
-    conda_home = find_conda_home()
+def cuda_paths(cuda_path: str) -> CUDAPaths:
+    """ Return the CUDA paths. """
+    nvcc_path = os.path.join(cuda_path, 'bin', 'nvcc')
+    if not os.path.exists(nvcc_path):
+        raise RuntimeError(f"nvcc not found in expected location: {nvcc_path}")
 
     arch = platform.machine() # e.g., 'x86_64' or 'aarch64'
     system = platform.system().lower() # e.g., 'linux' or 'windows'
-    include_path = os.path.join(conda_home, 'targets', f'{arch}-{system}', 'include')
+    include_path = os.path.join(cuda_path, 'targets', f'{arch}-{system}', 'include')
     if not os.path.exists(include_path):
-        raise RuntimeError(f"CUDA include path does not exist: {include_path}")
+        raise RuntimeError(f"CUDA include path not found: {include_path}")
 
-    return include_path
-
-def cuda_library_path() -> str:
-    """ Return the CUDA library path. """
-    conda_home = find_conda_home()
-
-    lib_path = os.path.join(conda_home, 'lib')
+    lib_path = os.path.join(cuda_path, 'lib')
     if not os.path.exists(lib_path):
-        raise RuntimeError(f"CUDA library path does not exist: {lib_path}")
+        raise RuntimeError(f"CUDA lib path not found: {lib_path}")
 
-    return lib_path
+    return CUDAPaths(nvcc=nvcc_path, include=include_path, lib=lib_path)
+
+SKIP_CUDA = os.environ.get('CBCLIB_SKIP_CUDA', '0').lower() in ('1', 'true', 'yes')
+CUDA_HOME = find_cuda()
+if CUDA_HOME and not SKIP_CUDA:
+    CUDA_PATHS = cuda_paths(CUDA_HOME)
+else:
+    CUDA_PATHS = None
 
 class CCompiler(Protocol):
     compiler_so : list[str]
@@ -222,8 +227,8 @@ class BuildCPPExp(build_ext):
                 extra_postargs = []
 
             try:
-                if src.endswith('.cu'):
-                    nvcc = [os.path.join(find_conda_home(), 'bin', 'nvcc')]
+                if src.endswith('.cu') and CUDA_PATHS:
+                    nvcc = [CUDA_PATHS.nvcc]
                     self.compiler.set_executable('compiler_so', nvcc)
 
                     # Handle both list and dict formats
@@ -285,32 +290,32 @@ extensions = [
                  cxx_std=17)
 ]
 
-if CUDA_HOME_FOUND:
+if CUDA_PATHS:
     extensions += [
         CPPExtension("cbclib_v2._src.src.cuda_draw_lines",
                      sources=["cbclib_v2/_src/src/cuda_draw_lines.cu",],
                      cxx_std=17,
-                     include_dirs=[cuda_include()],
-                     library_dirs=[cuda_library_path()],
+                     include_dirs=[CUDA_PATHS.include],
+                     library_dirs=[CUDA_PATHS.lib],
                      libraries=['cudart']),
         CPPExtension("cbclib_v2._src.src.cuda_label",
                      sources=["cbclib_v2/_src/src/cuda_label.cu",],
                      cxx_std=17,
-                     include_dirs=[cuda_include()],
-                     library_dirs=[cuda_library_path()],
+                     include_dirs=[CUDA_PATHS.include],
+                     library_dirs=[CUDA_PATHS.lib],
                      libraries=['cudart'],
                      extra_compile_args={'nvcc': ['-arch=sm_60',]}),
         CPPExtension("cbclib_v2._src.src.cuda_median",
                      sources=["cbclib_v2/_src/src/cuda_median.cu",],
                      cxx_std=17,
-                     include_dirs=[cuda_include()],
-                     library_dirs=[cuda_library_path()],
+                     include_dirs=[CUDA_PATHS.include],
+                     library_dirs=[CUDA_PATHS.lib],
                      libraries=['cudart']),
         CPPExtension("cbclib_v2._src.src.cuda_streak_finder",
                      sources=["cbclib_v2/_src/src/cuda_streak_finder.cu",],
                      cxx_std=17,
-                     include_dirs=[cuda_include()],
-                     library_dirs=[cuda_library_path()],
+                     include_dirs=[CUDA_PATHS.include],
+                     library_dirs=[CUDA_PATHS.lib],
                      libraries=['cudart'])
     ]
 

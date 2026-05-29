@@ -1,5 +1,6 @@
 from typing import Iterable, Iterator, List, Sequence, overload
-from ..annotations import Array, BoolArray, IntArray, NDBoolArray, NDIntArray, NDRealArray, RealArray
+from ..annotations import (Array, BoolArray, IntArray, NDBoolArray, NDIntArray, NDRealArray,
+                           RealArray)
 
 class Structure:
     """Pixel connectivity structure class. Defines a two-dimensional connectivity kernel.
@@ -10,7 +11,7 @@ class Structure:
             2 * radius + 1).
         rank : Rank determines which elements belong to the connectivity kernel, i.e. are
             considered as neighbors of the central element. Elements up to a squared distance
-            of raml from the center are considered neighbors. Rank may range from 1 (no adjacent
+            of rank from the center are considered neighbors. Rank may range from 1 (no adjacent
             elements are neighbours) to radius (all elements in (2 * radius + 1, 2 * radius + 1)
             square are neighbours).
 
@@ -75,14 +76,51 @@ class Regions:
 
     def extend(self, value: 'Regions'): ...
 
-class LabelResult:
+class NPLabelResult:
+    """Result of a connected-component labeling operation (CPU backend).
+
+    Stores labeled regions in a compact sparse representation: a
+    :class:`Regions` collection (pixel indices per label) plus the shape
+    of the original input array.  Use :func:`~cbclib_v2.label.labels` or
+    :meth:`to_array` to recover the dense integer label map.
+
+    Attributes:
+        regions: Collection of labeled pixel regions; one :class:`Region`
+            per connected component that survived the *npts* size filter.
+        shape: Shape of the input array that was labeled.
+    """
+
     regions : Regions
     shape   : List[int]
 
     @classmethod
-    def from_array(cls, labels: IntArray, index: IntArray | None = None) -> 'LabelResult': ...
+    def from_array(cls, labels: IntArray, index: IntArray | None = None) -> 'NPLabelResult':
+        """Construct a :class:`NPLabelResult` from a dense label array.
 
-    def to_array(self, index: IntArray, out: IntArray | None = None) -> NDIntArray: ...
+        Args:
+            labels: Integer array whose non-zero values encode region labels.
+            index: Optional 1-D array of label indices to include.  When
+                ``None``, all non-zero labels are used.
+
+        Returns:
+            New :class:`NPLabelResult` instance.
+        """
+        ...
+
+    def to_array(self, index: IntArray, out: IntArray | None = None) -> NDIntArray:
+        """Convert the sparse representation back to a dense label array.
+
+        Args:
+            index: 1-D integer array selecting which region indices to
+                paint into the output.
+            out: Optional pre-allocated output array of the same shape as
+                :attr:`shape`.  A new array is allocated when ``None``.
+
+        Returns:
+            Dense integer array of shape :attr:`shape` with each pixel
+            set to its region index (0 for background).
+        """
+        ...
 
 class Pixels2D:
     region : Region
@@ -107,21 +145,23 @@ class Pixels2D:
 def binary_dilation(inp: BoolArray, structure: Structure, iterations: int=1,
                     mask: BoolArray | None=None, num_threads: int=1) -> NDBoolArray: ...
 
-def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1, num_threads: int=1) -> LabelResult: ...
+def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1, num_threads: int=1
+          ) -> NPLabelResult: ...
 
-def total_mass(labels: LabelResult, data: Array) -> NDRealArray: ...
+def total_mass(labels: NPLabelResult, data: Array) -> NDRealArray: ...
 
-def mean(labels: LabelResult, data: Array) -> NDRealArray: ...
+def mean(labels: NPLabelResult, data: Array) -> NDRealArray: ...
 
-def center_of_mass(labels: LabelResult, data: Array) -> NDRealArray: ...
+def center_of_mass(labels: NPLabelResult, data: Array) -> NDRealArray: ...
 
-def moment_of_inertia(labels: LabelResult, data: Array) -> NDRealArray: ...
+def moment_of_inertia(labels: NPLabelResult, data: Array) -> NDRealArray: ...
 
-def covariance_matrix(labels: LabelResult, data: Array) -> NDRealArray: ...
+def covariance_matrix(labels: NPLabelResult, data: Array) -> NDRealArray: ...
 
-def line_fit(labels: LabelResult, data: Array) -> NDRealArray: ...
+def line_fit(labels: NPLabelResult, data: Array) -> NDRealArray: ...
 
-def p_values(labels: LabelResult, lines: RealArray, data: Array, p0: float, vmin: float, xtol: float) -> NDRealArray: ...
+def p_values(labels: NPLabelResult, lines: RealArray, data: Array, p0: float, vmin: float,
+             xtol: float) -> NDRealArray: ...
 
-def line_score(labels: LabelResult, lines: RealArray, data: Array, vmin: float, xtol: float, tau: float=1.0,
-               kernel: str='gaussian') -> NDRealArray: ...
+def line_score(labels: NPLabelResult, lines: RealArray, data: Array, vmin: float, xtol: float,
+               tau: float=1.0, kernel: str='gaussian') -> NDRealArray: ...

@@ -229,7 +229,7 @@ class TestRealGeometryFile:
         # Check first panel
         assert len(detector.panels) == 32
         assert detector.shape == (16448, 1030)
-        assert detector.indices().shape == (4433, 4218)
+        assert detector.assembler().shape == (4433, 4218)
         for panel in detector.panels.values():
             assert panel.shape == (514, 1030)
 
@@ -248,6 +248,6 @@ class TestRealGeometryFile:
         # Should have many panels (64 for JUNGFRAU 4M)
         assert len(detector.panels) == 64
         assert detector.shape == (8, 512, 1024)  # Example expected shape
-        assert detector.indices().shape == (2173, 2398)
+        assert detector.assembler().shape == (2173, 2398)
         for panel in detector.panels.values():
             assert panel.shape == (1, 256, 256)  # Example panel shape

@@ -495,6 +495,8 @@ py::array_t<D> robust_lsq(py::array_t<T> W, py::array_t<T> y, U axis, double r0,
 PYBIND11_MODULE(median, m)
 {
     using namespace cbclib;
+    py::options options;
+    options.disable_function_signatures();
 
     try
     {

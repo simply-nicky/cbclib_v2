@@ -24,6 +24,15 @@ if CuPy is not None:
             return super().rand(*size, dtype=dtype)
 
     def ascupy(array: Array) -> CPArray:
+        """Convert an array to a CuPy array. If the input array is already a CuPy array,
+        it will be returned as is.
+
+        Args:
+            array: The input array to convert.
+
+        Returns:
+            A CuPy array containing the same data as the input array.
+        """
         xp = array_namespace(array)
         if xp is JaxNumPy:
             x = device_put(array, device=devices("gpu")[0])
@@ -39,6 +48,15 @@ else:
     cp_array_api = None  # type: ignore
 
     def ascupy(array: Array) -> CPArray:
+        """Convert an array to a CuPy array. If the input array is already a CuPy array,
+        it will be returned as is.
+
+        Args:
+            array: The input array to convert.
+
+        Returns:
+            A CuPy array containing the same data as the input array.
+        """
         raise ValueError("CuPy is not available")
 
 def to_shape(shape: ShapeLike) -> Tuple[int, ...]:
@@ -200,6 +218,20 @@ def add_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Sca
 def add_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
 
 def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
+    """Perform unbuffered in-place addition of `b` to `a` at the specified `indices`. This
+    function works with all supported array APIs (NumPy, JAX, CuPy).
+
+    Args:
+        a: The input array to which values will be added.
+        indices: The indices at which to add the values from `b`. This can be a single array
+            of indices or a tuple of arrays for multi-dimensional indexing.
+        b: The values to add to `a` at the specified indices. This can be a scalar or an array
+            of values to add.
+
+    Returns:
+        An array with the same shape and type as `a`, where the values from `b` have been added
+        to `a` at the specified `indices`.
+    """
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
@@ -239,6 +271,20 @@ def min_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Sca
 def min_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
 
 def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
+    """Perform unbuffered in-place minimum of `b` and `a` at the specified `indices`. This
+    function works with all supported array APIs (NumPy, JAX, CuPy).
+
+    Args:
+        a: The input array to which values will be compared.
+        indices: The indices at which to compare the values from `b`. This can be a single array
+            of indices or a tuple of arrays for multi-dimensional indexing.
+        b: The values to compare with `a` at the specified indices. This can be a scalar or an array
+            of values to compare.
+
+    Returns:
+        An array with the same shape and type as `a`, where the minimum values between `a` and `b`
+        have been set at the specified `indices`.
+    """
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
@@ -261,6 +307,20 @@ def set_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Sca
 def set_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
 
 def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
+    """Perform unbuffered in-place assignment of `b` to `a` at the specified `indices`. This
+    function works with all supported array APIs (NumPy, JAX, CuPy).
+
+    Args:
+        a: The input array to which values will be assigned.
+        indices: The indices at which to assign the values from `b`. This can be a single array
+            of indices or a tuple of arrays for multi-dimensional indexing.
+        b: The values to assign to `a` at the specified indices. This can be a scalar or an array
+            of values to assign.
+
+    Returns:
+        An array with the same shape and type as `a`, where the values from `b` have been assigned
+        to `a` at the specified `indices`.
+    """
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
@@ -274,6 +334,17 @@ def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 def default_rng(seed: int | None = None, xp: ArrayNamespace = NumPy) -> Generator:
+    """Return a random number generator for the specified array API. This function provides a unified
+    interface for creating random number generators across different array APIs (NumPy, JAX, CuPy).
+
+    Args:
+        seed: An optional seed for the random number generator. If `None`, a default seed will be used.
+        xp: The array namespace for which to create the random number generator. This can be `NumPy`,
+            `JaxNumPy`, or `CuPy`.
+
+    Returns:
+        A random number generator for the specified array namespace.
+    """
     if xp is JaxNumPy:
         return cast(Generator, JaxGenerator(seed))
     if xp is NumPy:
@@ -295,6 +366,19 @@ def array_namespace(*arrays: CPArray) -> ArrayNamespace[CPArray]: ...
 def array_namespace(*arrays: SupportsNamespace | Any) -> AnyNamespace: ...
 
 def array_namespace(*arrays: SupportsNamespace | Array | Any) -> AnyNamespace:
+    """Determine the array API namespace of the given arrays. This function checks the underlying
+    array types to determine which array API they belong to (NumPy, JAX, CuPy). If multiple arrays
+    are provided, the precedence order for determining the namespace is CuPy > JAX > NumPy.
+
+    Args:
+        *arrays: One or more arrays for which to determine the array API namespace. These can be
+            arrays from any supported array API (NumPy, JAX, CuPy) or objects that implement the
+            `__array_namespace__` method.
+
+    Returns:
+        The array API namespace that the input arrays belong to. This will be one of `NumPy`,
+        `JaxNumPy`, or `CuPy`.
+    """
     def namespaces(*arrays: SupportsNamespace | Array | Any) -> Set:
         result = set()
         for array in arrays:
@@ -321,6 +405,18 @@ def array_namespace(*arrays: SupportsNamespace | Array | Any) -> AnyNamespace:
 Platform = Literal['cpu', 'gpu']
 
 def get_platform(array: Array) -> Platform:
+    """Determine the platform (CPU or GPU) on which the given array is located. This function
+    checks the array's API and device information to determine whether it is on the CPU or
+    GPU.
+
+    Args:
+        array: The input array for which to determine the platform. This can be an array from
+            any supported array API (NumPy, JAX, CuPy).
+
+    Returns:
+        A string indicating the platform on which the array is located. This will be either
+        'cpu' or 'gpu'.
+    """
     xp = array_namespace(array)
     if xp is JaxNumPy:
         dev : JaxDevice = device(array)
@@ -332,6 +428,16 @@ def get_platform(array: Array) -> Platform:
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 def asnumpy(array: Array) -> NDArray:
+    """Convert an array to a NumPy array. If the input array is already a NumPy array, it will be
+    returned as is.
+
+    Args:
+        array: The input array to convert. This can be an array from any supported array API
+            (NumPy, JAX, CuPy).
+
+    Returns:
+        A NumPy array containing the same data as the input array.
+    """
     xp = array_namespace(array)
     if xp is JaxNumPy:
         return np.asarray(array)
@@ -342,6 +448,16 @@ def asnumpy(array: Array) -> NDArray:
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 def asjax(array: Array) -> JaxArray:
+    """Convert an array to a JAX array. If the input array is already a JAX array, it will be
+    returned as is.
+
+    Args:
+        array: The input array to convert. This can be an array from any supported array API
+            (NumPy, JAX, CuPy).
+
+    Returns:
+        A JAX array containing the same data as the input array.
+    """
     xp = array_namespace(array)
 
     if xp is JaxNumPy:
@@ -353,6 +469,16 @@ def asjax(array: Array) -> JaxArray:
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 def default_api(platform: Platform) -> AnyNamespace:
+    """Get the default array API namespace for a given platform.
+
+    Args:
+        platform: The platform for which to get the default array API namespace. This can be
+            either 'cpu' or 'gpu'.
+
+    Returns:
+        The default array API namespace for the specified platform. This will be either `NumPy`
+        for CPU or `CuPy` for GPU.
+    """
     if platform == 'cpu':
         return NumPy
     if platform == 'gpu':
