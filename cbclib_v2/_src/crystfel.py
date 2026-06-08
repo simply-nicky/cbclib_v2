@@ -109,6 +109,8 @@ class BoolParser(AttributeParser[bool], SimpleParser):
     def parse(self, value: str):
         if value == 'true':
             self.__value__ = True
+        elif value == 'false':
+            self.__value__ = False
         elif value.isdigit():
             self.__value__ = bool(int(value))
         else:
@@ -337,35 +339,52 @@ class MaskDataParser(ParsingContainer):
     mask_badbits        : BitIntParser = field(default_factory=BitIntParser)
 
 wl_units = {'A': Unit(1e-10), 'm': Unit()}
-E_units = {'eV': Unit(), 'keV': Unit(1e-3)}
+E_units = {'eV': Unit(), 'keV': Unit(1e3)}
+voltage_units = {'V': Unit(), 'kV': Unit(1e3)}
 length_units = {'mm': Unit(1e-3), 'm': Unit()}
 
 DEFAULT_WL = FloatParser(float('nan'), wl_units)
 DEFAULT_PE = FloatParser(float('nan'), E_units)
+DEFAULT_EV = FloatParser(float('nan'), voltage_units)
 DEFAULT_CLEN = FloatParser(float('nan'), length_units)
+DEFAULT_DATA = StringParser('/data/data')
+DEFAULT_DIM = DimensionsParser(['ss', 'fs'])
 
 @dataclass
 class PanelParser(ParsingContainer):
     # Beam parameters
 
     # wavelength of the radiation
-    wavelength          : FloatParser = field(default_factory=lambda: DEFAULT_WL)
+    wavelength          : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_WL))
     # energy of a single photon
-    photon_energy       : FloatParser = field(default_factory=lambda: DEFAULT_PE)
+    photon_energy       : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_PE))
+    # accelerating voltage for electron diffraction
+    electron_voltage    : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_EV))
     # bandwidth of the radiation as a fraction of wavelength
     bandwidth           : FloatParser = field(default_factory=FloatParser)
 
     # Physical locations
 
     # overall z-pozition for the detector
-    clen                : FloatParser = field(default_factory=lambda: DEFAULT_CLEN)
+    clen                : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_CLEN))
+    # per-frame shift of the entire detector in x
+    detector_shift_x    : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_CLEN))
+    # per-frame shift of the entire detector in y
+    detector_shift_y    : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_CLEN))
 
     # Data locations
 
     # location of the data in the data file
-    data                : StringParser = field(default_factory=StringParser)
+    data                : StringParser = field(default_factory=lambda: deepcopy(DEFAULT_DATA))
     # range of pixels in the data block that correspond to this panel
     region              : PixelRegionParser = field(default_factory=PixelRegionParser)
+
+    # Peak list data
+
+    # location of an existing peak list in the data file
+    peak_list           : StringParser = field(default_factory=StringParser)
+    # layout of the peak list, e.g. cxi, list3 or auto
+    peak_list_type      : StringParser = field(default_factory=StringParser)
 
     # Pixel size
 
@@ -377,7 +396,7 @@ class PanelParser(ParsingContainer):
     # (x, y) position of the corner
     corner              : CornerParser = field(default_factory=CornerParser)
     # offset of the panel
-    coffset             : FloatParser = field(default_factory=lambda: FloatParser(0.0))
+    coffset             : FloatParser = field(default_factory=lambda: FloatParser(0.0, length_units))
     # vector of the fast scan direction
     fs                  : DirectionParser = field(default_factory=DirectionParser)
     # vector of the slow scan direction
@@ -386,7 +405,7 @@ class PanelParser(ParsingContainer):
     # Data dimensionality
 
     # dimension structure of the panel
-    dim                 : DimensionsParser = field(default_factory=DimensionsParser)
+    dim                 : DimensionsParser = field(default_factory=lambda: deepcopy(DEFAULT_DIM))
 
     # Detector gain data
 
@@ -407,6 +426,12 @@ class PanelParser(ParsingContainer):
     no_index            : BoolParser = field(default_factory=BoolParser)
     # mark a border of n pixels around the edge of the panel as bad
     mask_edge_pixels    : IntParser = field(default_factory=lambda: IntParser(0))
+    # mark pixels below this value as bad
+    flag_lessthan       : FloatParser = field(default_factory=FloatParser)
+    # mark pixels above this value as bad
+    flag_morethan       : FloatParser = field(default_factory=FloatParser)
+    # mark pixels equal to this value as bad
+    flag_equal          : FloatParser = field(default_factory=FloatParser)
 
     # Mask data
     masks               : List[MaskDataParser] = field(default_factory=list)
@@ -418,6 +443,12 @@ class PanelParser(ParsingContainer):
         if key.startswith('dim'):
             self.dim.parse(key, value)
         elif key.startswith('mask'):
+            aliases = {
+                'mask': 'mask0_data',
+                'mask_good': 'mask0_goodbits',
+                'mask_bad': 'mask0_badbits',
+            }
+            key = aliases.get(key, key)
             m = re.match(r'^mask(\d?)_(data|file|goodbits|badbits)$', key)
             if m:
                 if not m.group(1):
@@ -430,6 +461,8 @@ class PanelParser(ParsingContainer):
                     for _ in range(len(self.masks), index + 1):
                         self.masks.append(MaskDataParser())
                 self.masks[index].parse('mask_' + m.group(2), value)
+            else:
+                super().parse(key, value)
         else:
             super().parse(key, value)
 
@@ -444,6 +477,7 @@ RegionParser = BadPixelRegionParser | CoordRegionParser
 class DetectorParser():
     bad_regions        : OrderedDictType[str, RegionParser] = field(default_factory=OrderedDict)
     panels             : OrderedDictType[str, PanelParser] = field(default_factory=OrderedDict)
+    groups             : Dict[str, List[str]] = field(default_factory=dict)
 
     def check_bad_regions(self):
         for region_name, region in self.bad_regions.items():
@@ -460,7 +494,9 @@ def parse_crystfel_file(filename: str) -> DetectorParser:
         for attr, value in file:
             path = [item for item in re.split("(/)", attr) if item != "/"]
             if len(path) == 1:
-                if attr.startswith(('group', 'rigid_group')):
+                if attr.startswith('group_'):
+                    detector.groups[attr[6:]] = [item.strip() for item in value.split(',')]
+                elif attr.startswith('rigid_group'):
                     pass
                 else:
                     default_panel.parse(attr, value)
@@ -583,6 +619,8 @@ class Panel(Container):
     wavelength          : float
     # energy of a single photon
     photon_energy       : float
+    # accelerating voltage for electron diffraction
+    electron_voltage    : float
     # bandwidth of the radiation as a fraction of wavelength
     bandwidth           : float
 
@@ -590,6 +628,10 @@ class Panel(Container):
 
     # overall z-pozition for the detector
     clen                : float
+    # per-frame shift of the entire detector in x
+    detector_shift_x    : float
+    # per-frame shift of the entire detector in y
+    detector_shift_y    : float
 
     # Data locations
 
@@ -597,6 +639,13 @@ class Panel(Container):
     data                : str
     # range of pixels in the data block that correspond to this panel
     region              : PixelRegion
+
+    # Peak list data
+
+    # location of an existing peak list in the data file
+    peak_list           : str
+    # layout of the peak list, e.g. cxi, list3 or auto
+    peak_list_type      : str
 
     # Pixel size
 
@@ -638,6 +687,12 @@ class Panel(Container):
     no_index            : bool
     # mark a border of n pixels around the edge of the panel as bad
     mask_edge_pixels    : int
+    # mark pixels below this value as bad
+    flag_lessthan       : float
+    # mark pixels above this value as bad
+    flag_morethan       : float
+    # mark pixels equal to this value as bad
+    flag_equal          : float
 
     # Mask data
     masks               : List[MaskData]
@@ -1089,4 +1144,5 @@ def read_crystfel(file: str) -> Detector:
             detector.bad_regions[name] = CoordRegion(**region.value())
         else:
             raise RuntimeError(f'Invalid region type: {type(region)}')
+    detector.groups = parsed.groups
     return detector

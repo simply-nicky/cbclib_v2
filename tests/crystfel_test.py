@@ -169,6 +169,84 @@ class TestFullGeometryParsing:
         assert detector.shape == (1, 512, 1024)
         assert detector.panels['panel'].shape == (1, 512, 1024)
 
+    def test_supported_geometry_fields(self, tmp_path: Path) -> None:
+        """Test fields listed in the CrystFEL geometry convention."""
+        geom_file = tmp_path / "supported_fields.geom"
+        content = (
+            "wavelength = 1.0A\n"
+            "photon_energy = 12.0keV\n"
+            "electron_voltage = 200kV\n"
+            "bandwidth = 0.001\n"
+            "clen = 0.3621m\n"
+            "detector_shift_x = 1.0mm\n"
+            "detector_shift_y = -2.0mm\n"
+            "data = /data/%/data\n"
+            "dim0 = %\n"
+            "dim1 = ss\n"
+            "dim2 = fs\n"
+            "peak_list = /entry/peaks\n"
+            "peak_list_type = cxi\n"
+            "res = 13333.3\n"
+            "adu_per_photon = 10.0\n"
+            "adu_per_eV = 0.5\n"
+            "max_adu = 65535\n"
+            "saturation_map = /entry/saturation\n"
+            "saturation_map_file = saturation.h5\n"
+            "no_index = false\n"
+            "mask_edge_pixels = 2\n"
+            "flag_lessthan = 0\n"
+            "flag_morethan = 65000\n"
+            "flag_equal = -1\n"
+            "\n"
+            "panel/corner_x = 0.0\n"
+            "panel/corner_y = 0.0\n"
+            "panel/coffset = 1.0mm\n"
+            "panel/fs = +1.0x+0.0y+0.0z\n"
+            "panel/ss = +0.0x+1.0y+0.0z\n"
+            "panel/min_fs = 0\n"
+            "panel/max_fs = 1023\n"
+            "panel/min_ss = 0\n"
+            "panel/max_ss = 511\n"
+            "panel/mask = /entry/mask0\n"
+            "panel/mask_file = mask0.h5\n"
+            "panel/mask_good = 0xff\n"
+            "panel/mask_bad = 0x00\n"
+            "panel/mask1_data = /entry/mask1\n"
+            "panel/mask1_file = mask1.h5\n"
+            "panel/mask1_goodbits = 0x01\n"
+            "panel/mask1_badbits = 0x02\n"
+            "\n"
+            "badregion/min_fs = 1\n"
+            "badregion/max_fs = 2\n"
+            "badregion/min_ss = 3\n"
+            "badregion/max_ss = 4\n"
+            "badregion/panel = panel\n"
+            "group_all = panel\n"
+            "rigid_group_old = panel\n"
+        )
+        geom_file.write_text(content)
+
+        detector = read_crystfel(str(geom_file))
+        panel = detector.panels["panel"]
+
+        assert panel.wavelength == pytest.approx(1e-10)
+        assert panel.photon_energy == pytest.approx(12000.0)
+        assert panel.electron_voltage == pytest.approx(200000.0)
+        assert panel.detector_shift_x == pytest.approx(1e-3)
+        assert panel.detector_shift_y == pytest.approx(-2e-3)
+        assert panel.data == "/data/%/data"
+        assert panel.dim == ["%", "ss", "fs"]
+        assert panel.peak_list == "/entry/peaks"
+        assert panel.peak_list_type == "cxi"
+        assert panel.flag_lessthan == pytest.approx(0.0)
+        assert panel.flag_morethan == pytest.approx(65000.0)
+        assert panel.flag_equal == pytest.approx(-1.0)
+        assert panel.masks[0].mask_data == "/entry/mask0"
+        assert panel.masks[0].mask_goodbits == 0xff
+        assert panel.masks[1].mask_data == "/entry/mask1"
+        assert panel.masks[1].mask_badbits == 0x02
+        assert detector.groups == {"all": ["panel"]}
+
     def test_multi_panel_geometry(self, tmp_path: Path) -> None:
         """Test parsing multi-panel geometry."""
         geom_file = tmp_path / "multi.geom"
