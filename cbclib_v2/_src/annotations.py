@@ -5,12 +5,13 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Dict, Generic, Itera
 from typing_extensions import Self
 from types import ModuleType
 import numpy.typing as npt
-from jax import Array as JaxArray, Device as JaxDevice
+from jax import Device as JaxDevice
 import jax.numpy as jnp
 import numpy as np
 
 if TYPE_CHECKING:
     from cupy import cuda  # used only by type checkers
+    from jax import Array as JaxArray
 
     class CuPyDevice(Protocol):
         attributes: Dict[str, Any]
@@ -27,6 +28,22 @@ if TYPE_CHECKING:
 
     CPDevice = cast(Type[CuPyDevice], cuda.Device)
 else:
+    class JaxArrayMeta(type):
+        def __instancecheck__(cls, instance: Any) -> bool:
+            if not all(hasattr(instance, attr) for attr in ("shape", "dtype", "size", "ndim")):
+                return False
+            namespace = getattr(instance, "__array_namespace__", None)
+            if namespace is None:
+                return False
+            try:
+                module = namespace()
+            except TypeError:
+                return False
+            return getattr(module, "__name__", "").startswith("jax.numpy")
+
+    class JaxArray(metaclass=JaxArrayMeta):
+        pass
+
     try:
         from cupy.cuda import Device as CPDevice # runtime if CuPy is installed
 
@@ -125,7 +142,10 @@ T = TypeVar('T')
 T_Array = TypeVar('T_Array', bound='Array')
 
 FileMode = Literal['r', 'r+', 'w', 'w-', 'x', 'a']
-Attribute = str | Literal['data', 'eigen_field', 'eigen_value', 'flatfield', 'mask', 'std', 'snr', 'whitefield', 'whitefields']
+Attribute = str | Literal[
+    'data', 'eigen_field', 'eigen_value', 'flatfield', 'mask', 'std', 'snr', 'whitefield',
+    'whitefields',
+]
 
 PyTree = Any
 Scalar = int | float | np.bool_ | np.number | bool | complex
@@ -193,7 +213,9 @@ class ReferenceType(Generic[T]):
 
 @runtime_checkable
 class SupportsNamespace(Protocol):
-    def __array_namespace__(self) -> 'ModuleType | ArrayNamespace': ...
+    def __array_namespace__(
+        self, api_version: str | None = None
+    ) -> 'ModuleType | ArrayNamespace': ...
 
 @runtime_checkable
 class DataclassInstance(Protocol):

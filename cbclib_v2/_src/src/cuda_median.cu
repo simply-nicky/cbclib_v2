@@ -28,6 +28,276 @@ struct SumPairReduce
     }
 };
 
+static constexpr csize_t SMALL_REDUCE_SIZE = 64;
+
+template <typename T>
+struct less
+{
+    __device__ bool operator()(const T & lhs, const T & rhs) const { return lhs < rhs; }
+};
+
+template <typename D>
+struct order_less
+{
+    const D * values;
+
+    __device__ bool operator()(csize_t lhs, csize_t rhs) const
+    {
+        return values[lhs] < values[rhs];
+    }
+};
+
+template <typename Iter>
+__device__ void iter_swap(Iter lhs, Iter rhs)
+{
+    auto tmp = *lhs;
+    *lhs = *rhs;
+    *rhs = tmp;
+}
+
+template <typename Iter, typename Compare>
+__device__ Iter partition_pivot(Iter first, Iter last, Iter pivot, Compare comp)
+{
+    auto pivot_value = *pivot;
+    iter_swap(pivot, last - 1);
+
+    Iter store = first;
+    for (Iter it = first; it + 1 < last; ++it)
+    {
+        if (comp(*it, pivot_value))
+        {
+            iter_swap(store, it);
+            ++store;
+        }
+    }
+
+    iter_swap(store, last - 1);
+    return store;
+}
+
+template <typename Iter, typename Compare>
+__device__ void nth_element(Iter first, Iter nth, Iter last, Compare comp)
+{
+    Iter left = first;
+    Iter right = last;
+
+    while (right - left > 1)
+    {
+        Iter pivot = left + (right - left) / 2;
+        pivot = partition_pivot(left, right, pivot, comp);
+
+        if (nth == pivot) return;
+        if (nth < pivot) right = pivot;
+        else left = pivot + 1;
+    }
+}
+
+template <typename Iter>
+__device__ void nth_element(Iter first, Iter nth, Iter last)
+{
+    nth_element(first, nth, last, less<remove_cvref_t<decltype(*first)>>());
+}
+
+template <typename Iter, typename Compare>
+__device__ void sort(Iter first, Iter last, Compare comp)
+{
+    for (Iter it = first; it + 1 < last; ++it)
+    {
+        nth_element(it, it, last, comp);
+    }
+}
+
+template <typename Iter>
+__device__ void sort(Iter first, Iter last)
+{
+    sort(first, last, less<remove_cvref_t<decltype(*first)>>());
+}
+
+template <typename D>
+__device__ D median(D * first, D * last)
+{
+    csize_t n_values = last - first;
+    D * mid = first + n_values / 2;
+    nth_element(first, mid, last);
+
+    if (n_values & 1) return *mid;
+
+    D low = *first;
+    for (D * it = first + 1; it < mid; ++it)
+    {
+        if (*it > low) low = *it;
+    }
+    return (low + *mid) / D(2);
+}
+
+template <typename T, typename D, csize_t N, bool RETURN_STD>
+__global__ void robust_mean_kernel(ArrayViewND<D, N> mean, ArrayViewND<D, N> std,
+                                         ArrayViewND<T, N> inp, csize_t n_rows,
+                                         csize_t n_reduce, csize_t j0, csize_t j1,
+                                         csize_t n_iter, D lm)
+{
+    csize_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows) return;
+
+    csize_t start = row * n_reduce;
+    T * inp_ptr = inp.data(start);
+    csize_t inp_stride = inp.strides(N - 1) / sizeof(T);
+
+    D values[SMALL_REDUCE_SIZE];    // mutable array for median computation
+    D errors[SMALL_REDUCE_SIZE];
+    csize_t order[SMALL_REDUCE_SIZE];
+
+    order_less<D> comp {errors};
+
+    for (csize_t j = 0; j < n_reduce; ++j)
+    {
+        values[j] = static_cast<D>(inp_ptr[j * inp_stride]);
+    }
+
+    D center = median(values, values + n_reduce);
+
+    for (csize_t i = 0; i < n_iter; ++i)
+    {
+        for (csize_t j = 0; j < n_reduce; ++j)
+        {
+            D diff = inp_ptr[j * inp_stride] - center;
+            errors[j] = diff * diff;
+            order[j] = j;
+        }
+
+        nth_element(order, order + j1 - 1, order + n_reduce, comp);
+        if (j0) nth_element(order, order + j0, order + j1, comp);
+
+        D sum = D();
+        for (csize_t j = j0; j < j1; ++j) sum += inp_ptr[order[j] * inp_stride];
+        center = sum / static_cast<D>(j1 - j0);
+    }
+
+    for (csize_t j = 0; j < n_reduce; ++j)
+    {
+        D diff = inp_ptr[j * inp_stride] - center;
+        errors[j] = diff * diff;
+        order[j] = j;
+    }
+
+    sort(order, order + n_reduce, comp);
+
+    csize_t cutoff = n_reduce;
+    D cumsum = D();
+    for (csize_t j = 0; j < n_reduce; ++j)
+    {
+        D error = errors[order[j]];
+        cumsum += error;
+
+        if (lm * cumsum < static_cast<D>(j) * error)
+        {
+            cutoff = j;
+            break;
+        }
+    }
+
+    D sum = D();
+    D var = D();
+    for (csize_t j = 0; j < cutoff; ++j)
+    {
+        csize_t index = order[j];
+        sum += inp_ptr[index * inp_stride];
+        if constexpr (RETURN_STD) var += errors[index];
+    }
+
+    if (cutoff > 0)
+    {
+        mean[row] = sum / static_cast<D>(cutoff);
+        if constexpr (RETURN_STD) std[row] = math_traits<D>::sqrt(var / static_cast<D>(cutoff));
+    }
+    else
+    {
+        mean[row] = D();
+        if constexpr (RETURN_STD) std[row] = D();
+    }
+}
+
+template <typename T, typename D, csize_t N, bool RETURN_STD>
+std::tuple<array_t<D>, array_t<D>> robust_mean_nd(array_t<D> mean, array_t<D> std,
+                                                        array_t<T> inp, D r0, D r1,
+                                                        csize_t n_iter, D lm)
+{
+    csize_t n_reduce = inp.shape(N - 1);
+    csize_t n_rows = inp.size() / n_reduce;
+    if (n_reduce > SMALL_REDUCE_SIZE)
+        throw std::runtime_error("Small robust mean only supports reduction sizes up to " + std::to_string(SMALL_REDUCE_SIZE));
+
+    csize_t j0 = static_cast<csize_t>(r0 * static_cast<D>(n_reduce));
+    csize_t j1 = static_cast<csize_t>(r1 * static_cast<D>(n_reduce));
+    if (j1 <= j0 || j1 > n_reduce)
+        throw std::runtime_error("Invalid robust mean quantile range for reduction size " + std::to_string(n_reduce));
+
+    constexpr csize_t block_size = BLOCK_SIZE;
+    csize_t n_blocks = (n_rows + block_size - 1) / block_size;
+
+    ArrayViewND<D, N> std_view;
+    if constexpr (RETURN_STD) std_view = cast_to_nd<D, N>(std.view());
+
+    robust_mean_kernel<T, D, N, RETURN_STD><<<n_blocks, block_size>>>(
+        cast_to_nd<D, N>(mean.view()), std_view,
+        cast_to_nd<T, N>(inp.view()), n_rows, n_reduce, j0, j1, n_iter, lm
+    );
+    handle_cuda_error(cudaGetLastError());
+
+    return std::make_tuple(mean, std);
+}
+
+template <typename T, typename D>
+array_t<D> robust_mean(array_t<D> mean, array_t<T> inp, D r0, D r1, csize_t n_iter, D lm)
+{
+    check_equal("inp and mean shapes are incompatible",
+                inp.shape(), inp.shape() + inp.ndim() - 1,
+                mean.shape(), mean.shape() + mean.ndim());
+    if (mean.shape(mean.ndim() - 1) != 1)
+        throw std::runtime_error("Last dimension of mean must equal to 1");
+
+    switch (inp.ndim())
+    {
+        case 1: return std::get<0>(robust_mean_nd<T, D, 1, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        case 2: return std::get<0>(robust_mean_nd<T, D, 2, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        case 3: return std::get<0>(robust_mean_nd<T, D, 3, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        case 4: return std::get<0>(robust_mean_nd<T, D, 4, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        case 5: return std::get<0>(robust_mean_nd<T, D, 5, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        case 6: return std::get<0>(robust_mean_nd<T, D, 6, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        case 7: return std::get<0>(robust_mean_nd<T, D, 7, false>(mean, array_t<D>(), inp, r0, r1, n_iter, lm));
+        default: throw std::runtime_error("Unsupported number of dimensions of mean and input: " + std::to_string(mean.ndim()) +
+                                          " and " + std::to_string(inp.ndim()));
+    }
+}
+
+template <typename T, typename D>
+std::tuple<array_t<D>, array_t<D>> robust_mean_std(array_t<D> mean, array_t<D> std,
+                                                        array_t<T> inp, D r0, D r1,
+                                                        csize_t n_iter, D lm)
+{
+    check_equal("mean and std shapes are incompatible",
+                mean.shape(), mean.shape() + mean.ndim(),
+                std.shape(), std.shape() + std.ndim());
+    check_equal("inp and mean shapes are incompatible",
+                inp.shape(), inp.shape() + inp.ndim() - 1,
+                mean.shape(), mean.shape() + mean.ndim());
+    if (mean.shape(mean.ndim() - 1) != 1 || std.shape(std.ndim() - 1) != 1)
+        throw std::runtime_error("Last dimensions of mean and std must equal to 1");
+
+    switch (inp.ndim())
+    {
+        case 1: return robust_mean_nd<T, D, 1, true>(mean, std, inp, r0, r1, n_iter, lm);
+        case 2: return robust_mean_nd<T, D, 2, true>(mean, std, inp, r0, r1, n_iter, lm);
+        case 3: return robust_mean_nd<T, D, 3, true>(mean, std, inp, r0, r1, n_iter, lm);
+        case 4: return robust_mean_nd<T, D, 4, true>(mean, std, inp, r0, r1, n_iter, lm);
+        case 5: return robust_mean_nd<T, D, 5, true>(mean, std, inp, r0, r1, n_iter, lm);
+        case 6: return robust_mean_nd<T, D, 6, true>(mean, std, inp, r0, r1, n_iter, lm);
+        case 7: return robust_mean_nd<T, D, 7, true>(mean, std, inp, r0, r1, n_iter, lm);
+        default: throw std::runtime_error("Unsupported number of dimensions of mean, std and input: " + std::to_string(mean.ndim()) +
+                                          ", " + std::to_string(std.ndim()) + " and " + std::to_string(inp.ndim()));
+    }
+}
+
 // Parallel LSQ kernel: one block per (row, feature) pair, threads cooperatively reduce over n_reduce
 // Grid: (n_rows * n_features) blocks, each with BLOCK=BLOCK_SIZE threads
 // Strategy: Each block handles one (row, feature) pair. Threads use strided access to accumulate
@@ -503,12 +773,83 @@ __global__ void inliers_mean_kernel(ArrayViewND<D, N> mean, ArrayViewND<D, N> st
 }
 
 template <typename T, typename D, csize_t N>
+__global__ void small_inliers_mean_kernel(ArrayViewND<D, N> mean, ArrayViewND<D, N> std,
+                                          ArrayViewND<T, N> inp, ArrayViewND<D, N> errors,
+                                          ArrayViewND<py::ssize_t, N> indices,
+                                          csize_t n_rows, csize_t n_reduce, D lm)
+{
+    csize_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows) return;
+
+    csize_t start = row * n_reduce;
+
+    T * inp_ptr = inp.data(start);
+    csize_t inp_stride = inp.strides(N - 1) / sizeof(T);
+
+    D * err_ptr = errors.data(start);
+    csize_t err_stride = errors.strides(N - 1) / sizeof(D);
+
+    csize_t cutoff = n_reduce;
+    D cumsum = D();
+
+    for (csize_t j = 0; j < n_reduce; ++j)
+    {
+        py::ssize_t idx_j = indices[start + j];
+        D error = err_ptr[idx_j * err_stride];
+        cumsum += error;
+
+        if (lm * cumsum < static_cast<D>(j) * error)
+        {
+            cutoff = j;
+            break;
+        }
+    }
+
+    D sum = D();
+    D var = D();
+    bool compute_std = (std.data() != nullptr);
+
+    for (csize_t j = 0; j < cutoff; ++j)
+    {
+        py::ssize_t idx_j = indices[start + j];
+        sum += static_cast<D>(inp_ptr[idx_j * inp_stride]);
+        if (compute_std) var += err_ptr[idx_j * err_stride];
+    }
+
+    if (cutoff > 0)
+    {
+        mean[row] = sum / static_cast<D>(cutoff);
+        if (compute_std) std[row] = math_traits<D>::sqrt(var / static_cast<D>(cutoff));
+    }
+    else
+    {
+        mean[row] = D();
+        if (compute_std) std[row] = D();
+    }
+}
+
+template <typename T, typename D, csize_t N>
 array_t<D> inliers_mean_nd(array_t<D> mean, array_t<T> inp, array_t<D> errors, array_t<py::ssize_t> indices, D lm)
 {
     csize_t n_reduce = inp.shape(N - 1);
     csize_t n_rows = inp.size() / n_reduce;
 
     constexpr csize_t block_size = BLOCK_SIZE;
+    if (n_reduce <= block_size)
+    {
+        constexpr csize_t rows_per_block = 256;
+        csize_t n_blocks = (n_rows + rows_per_block - 1) / rows_per_block;
+
+        small_inliers_mean_kernel<T, D, N><<<n_blocks, rows_per_block>>>(
+            cast_to_nd<D, N>(mean.view()), ArrayViewND<D, N>(),
+            cast_to_nd<T, N>(inp.view()), cast_to_nd<D, N>(errors.view()),
+            cast_to_nd<py::ssize_t, N>(indices.view()), n_rows, n_reduce, lm
+        );
+        handle_cuda_error(cudaGetLastError());
+
+        return mean;
+    }
+
     csize_t n_chunks = (n_reduce + block_size - 1) / block_size;
 
     DeviceVector<D> chunk_sums(n_rows * n_chunks);
@@ -575,6 +916,21 @@ std::tuple<array_t<D>, array_t<D>> inliers_mean_std_nd(array_t<D> mean, array_t<
     csize_t n_rows = inp.size() / n_reduce;
 
     constexpr csize_t block_size = BLOCK_SIZE;
+    if (n_reduce <= block_size)
+    {
+        constexpr csize_t rows_per_block = 256;
+        csize_t n_blocks = (n_rows + rows_per_block - 1) / rows_per_block;
+
+        small_inliers_mean_kernel<T, D, N><<<n_blocks, rows_per_block>>>(
+            cast_to_nd<D, N>(mean.view()), cast_to_nd<D, N>(std.view()),
+            cast_to_nd<T, N>(inp.view()), cast_to_nd<D, N>(errors.view()),
+            cast_to_nd<py::ssize_t, N>(indices.view()), n_rows, n_reduce, lm
+        );
+        handle_cuda_error(cudaGetLastError());
+
+        return std::make_tuple(mean, std);
+    }
+
     csize_t n_chunks = (n_reduce + block_size - 1) / block_size;
 
     DeviceVector<D> chunk_sums(n_rows * n_chunks);
@@ -656,11 +1012,33 @@ PYBIND11_MODULE(cuda_median, m)
     }
 
     // Parallel versions (3-pass with chunked reduction and prefix scan)
+    m.def("robust_mean", &cu::robust_mean<float, float>, py::arg("mean"), py::arg("inp"), py::arg("r0") = 0.0f, py::arg("r1") = 0.5f, py::arg("n_iter") = 12, py::arg("lm") = 9.0f);
+    m.def("robust_mean", &cu::robust_mean<double, double>, py::arg("mean"), py::arg("inp"), py::arg("r0") = 0.0, py::arg("r1") = 0.5, py::arg("n_iter") = 12, py::arg("lm") = 9.0);
+    m.def("robust_mean", &cu::robust_mean<int, float>, py::arg("mean"), py::arg("inp"), py::arg("r0") = 0.0f, py::arg("r1") = 0.5f, py::arg("n_iter") = 12, py::arg("lm") = 9.0f);
+    m.def("robust_mean", &cu::robust_mean<int, double>, py::arg("mean"), py::arg("inp"), py::arg("r0") = 0.0, py::arg("r1") = 0.5, py::arg("n_iter") = 12, py::arg("lm") = 9.0);
+    m.def("robust_mean", &cu::robust_mean<long, float>, py::arg("mean"), py::arg("inp"), py::arg("r0") = 0.0f, py::arg("r1") = 0.5f, py::arg("n_iter") = 12, py::arg("lm") = 9.0f);
+    m.def("robust_mean", &cu::robust_mean<long, double>, py::arg("mean"), py::arg("inp"), py::arg("r0") = 0.0, py::arg("r1") = 0.5, py::arg("n_iter") = 12, py::arg("lm") = 9.0);
+
+    m.def("robust_mean_std", &cu::robust_mean_std<float, float>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("r0") = 0.0f, py::arg("r1") = 0.5f, py::arg("n_iter") = 12, py::arg("lm") = 9.0f);
+    m.def("robust_mean_std", &cu::robust_mean_std<double, double>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("r0") = 0.0, py::arg("r1") = 0.5, py::arg("n_iter") = 12, py::arg("lm") = 9.0);
+    m.def("robust_mean_std", &cu::robust_mean_std<int, float>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("r0") = 0.0f, py::arg("r1") = 0.5f, py::arg("n_iter") = 12, py::arg("lm") = 9.0f);
+    m.def("robust_mean_std", &cu::robust_mean_std<int, double>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("r0") = 0.0, py::arg("r1") = 0.5, py::arg("n_iter") = 12, py::arg("lm") = 9.0);
+    m.def("robust_mean_std", &cu::robust_mean_std<long, float>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("r0") = 0.0f, py::arg("r1") = 0.5f, py::arg("n_iter") = 12, py::arg("lm") = 9.0f);
+    m.def("robust_mean_std", &cu::robust_mean_std<long, double>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("r0") = 0.0, py::arg("r1") = 0.5, py::arg("n_iter") = 12, py::arg("lm") = 9.0);
+
     m.def("inliers_mean", &cu::inliers_mean<float, float>, py::arg("mean"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0f);
     m.def("inliers_mean", &cu::inliers_mean<double, double>, py::arg("mean"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0);
+    m.def("inliers_mean", &cu::inliers_mean<int, float>, py::arg("mean"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0f);
+    m.def("inliers_mean", &cu::inliers_mean<int, double>, py::arg("mean"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0);
+    m.def("inliers_mean", &cu::inliers_mean<long, float>, py::arg("mean"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0f);
+    m.def("inliers_mean", &cu::inliers_mean<long, double>, py::arg("mean"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0);
 
     m.def("inliers_mean_std", &cu::inliers_mean_std<float, float>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0f);
     m.def("inliers_mean_std", &cu::inliers_mean_std<double, double>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0);
+    m.def("inliers_mean_std", &cu::inliers_mean_std<int, float>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0f);
+    m.def("inliers_mean_std", &cu::inliers_mean_std<int, double>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0);
+    m.def("inliers_mean_std", &cu::inliers_mean_std<long, float>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0f);
+    m.def("inliers_mean_std", &cu::inliers_mean_std<long, double>, py::arg("mean"), py::arg("std"), py::arg("inp"), py::arg("errors"), py::arg("indices"), py::arg("lm") = 9.0);
 
     m.def("lsq", &cu::lsq<float, float>, py::arg("fits"), py::arg("W"), py::arg("y"), py::arg("indices"));
     m.def("lsq", &cu::lsq<double, double>, py::arg("fits"), py::arg("W"), py::arg("y"), py::arg("indices"));

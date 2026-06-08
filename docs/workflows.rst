@@ -65,6 +65,7 @@ run 373):
        },
        "system": {
            "platform":    "gpu",
+           "cuda_allocator": "default",
            "num_threads": 0
        }
    }
@@ -101,8 +102,11 @@ run 373):
    Crystal geometry and unit-cell files used by the indexer.
 
 ``system``
-   Backend selection (``"cpu"`` or ``"gpu"``) and OpenMP thread count
-   (``0`` = all available cores).
+   Backend selection (``"cpu"`` or ``"gpu"``), GPU allocator mode, and
+   OpenMP thread count (``0`` = all available cores).  ``cuda_allocator`` may
+   be ``"default"`` for the safest backend-native allocator behavior or
+   ``"cuda_malloc_async"`` for unified CUDA stream-ordered allocation across
+   cbclib, CuPy, and JAX/XLA on compatible GPU nodes.
 
 .. _workflows-notebook:
 

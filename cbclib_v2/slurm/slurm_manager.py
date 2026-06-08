@@ -1,10 +1,8 @@
-"""Simple SLURM job submission and monitoring wrapper using subprocess.
+"""SLURM job submission and monitoring utilities.
 
-This module provides `SLURMJobManager` which can submit a shell command as
-an SBATCH job, poll SLURM for status, wait for completion, and cancel jobs.
-
-It is intentionally lightweight (no external dependencies) and uses
-``subprocess`` to call `sbatch`, `squeue`, `sacct` and `scancel`.
+This module provides small wrappers for writing ``sbatch`` scripts, submitting
+jobs, polling ``squeue``/``sacct``, streaming output, and waiting for arrays of
+jobs to finish.
 """
 import asyncio
 from contextlib import contextmanager
@@ -14,17 +12,21 @@ from time import sleep
 from shlex import quote
 from tempfile import NamedTemporaryFile, _TemporaryFileWrapper as TemporaryFileWrapper
 import subprocess
-from typing import AsyncGenerator, ClassVar, Dict, Iterator, List, NamedTuple, Set, Tuple
+from typing import (AsyncGenerator, ClassVar, Dict, Iterator, List, NamedTuple, Set,
+                    Tuple, overload)
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
 from .._src.parser import from_container, from_file
 from .._src.data_container import Container
 
 class SLURMConfig(NamedTuple):
-    """NamedTuple holding the paths/names of SLURM binaries.
+    """Executable names used by :class:`SLURMJobManager`.
 
-    Using a NamedTuple keeps the init arguments grouped and typed while
-    remaining lightweight and tuple-like.
+    Attributes:
+        sbatch: Command used to submit batch jobs.
+        squeue: Command used to query live jobs.
+        sacct: Command used to query accounting records.
+        scancel: Command used to cancel jobs.
     """
     sbatch  : str = "sbatch"
     squeue  : str = "squeue"
@@ -33,6 +35,28 @@ class SLURMConfig(NamedTuple):
 
 @dataclass
 class ScriptSpec(Container):
+    """Settings used to construct an ``sbatch`` script header.
+
+    The object stores both ``#SBATCH`` directives and shell setup commands
+    that should run before the submitted command.
+
+    Attributes:
+        partition: SLURM partition name. If empty, no partition directive is
+            written.
+        time: Wall-clock time limit passed to ``--time``.
+        nodes: Number of nodes requested with ``--nodes``.
+        chdir: Working directory for the job. Defaults to the current
+            directory.
+        mem: Memory request passed to ``--mem``.
+        exclusive: If ``True``, request exclusive node access.
+        output: SLURM output filename pattern.
+        error: SLURM error filename pattern.
+        modules: Environment modules loaded before running the command.
+        define_macros: Environment variables exported before running the
+            command.
+        conda_env: Conda environment activated before running the command.
+        conda_source: Shell file sourced before ``conda activate``.
+    """
     partition       : str = ''
     time            : str = "01:00:00"
     nodes           : int = 1
@@ -63,23 +87,54 @@ class ScriptSpec(Container):
 
     @classmethod
     def is_shell_expression(cls, value: str) -> bool:
-        """Return True if the value contains shell variable or command substitutions.
+        """Return whether a value contains shell expansion syntax.
+
+        Args:
+            value: Value to inspect.
+
+        Returns:
+            ``True`` if *value* contains shell variable or command
+            substitution syntax.
         """
         return bool(cls.shell_pattern.search(value))
 
     @classmethod
     def read(cls, file: str) -> 'ScriptSpec':
+        """Read script parameters from a configuration file.
+
+        Args:
+            file: Path to the configuration file.
+
+        Returns:
+            Parsed script specification.
+        """
         parser = from_file(file, cls, 'parameters')
         return cls.from_dict(**parser.read(file))
 
     def write(self, file: str):
+        """Write script parameters to a configuration file.
+
+        Args:
+            file: Output configuration file.
+        """
         parser = from_container(file, self, 'parameters')
         parser.write(file, self)
 
     def add_define(self, key: str, value: str) -> None:
+        """Add an exported environment variable.
+
+        Args:
+            key: Variable name.
+            value: Variable value.
+        """
         self.define_macros[key] = value
 
     def script_header(self) -> List[str]:
+        """Return the ``#SBATCH`` header lines.
+
+        Returns:
+            Header lines for an ``sbatch`` script.
+        """
         header: List[str] = []
         if self.partition:
             header.append(f"#SBATCH --partition={self.partition}\n")
@@ -95,6 +150,12 @@ class ScriptSpec(Container):
         return header
 
     def script_body(self) -> List[str]:
+        """Return shell commands used to prepare the job environment.
+
+        Returns:
+            Shell lines that load modules, export variables, and activate a
+            Conda environment.
+        """
         body = []
         for module in self.modules:
             body.append(f"module load {quote(module)}\n")
@@ -111,23 +172,36 @@ class ScriptSpec(Container):
 
 @dataclass
 class SLURMScript:
-    """Dataclass encapsulating arguments for submitting a job.
+    """Shell command and metadata for an ``sbatch`` submission.
 
-    The fields provide sensible defaults for common SLURM parameters so a
-    caller only needs to set the command (and optionally a handful of
-    overrides).
+    Attributes:
+        command: Shell command executed by the job.
+        job_name: SLURM job name.
+        parameters: Header and environment parameters for the generated
+            script.
     """
     command         : str
     job_name        : str
     parameters      : ScriptSpec = field(default_factory=ScriptSpec)
 
     def script_header(self) -> List[str]:
+        """Return the complete ``#SBATCH`` header.
+
+        Returns:
+            Script header lines, including the job name directive.
+        """
         header = self.parameters.script_header()
         header.append(f"#SBATCH --job-name={self.job_name}\n")
 
         return header
 
     def script_body(self) -> List[str]:
+        """Return the complete script body.
+
+        Returns:
+            Environment setup lines followed by the command wrapped in
+            ``bash -lc``.
+        """
         body = self.parameters.script_body()
         body.append(f"bash -lc {quote(self.command)}\n")
         return body
@@ -135,6 +209,14 @@ class SLURMScript:
     @contextmanager
     def write_file(self, directory: str | os.PathLike[str] | None=None
                    ) -> Iterator[TemporaryFileWrapper]:
+        """Write the script to a temporary shell file.
+
+        Args:
+            directory: Directory in which to create the temporary file.
+
+        Yields:
+            Open temporary script file.
+        """
         temp_file = NamedTemporaryFile("w", dir=directory, suffix='.sh')
         try:
             temp_file.write("#!/bin/bash\n")
@@ -147,11 +229,25 @@ class SLURMScript:
 
 @dataclass
 class JobID:
+    """SLURM job identifier.
+
+    Attributes:
+        id: Base SLURM job id.
+        task_id: Array task id. ``None`` denotes a non-array job.
+    """
     id      : int
     task_id : int | None = None
 
     @classmethod
     def from_string(cls, s: str) -> 'JobID':
+        """Parse a SLURM job id string.
+
+        Args:
+            s: Job id string such as ``"12345"`` or ``"12345_7"``.
+
+        Returns:
+            Parsed job identifier.
+        """
         if '_' in s:
             jid_str, tid_str = s.split('_', 1)
             return cls(id=int(jid_str), task_id=int(tid_str))
@@ -166,12 +262,31 @@ class JobID:
         return str(self.id)
 
 class JobOutput(NamedTuple):
+    """Output and error files associated with a submitted job.
+
+    Attributes:
+        id: Job identifier.
+        output: Path to the output file.
+        error: Path to the error file.
+    """
     id          : JobID
     output      : str
     error       : str
 
 @dataclass
 class JobStatus:
+    """Status record returned by SLURM.
+
+    Attributes:
+        id: Job identifier.
+        partition: SLURM partition.
+        name: Job name.
+        hostname: First node in the reported node list.
+        user: Submitting user.
+        state: SLURM state string.
+        time_used: Elapsed run time.
+        nodes: Number of allocated nodes.
+    """
     id          : JobID
     partition   : str
     name        : str
@@ -182,24 +297,16 @@ class JobStatus:
     nodes       : int
 
     def format_filename(self, pattern: str) -> str:
-        """Format SLURM output/error filename with job status fields.
+        """Format a SLURM output or error filename pattern.
 
-        Supports common SLURM placeholders:
-        - %j: job id
-        - %J: job or job step id
-        - %N: hostname
-        - %s: job or job step id
-        - %u: user name
-        - %x: job name
-        A literal percent can be written as %%.
-
-        Unknown placeholders are left unchanged.
+        Supports common SLURM placeholders: ``%j``, ``%J``, ``%N``, ``%s``,
+        ``%u``, ``%x``, and ``%%``. Unknown placeholders are left unchanged.
 
         Args:
-            pattern: The filename pattern to format.
+            pattern: Filename pattern to format.
 
         Returns:
-            The formatted filename.
+            Formatted filename.
         """
         mapping = {'j': str(self.id), 'J': str(self.id), 'N': self.hostname,
                    's': str(self.id), 'u': self.user, 'x': self.name}
@@ -214,10 +321,13 @@ class JobStatus:
 
 @dataclass
 class SLURMJobManager:
-    """Submit and monitor SLURM jobs.
+    """Submit, query, stream, and wait for SLURM jobs.
 
-    This lightweight helper writes a small SBATCH script, submits it with
-    ``sbatch``, and can poll ``squeue``/``sacct`` to determine job state.
+    Uses ``sbatch`` for submission, ``squeue`` for live job state, ``sacct``
+    for accounting records, and ``scancel`` for cancellation.
+
+    Attributes:
+        config: Names or paths of the SLURM command-line tools.
     """
     config      : SLURMConfig = SLURMConfig()
     completed   : ClassVar[str] = "COMPLETED"
@@ -226,13 +336,193 @@ class SLURMJobManager:
     pending     : ClassVar[str] = "PENDING"
     running     : ClassVar[Set[str]] = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING"}
 
+    @staticmethod
+    def _parse_job_ids(lines: List[str]) -> List[JobID]:
+        job_ids: List[JobID] = []
+        seen: Set[JobID] = set()
+
+        for line in lines:
+            value = line.strip()
+            if not re.fullmatch(r"\d+(?:_\d+)?", value):
+                continue
+
+            job_id = JobID.from_string(value)
+            if job_id not in seen:
+                job_ids.append(job_id)
+                seen.add(job_id)
+
+        return sorted(job_ids, key=lambda jid: (jid.id, -1 if jid.task_id is None else jid.task_id))
+
+    @staticmethod
+    def _parse_status_row(values: List[str]) -> JobStatus | None:
+        if len(values) < 8:
+            raise RuntimeError(f"Unexpected SLURM status output: {values}")
+
+        jid, partition, name, nodelist, user, state, time_used, nodes = values[:8]
+        try:
+            job_id = JobID.from_string(jid)
+        except ValueError:
+            return None
+
+        hostname = (nodelist.split(',')[0].strip() if nodelist else '')
+        return JobStatus(id=job_id, partition=partition, name=name,
+                         hostname=hostname, user=user, state=state, time_used=time_used,
+                         nodes=int(nodes))
+
+    @staticmethod
+    def _split_slurm_rows(output: str) -> List[List[str]]:
+        rows: List[List[str]] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if line:
+                rows.append(line.split('|'))
+        return rows
+
+    @staticmethod
+    def _base_job_ids(job_ids: List[JobID]) -> str:
+        return ','.join(str(job_id) for job_id in sorted({job.id for job in job_ids}))
+
+    def _squeue_statuses(self, job_ids: List[JobID]) -> Dict[JobID, JobStatus]:
+        if not job_ids:
+            return {}
+
+        proc = subprocess.run(
+            [self.config.squeue, "-j", self._base_job_ids(job_ids), "-r", "-h",
+             "-o", "%i|%P|%j|%N|%u|%T|%M|%D"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"squeue failed: {proc.stderr.strip()}")
+
+        statuses: Dict[JobID, JobStatus] = {}
+        for values in self._split_slurm_rows(proc.stdout):
+            status = self._parse_status_row(values)
+            if status is not None:
+                statuses[status.id] = status
+        return statuses
+
+    def _sacct_statuses(self, job_ids: List[JobID]) -> Dict[JobID, JobStatus]:
+        if not job_ids:
+            return {}
+
+        proc = subprocess.run(
+            [self.config.sacct, "-j", self._base_job_ids(job_ids), "-n", "-P", "-X",
+             "--format=JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"sacct failed: {proc.stderr.strip()}")
+
+        statuses: Dict[JobID, JobStatus] = {}
+        for values in self._split_slurm_rows(proc.stdout):
+            status = self._parse_status_row(values)
+            if status is not None:
+                statuses[status.id] = status
+        return statuses
+
+    def _get_status_batch(self, job_ids: List[JobID]) -> List[JobStatus | None]:
+        statuses: Dict[JobID, JobStatus] = {}
+
+        try:
+            statuses.update(self._squeue_statuses(job_ids))
+        except (FileNotFoundError, RuntimeError):
+            pass
+
+        missing = [job_id for job_id in job_ids if job_id not in statuses]
+        if missing:
+            try:
+                for job_id, status in self._sacct_statuses(missing).items():
+                    statuses.setdefault(job_id, status)
+            except FileNotFoundError as exc:
+                raise RuntimeError("sacct not found") from exc
+
+        return [statuses.get(job_id) for job_id in job_ids]
+
+    def get_job_id(self, job_id: int) -> JobID | List[JobID] | None:
+        """Return SLURM job identifiers for a base job id.
+
+        For regular jobs this returns a single :class:`JobID`. For array jobs
+        it returns the expanded array task IDs. Accounting data from ``sacct``
+        is preferred so completed array tasks are included alongside running
+        ones. Returns None when neither ``sacct`` nor ``squeue`` knows about
+        the requested id.
+
+        Args:
+            job_id: Base SLURM job id.
+
+        Returns:
+            Matching job id, expanded array task ids, or ``None`` if the job is
+            not found.
+
+        Raises:
+            RuntimeError: If a SLURM command fails or no usable query command is
+            available.
+        """
+        jobs: List[JobID] = []
+        try:
+            proc = subprocess.run(
+                [self.config.sacct, "-j", str(job_id), "-n", "-P", "-X",
+                 "--format=JobID"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            if proc.returncode != 0:
+                raise RuntimeError(f"sacct failed: {proc.stderr.strip()}")
+            jobs = self._parse_job_ids(proc.stdout.splitlines())
+
+        if not jobs:
+            try:
+                proc = subprocess.run(
+                    [self.config.squeue, "-j", str(job_id), "-r", "-h", "-o", "%i"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError("squeue not found") from exc
+
+            if proc.returncode != 0:
+                raise RuntimeError(f"squeue failed: {proc.stderr.strip()}")
+
+            jobs = self._parse_job_ids(proc.stdout.splitlines())
+
+        if not jobs:
+            return None
+        if len(jobs) == 1:
+            return jobs[0]
+        return jobs
+
     def cancel(self, job_id: JobID) -> None:
-        """Cancel a SLURM job via scancel.
+        """Cancel a SLURM job.
+
+        Args:
+            job_id: Job to cancel.
         """
         subprocess.run([self.config.scancel, str(job_id)], check=False)
 
     def squeue(self, job_id: JobID, formatter: str="%i|%j|%T|%M") -> List[str]:
-        """Call squeue with a custom format and return output lines."""
+        """Query ``squeue`` for one job.
+
+        Args:
+            job_id: Job to query.
+            formatter: ``squeue`` output format string.
+
+        Returns:
+            Fields from the first non-empty output row, split on ``"|"``.
+
+        Raises:
+            RuntimeError: If ``squeue`` is unavailable or exits with an error.
+        """
         try:
             proc = subprocess.run(
                 [self.config.squeue, "-j", str(job_id), "-h", "-o", formatter],
@@ -258,7 +548,18 @@ class SLURMJobManager:
         return []
 
     async def squeue_async(self, job_id: JobID, formatter: str="%i|%j|%T|%M") -> List[str]:
-        """Call squeue with a custom format and return output lines asynchronously."""
+        """Asynchronously query ``squeue`` for one job.
+
+        Args:
+            job_id: Job to query.
+            formatter: ``squeue`` output format string.
+
+        Returns:
+            Fields from the first non-empty output row, split on ``"|"``.
+
+        Raises:
+            RuntimeError: If ``squeue`` is unavailable or exits with an error.
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.config.squeue, "-j", str(job_id), "-h", "-o", formatter,
@@ -285,7 +586,18 @@ class SLURMJobManager:
         return []
 
     def sacct(self, job_id: JobID, formatter: str="JobID,JobName,State,Elapsed") -> List[str]:
-        """Call sacct with a custom format and return output lines."""
+        """Query ``sacct`` for one job.
+
+        Args:
+            job_id: Job to query.
+            formatter: Comma-separated ``sacct`` format fields.
+
+        Returns:
+            Fields from the first non-empty output row, split on ``"|"``.
+
+        Raises:
+            RuntimeError: If ``sacct`` is unavailable or exits with an error.
+        """
         try:
             proc = subprocess.run(
                 [self.config.sacct, "-j", str(job_id), "-n", "-P", f"--format={formatter}"],
@@ -312,7 +624,18 @@ class SLURMJobManager:
 
     async def sacct_async(self, job_id: JobID, formatter: str="JobID,JobName,State,Elapsed"
                           ) -> List[str]:
-        """Call sacct with a custom format and return output lines asynchronously."""
+        """Asynchronously query ``sacct`` for one job.
+
+        Args:
+            job_id: Job to query.
+            formatter: Comma-separated ``sacct`` format fields.
+
+        Returns:
+            Fields from the first non-empty output row, split on ``"|"``.
+
+        Raises:
+            RuntimeError: If ``sacct`` is unavailable or exits with an error.
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.config.sacct, "-j", str(job_id), "-n", "-P", f"--format={formatter}",
@@ -340,14 +663,19 @@ class SLURMJobManager:
 
     def get_output(self, script: SLURMScript, job_id: JobID, poll_interval: float=0.5
                    ) -> JobOutput | None:
-        """Get the output and error files for a SLURM job.
+        """Resolve output and error filenames for a job.
+
+        Pending jobs are polled until SLURM reports enough status information
+        to expand the output and error filename patterns.
 
         Args:
-            script: The SLURM script used to submit the job.
-            job_id: The ID of the job to retrieve output for.
+            script: Script used to submit the job.
+            job_id: Job to inspect.
+            poll_interval: Delay in seconds between pending-state polls.
 
         Returns:
-            A JobOutput named tuple containing the job ID, output, and error.
+            Resolved output and error paths, or ``None`` if the job status
+            cannot be resolved.
         """
         state = self.get_state(job_id)
         while state is not None and state.upper() == self.pending:
@@ -363,39 +691,50 @@ class SLURMJobManager:
             return JobOutput(job_id, output_file, error_file)
         return None
 
+    @overload
     def get_status(self, job_id: JobID) -> JobStatus | None:
-        """Synchronous version of get_status using squeue with a fixed format.
+        ...
 
-        Returns None if the job is not listed by squeue.
+    @overload
+    def get_status(self, job_id: List[JobID]) -> List[JobStatus | None]:
+        ...
+
+    def get_status(self, job_id: JobID | List[JobID]) -> JobStatus | List[JobStatus | None] | None:
+        """Return SLURM status for one job or a batch of jobs.
+
+        For list input, live ``squeue`` rows are preferred and missing rows are
+        filled from ``sacct`` so completed array tasks can be resolved in one
+        accounting query per base job set.
+
+        Args:
+            job_id: Job or jobs to query.
+
+        Returns:
+            Status for a single job, or a list aligned to the input jobs. A
+            missing job is represented by ``None``.
+
+        Raises:
+            RuntimeError: If SLURM output cannot be parsed or a required query
+                command fails.
         """
-        # id | partition | name | nodelist | user | state | time_used | nodes
-        formatter = "JobIDRaw,Partition,JobName,NodeList,User,State,Elapsed,NNodes"
+        if isinstance(job_id, list):
+            return self._get_status_batch(job_id)
 
-        try:
-            values = self.squeue(job_id, formatter="%A|%P|%j|%N|%u|%T|%M|%D")
-        except RuntimeError:
-            values = self.sacct(job_id, formatter=formatter)
-        else:
-            if not values:
-                values = self.sacct(job_id, formatter=formatter)
-
-        if not values:
-            return None
-
-        if len(values) < 8:
-            raise RuntimeError(f"Unexpected squeue output: {values}")
-        jid, partition, name, nodelist, user, state, time_used, nodes = values[:8]
-        hostname = (nodelist.split(',')[0].strip() if nodelist else '')
-        return JobStatus(id=JobID.from_string(jid), partition=partition, name=name,
-                         hostname=hostname, user=user, state=state, time_used=time_used,
-                         nodes=int(nodes))
+        statuses = self._get_status_batch([job_id])
+        return statuses[0] if statuses else None
 
     async def get_status_async(self, job_id: JobID) -> JobStatus | None:
-        """Return rich job status information using `squeue`.
+        """Asynchronously return status information for one job.
 
-        Queries squeue for a single job id with a pipe-delimited format and
-        parses it into a JobStatus tuple. Returns None if the job is not found
-        or if squeue yields no rows.
+        Args:
+            job_id: Job to query.
+
+        Returns:
+            Parsed status record, or ``None`` if the job is not found.
+
+        Raises:
+            RuntimeError: If SLURM output cannot be parsed or a query command
+                fails.
         """
         # id | partition | name | nodelist | user | state | time_used | nodes
         formatter = "JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes"
@@ -420,10 +759,13 @@ class SLURMJobManager:
                          nodes=int(nodes))
 
     def get_state(self, job_id: JobID) -> str | None:
-        """Query squeue and sacct for job status. Returns a short string or None.
+        """Return the SLURM state string for one job.
 
-        Prefers `squeue` for live jobs and falls back to `sacct` for finished
-        jobs. Returns None if neither utility is available or returns no data.
+        Args:
+            job_id: Job to query.
+
+        Returns:
+            SLURM state string, or ``None`` if the job is not found.
         """
         try:
             values = self.squeue(job_id, formatter="%T")
@@ -439,10 +781,13 @@ class SLURMJobManager:
         return values[0]
 
     async def get_state_async(self, job_id: JobID) -> str | None:
-        """Query squeue and sacct for job status. Returns a short string or None.
+        """Asynchronously return the SLURM state string for one job.
 
-        Prefers `squeue` for live jobs and falls back to `sacct` for finished
-        jobs. Returns None if neither utility is available or returns no data.
+        Args:
+            job_id: Job to query.
+
+        Returns:
+            SLURM state string, or ``None`` if the job is not found.
         """
         try:
             values = await self.squeue_async(job_id, formatter="%T")
@@ -458,7 +803,13 @@ class SLURMJobManager:
         return values[0]
 
     def is_running(self, job_id: JobID) -> bool:
-        """Return True if SLURM job is still running or pending.
+        """Return whether a job is still active.
+
+        Args:
+            job_id: Job to query.
+
+        Returns:
+            ``True`` for pending, running, configuring, or completing jobs.
         """
         status = self.get_state(job_id)
         if status is None:
@@ -467,7 +818,13 @@ class SLURMJobManager:
         return status.upper() in self.running
 
     async def is_running_async(self, job_id: JobID) -> bool:
-        """Return True if SLURM job is still running or pending.
+        """Asynchronously return whether a job is still active.
+
+        Args:
+            job_id: Job to query.
+
+        Returns:
+            ``True`` for pending, running, configuring, or completing jobs.
         """
         status = await self.get_state_async(job_id)
         if status is None:
@@ -477,7 +834,14 @@ class SLURMJobManager:
 
     async def stream_job(self, job: JobOutput, poll_interval: float = 0.1
                          ) -> AsyncGenerator[str, None]:
-        """Yield lines from SLURM job output as they appear, until job finishes.
+        """Stream lines from a job output file.
+
+        Args:
+            job: Job output descriptor returned by :meth:`get_output`.
+            poll_interval: Delay in seconds between output file checks.
+
+        Yields:
+            New output lines, including newline characters.
         """
         async def read_lines(path: str, pos: int) -> Tuple[List[str], int]:
             """Read new lines from file asynchronously using a thread."""
@@ -512,10 +876,20 @@ class SLURMJobManager:
             await asyncio.sleep(poll_interval)
 
     def submit(self, slurm_script: SLURMScript) -> JobID:
-        """Submit a command to SLURM and return the job id.
+        """Submit one SLURM batch job.
 
         The provided command is run with ``bash -lc <command>`` inside the job
         script so shell expansions and quoting behave as the user expects.
+
+        Args:
+            slurm_script: Script specification to submit.
+
+        Returns:
+            Submitted job id.
+
+        Raises:
+            RuntimeError: If ``sbatch`` fails or its output does not contain a
+                job id.
         """
         with slurm_script.write_file() as script_file:
             result = subprocess.run([self.config.sbatch, script_file.name],
@@ -531,7 +905,17 @@ class SLURMJobManager:
 
     def submit_all(self, scripts: List[SLURMScript], wait: bool=True, poll_interval: float = 0.5,
                    desc: str = "SLURM Jobs") -> List[JobID]:
-        """Submit scripts and block synchronously until all finish using wait_all."""
+        """Submit multiple batch jobs.
+
+        Args:
+            scripts: Scripts to submit.
+            wait: If ``True``, wait until all submitted jobs finish.
+            poll_interval: Delay in seconds between status polls while waiting.
+            desc: Progress-bar description.
+
+        Returns:
+            Submitted job ids.
+        """
         jobs = [self.submit(script) for script in scripts]
         if wait:
             self.wait_all(jobs, poll_interval=poll_interval, desc=desc)
@@ -540,7 +924,24 @@ class SLURMJobManager:
     def submit_array(self, script: SLURMScript, task_ids: List[int] | range,
                      n_tasks: int | None=None, wait: bool=True, poll_interval: float = 0.5,
                      desc: str = "SLURM array") -> List[JobID]:
-        """Submit a SLURM array job."""
+        """Submit a SLURM array job.
+
+        Args:
+            script: Script specification to submit as an array.
+            task_ids: Array task ids.
+            n_tasks: Maximum number of simultaneously running array tasks.
+            wait: If ``True``, wait until all array tasks finish.
+            poll_interval: Delay in seconds between status polls while waiting.
+            desc: Progress-bar description.
+
+        Returns:
+            Submitted array task ids.
+
+        Raises:
+            ValueError: If ``task_ids`` is not a list or range.
+            RuntimeError: If ``sbatch`` fails or its output does not contain a
+                job id.
+        """
         if isinstance(task_ids, list):
             array_string = ','.join(str(tid) for tid in task_ids)
         elif isinstance(task_ids, range):
@@ -568,12 +969,17 @@ class SLURMJobManager:
             self.wait_all(jobs, poll_interval=poll_interval, desc=desc)
         return jobs
 
-    def wait_all(self, job_ids: List[JobID], poll_interval: float = 0.5,
+    def wait_all(self, job_ids: List[JobID], poll_interval: float = 0.1,
                  desc: str = "SLURM Jobs") -> None:
-        """Blocking waiter that polls get_state_sync and shows a tqdm progress bar.
+        """Wait until all jobs finish successfully.
+
+        Args:
+            job_ids: Jobs to wait for.
+            poll_interval: Delay in seconds between status polls.
+            desc: Progress-bar description.
 
         Raises:
-            RuntimeError: If any job fails (enters a failed state).
+            RuntimeError: If a job is not found or enters a failed state.
         """
         pending: List[JobID] = list(job_ids)
         completed: Set[JobID] = set()
@@ -582,11 +988,12 @@ class SLURMJobManager:
             while pending:
                 still_pending: List[JobID] = []
                 finished = 0
-                for job_id in pending:
-                    state = self.get_state(job_id)
-                    if state is None:
+                statuses = self.get_status(pending)
+                for job_id, status in zip(pending, statuses):
+                    if status is None:
                         raise RuntimeError(f"Job {job_id} not found in squeue or sacct")
 
+                    state = status.state
                     if state.upper() == self.completed:
                         if job_id not in completed:
                             completed.add(job_id)

@@ -1,25 +1,27 @@
 Getting started
 ===============
 
-.. contents:: On this page
-   :local:
-   :depth: 1
-
 Installation
 ------------
 
-CPU-only (default)::
+Install ``cbclib_v2`` from a local source checkout until packaged releases are
+available on PyPI. First clone the repository and enter the source tree::
 
-   pip install cbclib_v2
+   git clone https://github.com/simply-nicky/cbclib_v2.git
+   cd cbclib_v2
 
-With CUDA support::
+Build the extension modules in place, then install the package from the local
+source tree::
 
    python setup.py build_ext -i
-   pip install cbclib_v2
+   python -m pip install .
 
-To skip CUDA compilation when CUDA headers are present but unwanted::
+If CUDA headers and ``nvcc`` are available, the build will include CUDA
+extensions automatically. To skip CUDA compilation when CUDA headers are present
+but unwanted, set ``CBCLIB_SKIP_CUDA`` while building and installing::
 
-   CBCLIB_SKIP_CUDA=1 pip install cbclib_v2
+   CBCLIB_SKIP_CUDA=1 python setup.py build_ext -i
+   CBCLIB_SKIP_CUDA=1 python -m pip install .
 
 Quickstart
 ----------
@@ -86,9 +88,9 @@ background-ready loading into :class:`~cbclib_v2.CrystData` is shown in
 
    print(frames.shape)
 
-Next step: workflows
---------------------
+Next step: :doc:`workflows <workflows>`
+---------------------------------------
 
 For the most user-facing example of how these pieces fit together, continue to
-:doc:`workflows`. It shows the same library components in interactive Python,
-command-line processing, and SLURM batch workflows.
+:doc:`workflows <workflows>`. It shows the same library components in interactive
+Python, command-line processing, and SLURM batch workflows.

@@ -2,8 +2,8 @@ from math import prod
 from typing import Set, Tuple
 import pytest
 from cbclib_v2 import default_rng, set_at
-from cbclib_v2.annotations import (BoolArray, CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
-                                   NumPy, NumPyNamespace, RealArray, Shape)
+from cbclib_v2.annotations import (BoolArray, CPArray, CuPy, CuPyNamespace, Generator, IntArray,
+                                   NDArray, NumPy, NumPyNamespace, RealArray, Shape)
 from cbclib_v2.label import (CPLabelResult, NPLabelResult, LabelResult, Structure, binary_dilation,
                              center_of_mass, covariance_matrix, label)
 

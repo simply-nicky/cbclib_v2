@@ -847,6 +847,17 @@ def _robust_mean_gpu(inp: IntArray | RealArray, axis: int | Tuple[int, ...]=0, r
     inp = shift_axis(inp, axis)
     n_reduce = inp.shape[-1]
 
+    if n_reduce <= 64:
+        out_dtype = CuPy.result_type(inp.dtype, CuPy.float32)
+        mean = CuPy.empty(inp.shape[:-1] + (1,), dtype=out_dtype)
+
+        if return_std:
+            std = CuPy.empty_like(mean)
+            mean, std = cuda_median.robust_mean_std(mean, std, inp, r0, r1, n_iter, lm)
+            return CuPy.stack([mean, std], axis=0)[..., 0]
+
+        return cuda_median.robust_mean(mean, inp, r0, r1, n_iter, lm)[..., 0]
+
     mean = CuPy.median(inp, axis=-1, keepdims=True)
     j0, j1 = int(r0 * n_reduce), int(r1 * n_reduce)
 

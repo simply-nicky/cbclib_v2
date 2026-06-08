@@ -131,6 +131,56 @@ Three explicit converters move data between backends:
 methods: ``container.to_numpy()``, ``container.to_jax()``,
 ``container.to_cupy()``.
 
+GPU allocator setup
+-------------------
+
+When mixing cbclib CUDA kernels, CuPy, and JAX in the same Python process,
+configure allocator policy before importing JAX or making CuPy allocations.
+The default policy remains unchanged: cbclib C++ uses ``cudaMalloc`` /
+``cudaFree``, CuPy uses its normal default pool, and JAX uses its normal XLA
+allocator. In that default configuration the three backends manage GPU memory
+independently, so CuPy caches, JAX's allocator, and cbclib CUDA temporaries can
+compete for the same device memory. In mixed workloads this can waste memory,
+increase fragmentation, and trigger out-of-memory CUDA errors even when no
+single library appears to be using the whole GPU. To opt in to CUDA
+stream-ordered allocation for all three backends, use the lightweight CUDA
+setup module as the first notebook cell:
+
+.. code-block:: python
+
+   from cbclib_v2.cuda import set_allocator
+
+   set_allocator("cuda_malloc_async")
+
+``cuda_malloc_async`` asks cbclib C++ temporaries, CuPy, and JAX/XLA to use
+CUDA's driver-managed async memory pools. JAX documents this allocator as
+experimental, so use ``set_allocator("default")`` when debugging runtime or
+cluster-specific allocator issues.
+
+Fine-grained controls are also available:
+
+.. code-block:: python
+
+   from cbclib_v2.cuda import set_cuda_allocator, set_cupy_allocator, set_jax_allocator
+
+   set_cuda_allocator("cuda_malloc_async")
+   set_cupy_allocator("cuda_malloc_async")
+   set_jax_allocator("default")
+
+CuPy and JAX memory limits apply only to their default allocators:
+
+.. code-block:: python
+
+   from cbclib_v2.cuda import set_allocator, set_cupy_limit, set_jax_limit
+
+   set_allocator("default")
+   set_cupy_limit("8GB")
+   set_jax_limit(0.4)
+
+Calling ``set_cupy_limit`` or ``set_jax_limit`` after selecting
+``cuda_malloc_async`` raises an exception, because async allocation is governed
+by CUDA driver-managed pools rather than hard cbclib pool budgets.
+
 JAX considerations
 ------------------
 

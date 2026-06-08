@@ -8,6 +8,7 @@ from typing import ClassVar, Iterator, List, Literal, Type
 import h5py
 import pandas as pd
 from tqdm.auto import tqdm
+from ..cuda import Allocator, set_allocator
 from .._src.annotations import AnyNamespace, NumPy
 from .._src.array_api import default_api, default_rng, Platform
 from .._src.config import CPUConfig
@@ -32,18 +33,45 @@ class SystemConfig(BaseParameters):
 
     Attributes:
         platform: Compute backend — ``'cpu'`` or ``'gpu'``.
+        cuda_allocator: Unified GPU allocator mode for cbclib CUDA kernels,
+            CuPy, and JAX/XLA. Supported values are:
+
+            * ``"default"`` — use each backend's default allocator. This is
+              the safest mode and the CLI default.
+            * ``"cuda_malloc_async"`` — request CUDA stream-ordered
+              allocation across all three backends. Intended for mixed
+              cbclib/CuPy/JAX GPU workloads and requires a compatible GPU
+              node plus matching driver/runtime support.
+
         num_threads: Number of OpenMP threads.  ``0`` or negative values
             are replaced by :func:`multiprocessing.cpu_count` at
             initialisation.
     """
     platform        : Platform
-    num_threads     : int
+    cuda_allocator  : Allocator = 'default'
+    num_threads     : int = 0
 
     def __post_init__(self):
         if self.num_threads <= 0:
             self.num_threads = cpu_count()
         if self.platform not in ['cpu', 'gpu']:
             raise ValueError(f"Invalid platform: {self.platform}")
+        if self.cuda_allocator not in ('default', 'cuda_malloc_async'):
+            raise ValueError(f"Invalid CUDA allocator: {self.cuda_allocator}")
+
+    def apply(self) -> None:
+        """Apply system-level runtime configuration for this CLI process.
+
+        For GPU runs this must happen before data loading or any GPU backend
+        initialises its allocator state.  Unsupported async allocator setup
+        raises immediately.  CPU runs skip allocator configuration.
+
+        Raises:
+            RuntimeError: If ``platform == 'gpu'`` and allocator setup fails.
+        """
+        if self.platform == 'cpu':
+            return
+        set_allocator(self.cuda_allocator, strict=True)
 
     def cpu_config(self) -> CPUConfig:
         """Return a :class:`~cbclib_v2.CPUConfig` context manager for this thread count."""
@@ -743,7 +771,7 @@ class DetectHits(BaseScript):
                 df = hits.to_dataframe()
                 hit_indices = xp.where(xp.isin(xp.array(list(chunk.index())), hit_frames))[0]
                 pulse_ids = run.metadata('pulse_id', chunk[hit_indices])
-                pulse_ids = pulse_ids[hits.index_array.reset()]
+                pulse_ids = pulse_ids[hits.reset_index().index]
                 # If data for each module is saved in a separate file
                 # pulse_ids for each module will be stacked along the second axis
                 if pulse_ids.ndim > 1:
@@ -860,6 +888,10 @@ class IndexingScript(BaseScript):
         df = indexed.to_dataframe()
         df.to_hdf(output_path, key='data')
         with h5py.File(output_path, 'a') as output_file:
+            for key in ('files/xtal_file', 'files/hits_file', 'files/setup_file'):
+                if key in output_file:
+                    del output_file[key]
+
             if self.xtals:
                 output_file['files/xtal_file'] = self.xtals
             else:
@@ -1121,6 +1153,7 @@ def main():
 
     scan: ScanConfig = ScanConfig.read(args['scan'])
     print(f"Run: {scan.scan_num:d}")
+    scan.system.apply()
 
     if args['command'] == 'compile':
         script = CompileStreaks.from_file(args['kind'], args['scan'])
