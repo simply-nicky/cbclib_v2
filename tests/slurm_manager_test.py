@@ -84,6 +84,144 @@ class TestJobManager:
         job_id = manager.submit(script)
         assert job_id.id == 12345
 
+    def test_get_job_id_single(self, manager: SLURMJobManager,
+                               monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="42\n", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) == JobID(42)
+
+    def test_get_job_id_array(self, manager: SLURMJobManager,
+                              monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="42_2\n42_0\n42_1\n", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) == [JobID(42, 0), JobID(42, 1), JobID(42, 2)]
+
+    def test_get_job_id_prefers_sacct(self, manager: SLURMJobManager,
+                                      monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="42_2\n42_0\n42_1\n", returncode=0, stderr="")
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42_2\n", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) == [JobID(42, 0), JobID(42, 1), JobID(42, 2)]
+
+    def test_get_job_id_squeue_fallback(self, manager: SLURMJobManager,
+                                        monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="", returncode=0, stderr="")
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42\n", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) == JobID(42)
+
+    def test_get_job_id_missing(self, manager: SLURMJobManager,
+                                monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) is None
+
+    def test_get_status_single(self, manager: SLURMJobManager,
+                               monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42|debug|job|node01|user|RUNNING|00:01|1\n",
+                                  returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        status = manager.get_status(JobID(42))
+        assert status is not None
+        assert status.id == JobID(42)
+        assert status.state == "RUNNING"
+
+    def test_get_status_batch_aligned(self, manager: SLURMJobManager,
+                                      monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42_2|debug|job|node03|user|RUNNING|00:01|1\n",
+                                  returncode=0, stderr="")
+            if args[0] == manager.config.sacct:
+                return MockOutput(
+                    stdout=(
+                        "42_0|debug|job|node01|user|COMPLETED|00:03|1\n"
+                        "42_1|debug|job|node02|user|COMPLETED|00:03|1\n"
+                        "42_2|debug|job|node03|user|COMPLETED|00:03|1\n"
+                        "42.batch|debug|batch|node03|user|COMPLETED|00:03|1\n"
+                    ),
+                    returncode=0,
+                    stderr="",
+                )
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        statuses = manager.get_status([JobID(42, 1), JobID(42, 0), JobID(42, 2)])
+        assert [status.id if status is not None else None for status in statuses] == [
+            JobID(42, 1), JobID(42, 0), JobID(42, 2)]
+        assert [status.state if status is not None else None for status in statuses] == [
+            "COMPLETED", "COMPLETED", "RUNNING"]
+
+    def test_get_status_batch_missing(self, manager: SLURMJobManager,
+                                      monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42_0|debug|job|node01|user|RUNNING|00:01|1\n",
+                                  returncode=0, stderr="")
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        statuses = manager.get_status([JobID(42, 0), JobID(42, 1)])
+        assert statuses[0] is not None
+        assert statuses[1] is None
+
+    def test_wait_all_uses_batched_status(self, manager: SLURMJobManager,
+                                          monkeypatch: pytest.MonkeyPatch):
+        calls: List[List[str]] = []
+
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            calls.append(args)
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="", returncode=0, stderr="")
+            if args[0] == manager.config.sacct:
+                rows = [
+                    f"42_{tid}|debug|job|node01|user|COMPLETED|00:03|1"
+                    for tid in range(235)
+                ]
+                return MockOutput(stdout="\n".join(rows), returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        manager.wait_all([JobID(42, tid) for tid in range(235)])
+
+        assert sum(1 for args in calls if args[0] == manager.config.squeue) == 1
+        assert sum(1 for args in calls if args[0] == manager.config.sacct) == 1
+
     async def mock_process(self, stdout: str, returncode: int = 0) -> MockProcess:
         return MockProcess(stdout.encode(), returncode)
 

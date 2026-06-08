@@ -143,5 +143,8 @@ dmypy.json
 # CLAUDE settings
 .claude/
 
+# CODEX settings
+.codex/
+
 # Auto generated RST files from docstrings
 docs/generated

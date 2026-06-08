@@ -5,17 +5,107 @@ Convergent beam diffraction patterns contain *streaks* — elongated,
 high-SNR features whose orientation encodes the crystal unit-cell geometry.
 Detecting and fitting these streaks accurately is a prerequisite for indexing.
 
-:class:`~cbclib_v2.streak_finder.PatternStreakFinder` implements a seed-and-grow
-algorithm that detects the central spine of each streak rather than its edges.
-Unlike generic computer-vision line detectors, it is tuned specifically for CBC
-data and is designed to work reliably on **noisy, low-exposure** diffraction
-patterns where per-pixel SNR is modest but streak length provides the
-discriminating signal.
+cbclib_v2 provides **two** ways to detect streak-like features in SNR frames:
+
+* :class:`~cbclib_v2.RegionDetector` and :func:`~cbclib_v2.label.label`
+  perform plain connected-component detection on all pixels above a threshold,
+  then fit a line to each labeled region from its intensity-weighted image
+  moments. This route is faster and usually more robust, but it detects
+  **every** connected foreground region and can merge touching or crossing
+  streaks into a single object.
+* :class:`~cbclib_v2.streak_finder.PatternStreakFinder` implements a bespoke
+  seed-and-grow algorithm that detects the central spine of line-like features
+  rather than whole foreground blobs. This route is more computationally
+  intensive and more sensitive to local failures, but it is also more selective:
+  it is designed specifically for elongated CBC streaks and can separate nearby
+  line-like features that simple region labeling would join together.
+
+Use the region-based workflow when a thresholded connected-region description is
+sufficient. Use the bespoke streak finder when you specifically need a
+line-oriented detector that prefers narrow streaks over arbitrary bright shapes.
+
+Connected-region detection
+--------------------------
+
+The simplest workflow treats every pixel above a threshold as foreground and
+groups connected foreground pixels into labeled regions. The low-level
+:func:`~cbclib_v2.label.label` function behaves similarly to
+:func:`scipy.ndimage.label`: non-zero pixels are considered foreground,
+connectivity is defined by a :class:`~cbclib_v2.label.Structure`, and regions
+smaller than ``npts`` pixels are discarded.
+
+From those labeled regions, :func:`~cbclib_v2.label.line_fit` or
+:meth:`~cbclib_v2.RegionDetector.line_fit` fits one line segment per region from
+the intensity-weighted second-order image moments. In practice, this is the
+major axis of the region's covariance ellipse, so broad streaks and slightly
+curved features are reduced to a single best-fit line.
+
+This method is often the better default when the goal is simply to find bright
+streaky regions quickly and robustly. Its main limitation is that it does not
+try to split touching foreground components: if two streaks overlap or are
+connected by thresholded pixels, they will be labeled as one region and fitted
+with one line.
+
+The corresponding high-level workflow is:
+
+.. code-block:: text
+
+      SNR frames
+        │
+        ▼
+  ┌──────────────────┐
+  │ threshold > vmin │
+  └────────┬─────────┘
+        │  foreground mask
+        ▼
+  ┌──────────────────┐
+  │      label       │  connected-component labeling
+  └────────┬─────────┘
+        │  LabelResult
+        ▼
+  ┌──────────────────┐
+  │     line_fit     │  fit one major-axis line per region
+  └────────┬─────────┘
+        │  lines
+        ▼
+  ┌──────────────────┐
+  │ optional filter  │  area, length, eccentricity, etc.
+  └──────────────────┘
+
+Example:
+
+.. code-block:: python
+
+  import cbclib_v2 as cbc
+  from cbclib_v2.label import Structure, label, line_fit
+
+  structure = Structure([0, 1, 1], 1)
+  vmin = 3.0
+
+  # data.snr has shape (n_frames, height, width)
+  regions = label(data.snr > vmin, structure=structure, npts=5)
+  lines = line_fit(regions, data.snr)
+
+The same workflow is available through :class:`~cbclib_v2.RegionDetector`:
+
+.. code-block:: python
+
+  detector = data.region_detector(structure=Structure([1, 1], 1))
+  regions = detector.detect_regions(vmin=3.0, npts=5)
+  lines = detector.line_fit(regions)
 
 .. _streak-algorithm:
 
-How the algorithm works
------------------------
+Seed-and-grow streak detection
+------------------------------
+
+:class:`~cbclib_v2.streak_finder.PatternStreakFinder` is the specialized
+alternative. It still starts from thresholded connected regions, but then adds
+peak finding, local linelet fitting, propagation, and streak-consistency tests
+to keep only line-like structures.
+
+Compared with plain connected-region labeling, this detector is more selective
+but also more expensive and more dependent on its tuning parameters.
 
 The detector frame is partitioned into a regular grid of bins whose side length
 equals ``structure.connectivity`` (the *radius* **r**). The algorithm then runs
@@ -149,69 +239,61 @@ particularly effective for low-exposure patterns because it rewards streak
 .. _streak-parameters:
 
 Parameters
-----------
+^^^^^^^^^^
 
 ``PatternStreakFinder(data, structure, vmin)``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   * **data** — SNR frame stack of shape ``(n_frames, *frame_shape)``. Produce
+     *data* from raw detector frames with :meth:`~cbclib_v2.CrystData.update_snr`.
 
-* **data** — SNR frame stack of shape ``(n_frames, *frame_shape)``. Produce
-  *data* from raw detector frames with :meth:`~cbclib_v2.CrystData.update_snr`.
+   * **structure** — a :class:`~cbclib_v2.label.Structure` with two roles:
 
-* **structure** — a :class:`~cbclib_v2.label.Structure` with two roles:
+     * ``structure.connectivity`` sets the **bin radius** *r*: the frame is
+       divided into *r* x *r* bins. The radius should be chosen to match the
+       expected streak width. A larger radius averages more pixels when fitting
+       each linelet, which improves robustness to noise; however, if the radius
+       is too large the algorithm loses the ability to resolve closely spaced
+       streaks and to detect short streaks.
+     * The full structure defines the **local neighbourhood** used for linelet
+       fitting, the local-maximum test, and streak footprints.
 
-  * ``structure.connectivity`` sets the **bin radius** *r*: the frame is
-    divided into *r* x *r* bins. The radius should be chosen to match the
-    expected streak width. A larger radius averages more pixels when fitting
-    each linelet, which improves robustness to noise; however, if the radius
-    is too large the algorithm loses the ability to resolve closely spaced
-    streaks and to detect short streaks.
-  * The full structure defines the **local neighbourhood** used for linelet
-    fitting, the local-maximum test, and streak footprints.
-
-* **vmin** — SNR threshold. Pixels below *vmin* are invisible to the
-  algorithm. A value of 2-5 is typical; too low includes noise, too high
-  misses faint streaks.
+   * **vmin** — SNR threshold. Pixels below *vmin* are invisible to the
+     algorithm. A value of 2-5 is typical; too low includes noise, too high
+     misses faint streaks.
 
 ``detect_regions(npts, connectivity=None)``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   * **npts** — minimum blob size in pixels. Blobs smaller than *npts* are
+     removed before peak detection, eliminating isolated hot pixels and small
+     noise clusters. A value of 5-30 is typical.
 
-* **npts** — minimum blob size in pixels. Blobs smaller than *npts* are
-  removed before peak detection, eliminating isolated hot pixels and small
-  noise clusters. A value of 5-30 is typical.
-
-* **connectivity** — structuring element for blob labeling. Defaults to a
-  3 x 3 square (all 8 neighbours).
+   * **connectivity** — structuring element for blob labeling. Defaults to a
+     3 x 3 square (all 8 neighbours).
 
 ``detect_streaks(labels, peaks, linelets, xtol, nfa=0)``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   * **xtol** — collinearity tolerance in pixels. Every linelet endpoint in
+     the streak must lie within *xtol* of the total streak line. *xtol* should
+     be proportional to the bin radius *r*: a value of 0.5-0.75 x *r* works
+     well in practice.
 
-* **xtol** — collinearity tolerance in pixels. Every linelet endpoint in
-  the streak must lie within *xtol* of the total streak line. *xtol* should
-  be proportional to the bin radius *r*: a value of 0.5-0.75 x *r* works
-  well in practice.
+   * **nfa** — maximum number of false alarms: linelet endpoints allowed to
+     exceed *xtol* while still being accepted. ``nfa=0`` enforces strict
+     collinearity; ``nfa=1`` or ``nfa=2`` adds robustness to locally bent
+     or interrupted streaks.
 
-* **nfa** — maximum number of false alarms: linelet endpoints allowed to
-  exceed *xtol* while still being accepted. ``nfa=0`` enforces strict
-  collinearity; ``nfa=1`` or ``nfa=2`` adds robustness to locally bent
-  or interrupted streaks.
-
-* ``labels.keep_best(q)`` — pass ``labels.keep_best(q)`` instead of *labels*
-  to restrict growing to the top fraction *q* of peaks by intensity. This
-  suppresses spurious short streaks from weak local maxima.
+   * ``labels.keep_best(q)`` — pass ``labels.keep_best(q)`` instead of *labels*
+     to restrict growing to the top fraction *q* of peaks by intensity. This
+     suppresses spurious short streaks from weak local maxima.
 
 ``min_support(labeled, lines, xtol)``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-* The threshold applied to the returned score should be chosen based on the
-  expected footprint size of the smallest streaks to detect. Streaks with a
-  minimal support below the threshold are discarded. A threshold of **6-8**
-  works well for typical CBC data; lower values recover faint streaks at the
-  cost of more false positives.
+   * The threshold applied to the returned score should be chosen based on the
+     expected footprint size of the smallest streaks to detect. Streaks with a
+     minimal support below the threshold are discarded. A threshold of **6-8**
+     works well for typical CBC data; lower values recover faint streaks at the
+     cost of more false positives.
 
 .. _streak-example:
 
 Example
--------
+^^^^^^^
 
 The example below generates a synthetic stack of two frames containing 40
 randomly placed Gaussian streaks on a noisy background, runs the full detection
@@ -294,6 +376,14 @@ suitable for :func:`~cbclib_v2.ndimage.draw_lines`:
 
 
 .. seealso::
+
+   :class:`~cbclib_v2.RegionDetector`
+      High-level connected-region detector that labels all thresholded signal
+      and fits one line per labeled region.
+
+   :func:`~cbclib_v2.label.label`
+      Low-level connected-component labeling routine similar to
+      :func:`scipy.ndimage.label`.
 
    :class:`~cbclib_v2.streak_finder.PatternStreakFinder`
       Full API reference for the streak finder.

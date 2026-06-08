@@ -1,17 +1,15 @@
-from typing import Any, Literal, Tuple, Set, overload, cast
-import jax.numpy as jnp
+from typing import TYPE_CHECKING, Any, Literal, Tuple, Set, overload, cast
 from jax import devices, device_put, dlpack as jdl, random
 import numpy as np
-from array_api_compat import array_namespace as get_array_namespace, device, numpy as np_array_api
+from array_api_compat import array_namespace as get_array_namespace, device
 from .annotations import (AnyFloat, Array, ArrayLike, AnyNamespace, ArrayNamespace, CPArray,
                           CPIntArray, CuPy, DTypeLike, Generator, IntArray, IntSequence, JaxArray,
                           JaxDevice, JaxNumPy, NDArray, NumPy, RealArray, RealSequence, Scalar,
                           Shape, ShapeLike, SupportsNamespace)
 
-if CuPy is not None:
+if CuPy is not None or TYPE_CHECKING:
     import cupy as cp
     from cupy import fromDlpack as from_dlpack
-    from array_api_compat import cupy as cp_array_api
 
     class CuPyGenerator(cp.random.RandomState):
         def integers(self, low: int | CPIntArray, high: int | None=None,
@@ -45,7 +43,6 @@ if CuPy is not None:
 else:
     cp = None  # type: ignore
     CuPyGenerator = None  # type: ignore
-    cp_array_api = None  # type: ignore
 
     def ascupy(array: Array) -> CPArray:
         """Convert an array to a CuPy array. If the input array is already a CuPy array,
@@ -71,51 +68,57 @@ class JaxGenerator:
     def beta(self, a: AnyFloat, b: AnyFloat, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.beta(self.key, jnp.asarray(a), jnp.asarray(b), shape=size)
+        xp = JaxNumPy
+        return random.beta(self.key, xp.asarray(a), xp.asarray(b), shape=size)
 
     def binomial(self, n: IntSequence, p: AnyFloat, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.binomial(self.key, jnp.asarray(n), jnp.asarray(p), shape=size)
+        xp = JaxNumPy
+        return random.binomial(self.key, xp.asarray(n), xp.asarray(p), shape=size)
 
     def chisquare(self, df: AnyFloat, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.chisquare(self.key, jnp.asarray(df), shape=size)
+        return random.chisquare(self.key, JaxNumPy.asarray(df), shape=size)
 
     def choice(self, a: IntSequence | RealSequence | ArrayLike, size: ShapeLike | None = None,
                replace: bool = True, p: RealSequence | ArrayLike | None = None) -> JaxArray:
         if size is None:
             size = (1,)
+        xp = JaxNumPy
         if p is not None:
-            p = jnp.asarray(p)
-        return random.choice(self.key, jnp.asarray(a), shape=to_shape(size), replace=replace, p=p)
+            p = xp.asarray(p)
+        return random.choice(self.key, xp.asarray(a), shape=to_shape(size), replace=replace, p=p)
 
     def dirichlet(self, alpha: RealSequence, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.dirichlet(self.key, jnp.asarray(alpha), shape=size)
+        return random.dirichlet(self.key, JaxNumPy.asarray(alpha), shape=size)
 
     def exponential(self, scale: AnyFloat = 1.0, size: ShapeLike | None = None) -> JaxArray:
         if size is None:
             size = (1,)
-        return random.exponential(self.key, shape=to_shape(size)) * jnp.asarray(scale)
+        xp = JaxNumPy
+        return random.exponential(self.key, shape=to_shape(size)) * xp.asarray(scale)
 
     def f(self, dfnum: AnyFloat, dfden: AnyFloat, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.f(self.key, jnp.asarray(dfnum), jnp.asarray(dfden), shape=size)
+        xp = JaxNumPy
+        return random.f(self.key, xp.asarray(dfnum), xp.asarray(dfden), shape=size)
 
     def gamma(self, shape: AnyFloat, scale: AnyFloat = 1.0, size: ShapeLike | None = None
               ) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.gamma(self.key, jnp.asarray(shape), shape=size) * jnp.asarray(scale)
+        xp = JaxNumPy
+        return random.gamma(self.key, xp.asarray(shape), shape=size) * xp.asarray(scale)
 
     def geometric(self, p: AnyFloat, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.geometric(self.key, jnp.asarray(p), shape=size)
+        return random.geometric(self.key, JaxNumPy.asarray(p), shape=size)
 
     def integers(self, low: IntSequence, high: IntSequence | None = None,
                  size: ShapeLike | None = None, dtype: DTypeLike = np.int64) -> JaxArray:
@@ -123,54 +126,64 @@ class JaxGenerator:
             size = (1,)
         if high is None:
             low, high = 0, low
-        return random.randint(self.key, to_shape(size), jnp.asarray(low), jnp.asarray(high),
+        xp = JaxNumPy
+        return random.randint(self.key, to_shape(size), xp.asarray(low), xp.asarray(high),
                               dtype=dtype)
 
     def laplace(self, loc: AnyFloat = 0.0, scale: AnyFloat = 1.0,
                 size: ShapeLike | None = None) -> JaxArray:
         if size is None:
             size = (1,)
+        xp = JaxNumPy
         laplace = random.laplace(self.key, shape=to_shape(size))
-        return laplace * jnp.asarray(scale) + jnp.asarray(loc)
+        return laplace * xp.asarray(scale) + xp.asarray(loc)
 
     def logistic(self, loc: AnyFloat = 0.0, scale: AnyFloat = 1.0,
                  size: ShapeLike | None = None) -> JaxArray:
         if size is None:
             size = (1,)
+        xp = JaxNumPy
         logistic = random.logistic(self.key, shape=to_shape(size))
-        return logistic * jnp.asarray(scale) + jnp.asarray(loc)
+        return logistic * xp.asarray(scale) + xp.asarray(loc)
 
     def lognormal(self, mean: AnyFloat = 0.0, sigma: AnyFloat = 1.0, size: ShapeLike | None = None
                   ) -> JaxArray:
         if size is None:
             size = (1,)
+        xp = JaxNumPy
         normal = random.normal(self.key, shape=to_shape(size))
-        return jnp.exp(normal * jnp.asarray(sigma) + jnp.asarray(mean))
+        return xp.exp(normal * xp.asarray(sigma) + xp.asarray(mean))
 
     def multivariate_normal(self, mean: RealSequence, cov: ArrayLike,
                             size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.multivariate_normal(self.key, jnp.asarray(mean), jnp.asarray(cov), shape=size)
+        xp = JaxNumPy
+        return random.multivariate_normal(self.key, xp.asarray(mean),
+                                          xp.asarray(cov), shape=size)
 
     def normal(self, loc: AnyFloat = 0.0, scale: AnyFloat = 1.0,
                size: ShapeLike | None = None) -> JaxArray:
         if size is None:
             size = (1,)
-        return random.normal(self.key, shape=to_shape(size)) * jnp.asarray(scale) + jnp.asarray(loc)
+        xp = JaxNumPy
+        return random.normal(self.key, shape=to_shape(size)) * xp.asarray(scale) + xp.asarray(loc)
 
     def pareto(self, a: AnyFloat, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.pareto(self.key, jnp.asarray(a), shape=size)
+        xp = JaxNumPy
+        return random.pareto(self.key, xp.asarray(a), shape=size)
 
     def permutation(self, x: IntSequence | RealSequence | ArrayLike) -> JaxArray:
-        return random.permutation(self.key, jnp.asarray(x))
+        xp = JaxNumPy
+        return random.permutation(self.key, xp.asarray(x))
 
     def poisson(self, lam: AnyFloat = 1.0, size: ShapeLike | None = None) -> JaxArray:
         if size is not None:
             size = to_shape(size)
-        return random.poisson(self.key, jnp.asarray(lam), shape=size)
+        xp = JaxNumPy
+        return random.poisson(self.key, xp.asarray(lam), shape=size)
 
     def random(self, size: ShapeLike | None = None, dtype: DTypeLike = np.float64
                ) -> JaxArray:
@@ -181,7 +194,7 @@ class JaxGenerator:
     def rayleigh(self, scale: AnyFloat = 1.0, size: ShapeLike | None = None) -> JaxArray:
         if size is None:
             size = (1,)
-        return random.rayleigh(self.key, jnp.asarray(scale), shape=to_shape(size))
+        return random.rayleigh(self.key, JaxNumPy.asarray(scale), shape=to_shape(size))
 
     def standard_exponential(self, size: ShapeLike | None = None, dtype: DTypeLike = np.float64
                              ) -> JaxArray:
@@ -193,7 +206,7 @@ class JaxGenerator:
                        dtype: DTypeLike = np.float64) -> JaxArray:
         if size is None:
             size = (1,)
-        return random.gamma(self.key, jnp.asarray(shape), shape=to_shape(size), dtype=dtype)
+        return random.gamma(self.key, JaxNumPy.asarray(shape), shape=to_shape(size), dtype=dtype)
 
     def standard_normal(self, size: ShapeLike | None = None, dtype: DTypeLike = np.float64
                         ) -> JaxArray:
@@ -205,14 +218,16 @@ class JaxGenerator:
                 ) -> JaxArray:
         if size is None:
             size = (1,)
-        return random.uniform(self.key, shape=to_shape(size), minval=jnp.asarray(low),
-                              maxval=jnp.asarray(high))
+        xp = JaxNumPy
+        return random.uniform(self.key, shape=to_shape(size), minval=xp.asarray(low),
+                              maxval=xp.asarray(high))
 
 @overload
 def add_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
 
 @overload
-def add_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
+def add_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
+           ) -> JaxArray: ...
 
 @overload
 def add_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
@@ -235,11 +250,11 @@ def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
-        return jnp.asarray(a).at[indices].add(b)
+        return JaxNumPy.asarray(a).at[indices].add(b)
     if xp is NumPy:
         np.add.at(np.asarray(a), indices, b)
         return a
-    if cp is not None and xp is CuPy:
+    if CuPy is not None and xp is CuPy:
         a[indices] += b
         return a
     raise ValueError(f"Unsupported array namespace: {xp}")
@@ -265,7 +280,8 @@ def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace = JaxNumPy) -> Arr
 def min_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
 
 @overload
-def min_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
+def min_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
+           ) -> JaxArray: ...
 
 @overload
 def min_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
@@ -288,11 +304,11 @@ def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
-        return jnp.asarray(a).at[indices].min(b)
+        return JaxNumPy.asarray(a).at[indices].min(b)
     if xp is NumPy:
         np.minimum.at(np.asarray(a), indices, b)
         return a
-    if cp is not None and xp is CuPy:
+    if CuPy is not None and xp is CuPy:
         cp.minimum.at(cp.asarray(a), indices, b)
         return a
     raise ValueError(f"Unsupported array namespace: {xp}")
@@ -301,7 +317,8 @@ def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
 def set_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
 
 @overload
-def set_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> JaxArray: ...
+def set_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
+           ) -> JaxArray: ...
 
 @overload
 def set_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
@@ -324,23 +341,26 @@ def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     xp = array_namespace(a)
 
     if xp is JaxNumPy:
-        return jnp.asarray(a).at[indices].set(b)
+        return JaxNumPy.asarray(a).at[indices].set(b)
     if xp is NumPy:
         a[indices] = b
         return a
-    if cp is not None and xp is CuPy:
+    if CuPy is not None and xp is CuPy:
         a[indices] = b
         return a
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 def default_rng(seed: int | None = None, xp: ArrayNamespace = NumPy) -> Generator:
-    """Return a random number generator for the specified array API. This function provides a unified
-    interface for creating random number generators across different array APIs (NumPy, JAX, CuPy).
+    """Return a random number generator for the specified array API.
+
+    This function provides a unified interface for creating random number
+    generators across different array APIs (NumPy, JAX, CuPy).
 
     Args:
-        seed: An optional seed for the random number generator. If `None`, a default seed will be used.
-        xp: The array namespace for which to create the random number generator. This can be `NumPy`,
-            `JaxNumPy`, or `CuPy`.
+        seed: An optional seed for the random number generator. If `None`, a
+            default seed will be used.
+        xp: The array namespace for which to create the random number
+            generator. This can be `NumPy`, `JaxNumPy`, or `CuPy`.
 
     Returns:
         A random number generator for the specified array namespace.
@@ -349,7 +369,7 @@ def default_rng(seed: int | None = None, xp: ArrayNamespace = NumPy) -> Generato
         return cast(Generator, JaxGenerator(seed))
     if xp is NumPy:
         return cast(Generator, np.random.default_rng(seed))
-    if cp is not None and xp is CuPy:
+    if CuPy is not None and xp is CuPy:
         return cast(Generator, CuPyGenerator(seed))
     raise ValueError(f"Unsupported array namespace: {xp}")
 
@@ -379,7 +399,7 @@ def array_namespace(*arrays: SupportsNamespace | Array | Any) -> AnyNamespace:
         The array API namespace that the input arrays belong to. This will be one of `NumPy`,
         `JaxNumPy`, or `CuPy`.
     """
-    def namespaces(*arrays: SupportsNamespace | Array | Any) -> Set:
+    def namespaces(*arrays: SupportsNamespace | Array | Any) -> Set[Any]:
         result = set()
         for array in arrays:
             if isinstance(array, dict):
@@ -394,11 +414,13 @@ def array_namespace(*arrays: SupportsNamespace | Array | Any) -> AnyNamespace:
     if len(nspaces) == 0:
         raise ValueError("namespace set should not be empty")
     if CuPy is not None:
-        if cp in nspaces or cp_array_api in nspaces:
+        if any("cupy" in getattr(nspace, "__name__", "") for nspace in nspaces):
             return CuPy
-    if jnp in nspaces:
+    if any(getattr(nspace, "__name__", "").startswith("jax.numpy") for nspace in nspaces):
         return JaxNumPy
-    if np in nspaces or np_array_api in nspaces:
+    if any(getattr(nspace, "__name__", "") == "numpy" or
+           getattr(nspace, "__name__", "").startswith("array_api_compat.numpy")
+           for nspace in nspaces):
         return NumPy
     raise ValueError(f"The array namespace {nspaces.pop()} is not supported")
 
@@ -423,7 +445,7 @@ def get_platform(array: Array) -> Platform:
         return 'gpu' if dev.platform == 'gpu' else 'cpu'
     if xp is NumPy:
         return 'cpu'
-    if cp is not None and xp is CuPy:
+    if CuPy is not None and xp is CuPy:
         return 'gpu'
     raise ValueError(f"Unsupported array namespace: {xp}")
 
@@ -443,7 +465,7 @@ def asnumpy(array: Array) -> NDArray:
         return np.asarray(array)
     if xp is NumPy:
         return np.asarray(array)
-    if cp is not None and xp is CuPy:
+    if CuPy is not None and xp is CuPy:
         return cp.asnumpy(array)
     raise ValueError(f"Unsupported array namespace: {xp}")
 
@@ -461,10 +483,10 @@ def asjax(array: Array) -> JaxArray:
     xp = array_namespace(array)
 
     if xp is JaxNumPy:
-        return jnp.asarray(array)
+        return JaxNumPy.asarray(array)
     if xp is NumPy:
-        return jnp.asarray(array)
-    if cp is not None and xp is CuPy:
+        return JaxNumPy.asarray(array)
+    if CuPy is not None and xp is CuPy:
         return jdl.from_dlpack(cp.asarray(array).toDlpack())
     raise ValueError(f"Unsupported array namespace: {xp}")
 

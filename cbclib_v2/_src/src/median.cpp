@@ -140,15 +140,21 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
                     {
                         buffer[j] = {(islice[j] - mean) * (islice[j] - mean), j};
                     }
-                    std::sort(buffer.begin(), buffer.end());
 
                     if (j0 != j1)
                     {
+                        std::nth_element(buffer.begin(), buffer.begin() + j1 - 1, buffer.end());
+                        if (j0) std::nth_element(buffer.begin(), buffer.begin() + j0, buffer.begin() + j1);
+
                         D sum = D();
                         for (size_t j = j0; j < j1; j++) sum += islice[buffer[j].second];
                         mean = sum / (j1 - j0);
                     }
-                    else mean = islice[buffer[j0].second];
+                    else
+                    {
+                        std::nth_element(buffer.begin(), buffer.begin() + j0, buffer.end());
+                        mean = islice[buffer[j0].second];
+                    }
                 }
 
                 for (size_t j = 0; j < n_reduce; j++)

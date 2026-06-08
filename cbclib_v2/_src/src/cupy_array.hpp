@@ -1,5 +1,7 @@
 #ifndef CUPY_ARRAY_
 #define CUPY_ARRAY_
+#include <cstdlib>
+#include <cstring>
 #include <cuda_runtime.h>
 #include "include.hpp"
 #include "array_view.hpp"
@@ -21,6 +23,60 @@ void handle_cuda_error(cudaError_t error)
     {
         throw std::runtime_error(cudaGetErrorString(error));
     }
+}
+
+inline bool cuda_malloc_async_supported() noexcept
+{
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11020
+    int device = 0;
+    int supported = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) return false;
+    if (cudaDeviceGetAttribute(&supported, cudaDevAttrMemoryPoolsSupported, device) != cudaSuccess) return false;
+    return supported != 0;
+#else
+    return false;
+#endif
+}
+
+inline bool use_cuda_malloc_async() noexcept
+{
+    const char * allocator = std::getenv("CBCLIB_CUDA_ALLOCATOR");
+    return allocator != nullptr && std::strcmp(allocator, "cuda_malloc_async") == 0 && cuda_malloc_async_supported();
+}
+
+inline cudaError_t device_malloc(void ** ptr, size_t size, bool & async) noexcept
+{
+    async = false;
+    if (size == 0)
+    {
+        *ptr = nullptr;
+        return cudaSuccess;
+    }
+
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11020
+    if (use_cuda_malloc_async())
+    {
+        cudaError_t err = cudaMallocAsync(ptr, size, 0);
+        if (err == cudaSuccess)
+        {
+            async = true;
+            return err;
+        }
+        (void)cudaGetLastError();
+    }
+#endif
+    return cudaMalloc(ptr, size);
+}
+
+inline cudaError_t device_free(void * ptr, bool async) noexcept
+{
+    if (ptr == nullptr) return cudaSuccess;
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11020
+    if (async) return cudaFreeAsync(ptr, 0);
+#else
+    (void)async;
+#endif
+    return cudaFree(ptr);
 }
 
 namespace detail {
@@ -555,10 +611,10 @@ public:
     using iterator = T *;
     using const_iterator = const T *;
 
-    DeviceVector() : m_data(nullptr), m_size(0), m_owns(true) {}
+    DeviceVector() : m_data(nullptr), m_size(0), m_owns(true), m_async(false) {}
     DeviceVector(csize_t size) : m_size(size), m_owns(true)
     {
-        handle_cuda_error(cudaMalloc(&m_data, m_size * sizeof(T)));
+        handle_cuda_error(device_malloc(reinterpret_cast<void **>(&m_data), m_size * sizeof(T), m_async));
     }
     DeviceVector(csize_t size, const T & value) : DeviceVector(size)
     {
@@ -589,11 +645,12 @@ public:
     DeviceVector(const DeviceVector &) = delete;
     DeviceVector & operator=(const DeviceVector &) = delete;
 
-    DeviceVector(DeviceVector && other) noexcept : m_data(other.m_data), m_size(other.m_size), m_owns(other.m_owns)
+    DeviceVector(DeviceVector && other) noexcept : m_data(other.m_data), m_size(other.m_size), m_owns(other.m_owns), m_async(other.m_async)
     {
         other.m_data = nullptr;
         other.m_size = 0;
         other.m_owns = true;
+        other.m_async = false;
     }
 
     DeviceVector & operator=(DeviceVector && other) noexcept
@@ -605,9 +662,11 @@ public:
             m_data = other.m_data;
             m_size = other.m_size;
             m_owns = other.m_owns;
+            m_async = other.m_async;
             other.m_data = nullptr;
             other.m_size = 0;
             other.m_owns = true;
+            other.m_async = false;
         }
         return *this;
     }
@@ -665,7 +724,7 @@ public:
         {
             free();
             m_size = new_size;
-            handle_cuda_error(cudaMalloc(&m_data, m_size * sizeof(T)));
+            handle_cuda_error(device_malloc(reinterpret_cast<void **>(&m_data), m_size * sizeof(T), m_async));
             m_owns = true;
         }
     }
@@ -692,16 +751,18 @@ private:
     T_mutable * m_data;
     csize_t m_size = 0;
     bool m_owns = true;
+    bool m_async = false;
 
     void free() noexcept
     {
         if (m_data && m_owns)
         {
             // Destructors must not throw. Ignore cudaFree errors here.
-            cudaError_t _err = cudaFree(m_data);
+            cudaError_t _err = device_free(m_data, m_async);
             (void)_err;
             m_data = nullptr;
             m_size = 0;
+            m_async = false;
         }
     }
 };

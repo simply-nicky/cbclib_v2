@@ -384,8 +384,7 @@ class RegionParameters(Container):
     """Detection parameters for the connected-region finder.
 
     Attributes:
-        structure: Connectivity kernel used for region labeling and the
-            local-maximum test.
+        structure: Connectivity kernel used for region labeling.
         vmin: SNR threshold; pixels below this value are treated as
             background.
         npts: Minimum region size in pixels; smaller blobs are discarded.
@@ -499,18 +498,20 @@ def concentric_only(streaks: StackedStreaks | Streaks, center: Tuple[float, floa
 
 
 @dataclass
-class PeakParameters(RegionParameters):
-    """Detection parameters for the peak-finding step of the streak detector.
-
-    Extends :class:`RegionParameters` with an optional override for the
-    peak-detection bin radius.
+class PeakParameters(BaseParameters):
+    """Detection parameters for the region detection step in the streak detection
+    pipeline. The class is similar to :class:`~cbclib.scripts.RegionParameters`
+    but the SNR threshold is taken from :class:`~cbclib_v2.scripts.StreakParameters`.
 
     Attributes:
-        radius: Override for the bin radius used during peak detection.
-            When ``None``, the radius is taken from ``structure.connectivity``.
+        npts: Minimum region size in pixels; smaller blobs are discarded.
+        structure: Connectivity kernel used for region labeling.
     """
 
-    radius      : int | None = None
+    npts        : int
+    structure   : StructureParameters = field(
+        default_factory=lambda: StructureParameters(radius=1, connectivity=1)
+    )
 
 @dataclass
 class StreakParameters(Container):
@@ -533,7 +534,8 @@ class StreakParameters(Container):
     xtol        : float
     vmin        : float
     min_size    : float
-    nfa         : int
+    nfa         : int = 0
+    keep_best   : float = 1.0
 
 @dataclass
 class StreakFinderConfig(BaseParameters):
@@ -779,7 +781,7 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
     centers = patterns.sample(xp.full(patterns.shape[0], 0.5))
     points = indexer.points_to_kout(centers, state, xp)
     rotograms = indexer.index(candidates, patterns, points, state)
-    rotomap = indexer.rotomap(params.shape, rotograms, patterns.index, params.width)
+    rotomap = indexer.rotomap(params.shape, rotograms, patterns.reset_index().index, params.width)
     peaks = indexer.to_peaks(rotomap, params.threshold, params.n_max)
     return indexer.refine_peaks(peaks, rotomap, params.vicinity.to_structure(3),
                                 params.connectivity.to_structure(3))
@@ -803,9 +805,10 @@ def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState
         :class:`~cbclib_v2.indexer.MillerWithRLP` for each pattern.
     """
     q1, q2 = indexer.patterns_to_q(patterns, state, xp)
-    q_max = xp.max((xp.sqrt(xp.sum(q1.q**2, axis=-1)), xp.sqrt(xp.sum(q2.q**2, axis=-1))))
+    q_abs = xp.stack((xp.sqrt(xp.sum(q1.q**2, axis=-1)), xp.sqrt(xp.sum(q2.q**2, axis=-1))))
+    q_max = xp.max(q_abs)
     hkl = indexer.xtal.hkl_in_ball(q_max, xtal, xp)
-    return indexer.xtal.hkl_range(patterns.index_array.unique(), hkl, xtal, xp)
+    return indexer.xtal.hkl_range(patterns.unique_index(), hkl, xtal, xp)
 
 def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
                  xp: AnyNamespace=NumPy) -> XtalList:

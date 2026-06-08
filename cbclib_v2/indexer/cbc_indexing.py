@@ -374,10 +374,10 @@ class CBDIndexer(CBDSetup):
     def solutions(self, initial: XtalState, indices: IntArray, tilts: TiltOverAxisState,
                   patterns: Patterns) -> XtalList:
         if len(initial) == 1:
-            return XtalList(patterns.index_array.unique()[indices],
+            return XtalList(patterns.unique_index()[indices],
                             (tilts.to_tilt().to_rotation() @ initial).basis)
         if len(initial) == len(patterns):
-            return XtalList(patterns.index_array.unique()[indices],
+            return XtalList(patterns.unique_index()[indices],
                             (tilts.to_tilt().to_rotation() @ initial[indices]).basis)
         raise ValueError(f'Number of crystals ({len(initial):d}) and patterns ({len(patterns):d}) '\
                          'are inconsistent')

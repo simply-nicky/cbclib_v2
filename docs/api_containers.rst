@@ -31,8 +31,6 @@ Data processing
 
    CrystData
    CrystMetadata
-   StreakDetector
-   RegionDetector
 
 Streaks
 -------

@@ -60,7 +60,7 @@ class TestCBDIndexer():
     def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, state: FixedState,
                 xp: NumPyNamespace) -> MillerWithRLP:
         hkl = indexer.xtal.hkl_in_ball(q_abs, state.xtal, xp)
-        iterator = indexer.xtal.hkl_range(patterns.index_array.unique(), hkl, state.xtal, xp)
+        iterator = indexer.xtal.hkl_range(patterns.unique_index(), hkl, state.xtal, xp)
         return MillerWithRLP.concatenate(list(iterator))
 
     @pytest.fixture

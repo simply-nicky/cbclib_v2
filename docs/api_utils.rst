@@ -26,6 +26,29 @@ backends that are not part of the `Python Array API standard`_.
    min_at
    default_rng
 
+.. currentmodule:: cbclib_v2.cuda
+
+CUDA allocator utilities
+------------------------
+
+These helpers coordinate GPU allocator selection across cbclib CUDA kernels,
+CuPy, and JAX/XLA. Use them at the start of a notebook or batch job, before
+importing JAX or making CuPy allocations.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   set_allocator
+   set_cuda_allocator
+   set_cupy_allocator
+   set_jax_allocator
+   set_cupy_limit
+   set_jax_limit
+   get_allocator_config
+
+.. currentmodule:: cbclib_v2
+
 CPU configuration
 -----------------
 

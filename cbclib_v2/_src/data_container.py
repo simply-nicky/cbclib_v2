@@ -246,7 +246,7 @@ class DataContainer(Container):
     carried over unchanged.
     """
 
-    def __array_namespace__(self) -> AnyNamespace:
+    def __array_namespace__(self, api_version: str | None = None) -> AnyNamespace:
         """Return the array namespace shared by all array fields.
 
         Inspects the non-empty array fields via :meth:`contents` and
@@ -538,7 +538,7 @@ class IndexArray():
         arr = xp.asarray(asnumpy(arr), dtype=int)
         self.index = Indexer(xp.reshape(arr, (-1,) if arr.ndim == 0 else arr.shape))
 
-    def __array_namespace__(self) -> AnyNamespace:
+    def __array_namespace__(self, api_version: str | None = None) -> AnyNamespace:
         return self.__namespace__
 
     def __reduce__(self) -> Tuple:
@@ -614,7 +614,8 @@ class IndexArray():
         Returns:
             New :class:`IndexArray` with reset indices.
         """
-        return IndexArray(self.get_index(self.index.unique())[1])
+        _, new_index = self.get_index(self.index.unique())
+        return IndexArray(new_index)
 
 class Indexed(Protocol):
     """Protocol for objects that carry an integer index and support group-wise access.
@@ -622,13 +623,17 @@ class Indexed(Protocol):
     Any object implementing this protocol can be used with
     :class:`GenericIndexer`, :class:`ILocIndexer`, and :class:`LocIndexer`.
     """
-
     index       : IntArray
-    index_array : IndexArray
 
     def __getitem__(self: I, indices: Indices | BoolArray) -> I: ...
 
     def replace(self: I, **kwargs: Any) -> I: ...
+
+    def reset_index(self: I) -> I: ...
+
+    def take(self: I, indices: IntSequence, reset_index: bool = False) -> I: ...
+
+    def unique_index(self: I) -> NDIntArray: ...
 
 @dataclass
 class GenericIndexer(Generic[I]):
@@ -640,30 +645,27 @@ class GenericIndexer(Generic[I]):
     Attributes:
         obj: The :class:`Indexed` object to index into.
     """
-
     obj         : I
 
     def __getitem__(self, indices: IntSequence) -> I:
-        indexer, new_index = self.obj.index_array.get_index(indices)
-        return self.obj[indexer].replace(index=new_index)
+        return self.obj.take(indices, reset_index=True)
 
 @dataclass
 class ILocIndexer(GenericIndexer[I]):
     """Integer-location indexer — selects groups by their ordinal position.
 
     ``obj.iloc[i]`` returns the group whose index value is
-    ``obj.index_array.unique()[i]``.  Supports scalar integers, slices,
+    ``obj.unique_index()[i]``.  Supports scalar integers, slices,
     integer arrays, and :class:`IndexArray` objects.
     """
-
     def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
         xp = NumPy
         if isinstance(indices, IndexArray):
-            idxs = self.obj.index_array.unique()[xp.asarray(indices)]
+            idxs = self.obj.unique_index()[xp.asarray(indices)]
         elif isinstance(indices, int):
-            idxs = self.obj.index_array.unique()[xp.atleast_1d(indices)]
+            idxs = self.obj.unique_index()[xp.atleast_1d(indices)]
         else:
-            idxs = self.obj.index_array.unique()[indices]
+            idxs = self.obj.unique_index()[indices]
         return super().__getitem__(idxs)
 
 @dataclass
@@ -730,22 +732,20 @@ class IndexedContainer(ArrayContainer):
 
     Attributes:
         index: Integer frame index for each row, shape ``(N,)``.
-        index_array: :class:`IndexArray` wrapping the index for efficient
-            group-wise lookups.
     """
 
     index       : IntArray
 
     def __post_init__(self):
         try:
-            self.index_array = IndexArray(self.index)
+            self._index = IndexArray(self.index)
         except ValueError:
             xp = self.__array_namespace__()
             indices = xp.argsort(self.index)
             for attr, val in self.contents().items():
                 setattr(self, attr, val[indices])
             self.index = self.index[indices]
-            self.index_array = IndexArray(self.index)
+            self._index = IndexArray(self.index)
 
     @classmethod
     def concatenate(cls: Type[Self], containers: Iterable[Self]) -> Self:
@@ -819,12 +819,13 @@ class IndexedContainer(ArrayContainer):
         Yields:
             Container slice for each unique value in :attr:`index`.
         """
-        for index in self.index_array.unique():
-            yield self[self.index_array.get_index(index)]
+        for index in self._index.unique():
+            indexer, _ = self._index.get_index(index)
+            yield self[indexer]
 
     def __len__(self) -> int:
         """Return the number of unique index groups."""
-        return self.index_array.unique().size
+        return self._index.unique().size
 
     @property
     def iloc(self: Self) -> ILocIndexer[Self]:
@@ -895,12 +896,11 @@ class IndexedContainer(ArrayContainer):
             raise ValueError("Cannot reshape IndexedContainer: inconsistent index grouping")
         return type(self)(**(obj.to_dict() | {'index': new_index}))
 
-    def take(self: Self, indices: IntSequence) -> Self:
+    def take(self: Self, indices: IntSequence, reset_index: bool = False) -> Self:
         """Select groups by index value and return the corresponding slice.
 
         Unlike ``__getitem__``, which operates on raw row positions,
-        :meth:`take` looks up rows by their ``index`` value using
-        :meth:`IndexArray.get_index`.
+        :meth:`take` looks up rows by their ``index`` value.
 
         Args:
             indices: A single index value or a sequence of index values to
@@ -910,10 +910,29 @@ class IndexedContainer(ArrayContainer):
             New container containing all rows belonging to the requested
             index groups.
         """
-        if isinstance(indices, int):
-            indexer = self.index_array.get_index(indices)
-        elif isinstance(indices, Array):
-            indexer, _ = self.index_array.get_index(asnumpy(indices))
-        else:
-            indexer, _ = self.index_array.get_index(indices)
+        indexer, new_index = self._index.get_index(indices)
+        if reset_index:
+            return self[indexer].replace(index=new_index)
         return self[indexer]
+
+    def reset_index(self: Self) -> Self:
+        """Return a new container with reset indices and adjusted data fields.
+
+        Each unique value in the original ``index`` is replaced by its
+        ordinal position (0, 1, 2, …).  Data fields are permuted to match
+        the new index order.
+
+        Returns:
+            New container with reset indices.
+        """
+        xp = self.__array_namespace__()
+        return self.replace(index=xp.asarray(self._index.reset().array))
+
+    def unique_index(self) -> IntArray:
+        """Return the sorted array of unique index values.
+
+        Returns:
+            A flat array of unique index values.
+        """
+        xp = self.__array_namespace__()
+        return xp.asarray(self._index.unique())

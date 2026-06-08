@@ -299,6 +299,18 @@ private:
     array_iterator(array_pointer parent, size_t index) : m_parent(parent), m_index(index) {}
 };
 
+bool is_c_contiguous(const array_indexer & indexer)
+{
+    size_t stride = indexer.itemsize();
+    for (size_t dim = indexer.ndim(); dim > 0; --dim)
+    {
+        if (indexer.shape(dim - 1) == 0) return true;
+        if (indexer.strides(dim - 1) != stride) return false;
+        stride *= indexer.shape(dim - 1);
+    }
+    return true;
+}
+
 // ------------------------------------------------------------------
 // array (non-owning view)
 // Lightweight wrapper around a raw pointer with associated shape/stride
@@ -324,9 +336,9 @@ public:
     array() = default;
 
     array(ShapeContainer shape, ShapeContainer strides, T * ptr) :
-        array_indexer(std::move(shape), std::move(strides), sizeof(T)), m_ptr(ptr) {}
+        array_indexer(std::move(shape), std::move(strides), sizeof(T)), m_ptr(ptr), m_contiguous(is_c_contiguous(*this)) {}
 
-    array(ShapeContainer shape, T * ptr) : array_indexer(std::move(shape), sizeof(T)), m_ptr(ptr) {}
+    array(ShapeContainer shape, T * ptr) : array_indexer(std::move(shape), sizeof(T)), m_ptr(ptr), m_contiguous(is_c_contiguous(*this)) {}
 
     array(size_t count, T * ptr) : array(std::vector<size_t>{count}, ptr) {}
 
@@ -341,11 +353,11 @@ public:
 
     T & operator[] (size_t index)
     {
-        return *(m_ptr + index_to_offset(index, 0, m_ndim) / m_itemsize);
+        return *data(index);
     }
     const T & operator[] (size_t index) const
     {
-        return *(m_ptr + index_to_offset(index, 0, m_ndim) / m_itemsize);
+        return *data(index);
     }
 
     /* Slice sub-array:
@@ -465,7 +477,17 @@ public:
     }
 
     const T * data() const {return m_ptr;}
+    const T * data(size_t index) const
+    {
+        if (m_contiguous) return m_ptr + index;
+        return m_ptr + index_to_offset(index, 0, m_ndim) / m_itemsize;
+    }
     T * data() {return m_ptr;}
+    T * data(size_t index)
+    {
+        if (m_contiguous) return m_ptr + index;
+        return m_ptr + index_to_offset(index, 0, m_ndim) / m_itemsize;
+    }
 
 protected:
     using array_indexer_view<size_t>::m_ndim;
@@ -474,6 +496,7 @@ protected:
     using array_indexer::m_strides;
 
     T * m_ptr;
+    bool m_contiguous = false;
 };
 
 template <typename T>
