@@ -1,10 +1,11 @@
 #ifndef NEW_LABEL_H_
 #define NEW_LABEL_H_
-#include <limits>
 #include "geometry.hpp"
 #include "numpy.hpp"
 
 namespace cbclib {
+
+using LabelResult = std::tuple<py::array_t<long>, py::array_t<long>>;
 
 namespace detail {
 
@@ -338,220 +339,50 @@ protected:
     std::vector<size_t> m_shape;
 };
 
-// Extended interface of set of points - needed for Regions
-class Region
+namespace detail {
+
+struct ShiftOffset
 {
-public:
-    using size_type = size_t;
-    using iterator = typename std::set<long>::iterator;
-    using const_iterator = typename std::set<long>::const_iterator;
-    using node_type = typename std::set<long>::node_type;
-
-    Region() = default;
-
-    template <typename Container, typename = std::enable_if_t<
-        std::is_integral_v<typename Container::value_type>
-    >>
-    Region(long index, const Structure & structure, const Container & shape)
-    {
-        for (auto shift : structure)
-        {
-            auto new_index = detail::shift_index(index, shift, shape);
-            if (new_index >= 0) m_ctr.insert(new_index);
-        }
-    }
-
-    iterator begin() {return m_ctr.begin();}
-    const_iterator begin() const {return m_ctr.begin();}
-
-    iterator end() {return m_ctr.end();}
-    const_iterator end() const {return m_ctr.end();}
-
-    size_type size() const {return m_ctr.size();}
-
-    node_type extract(const_iterator pos)
-    {
-        return m_ctr.extract(pos);
-    }
-
-    std::pair<iterator, bool> insert(long index)
-    {
-        return m_ctr.insert(index);
-    }
-
-    iterator insert(iterator hint, long index)
-    {
-        return m_ctr.insert(hint, index);
-    }
-
-    iterator insert(const_iterator hint, node_type && node)
-    {
-        return m_ctr.insert(hint, std::move(node));
-    }
-
-    template <typename Func, typename Container, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
-        std::is_integral_v<typename Container::value_type>
-    >>
-    void dilate(Func && func, const Structure & structure, const Container & shape)
-    {
-        std::vector<long> last_pixels {begin(), end()};
-        std::set<long> new_pixels;
-
-        while (last_pixels.size())
-        {
-            for (auto index : last_pixels)
-            {
-                // Iterating over non-zero shifts in the structure
-                for (const auto & shift : structure.shifts())
-                {
-                    // Add new index if in bounds
-                    long new_index = detail::shift_index(index, shift, shape);
-                    if (new_index >= 0) new_pixels.insert(new_index);
-                }
-            }
-            last_pixels.clear();
-
-            for (auto index : new_pixels)
-            {
-                if (std::forward<Func>(func)(index))
-                {
-                    auto [iter, is_added] = m_ctr.insert(index);
-                    if (is_added) last_pixels.push_back(*iter);
-                }
-            }
-            new_pixels.clear();
-        }
-    }
-
-    template <typename Func, typename Stop, typename Container, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
-        std::is_invocable_r_v<bool, remove_cvref_t<Stop>, const Region &> &&
-        std::is_integral_v<typename Container::value_type>
-    >>
-    void dilate(Func && func, const Structure & structure, Stop && stop, const Container & shape)
-    {
-        std::vector<long> last_pixels {begin(), end()};
-        std::set<long> new_pixels;
-
-        while (last_pixels.size() && std::forward<Stop>(stop)(*this))
-        {
-            for (auto index : last_pixels)
-            {
-                // Iterating over non-zero shifts in the structure
-                for (const auto & shift : structure.shifts())
-                {
-                    // Add new index if in bounds
-                    long new_index = detail::shift_index(index, shift, shape);
-                    if (new_index >= 0) new_pixels.insert(new_index);
-                }
-            }
-            last_pixels.clear();
-
-            for (auto index : new_pixels)
-            {
-                if (std::forward<Func>(func)(index))
-                {
-                    auto [iter, is_added] = m_ctr.insert(index);
-                    if (is_added) last_pixels.push_back(*iter);
-                }
-            }
-            new_pixels.clear();
-        }
-    }
-
-    template <typename Func, typename Container, typename = std::enable_if_t<
-        std::is_invocable_r_v<bool, remove_cvref_t<Func>, long> &&
-        std::is_integral_v<typename Container::value_type>
-    >>
-    void dilate(Func && func, const Structure & structure, size_t n_iter, const Container & shape)
-    {
-        std::vector<long> last_pixels {begin(), end()};
-        std::set<long> new_pixels;
-
-        for (size_t n = 0; n < n_iter; n++)
-        {
-            for (auto index : last_pixels)
-            {
-                // Iterating over non-zero shifts in the structure
-                for (const auto & shift : structure.shifts())
-                {
-                    // Add new index if in bounds
-                    long new_index = detail::shift_index(index, shift, shape);
-                    if (new_index >= 0) new_pixels.insert(new_index);
-                }
-            }
-            last_pixels.clear();
-
-            for (auto index : new_pixels)
-            {
-                if (std::forward<Func>(func)(index))
-                {
-                    auto [iter, is_added] = m_ctr.insert(index);
-                    if (is_added) last_pixels.push_back(*iter);
-                }
-            }
-            new_pixels.clear();
-        }
-    }
-
-    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> & array, I value) const
-    {
-        for (auto index : m_ctr) array[index] = value;
-    }
-
-    template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    void mask(array<I> && array, I value) const
-    {
-        mask(array, value);
-    }
-
-    long first() const
-    {
-        if (m_ctr.size()) return *m_ctr.begin();
-        return -1;
-    }
-
-    std::string info() const
-    {
-        return "<Region, size = " +  std::to_string(size()) + ">";
-    }
-
-protected:
-    std::set<long> m_ctr;
+    std::vector<long> delta;
+    long offset = 0;
 };
 
-class LabelResult
+template <typename Shape, typename = std::enable_if_t<std::is_integral_v<typename Shape::value_type>>>
+bool is_inbound_shift(const std::vector<size_t> & coord, const ShiftOffset & shift, const Shape & shape)
 {
-public:
-    LabelResult(std::vector<py::ssize_t> && shape, std::vector<Region> && regions) :
-        m_shape(std::move(shape)), m_regions(std::move(regions)) {}
-
-    LabelResult(const std::vector<py::ssize_t> & shape, const std::vector<Region> & regions) :
-        m_shape(shape), m_regions(regions) {}
-
-    const std::vector<Region> & regions() const {return m_regions;}
-    std::vector<Region> & regions() {return m_regions;}
-
-    py::ssize_t coord_along_dim(py::ssize_t index, size_t dim) const
+    for (size_t dim = 0; dim < shape.size(); ++dim)
     {
-        py::ssize_t coord = 0;
-        for (size_t n = m_shape.size(); n > dim; --n)
-        {
-            coord = index % m_shape[n - 1];
-            index /= m_shape[n - 1];
-        }
-        return coord;
+        long shifted = static_cast<long>(coord[dim]) + shift.delta[dim];
+        if (shifted < 0 || shifted >= static_cast<long>(shape[dim])) return false;
     }
+    return true;
+}
 
-    const std::vector<py::ssize_t> & shape() const {return m_shape;}
-    py::ssize_t shape(size_t index) const {return m_shape[index];}
+template <typename Shape, typename = std::enable_if_t<std::is_integral_v<typename Shape::value_type>>>
+std::vector<ShiftOffset> shift_offsets(const Structure & structure, const Shape & shape,
+                                       bool reverse = false, bool negative_only = false)
+{
+    auto strides = c_strides(shape, typename Shape::value_type{1});
+    std::vector<ShiftOffset> shifts;
+    shifts.reserve(structure.size() - 1);
 
-protected:
-    std::vector<py::ssize_t> m_shape;
-    std::vector<Region> m_regions;
-};
+    for (const auto & shift : structure.shifts())
+    {
+        ShiftOffset result;
+        result.delta.reserve(structure.rank());
+        for (size_t dim = 0; dim < structure.rank(); ++dim)
+        {
+            long delta = reverse ? -shift[dim] : shift[dim];
+            result.delta.push_back(delta);
+            result.offset += delta * static_cast<long>(strides[dim]);
+        }
+
+        if (!negative_only || result.offset < 0) shifts.emplace_back(std::move(result));
+    }
+    return shifts;
+}
+
+}
 
 // Image moments class
 
@@ -637,15 +468,6 @@ public:
 
     template <typename Pt, typename = std::enable_if_t<std::is_base_of_v<PointND<T, N>, remove_cvref_t<Pt>>>>
     MomentsND(Pt && pt) : org(std::forward<Pt>(pt)) {}
-
-    MomentsND(const Region & region, const array<T> & data)
-    {
-        if (region.size())
-        {
-            org = make_point<N>(region.first(), data.shape());
-            for (auto index : region) insert(index, data);
-        }
-    }
 
     // In-place operators
 
@@ -788,67 +610,6 @@ private:
 
 template <typename T>
 using Moments = MomentsND<T, 2>;
-
-// Set of [point, value] pairs
-
-template <typename T, size_t N>
-class PixelsND
-{
-public:
-    PixelsND() = default;
-
-    PixelsND(const Region & points, const array<T> & data) : m_rgn(points), m_mnt(points, data) {}
-    PixelsND(Region && points, const array<T> & data) : m_rgn(std::move(points))
-    {
-        m_mnt = MomentsND<T, N>(m_rgn, data);
-    }
-
-    void merge(PixelsND & source, const array<T> & data)
-    {
-        auto first1 = m_rgn.begin(), last1 = m_rgn.end();
-        auto first2 = source.m_rgn.begin(), last2 = source.m_rgn.end();
-        for (; first1 != last1 && first2 != last2;)
-        {
-            if (*first2 < *first1)
-            {
-                m_mnt.insert(*first2, data);
-                m_rgn.insert(first1, source.m_rgn.extract(first2++));
-            }
-            else if (*first2 > *first1) ++first1;
-            else
-            {
-                ++first1; ++first2;
-            }
-        }
-        for (; first2 != last2;)
-        {
-            m_mnt.insert(*first2, data);
-            m_rgn.insert(first1, source.m_rgn.extract(first2++));
-        }
-    }
-
-    void merge(PixelsND && source, const array<T> & data)
-    {
-        merge(source, data);
-    }
-
-    template <size_t M = N, typename = std::enable_if_t<(M == 2)>>
-    Line<T> line() const
-    {
-        if (m_mnt.zeroth()) return m_mnt.central().line();
-        return {m_mnt.origin(), m_mnt.origin()};
-    }
-
-    const Region & region() const {return m_rgn;}
-    const MomentsND<T, N> & moments() const {return m_mnt;}
-
-protected:
-    Region m_rgn;
-    MomentsND<T, N> m_mnt;
-};
-
-template <typename T>
-using Pixels = PixelsND<T, 2>;
 
 // PyBind11 helper functions to wrap an std::vector derived classes
 

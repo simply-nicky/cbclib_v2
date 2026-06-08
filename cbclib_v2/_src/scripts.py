@@ -509,7 +509,9 @@ class PeakParameters(BaseParameters):
     """
 
     npts        : int
-    structure   : StructureParameters = StructureParameters(radius=1, connectivity=1)
+    structure   : StructureParameters = field(
+        default_factory=lambda: StructureParameters(radius=1, connectivity=1)
+    )
 
 @dataclass
 class StreakParameters(Container):

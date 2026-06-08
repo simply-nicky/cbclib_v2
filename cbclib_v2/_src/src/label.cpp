@@ -1,109 +1,107 @@
 #include "label.hpp"
 #include "zip.hpp"
 
-PYBIND11_MAKE_OPAQUE(std::vector<cbclib::Region>)
-
 namespace cbclib {
 
-auto dilate(py::array_t<bool> input, Structure structure, size_t iterations, py::none mask,
-            unsigned threads)
+auto dilate_impl(py::array_t<bool> input, Structure structure, py::ssize_t iterations,
+                 std::optional<py::array_t<bool>> mask, unsigned threads)
 {
-    // Deep copy of input array
-    auto output = py::array_t<bool>{input.request()};
-
     array<bool> inp {input.request()};
+    if (iterations < 0) throw std::invalid_argument("iterations must be non-negative");
+    if (input.ndim() != structure.rank())
+    {
+        throw std::invalid_argument("input array dimension (" + std::to_string(input.ndim()) +
+                                    ") does not match structure rank (" + std::to_string(structure.rank()) + ")");
+    }
+
+    py::array_t<bool> output {std::vector<py::ssize_t>(input.shape(), input.shape() + input.ndim())};
     array<bool> out {output.request()};
 
-    thread_exception e;
+    std::optional<array<bool>> marr;
+    if (mask)
+    {
+        marr.emplace(mask->request());
+        check_equal("input and mask must have the same shape",
+                    inp.shape().begin(), inp.shape().end(),
+                    marr->shape().begin(), marr->shape().end());
+    }
+
+    std::vector<unsigned char> current(inp.size());
+    std::vector<unsigned char> next(inp.size());
+
+    threads = std::max<unsigned>(1, std::min<unsigned>(threads, std::max<size_t>(inp.size(), 1)));
+    auto shape = inp.shape();
+    auto shifts = detail::shift_offsets(structure, shape, true);
 
     py::gil_scoped_release release;
 
-    #pragma omp parallel num_threads(threads)
+    #pragma omp parallel for num_threads(threads)
+    for (long index = 0; index < static_cast<long>(inp.size()); ++index)
     {
-        auto func = [](long index){ return true; };
+        current[index] = inp[index];
+    }
 
-        // Finding the chunk for each thread
-        int thread_id = omp_get_thread_num();
-        long chunk = (out.size() + threads - 1) / threads;
+    for (py::ssize_t iter = 0; iter < iterations; ++iter)
+    {
+        const bool has_mask = marr.has_value();
 
-        long thread_start = thread_id * chunk;
-        long thread_end = std::min<long>((thread_id + 1) * chunk, out.size());
-
-        // Each thread processes its own chunk
-        for (long index = thread_start; index < thread_end; index++)
+        #pragma omp parallel num_threads(threads)
         {
-            if (inp[index])
-            {
-                Region region;
-                region.insert(region.end(), index);
-                region.dilate(func, structure, iterations, out.shape());
+            std::vector<size_t> coord(shape.size());
 
-                for (auto pixel : region)
+            #pragma omp for
+            for (long index = 0; index < static_cast<long>(current.size()); ++index)
+            {
+                if (current[index])
                 {
-                    if (pixel >= thread_start && pixel < thread_end) out[pixel] = true;
+                    next[index] = 1;
+                    continue;
                 }
+
+                if (has_mask && !(*marr)[index])
+                {
+                    next[index] = 0;
+                    continue;
+                }
+
+                inp.coord_at(coord.begin(), index);
+                unsigned char value = 0;
+                for (const auto & shift : shifts)
+                {
+                    if (detail::is_inbound_shift(coord, shift, shape) && current[index + shift.offset])
+                    {
+                        value = 1;
+                        break;
+                    }
+                }
+                next[index] = value;
             }
         }
+
+        current.swap(next);
+    }
+
+    #pragma omp parallel for num_threads(threads)
+    for (long index = 0; index < static_cast<long>(current.size()); ++index)
+    {
+        out[index] = static_cast<bool>(current[index]);
     }
 
     py::gil_scoped_acquire acquire;
-
-    e.rethrow();
 
     return output;
 }
 
-auto dilate_with_mask(py::array_t<bool> input, Structure structure, size_t iterations, py::array_t<bool> mask,
+auto dilate(py::array_t<bool> input, Structure structure, py::ssize_t iterations, py::none mask,
+            unsigned threads)
+{
+    return dilate_impl(std::move(input), std::move(structure), iterations, std::nullopt, threads);
+}
+
+auto dilate_with_mask(py::array_t<bool> input, Structure structure, py::ssize_t iterations, py::array_t<bool> mask,
                       unsigned threads)
 {
-    // Deep copy of input array
-    auto output = py::array_t<bool>{input.request()};
-
-    check_equal("input and mask must have the same shape",
-                output.shape(), output.shape() + output.ndim(),
-                mask.shape(), mask.shape() + mask.ndim());
-
-    array<bool> out {output.request()};
-    array<bool> marr {mask.request()};
-    array<bool> inp {input.request()};
-
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        auto func = [&marr](long index){ return marr[index]; };
-
-        // Finding the chunk for each thread
-        int thread_id = omp_get_thread_num();
-        long chunk = (out.size() + threads - 1) / threads;
-
-        long thread_start = thread_id * chunk;
-        long thread_end = std::min<long>((thread_id + 1) * chunk, out.size());
-
-        // Each thread processes its own chunk
-        for (long index = thread_start; index < thread_end; index++)
-        {
-            if (inp[index])
-            {
-                Region region;
-                region.insert(region.end(), index);
-                region.dilate(func, structure, iterations, out.shape());
-
-                for (auto pixel : region)
-                {
-                    if (pixel >= thread_start && pixel < thread_end) out[pixel] = true;
-                }
-            }
-        }
-    }
-
-    py::gil_scoped_acquire acquire;
-
-    e.rethrow();
-
-    return output;
+    return dilate_impl(std::move(input), std::move(structure), iterations, std::move(mask), threads);
 }
 
 template <typename I>
@@ -117,8 +115,45 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
                                     ") does not match structure rank (" + std::to_string(structure.rank()) + ")");
     }
 
-    std::vector<Region> result;
-    std::vector<std::vector<Region>> thread_buffers(threads);
+    py::array_t<long> labels {std::vector<py::ssize_t>(input.shape(), input.shape() + input.ndim())};
+    array<long> out {labels.request()};
+
+    if (inp.size() == 0)
+    {
+        return std::make_tuple(std::move(labels), py::array_t<long>{std::vector<py::ssize_t>{0}});
+    }
+
+    threads = std::max<unsigned>(1, std::min<unsigned>(threads, inp.size()));
+
+    std::vector<long> parent (inp.size(), -1);
+    std::vector<std::vector<std::pair<long, long>>> boundary_edges (threads);
+
+    auto shape = inp.shape();
+    auto shifts = detail::shift_offsets(structure, shape, false, true);
+
+    auto find_root = [](std::vector<long> & parent, long index)
+    {
+        long root = index;
+        while (parent[root] != root) root = parent[root];
+
+        while (parent[index] != index)
+        {
+            long next = parent[index];
+            parent[index] = root;
+            index = next;
+        }
+        return root;
+    };
+
+    auto merge_roots = [&find_root](std::vector<long> & parent, long lhs, long rhs)
+    {
+        lhs = find_root(parent, lhs);
+        rhs = find_root(parent, rhs);
+        if (lhs == rhs) return;
+
+        if (lhs < rhs) parent[rhs] = lhs;
+        else parent[lhs] = rhs;
+    };
 
     thread_exception e;
 
@@ -126,131 +161,294 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
 
     #pragma omp parallel num_threads(threads)
     {
-        // Finding the chunk for each thread
         int thread_id = omp_get_thread_num();
         long chunk = (inp.size() + threads - 1) / threads;
 
         long thread_start = thread_id * chunk;
         long thread_end = std::min<long>((thread_id + 1) * chunk, inp.size());
 
-        std::vector<bool> visited(thread_end - thread_start, false);
-
-        // Each thread processes its own chunk
-        for (long index = thread_start; index < thread_end; index++)
+        for (long index = thread_start; index < thread_end; ++index)
         {
-            if (!visited[index - thread_start] && inp[index])
+            if (inp[index]) parent[index] = index;
+        }
+
+        #pragma omp barrier
+
+        std::vector<size_t> coord (shape.size());
+        for (long index = thread_start; index < thread_end; ++index)
+        {
+            if (parent[index] < 0) continue;
+
+            inp.coord_at(coord.begin(), index);
+            for (const auto & shift : shifts)
             {
-                auto func = [&inp, root=index](long index){ return inp[index] == inp[root]; };
+                if (!detail::is_inbound_shift(coord, shift, shape)) continue;
 
-                Region region;
-                region.insert(region.end(), index);
-                region.dilate(func, structure, inp.shape());
+                long neighbour = index + shift.offset;
+                if (parent[neighbour] < 0 || inp[neighbour] != inp[index]) continue;
 
-                for (auto pixel : region)
+                if (neighbour >= thread_start && neighbour < thread_end)
                 {
-                    if (pixel >= thread_start && pixel < thread_end) visited[pixel - thread_start] = true;
+                    merge_roots(parent, index, neighbour);
                 }
-
-                auto min_index = *region.begin();
-                if (region.size() >= npts && min_index >= thread_start && min_index < thread_end)
+                else
                 {
-                    thread_buffers[thread_id].emplace_back(std::move(region));
+                    boundary_edges[thread_id].emplace_back(index, neighbour);
                 }
             }
         }
     }
 
-    // I need to keep the order of regions in the output the same as in the input
-    for (auto & buffer : thread_buffers)
+    for (auto & edges : boundary_edges)
     {
-        result.insert(result.end(), std::make_move_iterator(buffer.begin()),
-                      std::make_move_iterator(buffer.end()));
+        for (auto [lhs, rhs] : edges) merge_roots(parent, lhs, rhs);
+    }
+
+    std::vector<long> label_map (parent.size(), 0);
+    long n_labels = 0;
+
+    if (npts <= 1)
+    {
+        for (long index = 0; index < static_cast<long>(parent.size()); ++index)
+        {
+            if (parent[index] < 0) continue;
+
+            parent[index] = find_root(parent, index);
+            if (parent[index] == index) label_map[index] = ++n_labels;
+        }
+    }
+    else
+    {
+        std::vector<size_t> label_sizes (parent.size(), 0);
+        for (long index = 0; index < static_cast<long>(parent.size()); ++index)
+        {
+            if (parent[index] < 0) continue;
+
+            parent[index] = find_root(parent, index);
+            label_sizes[parent[index]]++;
+        }
+
+        for (size_t index = 0; index < parent.size(); ++index)
+        {
+            if (parent[index] == static_cast<long>(index) && label_sizes[index] >= npts)
+            {
+                label_map[index] = ++n_labels;
+            }
+        }
+    }
+
+    #pragma omp parallel for num_threads(threads)
+    for (long index = 0; index < static_cast<long>(parent.size()); ++index)
+    {
+        out[index] = (parent[index] >= 0) ? label_map[parent[index]] : 0;
     }
 
     py::gil_scoped_acquire acquire;
 
     e.rethrow();
 
-    return LabelResult(std::vector<py::ssize_t>(input.shape(), input.shape() + input.ndim()), std::move(result));
+    py::array_t<long> index {std::vector<py::ssize_t>{n_labels}};
+    array<long> iarr {index.request()};
+    for (long i = 0; i < n_labels; ++i) iarr[i] = i + 1;
+
+    return std::make_tuple(std::move(labels), std::move(index));
 }
 
-template <typename T, size_t N, typename Func, typename Ret = std::invoke_result_t<remove_cvref_t<Func>, PixelsND<T, N>>, size_t M = std::tuple_size_v<Ret>>
-py::array_t<T> apply_impl(const std::vector<Region> & regions, py::array_t<T> data, Func && func)
+template <typename T, size_t N>
+std::vector<MomentsND<T, N>> moments_from_labels(const LabelResult & labels, py::array_t<T> data, unsigned threads)
 {
+    array<long> larr {std::get<0>(labels).request()};
+    array<long> iarr {std::get<1>(labels).request()};
     array<T> darr {data.request()};
 
-    std::vector<T> results;
-    for (const auto & region : regions)
+    check_equal("labels and data must have the same shape",
+                larr.shape().begin(), larr.shape().end(),
+                darr.shape().begin(), darr.shape().end());
+
+    py::ssize_t max_label = 0;
+    for (auto label_id : iarr) if (label_id > max_label) max_label = label_id;
+
+    std::vector<long> label_to_slot (max_label + 1, -1);
+    for (size_t i = 0; i < iarr.size(); ++i)
     {
-        auto result = std::forward<Func>(func)(PixelsND<T, N>{region, darr});
+        if (iarr[i] > 0) label_to_slot[iarr[i]] = i;
+    }
+
+    std::vector<long> first_index (iarr.size(), -1);
+    for (size_t i = 0; i < larr.size(); ++i)
+    {
+        auto label_id = larr[i];
+        if (label_id <= 0 || label_id > max_label) continue;
+
+        auto slot = label_to_slot[label_id];
+        if (slot >= 0 && first_index[slot] < 0) first_index[slot] = i;
+    }
+
+    std::vector<MomentsND<T, N>> moments (iarr.size());
+    for (size_t i = 0; i < first_index.size(); ++i)
+    {
+        if (first_index[i] >= 0)
+        {
+            auto origin = make_point<N>(first_index[i], darr.shape());
+            PointND<T, N> point;
+            for (size_t n = 0; n < N; ++n) point[n] = static_cast<T>(origin[n]);
+            moments[i] = MomentsND<T, N>(std::move(point));
+        }
+    }
+
+    threads = std::max(1u, threads);
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        auto local_moments = moments;
+
+        #pragma omp for
+        for (long i = 0; i < static_cast<long>(larr.size()); ++i)
+        {
+            auto label_id = larr[i];
+            if (label_id <= 0 || label_id > max_label) continue;
+
+            auto slot = label_to_slot[label_id];
+            if (slot >= 0) local_moments[slot].insert(i, darr);
+        }
+
+        #pragma omp critical
+        {
+            for (size_t i = 0; i < moments.size(); ++i)
+            {
+                moments[i] += local_moments[i];
+            }
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    return moments;
+}
+
+template <typename T, size_t N, typename Func, typename Ret = std::invoke_result_t<remove_cvref_t<Func>, MomentsND<T, N>>, size_t M = std::tuple_size_v<Ret>>
+py::array_t<T> apply_impl(const LabelResult & labels, py::array_t<T> data, unsigned threads, Func && func)
+{
+    auto moments = moments_from_labels<T, N>(labels, data, threads);
+
+    std::vector<T> results;
+    for (const auto & moment : moments)
+    {
+        auto result = std::forward<Func>(func)(moment);
 
         results.insert(results.end(), result.begin(), result.end());
     }
 
-    std::vector<size_t> shape {regions.size(), M};
+    std::vector<size_t> shape {moments.size(), M};
 
     if (results.size()) return as_pyarray(std::move(results), shape);
     return py::array_t<T>{shape};
 }
 
 template <typename T, typename Func>
-py::array_t<T> apply(const std::vector<Region> & regions, py::array_t<T> data, Func && func)
+py::array_t<T> apply(const LabelResult & labels, py::array_t<T> data, unsigned threads, Func && func)
 {
     switch(data.ndim())
     {
-        case 2: return apply_impl<T, 2>(regions, data, std::forward<Func>(func));
-        case 3: return apply_impl<T, 3>(regions, data, std::forward<Func>(func));
-        case 4: return apply_impl<T, 4>(regions, data, std::forward<Func>(func));
-        case 5: return apply_impl<T, 5>(regions, data, std::forward<Func>(func));
-        case 6: return apply_impl<T, 6>(regions, data, std::forward<Func>(func));
-        case 7: return apply_impl<T, 7>(regions, data, std::forward<Func>(func));
+        case 2: return apply_impl<T, 2>(labels, data, threads, std::forward<Func>(func));
+        case 3: return apply_impl<T, 3>(labels, data, threads, std::forward<Func>(func));
+        case 4: return apply_impl<T, 4>(labels, data, threads, std::forward<Func>(func));
+        case 5: return apply_impl<T, 5>(labels, data, threads, std::forward<Func>(func));
+        case 6: return apply_impl<T, 6>(labels, data, threads, std::forward<Func>(func));
+        case 7: return apply_impl<T, 7>(labels, data, threads, std::forward<Func>(func));
         default:
             throw std::invalid_argument("Unsupported number of dimensions: " + std::to_string(data.ndim()));
     }
 }
 
 template <typename T, typename Func>
-void declare_region_func(py::module & m, Func && func, const std::string & funcstr)
+void declare_label_func(py::module & m, Func && func, const std::string & funcstr)
 {
-    m.def(funcstr.c_str(), [f = std::forward<Func>(func)](const LabelResult & labels, py::array_t<T> data)
+    m.def(funcstr.c_str(), [f = std::forward<Func>(func)](const LabelResult & labels, py::array_t<T> data, unsigned threads)
     {
-        return apply(labels.regions(), std::move(data), f);
-    }, py::arg("labels"), py::arg("data"));
+        return apply(labels, std::move(data), threads, f);
+    }, py::arg("labels"), py::arg("data"), py::arg("num_threads") = 1);
 }
 
 template <typename T, size_t N>
-py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol)
+py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol,
+                           unsigned threads)
 {
-    const auto & regions = labels.regions();
-    py::array_t<T> result (std::vector<py::ssize_t>{py::ssize_t(regions.size())});
+    array<long> labels_array {std::get<0>(labels).request()};
+    array<long> index_array {std::get<1>(labels).request()};
+
+    py::array_t<T> result (std::vector<py::ssize_t>{py::ssize_t(index_array.size())});
     array<T> out {result.request()};
     array<T> lines {larray.request()};
     array<T> darr {data.request()};
 
-    for (size_t i = 0; i < regions.size(); ++i)
-    {
-        // Lines have shape (n_lines, data.ndim() * 2) and follow xyz convention
-        LineND<T, N> line {to_point<N>(lines, 2 * i * N), to_point<N>(lines, 2 * i * N + N)};
+    check_equal("labels and data must have the same shape",
+                labels_array.shape().begin(), labels_array.shape().end(),
+                darr.shape().begin(), darr.shape().end());
 
-        size_t n = 0, k = 0;
-        for (auto index : regions[i])
+    py::ssize_t max_label = 0;
+    for (auto label_id : index_array) if (label_id > max_label) max_label = label_id;
+
+    std::vector<long> label_to_slot (max_label + 1, -1);
+    for (size_t i = 0; i < index_array.size(); ++i)
+    {
+        if (index_array[i] > 0) label_to_slot[index_array[i]] = i;
+    }
+
+    threads = std::max(1u, threads);
+    std::vector<size_t> n_counts (index_array.size(), 0);
+    std::vector<size_t> k_counts (index_array.size(), 0);
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        std::vector<size_t> local_n_counts (index_array.size(), 0);
+        std::vector<size_t> local_k_counts (index_array.size(), 0);
+
+        #pragma omp for
+        for (long i = 0; i < static_cast<long>(labels_array.size()); ++i)
         {
-            auto point = make_point<N>(index, darr.shape());
+            auto label_id = labels_array[i];
+            if (label_id <= 0 || label_id > max_label) continue;
+
+            auto slot = label_to_slot[label_id];
+            if (slot < 0) continue;
+
+            LineND<T, N> line {to_point<N>(lines, 2 * slot * N), to_point<N>(lines, 2 * slot * N + N)};
+            auto point = make_point<N>(i, darr.shape());
             if (line.distance(point) < xtol)
             {
-                n++;
-                if (darr[index] >= vmin) k++;
+                local_n_counts[slot]++;
+                if (darr[i] >= vmin) local_k_counts[slot]++;
             }
         }
 
-        out[i] = detail::logbinom(n, k, p0);
+        #pragma omp critical
+        {
+            for (size_t i = 0; i < index_array.size(); ++i)
+            {
+                n_counts[i] += local_n_counts[i];
+                k_counts[i] += local_k_counts[i];
+            }
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    for (size_t i = 0; i < index_array.size(); ++i)
+    {
+        out[i] = detail::logbinom(n_counts[i], k_counts[i], p0);
     }
 
     return result;
 }
 
 template <typename T>
-py::array_t<T> p_values(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol)
+py::array_t<T> p_values(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol,
+                        unsigned threads)
 {
     if (larray.ndim() != 2 || larray.shape(1) != data.ndim() * 2)
     {
@@ -259,12 +457,12 @@ py::array_t<T> p_values(const LabelResult & labels, py::array_t<T> larray, py::a
 
     switch (data.ndim())
     {
-        case 2: return p_values_nd<T, 2>(labels, larray, data, p0, vmin, xtol);
-        case 3: return p_values_nd<T, 3>(labels, larray, data, p0, vmin, xtol);
-        case 4: return p_values_nd<T, 4>(labels, larray, data, p0, vmin, xtol);
-        case 5: return p_values_nd<T, 5>(labels, larray, data, p0, vmin, xtol);
-        case 6: return p_values_nd<T, 6>(labels, larray, data, p0, vmin, xtol);
-        case 7: return p_values_nd<T, 7>(labels, larray, data, p0, vmin, xtol);
+        case 2: return p_values_nd<T, 2>(labels, larray, data, p0, vmin, xtol, threads);
+        case 3: return p_values_nd<T, 3>(labels, larray, data, p0, vmin, xtol, threads);
+        case 4: return p_values_nd<T, 4>(labels, larray, data, p0, vmin, xtol, threads);
+        case 5: return p_values_nd<T, 5>(labels, larray, data, p0, vmin, xtol, threads);
+        case 6: return p_values_nd<T, 6>(labels, larray, data, p0, vmin, xtol, threads);
+        case 7: return p_values_nd<T, 7>(labels, larray, data, p0, vmin, xtol, threads);
         default:
             throw std::invalid_argument("Unsupported number of dimensions: " + std::to_string(data.ndim()));
     }
@@ -287,20 +485,7 @@ PYBIND11_MODULE(label, m)
         return;
     }
 
-    py::class_<Region>(m, "Region")
-        .def(py::init())
-        .def(py::init([](py::ssize_t index, const Structure & structure, std::vector<py::ssize_t> shape)
-        {
-            return Region(index, structure, shape);
-        }), py::arg("index"), py::arg("structure"), py::arg("shape"))
-        .def("__iter__", [](const Region & region)
-        {
-            return py::make_iterator(region.begin(), region.end());
-        }, py::keep_alive<0, 1>())
-        .def("__len__", [](const Region & region){return region.size();})
-        .def("__repr__", &Region::info);
-
-    py::class_<Structure>(m, "Structure")
+    py::class_<Structure>(m, "Structure", py::module_local(false))
         .def(py::init<const std::vector<py::ssize_t> &, int>(), py::arg("radii"), py::arg("connectivity"))
         .def_readonly("connectivity", &Structure::connectivity)
         .def_property_readonly("rank", [](const Structure & srt){ return srt.rank(); })
@@ -392,138 +577,6 @@ PYBIND11_MODULE(label, m)
             return out;
         }, py::arg("out"));
 
-    py::class_<std::vector<Region>> regions (m, "Regions");
-    declare_list(regions, "Regions");
-
-    py::class_<LabelResult>(m, "NPLabelResult")
-        .def_static("from_array", [](py::array_t<py::ssize_t> labels, py::none index) -> LabelResult
-        {
-            array<py::ssize_t> larr {labels.request()};
-
-            py::ssize_t max_label = 0;
-            for (auto value : larr)
-            {
-                if (value > max_label) max_label = value;
-            }
-
-            std::vector<Region> regions(max_label);
-            for (size_t i = 0; i < larr.size(); ++i)
-            {
-                auto label_id = larr[i];
-                if (label_id <= 0) continue;
-
-                regions[label_id - 1].insert(regions[label_id - 1].end(), i);
-            }
-
-            for (auto iter = regions.begin(); iter != regions.end();)
-            {
-                if (iter->size() == 0) iter = regions.erase(iter);
-                else ++iter;
-            }
-
-            return LabelResult(std::vector<py::ssize_t>(labels.shape(), labels.shape() + labels.ndim()), std::move(regions));
-        }, py::arg("labels"), py::arg("index") = py::none())
-        .def_static("from_array", [](py::array_t<py::ssize_t> labels, py::array_t<py::ssize_t> index) -> LabelResult
-        {
-            array<py::ssize_t> larr {labels.request()};
-            array<py::ssize_t> iarr {index.request()};
-
-            std::unordered_map<py::ssize_t, size_t> positions;
-            positions.reserve(iarr.size());
-            for (size_t i = 0; i < iarr.size(); ++i)
-            {
-                if (iarr[i] <= 0)
-                {
-                    throw std::invalid_argument("index array must contain positive label ids");
-                }
-                positions.emplace(iarr[i], i);
-            }
-
-            std::vector<Region> regions (positions.size());
-            for (size_t i = 0; i < larr.size(); ++i)
-            {
-                auto label_id = larr[i];
-                if (label_id <= 0) continue;
-
-                auto iter = positions.find(label_id);
-                if (iter != positions.end())
-                {
-                    regions[iter->second].insert(regions[iter->second].end(), i);
-                }
-            }
-
-            return LabelResult(std::vector<py::ssize_t>(labels.shape(), labels.shape() + labels.ndim()), std::move(regions));
-        }, py::arg("labels"), py::arg("index"))
-        .def_property("regions", [](const LabelResult & labels){ return labels.regions(); }, [](LabelResult & labels, std::vector<Region> regions){ labels.regions() = std::move(regions); })
-        .def_property_readonly("shape", [](const LabelResult & labels){ return labels.shape(); })
-        .def("to_array", [](const LabelResult & labels, py::array_t<py::ssize_t> index, py::none out) -> py::array_t<py::ssize_t>
-        {
-            if (index.size() != static_cast<py::ssize_t>(labels.regions().size()))
-                throw std::invalid_argument("Index array size does not match number of regions");
-
-            py::array_t<py::ssize_t> result {labels.shape()};
-            fill_array(result, py::ssize_t(0));
-            array<py::ssize_t> oarr {result.request()};
-            array<py::ssize_t> iarr {index.request()};
-
-            size_t counter = 0;
-            for (const auto & region : labels.regions())
-            {
-                region.mask(oarr, iarr[counter++]);
-            }
-            return result;
-        }, py::arg("index"), py::arg("out") = py::none())
-        .def("to_array", [](const LabelResult & labels, py::array_t<int> index, py::array_t<int> out) -> py::array_t<int>
-        {
-            if (index.size() != static_cast<py::ssize_t>(labels.regions().size()))
-                throw std::invalid_argument("Index array size does not match number of regions");
-            check_equal("out array shape does not match region shape",
-                        out.shape(), out.shape() + out.ndim(),
-                        labels.shape().begin(), labels.shape().end());
-
-            array<int> oarr {out.request()};
-            array<int> iarr {index.request()};
-
-            size_t counter = 0;
-            for (const auto & region : labels.regions())
-            {
-                region.mask(oarr, iarr[counter++]);
-            }
-            return out;
-        }, py::arg("index"), py::arg("out"));
-
-    py::class_<PixelsND<double, 2>>(m, "Pixels2D")
-        .def(py::init())
-        .def(py::init([](Region region, py::array_t<double> data)
-        {
-            return PixelsND<double, 2>{std::move(region), array<double>{data.request()}};
-        }), py::arg("region"), py::arg("data"))
-        .def_property_readonly("region", [](const PixelsND<double, 2> & pixels){ return pixels.region(); })
-        .def("merge", [](PixelsND<double, 2> & pixels, PixelsND<double, 2> other, py::array_t<double> data)
-        {
-            pixels.merge(other, array<double>{data.request()});
-        }, py::arg("other"), py::arg("data"))
-        .def("total_mass", [](const PixelsND<double, 2> & pixels)
-        {
-            return pixels.moments().zeroth();
-        })
-        .def("mean", [](const PixelsND<double, 2> & pixels)
-        {
-            return pixels.moments().first();
-        })
-        .def("center_of_mass", [](const PixelsND<double, 2> & pixels)
-        {
-            return pixels.moments().central().first();
-        })
-        .def("moment_of_inertia", [](const PixelsND<double, 2> & pixels)
-        {
-            return pixels.moments().second();
-        })
-        .def("covariance_matrix", [](const PixelsND<double, 2> & pixels)
-        {
-            return pixels.moments().central().second();
-        });
-
     m.def("binary_dilation", &dilate, py::arg("inp"), py::arg("structure"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("num_threads") = 1);
     m.def("binary_dilation", &dilate_with_mask, py::arg("inp"), py::arg("structure"), py::arg("iterations") = 1, py::arg("mask") = std::nullopt, py::arg("num_threads") = 1);
 
@@ -531,54 +584,56 @@ PYBIND11_MODULE(label, m)
     m.def("label", &label<int>, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
     m.def("label", &label<py::ssize_t>, py::arg("inp"), py::arg("structure"), py::arg("npts") = 1, py::arg("num_threads") = 1);
 
-    auto total_mass = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    auto total_mass = []<typename T, size_t N>(const MomentsND<T, N> & moments)
     {
-        return std::array<T, 1>{region.moments().zeroth()};
+        return std::array<T, 1>{moments.zeroth()};
     };
 
-    declare_region_func<double>(m, total_mass, "total_mass");
-    declare_region_func<float>(m, total_mass, "total_mass");
+    declare_label_func<double>(m, total_mass, "total_mass");
+    declare_label_func<float>(m, total_mass, "total_mass");
 
-    auto mean = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    auto mean = []<typename T, size_t N>(const MomentsND<T, N> & moments)
     {
-        return region.moments().first();
+        return moments.first();
     };
 
-    declare_region_func<double>(m, mean, "mean");
-    declare_region_func<float>(m, mean, "mean");
+    declare_label_func<double>(m, mean, "mean");
+    declare_label_func<float>(m, mean, "mean");
 
-    auto center_of_mass = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    auto center_of_mass = []<typename T, size_t N>(const MomentsND<T, N> & moments)
     {
-        return region.moments().central().first();
+        return moments.central().first();
     };
 
-    declare_region_func<double>(m, center_of_mass, "center_of_mass");
-    declare_region_func<float>(m, center_of_mass, "center_of_mass");
+    declare_label_func<double>(m, center_of_mass, "center_of_mass");
+    declare_label_func<float>(m, center_of_mass, "center_of_mass");
 
-    auto moment_of_inertia = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    auto moment_of_inertia = []<typename T, size_t N>(const MomentsND<T, N> & moments)
     {
-        return region.moments().second();
+        return moments.second();
     };
 
-    declare_region_func<double>(m, moment_of_inertia, "moment_of_inertia");
-    declare_region_func<float>(m, moment_of_inertia, "moment_of_inertia");
+    declare_label_func<double>(m, moment_of_inertia, "moment_of_inertia");
+    declare_label_func<float>(m, moment_of_inertia, "moment_of_inertia");
 
-    auto covariance_matrix = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    auto covariance_matrix = []<typename T, size_t N>(const MomentsND<T, N> & moments)
     {
-        return region.moments().central().second();
+        return moments.central().second();
     };
 
-    declare_region_func<double>(m, covariance_matrix, "covariance_matrix");
-    declare_region_func<float>(m, covariance_matrix, "covariance_matrix");
+    declare_label_func<double>(m, covariance_matrix, "covariance_matrix");
+    declare_label_func<float>(m, covariance_matrix, "covariance_matrix");
 
-    auto line_fit = []<typename T, size_t N>(const PixelsND<T, N> & region)
+    auto line_fit = []<typename T, size_t N>(const MomentsND<T, N> & moments)
     {
-        return region.moments().central().line().to_array();
+        return moments.central().line().to_array();
     };
 
-    declare_region_func<double>(m, line_fit, "line_fit");
-    declare_region_func<float>(m, line_fit, "line_fit");
+    declare_label_func<double>(m, line_fit, "line_fit");
+    declare_label_func<float>(m, line_fit, "line_fit");
 
-    m.def("p_values", &p_values<double>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"));
-    m.def("p_values", &p_values<float>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"));
+    m.def("p_values", &p_values<double>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"),
+          py::arg("vmin"), py::arg("xtol"), py::arg("num_threads") = 1);
+    m.def("p_values", &p_values<float>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"),
+          py::arg("vmin"), py::arg("xtol"), py::arg("num_threads") = 1);
 }

@@ -74,8 +74,7 @@ class TestNewStreakFinder:
         if isinstance(labeled, CPLabelResult):
             return labeled.labels, labeled.index
         if isinstance(labeled, NPLabelResult):
-            index = xp.arange(1, len(labeled.regions) + 1)
-            return labeled.to_array(index), index
+            return labeled.labels, labeled.index
         raise TypeError("Unknown LabelResult type")
 
     @pytest.fixture(params=['cpu', 'gpu'])

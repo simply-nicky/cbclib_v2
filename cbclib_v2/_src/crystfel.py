@@ -392,6 +392,8 @@ class PanelParser(ParsingContainer):
 
     # number of ADUs which will arise from one photon
     adu_per_photon      : FloatParser = field(default_factory=FloatParser)
+    # number of ADUs which will arise from 1 eV photon
+    adu_per_eV          : FloatParser = field(default_factory=FloatParser)
     # saturation value for the detector
     max_adu             : FloatParser = field(default_factory=lambda: FloatParser(float('inf')))
     # location of the per-pixel saturation map in the data file
@@ -621,6 +623,8 @@ class Panel(Container):
 
     # number of ADUs which will arise from one photon
     adu_per_photon      : float
+    # number of ADUs which will arise from 1 eV photon
+    adu_per_eV          : float
     # saturation value for the detector
     max_adu             : float
     # location of the per-pixel saturation map in the data file
@@ -640,7 +644,9 @@ class Panel(Container):
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        """Shape of this panel in the raw data array, one entry per non-``'%'`` axis in :attr:`dim`."""
+        """Shape of this panel in the raw data array, one entry per non-``'%'`` axis
+        in :attr:`dim`.
+        """
         return tuple(slice.stop - slice.start for slice in self.roi())
 
     @property

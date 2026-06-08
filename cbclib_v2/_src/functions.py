@@ -19,7 +19,7 @@ from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray, CP
 from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform
 from .config import get_cpu_config
 from .src import bresenham, label as cpu_label, median as cpu_median, streak_finder
-from .src.label import Structure, NPLabelResult
+from .src.label import Structure
 from .src.streak_finder import Streaks as NPStreaks
 
 def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
@@ -395,6 +395,46 @@ def binary_dilation(inp: BoolArray, structure: Structure, iterations: int=1,
     """
     ...
 
+class NPLabelResult(NamedTuple):
+    """Result of a connected-component labeling operation (CPU backend)."""
+
+    labels      : NDIntArray
+    index       : NDIntArray
+
+    @classmethod
+    def from_array(cls, labels: NDIntArray, index: NDIntArray | None=None) -> 'NPLabelResult':
+        if index is None:
+            present = NumPy.unique(labels)
+            index = present[present > 0]
+        else:
+            index = NumPy.asarray(index)
+            if NumPy.any(index <= 0):
+                raise ValueError("index array must contain positive label ids")
+
+        return cls(labels=NumPy.asarray(labels, dtype=NumPy.dtype('l')), index=index.astype('l'))
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        return self.labels.shape
+
+    def to_array(self, index: NDIntArray, out: NDIntArray | None=None) -> NDIntArray:
+        if index.size != self.index.size:
+            raise ValueError("Index array size does not match number of regions")
+
+        if out is None:
+            out = NumPy.zeros(self.labels.shape, dtype=index.dtype)
+        elif out.shape != self.labels.shape:
+            raise ValueError("out array shape does not match region shape")
+
+        max_label = int(NumPy.max(self.index)) if self.index.size else 0
+        label_map = NumPy.zeros(max_label + 1, dtype=out.dtype)
+        label_map[self.index] = index
+
+        mask = (self.labels > 0) & (self.labels <= max_label)
+        out[...] = 0
+        out[mask] = label_map[self.labels[mask]]
+        return out
+
 class CPLabelResult(NamedTuple):
     """Result of a connected-component labeling operation (GPU/CuPy backend).
 
@@ -415,8 +455,9 @@ LabelResult = NPLabelResult | CPLabelResult
 
 def _label_cpu(inp: NDBoolArray | NDIntArray, structure: Structure, npts: int=1) -> NPLabelResult:
     num_threads = get_cpu_config().effective_num_threads()
-    return cpu_label.label(inp=inp, structure=structure, npts=npts,
-                           num_threads=num_threads)
+    labels, index = cpu_label.label(inp=inp, structure=structure, npts=npts,
+                                    num_threads=num_threads)
+    return NPLabelResult(labels=labels, index=index)
 
 def _label_gpu(inp: CPBoolArray | CPIntArray, structure: Structure, npts: int=1) -> LabelResult:
     if cuda_label is None:
@@ -464,7 +505,8 @@ def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> Label
     ...
 
 def _center_of_mass_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArray:
-    return cpu_label.center_of_mass(labels=labels, data=data)
+    num_threads = get_cpu_config().effective_num_threads()
+    return cpu_label.center_of_mass(labels=labels, data=data, num_threads=num_threads)
 
 def _center_of_mass_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
     if cuda_label is None:
@@ -509,7 +551,8 @@ def center_of_mass(labels: LabelResult, data: RealArray) -> RealArray:
     ...
 
 def _covariance_matrix_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArray:
-    matrices = cpu_label.covariance_matrix(labels=labels, data=data)
+    num_threads = get_cpu_config().effective_num_threads()
+    matrices = cpu_label.covariance_matrix(labels=labels, data=data, num_threads=num_threads)
     return matrices.reshape(-1, data.ndim, data.ndim)
 
 def _covariance_matrix_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
@@ -578,7 +621,7 @@ def index(labels: LabelResult) -> NDIntArray | CPIntArray:
         index of each region.
     """
     if isinstance(labels, NPLabelResult):
-        return NumPy.arange(1, len(labels.regions) + 1, dtype=int)
+        return labels.index
     if isinstance(labels, CPLabelResult):
         return labels.index
     raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
@@ -593,11 +636,7 @@ def labels(labels: LabelResult) -> NDIntArray | CPIntArray:
     """Return the dense per-pixel label array from a :class:`~cbclib_v2.label.LabelResult`.
 
     Each pixel in the returned array contains the integer index of the
-    region it belongs to, or ``0`` for background.  For the CPU backend
-    this materialises the sparse :class:`~cbclib_v2.label.Regions`
-    representation via :meth:`~cbclib_v2.label.LabelResult.to_array`; for
-    the GPU backend it returns the stored
-    :attr:`~cbclib_v2.label.CPLabelResult.labels` array directly.
+    region it belongs to, or ``0`` for background.
 
     Args:
         labels: Labeled regions returned by :func:`label`.
@@ -608,7 +647,7 @@ def labels(labels: LabelResult) -> NDIntArray | CPIntArray:
         background).
     """
     if isinstance(labels, NPLabelResult):
-        return labels.to_array(index(labels))
+        return labels.labels
     if isinstance(labels, CPLabelResult):
         return labels.labels
     raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
@@ -710,7 +749,8 @@ def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
         line segment.
     """
     if isinstance(labels, NPLabelResult):
-        return cpu_label.line_fit(labels, data)
+        num_threads = get_cpu_config().effective_num_threads()
+        return cpu_label.line_fit(labels, data, num_threads)
     if isinstance(labels, CPLabelResult):
         centers = _center_of_mass_gpu(labels, data)
         covmat = _covariance_matrix_gpu(labels, data)
@@ -771,8 +811,9 @@ def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, 
         stronger statistical evidence for a real streak.
     """
     if isinstance(labels, NPLabelResult):
+        num_threads = get_cpu_config().effective_num_threads()
         return cpu_label.p_values(labels=labels, lines=lines, data=data, p0=p0, vmin=vmin,
-                                  xtol=xtol)
+                                  xtol=xtol, num_threads=num_threads)
     if isinstance(labels, CPLabelResult):
         if cuda_label is None:
             raise RuntimeError("label is not compiled for the current platform. "
@@ -1001,12 +1042,10 @@ def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: int | Tup
 
 def _detect_peaks_cpu(data: RealArray, labeled: NPLabelResult, radius: int, vmin: float) -> NDIntArray:
     num_threads = get_cpu_config().effective_num_threads()
-    xp = NumPy
-    labels_array = labeled.to_array(xp.arange(1, len(labeled.regions) + 1))
     radii = [0,] * (data.ndim - 2) + [1, 1]
 
-    return streak_finder.detect_peaks(labels_array, data, Structure(radii, 1), radius, vmin,
-                                          num_threads=num_threads)
+    return streak_finder.detect_peaks(labeled.labels, data, Structure(radii, 1), radius, vmin,
+                                      num_threads=num_threads)
 
 def binned_shape(shape: Tuple[int, ...], radius: int) -> Tuple[int, ...]:
     return shape[:-2] + ((shape[-2] + radius - 1) // radius, (shape[-1] + radius - 1) // radius)

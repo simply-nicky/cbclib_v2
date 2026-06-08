@@ -10,6 +10,58 @@ from cbclib_v2.label import (CPLabelResult, NPLabelResult, LabelResult, Structur
 TestNamespace = NumPyNamespace | CuPyNamespace
 TestGenerator = Generator[NDArray] | Generator[CPArray]
 
+class TestBinaryDilation:
+    @pytest.fixture(params=['cpu'])
+    def platform(self, request: pytest.FixtureRequest) -> str:
+        return request.param
+
+    @pytest.fixture
+    def xp(self, platform: str) -> TestNamespace:
+        if platform == 'cpu':
+            return NumPy
+        raise ValueError(f"Unknown platform: {platform}")
+
+    @pytest.fixture
+    def structure(self) -> Structure:
+        return Structure([1, 1], 1)
+
+    @pytest.fixture
+    def mask(self, xp: TestNamespace) -> BoolArray:
+        mask = xp.zeros((5, 5), dtype=bool)
+        mask[2, 2] = True
+        return mask
+
+    def test_iterations(self, mask: BoolArray, structure: Structure, xp: TestNamespace):
+        expected = xp.zeros_like(mask)
+        expected[2, 2] = True
+        expected[1, 2] = True
+        expected[2, 1] = True
+        expected[2, 3] = True
+        expected[3, 2] = True
+
+        result = binary_dilation(mask, structure=structure)
+        assert xp.all(result == expected)
+
+    def test_mask(self, mask: BoolArray, structure: Structure, xp: TestNamespace):
+        limited = xp.zeros_like(mask)
+        limited[2, 3] = True
+
+        expected = xp.zeros_like(mask)
+        expected[2, 2] = True
+        expected[2, 3] = True
+
+        result = binary_dilation(mask, structure=structure, iterations=2, mask=limited)
+        assert xp.all(result == expected)
+
+    def test_validation(self, structure: Structure, xp: TestNamespace):
+        mask = xp.zeros((3, 3), dtype=bool)
+
+        assert xp.all(binary_dilation(mask, structure, iterations=0) == mask)
+        with pytest.raises(ValueError, match="iterations must be non-negative"):
+            binary_dilation(mask, structure, iterations=-1)
+        with pytest.raises(ValueError, match="does not match structure rank"):
+            binary_dilation(mask, Structure([1, 1, 1], 1))
+
 @pytest.mark.parametrize('shape,structure', [((50, 50), Structure([2, 2], 2)),
                                              ((10, 10, 10), Structure([1, 1, 1], 1))])
 class TestLabel():
@@ -41,8 +93,7 @@ class TestLabel():
         if isinstance(labeled, CPLabelResult):
             return labeled.labels, labeled.index
         if isinstance(labeled, NPLabelResult):
-            index = xp.arange(1, len(labeled.regions) + 1)
-            return labeled.to_array(index), index
+            return labeled.labels, labeled.index
         raise TypeError("Unknown LabelResult type")
 
     @pytest.fixture(params=['cpu', 'gpu'])
