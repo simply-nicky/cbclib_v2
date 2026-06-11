@@ -15,9 +15,10 @@ if TYPE_CHECKING:
     from ._src.crystfel import Detector, Panel, read_crystfel
     from ._src.cxi_protocol import (H5Files, H5Handler, H5Protocol, Kinds, LoadIndices, read_hdf,
                                     write_hdf)
-    from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexArray, split,
-                                      to_list)
-    from ._src.data_processing import CrystData, CrystMetadata, RegionDetector, StreakDetector
+    from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexedContainer,
+                                      split, to_list)
+    from ._src.data_processing import (CrystData, CrystMetadata, OnlineDetector, RegionDetector,
+                                       StreakDetector)
     from ._src.run import (BaseRun, RunConfig, SwissFELConfig, SwissFELRun, XFELRun, XFELRunConfig,
                            open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
@@ -50,11 +51,12 @@ _EXPORTS = {
     "Container": ("._src.data_container", "Container"),
     "DataContainer": ("._src.data_container", "DataContainer"),
     "ArrayContainer": ("._src.data_container", "ArrayContainer"),
-    "IndexArray": ("._src.data_container", "IndexArray"),
+    "IndexedContainer": ("._src.data_container", "IndexedContainer"),
     "split": ("._src.data_container", "split"),
     "to_list": ("._src.data_container", "to_list"),
     "CrystData": ("._src.data_processing", "CrystData"),
     "CrystMetadata": ("._src.data_processing", "CrystMetadata"),
+    "OnlineDetector": ("._src.data_processing", "OnlineDetector"),
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),
     "RunConfig": ("._src.run", "RunConfig"),

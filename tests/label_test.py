@@ -4,8 +4,8 @@ import pytest
 from cbclib_v2 import default_rng, set_at
 from cbclib_v2.annotations import (BoolArray, CPArray, CuPy, CuPyNamespace, Generator, IntArray,
                                    NDArray, NumPy, NumPyNamespace, RealArray, Shape)
-from cbclib_v2.label import (CPLabelResult, NPLabelResult, LabelResult, Structure, binary_dilation,
-                             center_of_mass, covariance_matrix, label)
+from cbclib_v2.label import (LabelResult, Structure, binary_dilation, center_of_mass, covariance_matrix,
+                             label)
 
 TestNamespace = NumPyNamespace | CuPyNamespace
 TestGenerator = Generator[NDArray] | Generator[CPArray]
@@ -88,14 +88,6 @@ class TestLabel():
                         new_pixels.add(new)
         return pixels
 
-    def labels_and_index(self, labeled: LabelResult, xp: TestNamespace
-                         ) -> Tuple[IntArray, IntArray]:
-        if isinstance(labeled, CPLabelResult):
-            return labeled.labels, labeled.index
-        if isinstance(labeled, NPLabelResult):
-            return labeled.labels, labeled.index
-        raise TypeError("Unknown LabelResult type")
-
     @pytest.fixture(params=['cpu', 'gpu'])
     def platform(self, request: pytest.FixtureRequest) -> str:
         return request.param
@@ -151,7 +143,8 @@ class TestLabel():
 
     def test_label(self, seeds: IntArray, shape: Shape, structure: Structure,
                    mask: BoolArray, labeled: LabelResult, xp: TestNamespace):
-        labels = self.labels_and_index(labeled, xp)[0]
+        labels = labeled.labels
+        assert labels.dtype == xp.int32
         for seed in seeds:
             seed_index = tuple(int(x) for x in xp.unravel_index(seed, mask.shape))
             pixels = self.find_pixel_set(mask, seed_index, structure)
@@ -162,7 +155,7 @@ class TestLabel():
                            xp: TestNamespace):
         centers = center_of_mass(labeled, data)
         covmats = covariance_matrix(labeled, data)
-        labels, index = self.labels_and_index(labeled, xp)
+        labels, index = labeled.labels, labeled.index
         for i, idx in enumerate(index):
             indices = xp.where(labels == idx)
             vals = data[indices]
@@ -171,3 +164,36 @@ class TestLabel():
             expected_covmat = self.covariance_matrix(coords, vals, xp)
             assert xp.allclose(centers[i], expected_center)
             assert xp.allclose(covmats[i], expected_covmat)
+
+class TestLabelEdgeCases:
+    @pytest.fixture
+    def structure(self) -> Structure:
+        return Structure([1, 1], 1)
+
+    def test_npts_filter(self, structure: Structure):
+        mask = NumPy.zeros((5, 5), dtype=bool)
+        mask[0, 0] = True
+        mask[2, 2] = True
+        mask[2, 3] = True
+        mask[3, 2] = True
+
+        labeled = label(mask, structure=structure, npts=2)
+
+        assert labeled.labels.dtype == NumPy.int32
+        assert labeled.index.dtype == NumPy.int32
+        assert NumPy.all(labeled.labels[mask] == NumPy.array([0, 1, 1, 1], dtype=NumPy.int32))
+        assert NumPy.all(labeled.index == NumPy.array([1], dtype=NumPy.int32))
+
+    def test_non_contiguous_input(self, structure: Structure):
+        base = NumPy.zeros((6, 6), dtype=bool)
+        view = base[::2, ::2]
+        view[1, 1] = True
+        view[1, 2] = True
+
+        labeled = label(view, structure=structure)
+
+        assert labeled.labels.shape == view.shape
+        assert labeled.labels.dtype == NumPy.int32
+        assert labeled.labels[1, 1] == 1
+        assert labeled.labels[1, 2] == 1
+        assert NumPy.all(labeled.index == NumPy.array([1], dtype=NumPy.int32))

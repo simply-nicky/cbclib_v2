@@ -20,6 +20,7 @@ whole stack.
    hdf5
    geometry
    background_subtraction
+   online_detection
    streak_detection
 
 Performance
@@ -30,7 +31,7 @@ frame stacks. The library uses array-backend-aware code paths for NumPy, CuPy,
 and JAX arrays, and selected image-processing kernels have CPU/OpenMP and
 CUDA implementations. The Array API page explains backend selection and array
 conversion utilities; the low-level labeling and streak-detection APIs are
-documented in :doc:`api_image` and :doc:`api_streak_finder`.
+documented in :doc:`api_image`.
 
 .. toctree::
    :maxdepth: 1

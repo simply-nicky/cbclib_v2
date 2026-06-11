@@ -13,6 +13,7 @@ from .annotations import (Array, AnyNamespace, DataclassInstance, IntArray, NDAr
                           RealArray, Shape)
 from .array_api import array_namespace, set_at
 from .data_container import Container
+from .functions import pixel_map, radius, radial_index
 from .streaks import StackedStreaks, Streaks
 from ..indexer import Patterns
 
@@ -879,7 +880,8 @@ class Detector():
 
     @property
     def bounds(self) -> Tuple[float, float, float, float]:
-        """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame pixel units."""
+        """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame
+        pixel units."""
         x, y = [], []
         for panel in self.panels.values():
             x0, y0, x1, y1 = panel.bounds
@@ -901,6 +903,24 @@ class Detector():
     def num_modules(self) -> int:
         """Number of detector modules (product of all axes except the last two ss/fs axes)."""
         return prod(self.shape) // prod(self.shape[-2:])
+
+    def __geometry_protocol__(self) -> Dict[str, Any]:
+        """Return a compact CrystFEL geometry protocol for native online detection."""
+        x_min, y_min, x_max, y_max = self.bounds
+        panels = []
+        for panel in self.panels.values():
+            panels.append({
+                'region': (panel.region.min_fs, panel.region.max_fs,
+                           panel.region.min_ss, panel.region.max_ss),
+                'corner': (panel.corner.x, panel.corner.y),
+                'ss': (panel.ss.x, panel.ss.y, panel.ss.z),
+                'fs': (panel.fs.x, panel.fs.y, panel.fs.z),
+            })
+        return {
+            'panels': panels,
+            'shape': self.shape[-2:],
+            'bounds': (x_min, x_max, y_min, y_max),
+        }
 
     @property
     def pixel_size(self) -> float:
@@ -931,8 +951,8 @@ class Detector():
             >>> assembled = assembler(frames)
         """
         pix_x, pix_y, _ = self.pixel_map(xp=xp)
-        pix_x = xp.asarray(xp.round(pix_x - pix_x.min()), dtype=int)
-        pix_y = xp.asarray(xp.round(pix_y - pix_y.min()), dtype=int)
+        pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
+        pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
         return Assembler(pix_y, pix_x)
 
     def panel(self, module_id: int) -> Panel:
@@ -947,28 +967,116 @@ class Detector():
         return self.panels[list(self.panels.keys())[module_id]]
 
     def pixel_map(self, half_pixel_shift: bool=True, xp: AnyNamespace=NumPy):
-        """Compute the (x, y, z) lab-frame coordinate map for all panels.
+        """Compute the lab-frame coordinate map for detector pixels.
+
+        This is the geometry-aware starting point for detector assembly and
+        online radial background estimation. For every pixel covered by a panel
+        in this CrystFEL geometry, the returned map stores the corresponding
+        ``(x, y, z)`` coordinate in lab-frame pixel units. The ``x`` and ``y``
+        components describe the position in the detector plane; ``z`` includes
+        the camera length and panel ``coffset`` converted to pixels.
+
+        With ``half_pixel_shift=True`` (the default), panel-local integer
+        coordinates are shifted by 0.5 before applying the ``fs`` and ``ss``
+        vectors, so coordinates refer to pixel centres. This matches the
+        convention used by radial-profile hit finding and avoids measuring
+        radii from pixel corners.
 
         Args:
             half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
                 pixel centres when ``True`` (default).
-            xp: Array namespace; defaults to NumPy.
+            xp: Array namespace used for the output and backend dispatch.
+                ``NumPy`` uses the CPU native geometry kernel, ``CuPy`` uses
+                the CUDA kernel, and other namespaces use a portable fallback.
 
         Returns:
-            Array of shape ``(3, *detector_shape)`` with x, y, z coordinates
-            in lab-frame pixel units.
-        """
-        pixel_map = xp.zeros((3,) + self.shape)
-        for panel in self.panels.values():
-            roi = panel.roi()
-            ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[-2]),
-                                           xp.arange(panel.shape[-1]), indexing='ij')
+            Array of shape ``(3, *image_shape)``. ``out[0]`` is ``x``,
+            ``out[1]`` is ``y``, and ``out[2]`` is ``z`` in lab-frame pixel
+            units.
 
-            x, y, z = panel.to_detector(ss_grid, fs_grid, half_pixel_shift)
-            pixel_map[(0, ...) + roi] = x
-            pixel_map[(1, ...) + roi] = y
-            pixel_map[(2, ...) + roi] = z
-        return pixel_map
+        See Also:
+            :func:`~cbclib_v2.functions.pixel_map`: Low-level backend-dispatched
+            implementation.
+        """
+        return pixel_map(self, half_pixel_shift=half_pixel_shift, xp=xp)
+
+    def max_radius(self, center: Tuple[float, float]) -> float:
+        """Return the maximum radius from ``center`` to any detector pixel.
+
+        Args:
+            center: Beam center in CrystFEL lab-frame pixel coordinates.
+
+        Returns:
+            Maximum radius from ``center`` to any detector pixel in pixels.
+        """
+        bounds = self.bounds
+        min_pt, max_pt = bounds[:2], bounds[2:]
+        corners = [min_pt, (min_pt[0], max_pt[1]), (max_pt[0], min_pt[1]), max_pt]
+        return max(((corner[0] - center[0] - bounds[0]) ** 2 +
+                    (corner[1] - center[1] - bounds[1]) ** 2) ** 0.5
+                   for corner in corners)
+
+    def radii(self, center: Tuple[float, float], half_pixel_shift: bool=True,
+              xp: AnyNamespace=NumPy) -> RealArray:
+        """Return detector-pixel radii from the beam centre.
+
+        Radii are computed in the same assembled detector coordinate system as
+        :meth:`pixel_map`. The ``center`` should be the direct-beam position in
+        CrystFEL lab-frame pixel coordinates, not an array index in a single
+        module. The detector bounds are handled internally so the output aligns
+        with the assembled image grid and with :meth:`radial_index`.
+
+        Args:
+            center: Beam center in CrystFEL lab-frame pixel coordinates.
+            half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
+                pixel centres when ``True``.
+            xp: Array namespace used for the output and backend dispatch.
+
+        Returns:
+            Real array with the detector image shape. Each value is the
+            Euclidean distance from ``center`` in pixels.
+
+        See Also:
+            :meth:`radial_index`: Discretise these radii into radial bins.
+        """
+        return radius(self, center, half_pixel_shift=half_pixel_shift, xp=xp)
+
+    def radial_index(self, center: Tuple[float, float], n_bins: int,
+                     half_pixel_shift: bool=True, xp: AnyNamespace=NumPy) -> IntArray:
+        """Return integer radial-bin indices for detector pixels.
+
+        The detector plane is divided into ``n_bins`` concentric annuli around
+        ``center``. Each pixel is assigned the nearest radial bin, producing the
+        compact lookup table used by
+        :meth:`~cbclib_v2.CrystData.online_detector`,
+        :func:`~cbclib_v2.radial_profiles`, and
+        :class:`~cbclib_v2.RadialProfiles`.
+
+        Native CPU/CUDA backends mark non-panel pixels in the assembled image
+        as ``-1`` so they can be ignored during profile accumulation. Valid
+        panel pixels are in the inclusive range ``[0, n_bins - 1]``.
+
+        Args:
+            center: Beam center in CrystFEL lab-frame pixel coordinates.
+            n_bins: Number of radial bins. Use enough bins to resolve sharp
+                powder rings or SAXS/WAXS structure without making per-bin
+                counts too sparse.
+            half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
+                pixel centres when ``True``.
+            xp: Array namespace used for the output and backend dispatch.
+
+        Returns:
+            Integer radial-bin map with the detector image shape. Values index
+            compact radial profiles; ``-1`` denotes non-panel pixels on native
+            backends.
+
+        Example:
+            Build the radial lookup table used by online hit finding:
+
+            >>> geometry = read_crystfel('detector.geom')
+            >>> radial = geometry.radial_index(center=(512.0, 512.0), n_bins=1024)
+        """
+        return radial_index(self, center, n_bins, half_pixel_shift=half_pixel_shift, xp=xp)
 
     def to_detector(self, *coordinates: IntArray | RealArray, half_pixel_shift: bool=True,
                     units: Literal['pixel', 'meter']='pixel', tolerance: float=1.0

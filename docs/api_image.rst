@@ -61,18 +61,11 @@ is the bin radius used throughout streak detection.
 Label types
 -----------
 
-:func:`label` dispatches to a CPU or GPU implementation and returns one of
-two backend-specific result types:
+:func:`label` dispatches to a CPU or GPU implementation and returns
+:class:`LabelResult`, a small container holding:
 
-* **NPLabelResult** (``cbclib_v2.label.NPLabelResult``) — CPU / NumPy
-  backend.  An alias for the C++ class documented below; stores regions
-  in a compact sparse representation.
-* **CPLabelResult** (``cbclib_v2.label.CPLabelResult``) — GPU / CuPy
-  backend.  A :class:`~typing.NamedTuple` holding a dense label array and
-  a region-index vector.
-
-Use :func:`index` and :func:`labels` to extract region indices or the
-dense per-pixel integer label map from either type.
+* ``labels`` — the dense per-pixel integer label map.
+* ``index`` — the 1-D array of region indices present in the label map.
 
 .. currentmodule:: cbclib_v2.label
 
@@ -81,8 +74,6 @@ dense per-pixel integer label map from either type.
    :nosignatures:
 
    LabelResult
-   NPLabelResult
-   CPLabelResult
 
 Morphological operations
 ------------------------
@@ -93,16 +84,6 @@ Morphological operations
 
    label
    binary_dilation
-
-Accessors
----------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   index
-   labels
 
 Image moments
 -------------
@@ -120,3 +101,41 @@ functions follow the formulation from `Image moment
    ellipse_fit
    line_fit
    p_values
+
+Radial profiles
+---------------
+
+Compact radial background profiles used by online detection and hit finding.
+See :doc:`online_detection` for the high-level workflow.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   RadialProfiles
+   radial_profiles
+
+Seed-and-grow streak detection
+------------------------------
+
+**cbclib_v2.streak_finder** provides a seed-and-grow streak detection pipeline that
+is more selective for narrow, line-like features than connected-region detection.
+:class:`~cbclib_v2.StreakDetector` uses the functions in this module to implement a
+high-level streak detection pipeline.
+
+.. currentmodule:: cbclib_v2.streak_finder
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   PatternStreakFinder
+   PeakLabels
+   Streaks
+   detect_peaks
+   peak_labels
+   fit_linelets
+   detect_streaks
+   to_lines
+   n_signal
+   streak_labels

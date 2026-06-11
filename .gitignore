@@ -145,6 +145,7 @@ dmypy.json
 
 # CODEX settings
 .codex/
+AGENTS.md
 
 # Auto generated RST files from docstrings
 docs/generated

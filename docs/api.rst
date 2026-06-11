@@ -14,5 +14,4 @@ describing their purpose and usage. The API is organized into the following sect
    api_state
    api_utils
    api_image
-   api_streak_finder
    api_scripts

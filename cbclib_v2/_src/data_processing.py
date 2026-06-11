@@ -17,15 +17,17 @@ from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
 import numpy as np
-from .array_api import array_namespace
+from .array_api import array_namespace, default_rng
+from .crystfel import Detector
 from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
 from .streaks import StackedStreaks, Streaks
 from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
                           ROI, Shape)
-from .functions import (LabelResult, Structure, center_of_mass, covariance_matrix, ellipse_fit,
-                        label, line_fit, median, robust_mean, robust_lsq)
+from .functions import (LabelResult, RadialProfiles, Structure, center_of_mass, covariance_matrix,
+                        ellipse_fit, label, line_fit, median, radial_profiles, robust_lsq,
+                        robust_mean)
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
 MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
@@ -122,7 +124,7 @@ class CrystMetadata(CrystBase):
 
     protocol    : H5Protocol = field(default_factory=lambda: H5Protocol.read(METADATA_PROTOCOL))
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.is_empty(self.mask):
             if not self.is_empty(self.std):
                 self.std *= self.mask
@@ -409,7 +411,7 @@ class CrystData(CrystBase):
         ...                             r0=0.5, r1=0.95, n_iter=2, lm=9.0)
         >>> data = data.update_snr(std_min=0.5)
     """
-    data        : RealArray = field(default_factory=lambda: np.array([]))
+    data        : IntArray | RealArray = field(default_factory=lambda: np.array([]))
 
     whitefield  : RealArray = field(default_factory=lambda: np.array([]))
     std         : RealArray = field(default_factory=lambda: np.array([]))
@@ -580,6 +582,37 @@ class CrystData(CrystBase):
 
         parent = cast(ReferenceType[CrystData], ref(self))
         return RegionDetector(data=self.snr, structure=structure, parent=parent)
+
+    def online_detector(self, structure: Structure, radial_index: IntArray, n_bins: int
+                        ) -> 'OnlineDetector':
+        """Return an online radial-background region detector.
+
+        The online detector estimates a compact radial background profile for
+        each frame and labels connected pixels whose residual exceeds a radial
+        SNR threshold. It is intended for fast hit finding or coarse region
+        detection directly on raw detector counts, before constructing a
+        persistent :class:`CrystMetadata` background model.
+
+        Args:
+            structure: Connectivity structure used to group signal pixels into
+                labeled regions.
+            radial_index: Integer radial-bin map with the same detector shape
+                as one frame. Usually created with
+                :meth:`~cbclib_v2.Detector.radial_index`.
+            n_bins: Number of radial bins represented in ``radial_index``.
+
+        Raises:
+            ValueError: If ``data`` is absent.
+
+        Returns:
+            An :class:`OnlineDetector` operating on the current raw frames.
+        """
+        if self.is_empty(self.data):
+            raise ValueError('no data in the container')
+
+        parent = cast(ReferenceType[CrystData], ref(self))
+        return OnlineDetector(data=self.data, structure=structure, radial_index=radial_index,
+                              n_bins=n_bins, parent=parent)
 
     def reset_mask(self) -> 'CrystData':
         """Reset bad pixel mask. Every pixel is assumed to be good by default.
@@ -908,6 +941,98 @@ class DetectorBase(DataContainer):
         """Return a new detector with SNR values clipped to ``[vmin, vmax]``."""
         xp = self.__array_namespace__()
         return self.replace(data=xp.clip(self.data, vmin, vmax))
+
+@dataclass
+class OnlineDetector(DataContainer):
+    """Radial-background detector for online hit and region detection.
+
+    Online detection is a fast, permissive save/reject step used during data
+    acquisition or early inspection, when high-rate FEL detector streams are
+    too large to keep in full. ``OnlineDetector`` estimates a compact radial
+    background from the frames being searched and labels connected pixels whose
+    residual radial SNR exceeds a threshold.
+
+    The result is suitable for hit finding and candidate-region discovery. It
+    is not a final background-subtraction method for intensity scaling, and it
+    does not enforce the streak-like morphology expected from CBC diffraction.
+
+    Attributes:
+        data: Raw detector frame stack, shape ``(n_frames, *frame_shape)`` or a
+            compatible leading batch shape.
+        structure: Connectivity structure used by :func:`~cbclib_v2.label` to
+            group signal pixels into regions.
+        radial_index: Integer radial-bin map with shape ``frame_shape``.
+            Pixels outside the detector panels may be marked ``-1`` by native
+            geometry helpers and are ignored by the radial-profile kernels.
+        n_bins: Number of radial bins in the compact profiles.
+        parent: Weak reference to the source :class:`CrystData` container.
+
+    Example:
+        Estimate radial profiles and label online signal regions:
+
+        >>> detector = read_crystfel('detector.geom')
+        >>> radial = detector.radial_index(center=(512.0, 512.0), n_bins=1024)
+        >>> online = data.online_detector(Structure([1, 1], 1), radial, 1024)
+        >>> profiles = online.profiles(clip_snr=4.0, n_iter=5)
+        >>> regions = online.detect_regions(profiles, min_snr=5.0, npts=3)
+    """
+    data            : IntArray | RealArray
+    structure       : Structure
+    radial_index    : IntArray
+    n_bins          : int
+    parent          : ReferenceType[CrystData]
+
+    def profiles(self, interval: int=1, clip_snr: float=3.0, n_iter: int=3,
+                 std_min: float=0.0) -> RadialProfiles:
+        """Compute compact per-frame radial whitefield and noise profiles.
+
+        The profile estimator groups pixels by ``radial_index`` and computes
+        one mean and standard deviation per radial bin. The fit is repeated
+        ``n_iter`` times; after each pass, pixels above
+        ``mean + clip_snr * std`` are excluded so sparse diffraction peaks do
+        not bias the background estimate.
+
+        Args:
+            interval: Process every ``interval``-th radial bin together in the
+                native kernel. Larger values can improve throughput for many
+                narrow bins at the cost of coarser temporary grouping.
+            clip_snr: SNR threshold used to reject bright outliers during
+                iterative profile estimation.
+            n_iter: Number of outlier-rejection passes.
+            std_min: Lower bound for per-bin standard deviation.
+
+        Returns:
+            Compact :class:`~cbclib_v2.RadialProfiles` containing per-frame
+            radial ``whitefield``, ``std``, and pixel ``counts`` arrays of
+            shape ``(n_frames, n_bins)``.
+        """
+        return radial_profiles(self.data, self.radial_index, self.n_bins, interval,
+                               clip_snr=clip_snr, n_iter=n_iter, std_min=std_min)
+
+    def detect_regions(self, profiles: RadialProfiles, min_snr: float,
+                       npts: int=1, std_min: float=0.0) -> LabelResult:
+        """Label connected pixels above the radial residual-SNR threshold.
+
+        Each pixel is compared with the whitefield/std value of its radial bin:
+        ``(data - whitefield[r]) / max(std[r], std_min)``. Pixels with residual
+        SNR at least ``min_snr`` are foreground and are grouped with
+        :func:`~cbclib_v2.label` using :attr:`structure`.
+
+        Args:
+            profiles: Compact radial background model returned by
+                :meth:`profiles`.
+            min_snr: Minimum radial residual SNR for a pixel to be considered
+                signal.
+            npts: Minimum connected-region size in pixels. Smaller regions are
+                discarded.
+            std_min: Lower bound for the radial standard deviation used in the
+                SNR denominator.
+
+        Returns:
+            Labeled online signal regions as a :class:`~cbclib_v2.LabelResult`.
+        """
+        signal = profiles.is_signal(self.data, self.radial_index, min_snr, std_min)
+        return label(signal, structure=self.structure, npts=npts)
 
 @dataclass
 class StreakDetector(DetectorBase):

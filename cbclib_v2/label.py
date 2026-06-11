@@ -1,4 +1,4 @@
 from ._src.src.label import Structure
-from ._src.functions import (CPLabelResult, LabelResult, NPLabelResult, binary_dilation,
-                             label, center_of_mass, covariance_matrix, ellipse_fit, index,
-                             labels, line_fit, p_values)
+from ._src.functions import LabelResult, RadialProfiles
+from ._src.functions import (binary_dilation, label, center_of_mass, covariance_matrix,
+                             ellipse_fit, line_fit, p_values, radial_profiles)

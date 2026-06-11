@@ -5,7 +5,7 @@
 
 namespace cbclib {
 
-using LabelResult = std::tuple<py::array_t<long>, py::array_t<long>>;
+using LabelResult = std::tuple<py::array_t<int>, py::array_t<int>>;
 
 namespace detail {
 
@@ -356,6 +356,16 @@ bool is_inbound_shift(const std::vector<size_t> & coord, const ShiftOffset & shi
         if (shifted < 0 || shifted >= static_cast<long>(shape[dim])) return false;
     }
     return true;
+}
+
+template <typename Shape, typename = std::enable_if_t<std::is_integral_v<typename Shape::value_type>>>
+void next_coord(std::vector<size_t> & coord, const Shape & shape)
+{
+    for (size_t dim = shape.size(); dim-- > 0;)
+    {
+        if (++coord[dim] < shape[dim]) return;
+        coord[dim] = 0;
+    }
 }
 
 template <typename Shape, typename = std::enable_if_t<std::is_integral_v<typename Shape::value_type>>>

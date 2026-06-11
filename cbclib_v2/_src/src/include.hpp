@@ -1,6 +1,7 @@
 #ifndef INCLUDE_
 #define INCLUDE_
 
+#include <array>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>

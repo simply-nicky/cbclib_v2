@@ -8,6 +8,7 @@ Tests cover:
 - Detector: Geometry calculations and transformations
 """
 from pathlib import Path
+import numpy as np
 import pytest
 from cbclib_v2 import read_crystfel
 from cbclib_v2.test_util import parse_crystfel_file
@@ -168,6 +169,34 @@ class TestFullGeometryParsing:
         detector = read_crystfel(str(geom_file))
         assert detector.shape == (1, 512, 1024)
         assert detector.panels['panel'].shape == (1, 512, 1024)
+
+    def test_radii(self, tmp_path: Path) -> None:
+        """Test detector radius generation in detector-frame coordinates."""
+        geom_file = tmp_path / "radius.geom"
+        content = (
+            "photon_energy = 12.0keV\n"
+            "clen = 0.1m\n"
+            "res = 1\n"
+            "panel/corner_x = -0.5\n"
+            "panel/corner_y = -0.5\n"
+            "panel/fs = +1.0x+0.0y\n"
+            "panel/ss = +0.0x+1.0y\n"
+            "panel/min_fs = 0\n"
+            "panel/max_fs = 2\n"
+            "panel/min_ss = 0\n"
+            "panel/max_ss = 2\n"
+        )
+        geom_file.write_text(content)
+
+        detector = read_crystfel(str(geom_file))
+        radii = detector.radii((0.0, 0.0))
+
+        assert radii.shape == (3, 3)
+        np.testing.assert_allclose(radii, np.asarray([
+            [0.0, 1.0, 2.0],
+            [1.0, 2.0 ** 0.5, 5.0 ** 0.5],
+            [2.0, 5.0 ** 0.5, 8.0 ** 0.5],
+        ]))
 
     def test_supported_geometry_fields(self, tmp_path: Path) -> None:
         """Test fields listed in the CrystFEL geometry convention."""

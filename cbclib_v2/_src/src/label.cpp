@@ -47,34 +47,40 @@ auto dilate_impl(py::array_t<bool> input, Structure structure, py::ssize_t itera
 
         #pragma omp parallel num_threads(threads)
         {
-            std::vector<size_t> coord(shape.size());
+            int thread_id = omp_get_thread_num();
+            long chunk = (current.size() + threads - 1) / threads;
 
-            #pragma omp for
-            for (long index = 0; index < static_cast<long>(current.size()); ++index)
+            long thread_start = thread_id * chunk;
+            long thread_end = std::min<long>((thread_id + 1) * chunk, current.size());
+
+            std::vector<size_t> coord(shape.size());
+            if (thread_start < thread_end) inp.coord_at(coord.begin(), thread_start);
+
+            for (long index = thread_start; index < thread_end; ++index)
             {
                 if (current[index])
                 {
                     next[index] = 1;
-                    continue;
                 }
-
-                if (has_mask && !(*marr)[index])
+                else if (has_mask && !(*marr)[index])
                 {
                     next[index] = 0;
-                    continue;
+                }
+                else
+                {
+                    unsigned char value = 0;
+                    for (const auto & shift : shifts)
+                    {
+                        if (detail::is_inbound_shift(coord, shift, shape) && current[index + shift.offset])
+                        {
+                            value = 1;
+                            break;
+                        }
+                    }
+                    next[index] = value;
                 }
 
-                inp.coord_at(coord.begin(), index);
-                unsigned char value = 0;
-                for (const auto & shift : shifts)
-                {
-                    if (detail::is_inbound_shift(coord, shift, shape) && current[index + shift.offset])
-                    {
-                        value = 1;
-                        break;
-                    }
-                }
-                next[index] = value;
+                detail::next_coord(coord, shape);
             }
         }
 
@@ -104,6 +110,339 @@ auto dilate_with_mask(py::array_t<bool> input, Structure structure, py::ssize_t 
     return dilate_impl(std::move(input), std::move(structure), iterations, std::move(mask), threads);
 }
 
+template <size_t N>
+struct LabelShift
+{
+    std::array<int, N> delta;
+    std::array<int, N> lower;
+    std::array<int, N> upper;
+    int offset = 0;
+};
+
+template <size_t N>
+struct Bounds
+{
+    std::array<int, N> lower;
+    std::array<int, N> upper;
+
+    bool contains(const std::array<int, N> & coord) const
+    {
+        for (size_t dim = 0; dim < N; ++dim)
+        {
+            if (coord[dim] < lower[dim] || coord[dim] >= upper[dim]) return false;
+        }
+        return true;
+    }
+};
+
+template <size_t N>
+std::array<int, N> int_shape(const array_indexer & inp)
+{
+    std::array<int, N> shape;
+    for (size_t dim = 0; dim < N; ++dim) shape[dim] = static_cast<int>(inp.shape(dim));
+    return shape;
+}
+
+template <size_t N>
+std::array<int, N> int_strides(const std::array<int, N> & shape)
+{
+    std::array<int, N> strides;
+    int stride = 1;
+    for (size_t dim = N; dim-- > 0;)
+    {
+        strides[dim] = stride;
+        stride *= shape[dim];
+    }
+    return strides;
+}
+
+template <size_t N>
+std::array<int, N> coord_at(int index, const std::array<int, N> & shape)
+{
+    std::array<int, N> coord;
+    for (size_t dim = N; dim-- > 0;)
+    {
+        coord[dim] = index % shape[dim];
+        index /= shape[dim];
+    }
+    return coord;
+}
+
+template <size_t N>
+void next_coord(std::array<int, N> & coord, const std::array<int, N> & shape)
+{
+    for (size_t dim = N; dim-- > 0;)
+    {
+        if (++coord[dim] < shape[dim]) return;
+        coord[dim] = 0;
+    }
+}
+
+template <size_t N>
+bool is_inbound_shift(const std::array<int, N> & coord, const LabelShift<N> & shift)
+{
+    for (size_t dim = 0; dim < N; ++dim)
+    {
+        if (coord[dim] < shift.lower[dim] || coord[dim] >= shift.upper[dim]) return false;
+    }
+    return true;
+}
+
+template <size_t N>
+std::vector<LabelShift<N>> label_shifts(const Structure & structure, const std::array<int, N> & shape,
+                                        const std::array<int, N> & strides)
+{
+    std::vector<LabelShift<N>> shifts;
+    shifts.reserve(structure.size() - 1);
+
+    for (const auto & shift : structure.shifts())
+    {
+        LabelShift<N> result;
+        for (size_t dim = 0; dim < N; ++dim)
+        {
+            result.delta[dim] = static_cast<int>(shift[dim]);
+            result.offset += result.delta[dim] * strides[dim];
+            result.lower[dim] = std::max(0, -result.delta[dim]);
+            result.upper[dim] = shape[dim] - std::max(0, result.delta[dim]);
+        }
+
+        if (result.offset < 0) shifts.emplace_back(result);
+    }
+    return shifts;
+}
+
+template <size_t N>
+Bounds<N> interior_bounds(const std::vector<LabelShift<N>> & shifts, const std::array<int, N> & shape)
+{
+    Bounds<N> bounds;
+    for (size_t dim = 0; dim < N; ++dim)
+    {
+        bounds.lower[dim] = 0;
+        bounds.upper[dim] = shape[dim];
+    }
+
+    for (const auto & shift : shifts)
+    {
+        for (size_t dim = 0; dim < N; ++dim)
+        {
+            bounds.lower[dim] = std::max(bounds.lower[dim], shift.lower[dim]);
+            bounds.upper[dim] = std::min(bounds.upper[dim], shift.upper[dim]);
+        }
+    }
+    return bounds;
+}
+
+int find_root(array<int> & out, int index)
+{
+    int root = index;
+    while (out[root] != root) root = out[root];
+
+    while (out[index] != index)
+    {
+        int next = out[index];
+        out[index] = root;
+        index = next;
+    }
+    return root;
+}
+
+int root_of(const array<int> & out, int index)
+{
+    int root = index;
+    while (out[root] != root) root = out[root];
+    return root;
+}
+
+int merge_roots(array<int> & out, int lhs, int rhs)
+{
+    lhs = find_root(out, lhs);
+    rhs = find_root(out, rhs);
+    if (lhs == rhs) return lhs;
+
+    if (lhs < rhs)
+    {
+        out[rhs] = lhs;
+        return lhs;
+    }
+
+    out[lhs] = rhs;
+    return rhs;
+}
+
+template <typename I, size_t N>
+LabelResult label_impl(py::array_t<I> input, Structure structure, size_t npts, unsigned threads)
+{
+    array<I> inp {input.request()};
+    py::array_t<int> labels {std::vector<py::ssize_t>(input.shape(), input.shape() + input.ndim())};
+    array<int> out {labels.request()};
+
+    if (inp.size() == 0)
+    {
+        return std::make_tuple(std::move(labels), py::array_t<int>{std::vector<py::ssize_t>{0}});
+    }
+
+    threads = std::max<unsigned>(1, std::min<unsigned>(threads, inp.size()));
+    std::vector<std::vector<std::pair<int, int>>> boundary_edges (threads);
+    auto shape = int_shape<N>(inp);
+    auto strides = int_strides<N>(shape);
+    auto shifts = label_shifts<N>(structure, shape, strides);
+    auto interior = interior_bounds<N>(shifts, shape);
+
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        int thread_id = omp_get_thread_num();
+        int chunk = static_cast<int>((inp.size() + threads - 1) / threads);
+
+        int thread_start = thread_id * chunk;
+        int thread_end = std::min<int>((thread_id + 1) * chunk, static_cast<int>(inp.size()));
+
+        for (int index = thread_start; index < thread_end; ++index)
+        {
+            out[index] = inp[index] ? index : -1;
+        }
+
+        #pragma omp barrier
+
+        auto coord = coord_at<N>(thread_start, shape);
+        for (int index = thread_start; index < thread_end; ++index)
+        {
+            if (out[index] >= 0)
+            {
+                int root = index;
+                bool is_interior = interior.contains(coord);
+                for (const auto & shift : shifts)
+                {
+                    if (!is_interior && !is_inbound_shift(coord, shift)) continue;
+
+                    int neighbour = index + shift.offset;
+                    if constexpr (std::is_same_v<I, bool>)
+                    {
+                        if (out[neighbour] < 0) continue;
+                    }
+                    else
+                    {
+                        if (out[neighbour] < 0 || inp[neighbour] != inp[index]) continue;
+                    }
+
+                    if (neighbour >= thread_start && neighbour < thread_end)
+                    {
+                        root = merge_roots(out, root, neighbour);
+                    }
+                    else
+                    {
+                        boundary_edges[thread_id].emplace_back(index, neighbour);
+                    }
+                }
+            }
+            next_coord(coord, shape);
+        }
+    }
+
+    for (auto & edges : boundary_edges)
+    {
+        for (auto [lhs, rhs] : edges) merge_roots(out, lhs, rhs);
+    }
+
+    #pragma omp parallel for num_threads(threads)
+    for (int index = 0; index < static_cast<int>(out.size()); ++index)
+    {
+        if (out[index] >= 0) out[index] = root_of(out, index);
+    }
+
+    int n_labels = 0;
+    if (npts <= 1)
+    {
+        for (int index = 0; index < static_cast<int>(out.size()); ++index)
+        {
+            if (out[index] == index) out[index] = -(++n_labels + 1);
+        }
+    }
+    else
+    {
+        std::vector<int> roots;
+        for (int index = 0; index < static_cast<int>(out.size()); ++index)
+        {
+            if (out[index] == index)
+            {
+                out[index] = -static_cast<int>(roots.size()) - 2;
+                roots.push_back(index);
+            }
+        }
+
+        std::vector<size_t> label_sizes (roots.size(), 0);
+        for (int index = 0; index < static_cast<int>(out.size()); ++index)
+        {
+            int value = out[index];
+            if (value == -1) continue;
+
+            int slot = (value < -1) ? -value - 2 : -out[value] - 2;
+            label_sizes[slot]++;
+        }
+
+        for (size_t slot = 0; slot < roots.size(); ++slot)
+        {
+            int root = roots[slot];
+            out[root] = (label_sizes[slot] >= npts) ? -(++n_labels + 1) : -1;
+        }
+    }
+
+    if (threads == 1)
+    {
+        for (int index = static_cast<int>(out.size()); index-- > 0;)
+        {
+            int value = out[index];
+            if (value == -1)
+            {
+                out[index] = 0;
+            }
+            else if (value < -1)
+            {
+                out[index] = -value - 1;
+            }
+            else
+            {
+                value = out[value];
+                out[index] = (value < -1) ? -value - 1 : 0;
+            }
+        }
+    }
+    else
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int index = 0; index < static_cast<int>(out.size()); ++index)
+        {
+            int value = out[index];
+            if (value >= 0)
+            {
+                value = out[value];
+                out[index] = (value < -1) ? -value - 1 : 0;
+            }
+        }
+
+        #pragma omp parallel for num_threads(threads)
+        for (int index = 0; index < static_cast<int>(out.size()); ++index)
+        {
+            int value = out[index];
+            if (value == -1) out[index] = 0;
+            else if (value < -1) out[index] = -value - 1;
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    e.rethrow();
+
+    py::array_t<int> index {std::vector<py::ssize_t>{n_labels}};
+    array<int> iarr {index.request()};
+    for (int i = 0; i < n_labels; ++i) iarr[i] = i + 1;
+
+    return std::make_tuple(std::move(labels), std::move(index));
+}
+
 template <typename I>
 LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsigned threads)
 {
@@ -115,150 +454,29 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
                                     ") does not match structure rank (" + std::to_string(structure.rank()) + ")");
     }
 
-    py::array_t<long> labels {std::vector<py::ssize_t>(input.shape(), input.shape() + input.ndim())};
-    array<long> out {labels.request()};
-
-    if (inp.size() == 0)
+    if (inp.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
     {
-        return std::make_tuple(std::move(labels), py::array_t<long>{std::vector<py::ssize_t>{0}});
+        throw std::invalid_argument("input array is too large for int32 label indices");
     }
 
-    threads = std::max<unsigned>(1, std::min<unsigned>(threads, inp.size()));
-
-    std::vector<long> parent (inp.size(), -1);
-    std::vector<std::vector<std::pair<long, long>>> boundary_edges (threads);
-
-    auto shape = inp.shape();
-    auto shifts = detail::shift_offsets(structure, shape, false, true);
-
-    auto find_root = [](std::vector<long> & parent, long index)
+    switch (input.ndim())
     {
-        long root = index;
-        while (parent[root] != root) root = parent[root];
-
-        while (parent[index] != index)
-        {
-            long next = parent[index];
-            parent[index] = root;
-            index = next;
-        }
-        return root;
-    };
-
-    auto merge_roots = [&find_root](std::vector<long> & parent, long lhs, long rhs)
-    {
-        lhs = find_root(parent, lhs);
-        rhs = find_root(parent, rhs);
-        if (lhs == rhs) return;
-
-        if (lhs < rhs) parent[rhs] = lhs;
-        else parent[lhs] = rhs;
-    };
-
-    thread_exception e;
-
-    py::gil_scoped_release release;
-
-    #pragma omp parallel num_threads(threads)
-    {
-        int thread_id = omp_get_thread_num();
-        long chunk = (inp.size() + threads - 1) / threads;
-
-        long thread_start = thread_id * chunk;
-        long thread_end = std::min<long>((thread_id + 1) * chunk, inp.size());
-
-        for (long index = thread_start; index < thread_end; ++index)
-        {
-            if (inp[index]) parent[index] = index;
-        }
-
-        #pragma omp barrier
-
-        std::vector<size_t> coord (shape.size());
-        for (long index = thread_start; index < thread_end; ++index)
-        {
-            if (parent[index] < 0) continue;
-
-            inp.coord_at(coord.begin(), index);
-            for (const auto & shift : shifts)
-            {
-                if (!detail::is_inbound_shift(coord, shift, shape)) continue;
-
-                long neighbour = index + shift.offset;
-                if (parent[neighbour] < 0 || inp[neighbour] != inp[index]) continue;
-
-                if (neighbour >= thread_start && neighbour < thread_end)
-                {
-                    merge_roots(parent, index, neighbour);
-                }
-                else
-                {
-                    boundary_edges[thread_id].emplace_back(index, neighbour);
-                }
-            }
-        }
+        case 2: return label_impl<I, 2>(std::move(input), std::move(structure), npts, threads);
+        case 3: return label_impl<I, 3>(std::move(input), std::move(structure), npts, threads);
+        case 4: return label_impl<I, 4>(std::move(input), std::move(structure), npts, threads);
+        case 5: return label_impl<I, 5>(std::move(input), std::move(structure), npts, threads);
+        case 6: return label_impl<I, 6>(std::move(input), std::move(structure), npts, threads);
+        case 7: return label_impl<I, 7>(std::move(input), std::move(structure), npts, threads);
+        default:
+            throw std::invalid_argument("Unsupported number of dimensions: " + std::to_string(input.ndim()));
     }
-
-    for (auto & edges : boundary_edges)
-    {
-        for (auto [lhs, rhs] : edges) merge_roots(parent, lhs, rhs);
-    }
-
-    std::vector<long> label_map (parent.size(), 0);
-    long n_labels = 0;
-
-    if (npts <= 1)
-    {
-        for (long index = 0; index < static_cast<long>(parent.size()); ++index)
-        {
-            if (parent[index] < 0) continue;
-
-            parent[index] = find_root(parent, index);
-            if (parent[index] == index) label_map[index] = ++n_labels;
-        }
-    }
-    else
-    {
-        std::vector<size_t> label_sizes (parent.size(), 0);
-        for (long index = 0; index < static_cast<long>(parent.size()); ++index)
-        {
-            if (parent[index] < 0) continue;
-
-            parent[index] = find_root(parent, index);
-            label_sizes[parent[index]]++;
-        }
-
-        for (size_t index = 0; index < parent.size(); ++index)
-        {
-            if (parent[index] == static_cast<long>(index) && label_sizes[index] >= npts)
-            {
-                label_map[index] = ++n_labels;
-            }
-        }
-    }
-
-    #pragma omp parallel for num_threads(threads)
-    for (long index = 0; index < static_cast<long>(parent.size()); ++index)
-    {
-        out[index] = (parent[index] >= 0) ? label_map[parent[index]] : 0;
-    }
-
-    py::gil_scoped_acquire acquire;
-
-    e.rethrow();
-
-    py::array_t<long> index {std::vector<py::ssize_t>{n_labels}};
-    array<long> iarr {index.request()};
-    for (long i = 0; i < n_labels; ++i) iarr[i] = i + 1;
-
-    return std::make_tuple(std::move(labels), std::move(index));
 }
 
 template <typename T, size_t N>
 std::vector<MomentsND<T, N>> moments_from_labels(const LabelResult & labels, py::array_t<T> data, unsigned threads)
 {
-    array<long> larr {std::get<0>(labels).request()};
-    array<long> iarr {std::get<1>(labels).request()};
+    array<int> larr {std::get<0>(labels).request()};
+    array<int> iarr {std::get<1>(labels).request()};
     array<T> darr {data.request()};
 
     check_equal("labels and data must have the same shape",
@@ -268,13 +486,13 @@ std::vector<MomentsND<T, N>> moments_from_labels(const LabelResult & labels, py:
     py::ssize_t max_label = 0;
     for (auto label_id : iarr) if (label_id > max_label) max_label = label_id;
 
-    std::vector<long> label_to_slot (max_label + 1, -1);
+    std::vector<int> label_to_slot (max_label + 1, -1);
     for (size_t i = 0; i < iarr.size(); ++i)
     {
         if (iarr[i] > 0) label_to_slot[iarr[i]] = i;
     }
 
-    std::vector<long> first_index (iarr.size(), -1);
+    std::vector<int> first_index (iarr.size(), -1);
     for (size_t i = 0; i < larr.size(); ++i)
     {
         auto label_id = larr[i];
@@ -376,8 +594,8 @@ template <typename T, size_t N>
 py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol,
                            unsigned threads)
 {
-    array<long> labels_array {std::get<0>(labels).request()};
-    array<long> index_array {std::get<1>(labels).request()};
+    array<int> labels_array {std::get<0>(labels).request()};
+    array<int> index_array {std::get<1>(labels).request()};
 
     py::array_t<T> result (std::vector<py::ssize_t>{py::ssize_t(index_array.size())});
     array<T> out {result.request()};
@@ -391,7 +609,7 @@ py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py
     py::ssize_t max_label = 0;
     for (auto label_id : index_array) if (label_id > max_label) max_label = label_id;
 
-    std::vector<long> label_to_slot (max_label + 1, -1);
+    std::vector<int> label_to_slot (max_label + 1, -1);
     for (size_t i = 0; i < index_array.size(); ++i)
     {
         if (index_array[i] > 0) label_to_slot[index_array[i]] = i;

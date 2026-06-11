@@ -317,21 +317,23 @@ struct ArrayViewND : public ArrayIndexerND<N>
 {
     using ArrayIndexerND<N>::_M_shape;
     using ArrayIndexerND<N>::_M_strides;
+    using ShapeND<N>::_M_size;
     T * _M_ptr;
+    bool _M_contiguous;
 
-    ArrayViewND() : ArrayIndexerND<N>(), _M_ptr(nullptr) {}
+    ArrayViewND() : ArrayIndexerND<N>(), _M_ptr(nullptr), _M_contiguous(false) {}
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
     HOST_DEVICE ArrayViewND(T * ptr, const I * shape, const I * strides)
-        : ArrayIndexerND<N>(shape, strides), _M_ptr(ptr) {}
+        : ArrayIndexerND<N>(shape, strides), _M_ptr(ptr), _M_contiguous(is_c_contiguous()) {}
 
     HOST_DEVICE T & operator[] (csize_t index)
     {
-        return *(_M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T));
+        return *data(index);
     }
     HOST_DEVICE const T & operator[] (csize_t index) const
     {
-        return *(_M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T));
+        return *data(index);
     }
 
     HOST_DEVICE T * data() { return _M_ptr; }
@@ -339,10 +341,12 @@ struct ArrayViewND : public ArrayIndexerND<N>
 
     HOST_DEVICE T * data(csize_t index)
     {
+        if (_M_contiguous) return _M_ptr + index;
         return _M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T);
     }
     HOST_DEVICE const T * data(csize_t index) const
     {
+        if (_M_contiguous) return _M_ptr + index;
         return _M_ptr + cbclib::detail::index_to_offset(index, _M_shape.data(), _M_strides.data(), csize_t(), N) / sizeof(T);
     }
 
@@ -374,6 +378,18 @@ struct ArrayViewND : public ArrayIndexerND<N>
     HOST_DEVICE const T & at(Ix... index) const
     {
         return *data(PointND<csize_t, N>{static_cast<csize_t>(index)...});
+    }
+
+    HOST_DEVICE bool is_c_contiguous() const
+    {
+        csize_t stride = sizeof(T);
+        for (csize_t dim = N; dim > 0; --dim)
+        {
+            if (_M_shape[dim - 1] == 0) return true;
+            if (_M_strides[dim - 1] != stride) return false;
+            stride *= _M_shape[dim - 1];
+        }
+        return true;
     }
 
     HOST_DEVICE StridedIterator<T> begin_at(csize_t offset, csize_t dim)
@@ -454,6 +470,7 @@ public:
         this->m_itemsize = sizeof(T);
         this->m_ndim = m_shape.size();
         this->m_ptr = ptr;
+        m_contiguous = is_c_contiguous();
     }
 
     py::dtype dtype() const {return py::dtype::of<T>();}
@@ -493,6 +510,15 @@ public:
     array_t reshape(std::initializer_list<py::ssize_t> new_shape) const
     {
         return reshape(std::vector<py::ssize_t>(new_shape));
+    }
+
+    T & operator[] (py::ssize_t index)
+    {
+        return *data(index);
+    }
+    const T & operator[] (py::ssize_t index) const
+    {
+        return *data(index);
     }
 
     void fill(const T & value)
@@ -563,9 +589,33 @@ public:
         return py::detail::npy_api::get().PyArray_EquivTypes_(py::dtype::of<T>().ptr(), py::dtype(typestr).ptr());
     }
 
+    T * data(py::ssize_t index)
+    {
+        if (m_contiguous) return this->m_ptr + index;
+        return this->m_ptr + this->index_to_offset(index, 0, this->m_ndim) / this->m_itemsize;
+    }
+    const T * data(py::ssize_t index) const
+    {
+        if (m_contiguous) return this->m_ptr + index;
+        return this->m_ptr + this->index_to_offset(index, 0, this->m_ndim) / this->m_itemsize;
+    }
+
 protected:
+    bool is_c_contiguous() const
+    {
+        py::ssize_t stride = sizeof(T);
+        for (py::ssize_t dim = this->m_ndim; dim > 0; --dim)
+        {
+            if (this->m_shape_ptr[dim - 1] == 0) return true;
+            if (this->m_strides_ptr[dim - 1] != stride) return false;
+            stride *= this->m_shape_ptr[dim - 1];
+        }
+        return true;
+    }
+
     std::vector<py::ssize_t> m_shape, m_strides;
     py::object m_base;  // Owns reference to original Python object
+    bool m_contiguous = false;
 };
 
 // Device array and range wrappers
