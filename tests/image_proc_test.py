@@ -46,7 +46,8 @@ class TestImageProcessing():
             pytest.xfail("CuPy's median over an empty array raises an error")
 
         out = median(xp.zeros((0,)))
-        out2 = xp.median(xp.zeros((0,)))
+        with pytest.warns(RuntimeWarning):
+            out2 = xp.median(xp.zeros((0,)))
 
         assert xp.all((out == out2) | (xp.isnan(out) & xp.isnan(out2)))
 

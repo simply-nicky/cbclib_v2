@@ -25,19 +25,19 @@ class TestJaxPrimitives():
 
     @pytest.fixture
     def src(self, rng: Generator, xp: JaxNamespace) -> RealArray:
-        return xp.asarray(rng.random(3))
+        return xp.asarray(rng.random(3, dtype=xp.float32))
 
     @pytest.fixture
     def generate_mats(self, rng: Generator, n_samples: Shape, xp: JaxNamespace) -> GenFunc:
-        return lambda : xp.asarray(rng.random(n_samples + (3, 3)))
+        return lambda : xp.asarray(rng.random(n_samples + (3, 3), dtype=xp.float32))
 
     @pytest.fixture
     def generate_vecs(self, rng: Generator, n_samples: Shape, xp: JaxNamespace) -> GenFunc:
-        return lambda : xp.asarray(rng.random(n_samples + (3,)))
+        return lambda : xp.asarray(rng.random(n_samples + (3,), dtype=xp.float32))
 
     @pytest.fixture
     def generate_coords(self, rng: Generator, n_samples: Shape, xp: JaxNamespace) -> GenFunc:
-        return lambda : xp.asarray(rng.random(n_samples))
+        return lambda : xp.asarray(rng.random(n_samples, dtype=xp.float32))
 
     @pytest.fixture
     def idxs(self, n_samples: Shape, xp: JaxNamespace) -> IntArray:

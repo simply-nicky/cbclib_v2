@@ -17,10 +17,9 @@ if TYPE_CHECKING:
                                     write_hdf)
     from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexedContainer,
                                       split, to_list)
-    from ._src.data_processing import (CrystData, CrystMetadata, OnlineDetector, RegionDetector,
-                                       StreakDetector)
-    from ._src.run import (BaseRun, RunConfig, SwissFELConfig, SwissFELRun, XFELRun, XFELRunConfig,
-                           open_run)
+    from ._src.data_processing import CrystData, CrystMetadata, RegionDetector, StreakDetector
+    from ._src.run import (BaseRun, RunConfig, RunLocator, LCLSConfig, LCLSRun, SwissFELConfig,
+                           SwissFELRun, XFELRun, XFELConfig, open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
     from ._src.streaks import Lines, StackedStreaks, Streaks
 
@@ -60,8 +59,11 @@ _EXPORTS = {
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),
     "RunConfig": ("._src.run", "RunConfig"),
+    "RunLocator": ("._src.run", "RunLocator"),
     "BaseRun": ("._src.run", "BaseRun"),
-    "XFELRunConfig": ("._src.run", "XFELRunConfig"),
+    "LCLSConfig": ("._src.run", "LCLSConfig"),
+    "LCLSRun": ("._src.run", "LCLSRun"),
+    "XFELConfig": ("._src.run", "XFELConfig"),
     "XFELRun": ("._src.run", "XFELRun"),
     "SwissFELConfig": ("._src.run", "SwissFELConfig"),
     "SwissFELRun": ("._src.run", "SwissFELRun"),

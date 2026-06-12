@@ -99,7 +99,9 @@ class BaseLines(ArrayContainer):
         tau = self.pt1 - self.pt0
         center = 0.5 * (self.pt0 + self.pt1)
         r = point - center
-        r_tau = xp.sum(tau * r, axis=-1) / xp.sum(tau**2, axis=-1)
+        tau_mag = xp.sum(tau**2, axis=-1)
+        tau_mag_safe = xp.where(tau_mag != 0, tau_mag, 1)
+        r_tau = xp.where(tau_mag != 0, xp.sum(tau * r, axis=-1) / tau_mag_safe, 0)
         r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
         return tau * r_tau + center
 

@@ -80,7 +80,7 @@ run 373):
 ``data``
    Facility identity and HDF5 layout.  ``facility`` selects the run class
    (:class:`~cbclib_v2.XFELRun` for ``"XFEL"``, :class:`~cbclib_v2.SwissFELRun`
-   for ``"SwissFEL"``).
+   for ``"SwissFEL"``, :class:`~cbclib_v2.LCLSRun` for ``"LCLS"``).
 
 ``metadata``
    Parameters for the background-estimation step: number of frames averaged

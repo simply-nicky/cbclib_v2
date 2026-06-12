@@ -63,14 +63,14 @@ building frame indices and loading named datasets.
 
 Use a facility-specific :class:`~cbclib_v2.RunConfig` and
 :func:`~cbclib_v2.open_run` when working with a beamtime run rather than a
-single file. See :doc:`io_layer` for EuXFEL and SwissFEL run configuration
-examples.
+single file. See :doc:`io_layer` for EuXFEL, SwissFEL, and LCLS run
+configuration examples.
 
 .. code-block:: python
 
-   from cbclib_v2 import XFELRunConfig, open_run
+   from cbclib_v2 import XFELConfig, open_run
 
-   config = XFELRunConfig.read("xfel_config.json")
+   config = XFELConfig.read("xfel_config.json")
    run = open_run(100, config)
 
 **4. Load detector data**

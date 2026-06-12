@@ -94,7 +94,7 @@ array is wrapped directly into :class:`~cbclib_v2.CrystData`:
 
     cbc.set_cpu_config(num_threads=32)
 
-    config = cbc.XFELRunConfig(
+    config = cbc.XFELConfig(
         data_dir="/gpfs/exfel/exp/SPB/202302/p004456/proc/r{0:04d}",
         hdf5_protocol="/path/to/agipd_protocol.json",
         file_pattern=r"CORR-R{0:04d}-JNGFR{1:02d}-S(\d{5})\.h5",

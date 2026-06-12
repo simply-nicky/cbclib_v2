@@ -1,5 +1,6 @@
 import importlib
 import sys
+from contextlib import nullcontext
 from types import ModuleType
 import pytest
 
@@ -12,6 +13,11 @@ class TestCudaAllocator():
         for name in list(sys.modules):
             if name == "jax" or name.startswith("jax."):
                 monkeypatch.delitem(sys.modules, name, raising=False)
+
+    def jax_init_warning(self, cuda: ModuleType):
+        if cuda.get_allocator_config()["jax_initialized"]:
+            return pytest.warns(RuntimeWarning, match="after JAX backend initialization")
+        return nullcontext()
 
     @pytest.fixture
     def cuda(self, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
@@ -27,11 +33,13 @@ class TestCudaAllocator():
     def test_jax_allocator_env(self, cuda: ModuleType, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("TF_GPU_ALLOCATOR", raising=False)
 
-        cuda.set_jax_allocator("cuda_malloc_async")
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_allocator("cuda_malloc_async")
         assert cuda.os.environ["TF_GPU_ALLOCATOR"] == "cuda_malloc_async"
         assert cuda.get_allocator_config()["jax_allocator"] == "cuda_malloc_async"
 
-        cuda.set_jax_allocator("default")
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_allocator("default")
         assert "TF_GPU_ALLOCATOR" not in cuda.os.environ
         assert cuda.get_allocator_config()["jax_allocator"] == "default"
 
@@ -39,14 +47,17 @@ class TestCudaAllocator():
                                          monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("TF_GPU_ALLOCATOR", "platform")
 
-        cuda.set_jax_allocator("cuda_malloc_async")
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_allocator("cuda_malloc_async")
         assert cuda.os.environ["TF_GPU_ALLOCATOR"] == "cuda_malloc_async"
 
-        cuda.set_jax_allocator("default")
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_allocator("default")
         assert cuda.os.environ["TF_GPU_ALLOCATOR"] == "platform"
 
     def test_jax_limit_rejects_async(self, cuda: ModuleType):
-        cuda.set_jax_allocator("cuda_malloc_async")
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_allocator("cuda_malloc_async")
 
         with pytest.raises(RuntimeError, match="JAX memory limits"):
             cuda.set_jax_limit(0.5)
@@ -54,11 +65,13 @@ class TestCudaAllocator():
     def test_jax_limit_fraction(self, cuda: ModuleType, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("XLA_PYTHON_CLIENT_MEM_FRACTION", raising=False)
 
-        cuda.set_jax_limit("40%")
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_limit("40%")
         assert cuda.os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.4"
         assert cuda.get_allocator_config()["jax_limit"] == 0.4
 
-        cuda.set_jax_limit(None)
+        with self.jax_init_warning(cuda):
+            cuda.set_jax_limit(None)
         assert "XLA_PYTHON_CLIENT_MEM_FRACTION" not in cuda.os.environ
         assert cuda.get_allocator_config()["jax_limit"] is None
 

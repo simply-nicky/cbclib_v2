@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from functools import wraps
 from multiprocessing.pool import Pool
@@ -18,16 +17,43 @@ from .cxi_protocol import (H5Files, H5Protocol, H5Handler, H5ReadWorker, LoadWor
 from .data_container import Container, list_indices, split, to_list
 from .scripts import BaseParameters
 
+Facility = Literal['LCLS', 'XFEL', 'SwissFEL']
+
+@dataclass(frozen=True)
+class RunLocator:
+    """Structured identifier for a facility run.
+
+    ``run_id`` is the public identifier users usually provide. ``variant`` is
+    an optional facility-specific discriminator, such as an LCLS directory
+    suffix, that must travel with the run ID for file lookup and caching.
+
+    Attributes:
+        run_id: Numeric run identifier.
+        variant: Optional facility-specific discriminator. Used by
+            :class:`~cbclib_v2.LCLSConfig` to choose the correct scan directory
+            for a run when multiple run directories are present.
+    """
+    run_id     : int
+    variant    : str | None = None
+
+    @classmethod
+    def coerce(cls, locator: int | 'RunLocator') -> 'RunLocator':
+        """Return *locator* as a :class:`RunLocator`."""
+        if isinstance(locator, cls):
+            return locator
+        return cls(locator)
+
 class IndexCacher:
     """Caching utility for run indices with file modification checking.
 
     Cache is stored in ~/.cache/cbclib_v2/ by default, but can be overridden
     via the CBCLIB_CACHE_DIR environment variable.
     """
-    def __init__(self, run_id: int, config: 'RunConfig'):
-        self.run_id = run_id
+    def __init__(self, locator: RunLocator, config: 'RunConfig'):
+        self.locator = locator
+        self.run_id = locator.run_id
         self.config = config
-        self.filenames = config.filenames(run_id)
+        self.filenames = config.filenames(locator)
 
     @classmethod
     def cache_dir(cls) -> Path:
@@ -38,7 +64,7 @@ class IndexCacher:
 
     def cache_key(self) -> str:
         """Generate a unique cache key for this run config."""
-        config_str = f"{self.config.facility}_{self.run_id}_{len(self.filenames)}"
+        config_str = f"{self.config.facility}_{self.locator}_{len(self.filenames)}"
         return hashlib.md5(config_str.encode()).hexdigest()[:16]
 
     def cache_path(self) -> Path:
@@ -101,21 +127,22 @@ class RunConfig(BaseParameters):
     :class:`BaseRun`.
 
     Attributes:
-        facility: Facility identifier; one of ``'XFEL'`` or ``'SwissFEL'``.
+        facility: Facility identifier; one of ``'LCLS'``, ``'XFEL'``,
+            or ``'SwissFEL'``.
 
     Example:
         Load a run using an XFEL configuration JSON file:
 
-        >>> config = XFELRunConfig.read('config.json')
+        >>> config = XFELConfig.read('config.json')
         >>> run = open_run(42, config)
     """
-    facility : Literal['XFEL', 'SwissFEL'] = field(kw_only=True)
+    facility : Facility = field(kw_only=True)
 
-    def filenames(self, run_id: int) -> List[str]:
+    def filenames(self, locator: int | RunLocator) -> List[str]:
         """This method should return a list of all HDF5 file paths for the given run ID."""
         raise NotImplementedError
 
-    def scan_dir(self, run_id: int) -> str:
+    def scan_dir(self, locator: int | RunLocator) -> str:
         """This method should return the directory path to scan for HDF5 files for the
         given run ID."""
         raise NotImplementedError
@@ -128,9 +155,11 @@ class RunConfig(BaseParameters):
     def type_resolver(cls, data: Dict[str, Any]) -> type['RunConfig']:
         facility = data.get('facility')
         if facility == 'XFEL':
-            return XFELRunConfig
+            return XFELConfig
         if facility == 'SwissFEL':
             return SwissFELConfig
+        if facility == 'LCLS':
+            return LCLSConfig
         raise ValueError(f"Unsupported facility type: {facility}")
 
 IndicesType = TypeVar('IndicesType', bound='TrainIndices')
@@ -347,7 +376,7 @@ class BaseRun(Container, Generic[IndicesType]):
         raise NotImplementedError
 
 @dataclass
-class XFELRunConfig(RunConfig):
+class XFELConfig(RunConfig):
     """Run configuration for European XFEL experiments.
 
     Locates per-module HDF5 files by scanning a per-run data directory for
@@ -374,7 +403,7 @@ class XFELRunConfig(RunConfig):
         Open a run with an XFEL configuration JSON file and load the first 10 frames with
         geometry applied:
 
-        >>> config = XFELRunConfig.read('xfel_config.json')
+        >>> config = XFELConfig.read('xfel_config.json')
         >>> run = open_run(100, config)
         >>> frames = run.data(run.indices()[:10], geometry=True)
     """
@@ -384,64 +413,68 @@ class XFELRunConfig(RunConfig):
     geometry_file   : str
     num_modules     : int = 1
     starts_at       : int = 0
-    facility        : Literal['XFEL', 'SwissFEL'] = field(default='XFEL', kw_only=True)
+    facility        : Facility = field(default='XFEL', kw_only=True)
 
-    def scan_dir(self, run_id: int) -> str:
+    def scan_dir(self, locator: int | RunLocator) -> str:
         """Return the directory path to scan for HDF5 files for the given run ID.
 
         Args:
-            run_id: The ID of the run to locate the data directory for.
+            locator: The run locator or run ID to locate the data directory for.
 
         Returns:
             The directory path as a string.
         """
-        return self.data_dir.format(run_id)
+        locator = RunLocator.coerce(locator)
+        if locator.variant is not None:
+            raise ValueError("Run variants are not supported for XFEL runs.")
+        return self.data_dir.format(locator.run_id)
 
-    def module_files(self, run_id: int) -> Iterator[List[str]]:
+    def module_files(self, locator: int | RunLocator) -> Iterator[List[str]]:
         """Yield lists of HDF5 file paths for each detector module in the run.
 
         Args:
-            run_id: The ID of the run to locate files for.
+            locator: The run locator or run ID to locate files for.
 
         Yields:
             Lists of file paths corresponding to each detector module, in order.
         """
-        data_dir = self.scan_dir(run_id)
+        locator = RunLocator.coerce(locator)
+        data_dir = self.scan_dir(locator)
 
         for module_id in range(self.starts_at, self.starts_at + self.num_modules):
-            pattern = self.file_pattern.format(run_id, module_id)
+            pattern = self.file_pattern.format(locator.run_id, module_id)
             module_files = []
             for path in os.listdir(data_dir):
                 if re.match(pattern, path):
                     module_files.append(os.path.join(data_dir, path))
             yield module_files
 
-    def filenames(self, run_id: int) -> List[str]:
+    def filenames(self, locator: int | RunLocator) -> List[str]:
         """Return a list of all HDF5 file paths for the given run ID.
 
         Args:
-            run_id: The ID of the run to locate files for.
+            locator: The run locator or run ID to locate files for.
 
         Returns:
             A list of file paths as strings.
         """
         filenames = []
-        for module_files in self.module_files(run_id):
+        for module_files in self.module_files(locator):
             filenames.extend(module_files)
         return filenames
 
-    def files(self, run_id: int) -> List[H5Files]:
+    def files(self, locator: int | RunLocator) -> List[H5Files]:
         """Returns a list of H5Files objects, one for each module.
 
         Args:
-            run_id: The ID of the run to load files for.
+            locator: The run locator or run ID to load files for.
 
         Returns:
             A list where each element corresponds to all HDF5 files pertaining to a
             specific detector module.
         """
         files = []
-        for module_files in self.module_files(run_id):
+        for module_files in self.module_files(locator):
             files.append(H5Files(module_files))
 
         return files
@@ -559,20 +592,20 @@ class XFELRun(BaseRun[FileStackIndices]):
     """Detector run for European XFEL multi-module experiments.
 
     Reads data from the per-module HDF5 files described by an
-    :class:`XFELRunConfig`. Module arrays are stacked along a new leading
+    :class:`XFELConfig`. Module arrays are stacked along a new leading
     axis for each frame, so the returned shape is
     ``(n_frames, n_modules, *frame_shape)`` when ``geometry=False``.
 
     Attributes:
         run_id: Numeric run identifier.
-        config: :class:`XFELRunConfig` with file locations and protocol.
+        config: :class:`XFELConfig` with file locations and protocol.
         ss_idxs: Slow-scan (row) pixel indices for ROI selection; ``None``
             loads full rows.
         fs_idxs: Fast-scan (column) pixel indices for ROI selection; ``None``
             loads full columns.
 
     Example:
-        Open a run with a :class:`XFELRunConfig` and load the first 20 frames with geometry
+        Open a run with a :class:`XFELConfig` and load the first 20 frames with geometry
         applied using 4 worker processes:
 
         >>> run = open_run(100, config)
@@ -580,17 +613,18 @@ class XFELRun(BaseRun[FileStackIndices]):
         >>> frames = run.data(indices[:20], geometry=True, n_processes=4)
     """
     run_id      : int
-    config      : XFELRunConfig
+    config      : XFELConfig
     ss_idxs     : Indices | None = None
     fs_idxs     : Indices | None = None
 
     def __post_init__(self):
         self.handler = H5Handler(self.config.protocol())
-        self.files = self.config.files(self.run_id)
+        locator = RunLocator(self.run_id)
+        self.files = self.config.files(locator)
         if 'data' not in self.handler.attributes():
             raise ValueError("Protocol must contain 'data' attribute for XFELRun.")
         self.data_paths : Dict[str, str | Tuple[str, ...]] = {}
-        self.cacher = IndexCacher(self.run_id, self.config)
+        self.cacher = IndexCacher(locator, self.config)
 
     def attributes(self) -> List[str]:
         """Return a list of attributes available in the HDF5 protocol, excluding 'data'.
@@ -763,29 +797,33 @@ class SwissFELConfig(RunConfig):
     hdf5_protocol   : str
     file_pattern    : str
     geometry_file   : str
-    facility        : Literal['XFEL', 'SwissFEL'] = field(default='SwissFEL', kw_only=True)
+    facility        : Facility = field(default='SwissFEL', kw_only=True)
 
-    def scan_dir(self, run_id: int) -> str:
+    def scan_dir(self, locator: int | RunLocator) -> str:
         """Return the directory path to scan for HDF5 files for the given run ID.
 
         Args:
-            run_id: The ID of the run to locate the data directory for.
+            locator: The run locator or run ID to locate the data directory for.
 
         Returns:
             The directory path as a string.
         """
-        return self.data_dir.format(run_id)
+        locator = RunLocator.coerce(locator)
+        if locator.variant is not None:
+            raise ValueError("Run variants are not supported for SwissFEL runs.")
+        return self.data_dir.format(locator.run_id)
 
-    def filenames(self, run_id: int) -> List[str]:
+    def filenames(self, locator: int | RunLocator) -> List[str]:
         """Return a list of all HDF5 file paths for the given run ID.
 
         Args:
-            run_id: The ID of the run to locate files for.
+            locator: The run locator or run ID to locate files for.
 
         Returns:
             A list of file paths as strings.
         """
-        data_dir = self.scan_dir(run_id)
+        locator = RunLocator.coerce(locator)
+        data_dir = self.scan_dir(locator)
 
         filenames = []
         for path in os.listdir(data_dir):
@@ -793,16 +831,16 @@ class SwissFELConfig(RunConfig):
                 filenames.append(os.path.join(data_dir, path))
         return filenames
 
-    def files(self, run_id: int) -> H5Files:
+    def files(self, locator: int | RunLocator) -> H5Files:
         """Return an H5Files object containing all HDF5 files for the given run ID.
 
         Args:
-            run_id: The ID of the run to load files for.
+            locator: The run locator or run ID to load files for.
 
         Returns:
             An H5Files object containing all HDF5 files for the run.
         """
-        return H5Files(self.filenames(run_id))
+        return H5Files(self.filenames(locator))
 
     def geometry(self) -> Geometry:
         """Return the CrystFEL detector geometry for the run.
@@ -879,11 +917,12 @@ class SwissFELRun(BaseRun[StackIndices]):
 
     def __post_init__(self):
         self.handler = H5Handler(self.config.protocol())
-        self.files = self.config.files(self.run_id)
+        locator = RunLocator(self.run_id)
+        self.files = self.config.files(locator)
         if 'data' not in self.handler.attributes():
-            raise ValueError("Protocol must contain 'data' attribute for XFELRun.")
+            raise ValueError("Protocol must contain 'data' attribute for SwissFELRun.")
         self.data_paths : Dict[str, str] = {}
-        self.cacher = IndexCacher(self.run_id, self.config)
+        self.cacher = IndexCacher(locator, self.config)
 
     def data_path(self, attr: str = 'data') -> str:
         """Return the HDF5 data path for the given attribute.
@@ -934,7 +973,8 @@ class SwissFELRun(BaseRun[StackIndices]):
 
         Args:
             geometry: Whether to apply the CrystFEL geometry in the worker function.
-            processes: The number of worker processes to use. If None, defaults to the number of CPU cores.
+            processes: The number of worker processes to use. If None, defaults to the
+                number of CPU cores.
 
         Returns:
             A tuple containing the Pool object and the worker class to use for loading data.
@@ -1001,28 +1041,36 @@ class SwissFELRun(BaseRun[StackIndices]):
         return SFELReadWorker(self.data_path(), self.ss_idxs, self.fs_idxs)
 
 @overload
-def open_run(run_id: int, config: XFELRunConfig) -> XFELRun: ...
+def open_run(run_id: int, config: XFELConfig) -> XFELRun: ...
 
 @overload
 def open_run(run_id: int, config: SwissFELConfig) -> SwissFELRun: ...
 
 @overload
-def open_run(run_id: int, config: RunConfig) -> BaseRun[TrainIndices]: ...
+def open_run(run_id: int, config: LCLSConfig, *, variant: str | None = None) -> LCLSRun: ...
 
-def open_run(run_id: int, config: RunConfig
-             ) -> XFELRun | SwissFELRun | BaseRun[TrainIndices]:
+@overload
+def open_run(run_id: int, config: RunConfig, *, variant: str | None = None
+             ) -> BaseRun[TrainIndices]: ...
+
+def open_run(run_id: int, config: RunConfig, *, variant: str | None = None
+             ) -> XFELRun | SwissFELRun | LCLSRun | BaseRun[TrainIndices]:
     """Create a run object from a run ID and facility configuration.
 
     Dispatches on the concrete type of *config* and returns the matching
-    :class:`BaseRun` subclass: :class:`XFELRun` for :class:`XFELRunConfig`
-    and :class:`SwissFELRun` for :class:`SwissFELConfig`.
+    :class:`BaseRun` subclass: :class:`XFELRun` for :class:`XFELConfig`,
+    :class:`SwissFELRun` for :class:`SwissFELConfig`, and :class:`LCLSRun`
+    for :class:`LCLSConfig`.
 
     Args:
         run_id: Numeric identifier of the run to open.
         config: Facility-specific run configuration.
+        variant: Optional facility-specific run discriminator. For LCLS, this is used
+            as the run directory suffix.
 
     Returns:
-        :class:`XFELRun` or :class:`SwissFELRun` wrapping the requested run.
+        :class:`XFELRun`, :class:`SwissFELRun`, or :class:`LCLSRun` wrapping the
+        requested run.
 
     Raises:
         ValueError: If *config* is not a recognized :class:`RunConfig` subclass.
@@ -1031,12 +1079,151 @@ def open_run(run_id: int, config: RunConfig
         Open a run with an XFEL configuration JSON file and load the first 10 frames with
         geometry applied:
 
-        >>> config = XFELRunConfig.read('xfel_config.json')
+        >>> config = XFELConfig.read('xfel_config.json')
         >>> run = open_run(100, config)
         >>> frames = run.data(run.indices()[:10], geometry=True)
     """
-    if isinstance(config, XFELRunConfig):
+    if isinstance(config, LCLSConfig):
+        return LCLSRun(run_id, config, variant=variant)
+    if variant is not None:
+        raise ValueError(f"Run variants are not supported for {config.facility} runs.")
+    if isinstance(config, XFELConfig):
         return XFELRun(run_id, config)
     if isinstance(config, SwissFELConfig):
         return SwissFELRun(run_id, config)
     raise ValueError(f"Unsupported RunConfig type: {type(config)}")
+
+@dataclass
+class LCLSConfig(RunConfig):
+    """Run configuration for LCLS experiments.
+
+    Locates HDF5 data files by scanning a per-run data directory for
+    filenames that match a regex pattern, then assembles them into a
+    :class:`LCLSRun` via :func:`open_run`.
+
+    Attributes:
+        data_dir: Format string for the per-run data directory; the run ID is
+            substituted with ``str.format`` (e.g.
+            ``'/sf/bernina/data/p19000/raw/r{0:04d}'``).
+        hdf5_protocol: Path to the JSON or INI file read by
+            :meth:`H5Protocol.read`.
+        file_pattern: Regular expression matched directly against filenames in
+            ``data_dir`` to select HDF5 files for the run
+            (e.g. ``'run_\\d{6}\\.h5'``).
+        geometry_file: Path to the CrystFEL ``.geom`` geometry file.
+        variant: Optional run variant, interpreted as an LCLS directory suffix.
+
+    Example:
+        Open a run config from a JSON file and load the first 10 frames with geometry applied:
+
+        >>> config = LCLSConfig.read('lcls_config.json')
+        >>> run = open_run(50, config)
+        >>> frames = run.data(run.indices()[:10], geometry=True)
+    """
+    data_dir        : str
+    hdf5_protocol   : str
+    file_pattern    : str
+    geometry_file   : str
+    facility        : Facility = field(default='LCLS', kw_only=True)
+
+    def scan_dir(self, locator: int | RunLocator) -> str:
+        """Return the directory path to scan for HDF5 files for the given run ID.
+
+        Args:
+            locator: The run locator or run ID to locate the data directory for.
+                ``locator.variant`` is used as an optional directory suffix
+                (e.g. '-proc').
+
+        Returns:
+            The directory path as a string.
+        """
+        locator = RunLocator.coerce(locator)
+        data_dir = self.data_dir.format(locator.run_id)
+        parent_dir = os.path.dirname(data_dir)
+        scan_folder = os.path.basename(data_dir)
+        dirs = [os.path.join(parent_dir, d) for d in os.listdir(parent_dir)
+                if d.startswith(scan_folder)]
+        if len(dirs) == 0:
+            raise ValueError(f"No directories found matching pattern: {data_dir}")
+        if len(dirs) > 1:
+            if locator.variant is None:
+                raise ValueError(f"Multiple directories found matching pattern: {data_dir},"
+                                 f" specify a run variant to disambiguate.")
+            matches = [d for d in dirs if d.endswith(locator.variant)]
+            if not matches:
+                raise ValueError(f"No directories found matching pattern: {data_dir}"
+                                 f" with variant {locator.variant!r}.")
+            if len(matches) > 1:
+                raise ValueError(f"Multiple directories found matching pattern: {data_dir}"
+                                 f" with variant {locator.variant!r}.")
+            return matches[0]
+        return dirs[0]
+
+    def filenames(self, locator: int | RunLocator) -> List[str]:
+        """Return a list of all HDF5 file paths for the given run ID.
+
+        Args:
+            locator: The run locator or run ID to locate files for.
+
+        Returns:
+            A list of file paths as strings.
+        """
+        locator = RunLocator.coerce(locator)
+        data_dir = self.scan_dir(locator)
+
+        filenames = []
+        for path in os.listdir(data_dir):
+            if re.match(self.file_pattern.format(locator.run_id), path):
+                filenames.append(os.path.join(data_dir, path))
+        return filenames
+
+    def files(self, locator: int | RunLocator) -> H5Files:
+        """Return an H5Files object containing all HDF5 files for the given run ID.
+
+        Args:
+            locator: The run locator or run ID to load files for.
+
+        Returns:
+            An H5Files object containing all HDF5 files for the run.
+        """
+        return H5Files(self.filenames(locator))
+
+    def geometry(self) -> Geometry:
+        """Return the CrystFEL detector geometry for the run."""
+        return read_crystfel(self.geometry_file)
+
+    def protocol(self) -> H5Protocol:
+        """Return the HDF5 protocol for the run."""
+        return H5Protocol.read(self.hdf5_protocol)
+
+@dataclass
+class LCLSRun(SwissFELRun):
+    """Detector run for LCLS experiments.
+
+    Reads data from a single-detector HDF5 file collection described by a
+    :class:`LCLSConfig`.
+
+    Attributes:
+        run_id: Numeric run identifier.
+        config: :class:`LCLSConfig` with file locations and protocol.
+        ss_idxs: Slow-scan (row) pixel indices for ROI selection; ``None``
+            loads full rows.
+        fs_idxs: Fast-scan (column) pixel indices for ROI selection; ``None``
+            loads full columns.
+
+    Example:
+        >>> run = open_run(50, config)
+        >>> indices = run.indices()
+        >>> frames = run.data(indices[:20], geometry=True)
+    """
+    config      : LCLSConfig
+    variant     : str | None = None
+
+    def __post_init__(self):
+        locator = RunLocator(self.run_id, self.variant)
+        self.handler = H5Handler(self.config.protocol())
+        self.files = self.config.files(locator)
+        if 'data' not in self.handler.attributes():
+            raise ValueError("Protocol must contain 'data' attribute for LCLSRun.")
+        self.data_paths : Dict[str, str] = {}
+        self.cacher = IndexCacher(locator, self.config)
