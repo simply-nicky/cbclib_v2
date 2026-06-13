@@ -994,6 +994,54 @@ def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
     """
     ...
 
+def _maximum_position_cpu(labels: LabelResult, data: NDIntArray | NDRealArray) -> NDIntArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return cpu_label.maximum_position(labels=(labels.labels, labels.index), data=data,
+                                      num_threads=num_threads)
+
+def _maximum_position_gpu(labels: LabelResult, data: CPIntArray | CPRealArray) -> CPIntArray:
+    if cuda_label is None:
+        raise RuntimeError("maximum_position is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+    if labels.labels.shape != data.shape:
+        raise ValueError("labels and data must have the same shape")
+
+    xp = CuPy
+    out = xp.empty((labels.index.shape[0], data.ndim), dtype=xp.int32)
+    return cuda_label.maximum_position(out=out, labels=labels.labels, index=labels.index,
+                                       data=data)
+
+@overload
+def maximum_position(labels: LabelResult, data: NDIntArray | NDRealArray) -> NDIntArray: ...
+
+@overload
+def maximum_position(labels: LabelResult, data: CPIntArray | CPRealArray) -> CPIntArray: ...
+
+@overload
+def maximum_position(labels: LabelResult, data: JaxIntArray | JaxRealArray) -> JaxIntArray: ...
+
+@overload
+def maximum_position(labels: LabelResult, data: IntArray | RealArray) -> IntArray: ...
+
+@array_dispatch("data", cpu_impl=_maximum_position_cpu, gpu_impl=_maximum_position_gpu)
+def maximum_position(labels: LabelResult, data: IntArray | RealArray) -> IntArray:
+    """Find the first maximum position in each labeled region.
+
+    For each label listed in ``labels.index``, the function returns the
+    coordinate of the first pixel, in flat row-major traversal order, whose
+    value is maximal within that labeled region.  Labels with no matching
+    pixels return the coordinate of the first array element.
+
+    Args:
+        labels: Labeled regions returned by :func:`label`.
+        data: Intensity array with the same spatial shape as the label array.
+
+    Returns:
+        Integer array of shape ``(N, data.ndim)`` with one coordinate row for
+        each of the *N* labels in ``labels.index``.
+    """
+    ...
+
 def _p_values_cpu(labels: LabelResult, lines: NDRealArray, data: NDRealArray, p0: float, vmin: float,
                   xtol: float) -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()

@@ -521,6 +521,13 @@ array_t<T> center_of_mass(array_t<T> out, array_t<int> labels, array_t<py::ssize
         throw std::invalid_argument("labels array dimension (" + std::to_string(labels.ndim()) +
                                     ") does not match data array dimension (" + std::to_string(data.ndim()) + ")");
     }
+    for (py::ssize_t dim = 0; dim < labels.ndim(); ++dim)
+    {
+        if (labels.shape(dim) != data.shape(dim))
+        {
+            throw std::invalid_argument("labels and data must have the same shape");
+        }
+    }
     if (out.ndim() != 2 || out.shape(0) != index.size() || out.shape(1) != labels.ndim())
     {
         throw std::invalid_argument("output array shape (" + std::to_string(out.shape(0)) + ", " + std::to_string(out.shape(1)) +
@@ -699,6 +706,317 @@ array_t<T> covariance_matrix(array_t<T> out, array_t<int> labels, array_t<py::ss
     }
 }
 
+template <typename T>
+HOST_DEVICE bool is_better_position(T new_value, csize_t new_index, bool found,
+                                    T best_value, csize_t best_index)
+{
+    if (!found) return true;
+    if (new_value > best_value) return true;
+    return new_value == best_value && new_index < best_index;
+}
+
+
+template <csize_t N>
+__global__ void maximum_candidates_kernel(DeviceRange<int> keep_flags,
+                                          DeviceRange<int> candidate_slots,
+                                          DeviceRange<csize_t> candidate_indices,
+                                          ArrayViewND<int, N> labels,
+                                          DeviceRange<int> label_to_slot)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= labels.size()) return;
+
+    keep_flags[idx] = 0;
+
+    int label = labels[idx];
+    if (label <= 0 || static_cast<csize_t>(label) >= label_to_slot.size()) return;
+
+    int slot = label_to_slot[static_cast<csize_t>(label)];
+    if (slot < 0) return;
+
+    keep_flags[idx] = 1;
+    candidate_slots[idx] = slot;
+    candidate_indices[idx] = idx;
+}
+
+__global__ void compact_position_candidates_kernel(DeviceRange<int> compact_slots,
+                                                   DeviceRange<csize_t> compact_indices,
+                                                   DeviceRange<int> keep_flags,
+                                                   DeviceRange<csize_t> prefix,
+                                                   DeviceRange<int> candidate_slots,
+                                                   DeviceRange<csize_t> candidate_indices)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= keep_flags.size() || keep_flags[idx] == 0) return;
+
+    csize_t out_idx = prefix[idx];
+    compact_slots[out_idx] = candidate_slots[idx];
+    compact_indices[out_idx] = candidate_indices[idx];
+}
+
+__global__ void mark_position_segments_kernel(DeviceRange<int> segment_flags,
+                                              DeviceRange<int> sorted_slots)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= sorted_slots.size()) return;
+
+    segment_flags[idx] = (idx == 0 || sorted_slots[idx] != sorted_slots[idx - 1]) ? 1 : 0;
+}
+
+__global__ void compact_position_segments_kernel(DeviceRange<csize_t> segment_starts,
+                                                 DeviceRange<int> segment_flags,
+                                                 DeviceRange<csize_t> segment_prefix)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= segment_flags.size() || segment_flags[idx] == 0) return;
+
+    segment_starts[segment_prefix[idx]] = idx;
+}
+
+template <typename T, csize_t N>
+__global__ void reduce_maximum_segments_kernel(ArrayViewND<int, 2> out,
+                                               DeviceRange<int> sorted_slots,
+                                               DeviceRange<csize_t> sorted_indices,
+                                               DeviceRange<csize_t> segment_starts,
+                                               csize_t n_segments,
+                                               ArrayViewND<T, N> data,
+                                               ArrayViewND<int, N> labels)
+{
+    __shared__ csize_t shared_index[BLOCK_SIZE];
+    __shared__ T shared_value[BLOCK_SIZE];
+    __shared__ int shared_found[BLOCK_SIZE];
+
+    csize_t segment = blockIdx.x;
+    csize_t tid = threadIdx.x;
+    if (segment >= n_segments) return;
+
+    csize_t start = segment_starts[segment];
+    csize_t end = segment + 1 < n_segments ? segment_starts[segment + 1] : sorted_indices.size();
+
+    bool found = false;
+    csize_t best_index = 0;
+    T best_value = T();
+    for (csize_t idx = start + tid; idx < end; idx += blockDim.x)
+    {
+        csize_t candidate_index = sorted_indices[idx];
+        T candidate_value = data[candidate_index];
+        if (is_better_position(candidate_value, candidate_index, found, best_value, best_index))
+        {
+            found = true;
+            best_index = candidate_index;
+            best_value = candidate_value;
+        }
+    }
+
+    shared_found[tid] = found ? 1 : 0;
+    shared_index[tid] = best_index;
+    shared_value[tid] = best_value;
+    __syncthreads();
+
+    for (csize_t stride = blockDim.x / 2; stride > 0; stride /= 2)
+    {
+        if (tid < stride && shared_found[tid + stride])
+        {
+            bool current_found = shared_found[tid] != 0;
+            if (is_better_position(shared_value[tid + stride], shared_index[tid + stride],
+                                   current_found, shared_value[tid], shared_index[tid]))
+            {
+                shared_found[tid] = 1;
+                shared_index[tid] = shared_index[tid + stride];
+                shared_value[tid] = shared_value[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid != 0 || shared_found[0] == 0) return;
+
+    int slot = sorted_slots[start];
+    PointND<csize_t, N> point = make_point<N, N>(shared_index[0], labels.shape());
+    for (csize_t dim = 0; dim < N; ++dim)
+    {
+        out.at(static_cast<csize_t>(slot), dim) = static_cast<int>(point[N - dim - 1]);
+    }
+}
+
+template <csize_t N>
+__global__ void write_maximum_positions_kernel(ArrayViewND<int, 2> out,
+                                               DeviceRange<int> unique_slots,
+                                               DeviceRange<csize_t> best_indices,
+                                               DeviceRange<int> n_segments,
+                                               ArrayViewND<int, N> labels)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= static_cast<csize_t>(n_segments[0])) return;
+
+    int slot = unique_slots[idx];
+    PointND<csize_t, N> point = make_point<N, N>(best_indices[idx], labels.shape());
+    for (csize_t dim = 0; dim < N; ++dim)
+    {
+        out.at(static_cast<csize_t>(slot), dim) = static_cast<int>(point[N - dim - 1]);
+    }
+}
+
+template <typename T, csize_t N>
+array_t<int> maximum_position_nd(array_t<int> out, array_t<int> labels,
+                                 array_t<py::ssize_t> index, array_t<T> data)
+{
+    auto out_view = cast_to_nd<int, 2>(out.view());
+    auto labels_view = cast_to_nd<int, N>(labels.view());
+    auto index_view = cast_to_nd<py::ssize_t, 1>(index.view());
+    auto data_view = cast_to_nd<T, N>(data.view());
+
+    out.fill(0);
+    if (index_view.size() == 0) return out;
+    if (labels_view.size() == 0) return out;
+
+    csize_t block_size = BLOCK_SIZE;
+
+    DeviceVector<int> max_label_d (1, 0);
+    size_t temp_bytes = 0;
+    cub::DeviceReduce::Max(nullptr, temp_bytes, labels_view.data(0), max_label_d.data(), labels_view.size());
+    DeviceVector<char> temp_storage(temp_bytes);
+    cub::DeviceReduce::Max(temp_storage.data(), temp_bytes, labels_view.data(0), max_label_d.data(), labels_view.size());
+    handle_cuda_error(cudaGetLastError());
+
+    int max_label = 0;
+    handle_cuda_error(cudaMemcpy(&max_label, max_label_d.data(), sizeof(int), cudaMemcpyDeviceToHost));
+
+    if (max_label <= 0) return out;
+
+    DeviceVector<int> label_to_slot (static_cast<csize_t>(max_label) + 1, -1);
+    csize_t index_blocks = (index_view.size() + block_size - 1) / block_size;
+    index_map_kernel<<<index_blocks, block_size>>>(label_to_slot.view(), index_view);
+    handle_cuda_error(cudaGetLastError());
+
+    csize_t pixel_blocks = (labels_view.size() + block_size - 1) / block_size;
+    DeviceVector<int> keep_flags(labels_view.size());
+    DeviceVector<csize_t> prefix(labels_view.size());
+    DeviceVector<int> candidate_slots(labels_view.size());
+    DeviceVector<csize_t> candidate_indices(labels_view.size());
+
+    maximum_candidates_kernel<N><<<pixel_blocks, block_size>>>(keep_flags.view(),
+                                                               candidate_slots.view(),
+                                                               candidate_indices.view(),
+                                                               labels_view,
+                                                               label_to_slot.view());
+    handle_cuda_error(cudaGetLastError());
+
+    temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, keep_flags.data(), prefix.data(),
+                                  labels_view.size());
+    temp_storage.resize(temp_bytes);
+    cub::DeviceScan::ExclusiveSum(temp_storage.data(), temp_bytes, keep_flags.data(), prefix.data(),
+                                  labels_view.size());
+    handle_cuda_error(cudaGetLastError());
+
+    csize_t last_prefix = 0;
+    int last_flag = 0;
+    handle_cuda_error(cudaMemcpy(&last_prefix, prefix.data(labels_view.size() - 1),
+                                 sizeof(csize_t), cudaMemcpyDeviceToHost));
+    handle_cuda_error(cudaMemcpy(&last_flag, keep_flags.data(labels_view.size() - 1),
+                                 sizeof(int), cudaMemcpyDeviceToHost));
+
+    csize_t n_candidates = last_prefix + static_cast<csize_t>(last_flag);
+    if (n_candidates == 0) return out;
+
+    DeviceVector<int> compact_slots(n_candidates);
+    DeviceVector<csize_t> compact_indices(n_candidates);
+    compact_position_candidates_kernel<<<pixel_blocks, block_size>>>(compact_slots.view(),
+                                                                     compact_indices.view(),
+                                                                     keep_flags.view(),
+                                                                     prefix.view(),
+                                                                     candidate_slots.view(),
+                                                                     candidate_indices.view());
+    handle_cuda_error(cudaGetLastError());
+
+    DeviceVector<int> sorted_slots(n_candidates);
+    DeviceVector<csize_t> sorted_indices(n_candidates);
+    temp_bytes = 0;
+    cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes,
+                                    compact_slots.data(), sorted_slots.data(),
+                                    compact_indices.data(), sorted_indices.data(),
+                                    n_candidates);
+    temp_storage.resize(temp_bytes);
+    cub::DeviceRadixSort::SortPairs(temp_storage.data(), temp_bytes,
+                                    compact_slots.data(), sorted_slots.data(),
+                                    compact_indices.data(), sorted_indices.data(),
+                                    n_candidates);
+    handle_cuda_error(cudaGetLastError());
+
+    DeviceVector<int> segment_flags(n_candidates);
+    mark_position_segments_kernel<<<(n_candidates + block_size - 1) / block_size, block_size>>>(
+        segment_flags.view(), sorted_slots.view());
+    handle_cuda_error(cudaGetLastError());
+
+    temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, segment_flags.data(), prefix.data(),
+                                  n_candidates);
+    temp_storage.resize(temp_bytes);
+    cub::DeviceScan::ExclusiveSum(temp_storage.data(), temp_bytes, segment_flags.data(),
+                                  prefix.data(), n_candidates);
+    handle_cuda_error(cudaGetLastError());
+
+    csize_t last_segment_prefix = 0;
+    int last_segment_flag = 0;
+    handle_cuda_error(cudaMemcpy(&last_segment_prefix, prefix.data(n_candidates - 1),
+                                 sizeof(csize_t), cudaMemcpyDeviceToHost));
+    handle_cuda_error(cudaMemcpy(&last_segment_flag, segment_flags.data(n_candidates - 1),
+                                 sizeof(int), cudaMemcpyDeviceToHost));
+
+    csize_t n_segments = last_segment_prefix + static_cast<csize_t>(last_segment_flag);
+    DeviceVector<csize_t> segment_starts(n_segments);
+    compact_position_segments_kernel<<<(n_candidates + block_size - 1) / block_size, block_size>>>(
+        segment_starts.view(), segment_flags.view(), prefix.view());
+    handle_cuda_error(cudaGetLastError());
+
+    reduce_maximum_segments_kernel<T, N><<<n_segments, block_size>>>(out_view,
+                                                                     sorted_slots.view(),
+                                                                     sorted_indices.view(),
+                                                                     segment_starts.view(),
+                                                                     n_segments,
+                                                                     data_view,
+                                                                     labels_view);
+    handle_cuda_error(cudaGetLastError());
+    handle_cuda_error(cudaDeviceSynchronize());
+
+    return out;
+}
+
+template <typename T>
+array_t<int> maximum_position(array_t<int> out, array_t<int> labels,
+                              array_t<py::ssize_t> index, array_t<T> data)
+{
+    if (labels.ndim() != data.ndim())
+    {
+        throw std::invalid_argument("labels array dimension (" + std::to_string(labels.ndim()) +
+                                    ") does not match data array dimension (" + std::to_string(data.ndim()) + ")");
+    }
+    for (py::ssize_t dim = 0; dim < labels.ndim(); ++dim)
+    {
+        if (labels.shape(dim) != data.shape(dim))
+        {
+            throw std::invalid_argument("labels and data must have the same shape");
+        }
+    }
+    if (out.ndim() != 2 || out.shape(0) != index.size() || out.shape(1) != labels.ndim())
+    {
+        throw std::invalid_argument("output array shape (" + std::to_string(out.shape(0)) + ", " + std::to_string(out.shape(1)) +
+                                    ") does not match expected shape (" + std::to_string(index.size()) + ", " + std::to_string(labels.ndim()) + ")");
+    }
+
+    switch (labels.ndim())
+    {
+        case 2: return maximum_position_nd<T, 2>(out, labels, index, data);
+        case 3: return maximum_position_nd<T, 3>(out, labels, index, data);
+        case 4: return maximum_position_nd<T, 4>(out, labels, index, data);
+        case 5: return maximum_position_nd<T, 5>(out, labels, index, data);
+        case 6: return maximum_position_nd<T, 6>(out, labels, index, data);
+        case 7: return maximum_position_nd<T, 7>(out, labels, index, data);
+        default: throw std::runtime_error("Unsupported number of dimensions: labels.ndim = " + std::to_string(labels.ndim()));
+    }
+}
+
 struct StreakCounts
 {
     csize_t n_signal = 0;
@@ -855,6 +1173,11 @@ PYBIND11_MODULE(cuda_label, m)
 
     m.def("covariance_matrix", &cu::covariance_matrix<float>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("data"));
     m.def("covariance_matrix", &cu::covariance_matrix<double>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("data"));
+
+    m.def("maximum_position", &cu::maximum_position<float>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("data"));
+    m.def("maximum_position", &cu::maximum_position<double>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("data"));
+    m.def("maximum_position", &cu::maximum_position<int>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("data"));
+    m.def("maximum_position", &cu::maximum_position<py::ssize_t>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("data"));
 
     m.def("p_values", &cu::p_values<float>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("lines"), py::arg("data"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"));
     m.def("p_values", &cu::p_values<double>, py::arg("out"), py::arg("labels"), py::arg("index"), py::arg("lines"), py::arg("data"), py::arg("p0"), py::arg("vmin"), py::arg("xtol"));

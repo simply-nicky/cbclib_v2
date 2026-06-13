@@ -36,71 +36,36 @@ Robust reductions that are resistant to outliers and structured artefacts
    robust_mean
    robust_lsq
 
-----
+Labeling and morphology
+-----------------------
 
 .. currentmodule:: cbclib_v2.label
 
-**cbclib_v2.label** provides connected-component labeling, morphological
-operations, and intensity-weighted image moments.  It is the building block
-for :class:`~cbclib_v2.streak_finder.PatternStreakFinder` and the
+**cbclib_v2.label** provides connected-component labeling, structuring elements,
+morphological operations, and intensity-weighted image moments.  It is the
+building block for :class:`~cbclib_v2.streak_finder.PatternStreakFinder` and the
 :class:`~cbclib_v2.RegionDetector` high-level pipeline step.
-
-Structuring elements
---------------------
-
-A :class:`Structure` describes the pixel neighbourhood used for
-connectivity tests and morphological operations.  ``structure.connectivity``
-is the bin radius used throughout streak detection.
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
    Structure
-
-Label types
------------
-
-:func:`label` dispatches to a CPU or GPU implementation and returns
-:class:`LabelResult`, a small container holding:
-
-* ``labels`` — the dense per-pixel integer label map.
-* ``index`` — the 1-D array of region indices present in the label map.
-
-.. currentmodule:: cbclib_v2.label
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
    LabelResult
-
-Morphological operations
-------------------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
    label
    binary_dilation
-
-Image moments
--------------
-
-Intensity-weighted image moments computed per labeled region.  All moment
-functions follow the formulation from `Image moment
-<https://en.wikipedia.org/wiki/Image_moment>`_ (Wikipedia).
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
    center_of_mass
    covariance_matrix
    ellipse_fit
    line_fit
+   maximum_position
    p_values
+
+.. note::
+
+   Intensity-weighted image moments are computed per labeled region.  All moment
+   functions follow the formulation from `Image moment
+   <https://en.wikipedia.org/wiki/Image_moment>`_ (Wikipedia).
 
 Radial profiles
 ---------------

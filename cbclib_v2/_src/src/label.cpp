@@ -472,6 +472,25 @@ LabelResult label(py::array_t<I> input, Structure structure, size_t npts, unsign
     }
 }
 
+struct LabelLookup
+{
+    py::ssize_t max_label = 0;
+    std::vector<int> slot;
+};
+
+LabelLookup make_label_to_slot(const array<int> & index)
+{
+    LabelLookup lookup;
+    for (auto label_id : index) if (label_id > lookup.max_label) lookup.max_label = label_id;
+
+    lookup.slot.assign(lookup.max_label + 1, -1);
+    for (size_t i = 0; i < index.size(); ++i)
+    {
+        if (index[i] > 0) lookup.slot[index[i]] = static_cast<int>(i);
+    }
+    return lookup;
+}
+
 template <typename T, size_t N>
 std::vector<MomentsND<T, N>> moments_from_labels(const LabelResult & labels, py::array_t<T> data, unsigned threads)
 {
@@ -483,22 +502,15 @@ std::vector<MomentsND<T, N>> moments_from_labels(const LabelResult & labels, py:
                 larr.shape().begin(), larr.shape().end(),
                 darr.shape().begin(), darr.shape().end());
 
-    py::ssize_t max_label = 0;
-    for (auto label_id : iarr) if (label_id > max_label) max_label = label_id;
-
-    std::vector<int> label_to_slot (max_label + 1, -1);
-    for (size_t i = 0; i < iarr.size(); ++i)
-    {
-        if (iarr[i] > 0) label_to_slot[iarr[i]] = i;
-    }
+    auto label_lookup = make_label_to_slot(iarr);
 
     std::vector<int> first_index (iarr.size(), -1);
     for (size_t i = 0; i < larr.size(); ++i)
     {
         auto label_id = larr[i];
-        if (label_id <= 0 || label_id > max_label) continue;
+        if (label_id <= 0 || label_id > label_lookup.max_label) continue;
 
-        auto slot = label_to_slot[label_id];
+        auto slot = label_lookup.slot[label_id];
         if (slot >= 0 && first_index[slot] < 0) first_index[slot] = i;
     }
 
@@ -526,9 +538,9 @@ std::vector<MomentsND<T, N>> moments_from_labels(const LabelResult & labels, py:
         for (long i = 0; i < static_cast<long>(larr.size()); ++i)
         {
             auto label_id = larr[i];
-            if (label_id <= 0 || label_id > max_label) continue;
+            if (label_id <= 0 || label_id > label_lookup.max_label) continue;
 
-            auto slot = label_to_slot[label_id];
+            auto slot = label_lookup.slot[label_id];
             if (slot >= 0) local_moments[slot].insert(i, darr);
         }
 
@@ -591,6 +603,97 @@ void declare_label_func(py::module & m, Func && func, const std::string & funcst
 }
 
 template <typename T, size_t N>
+py::array_t<int> maximum_position_nd(const LabelResult & labels, py::array_t<T> data, unsigned threads)
+{
+    array<int> labels_array {std::get<0>(labels).request()};
+    array<int> index_array {std::get<1>(labels).request()};
+    array<T> darr {data.request()};
+
+    check_equal("labels and data must have the same shape",
+                labels_array.shape().begin(), labels_array.shape().end(),
+                darr.shape().begin(), darr.shape().end());
+
+    auto label_lookup = make_label_to_slot(index_array);
+
+    std::vector<int> best_index (index_array.size(), 0);
+    std::vector<unsigned char> found (index_array.size(), 0);
+    std::vector<T> best_value (index_array.size(), T());
+
+    threads = std::max(1u, threads);
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        std::vector<int> local_best_index (index_array.size(), 0);
+        std::vector<unsigned char> local_found (index_array.size(), 0);
+        std::vector<T> local_best_value (index_array.size(), T());
+
+        #pragma omp for
+        for (long i = 0; i < static_cast<long>(labels_array.size()); ++i)
+        {
+            auto label_id = labels_array[i];
+            if (label_id <= 0 || label_id > label_lookup.max_label) continue;
+
+            auto slot = label_lookup.slot[label_id];
+            if (slot < 0) continue;
+
+            auto value = darr[i];
+            if (!local_found[slot] || value > local_best_value[slot])
+            {
+                local_found[slot] = 1;
+                local_best_value[slot] = value;
+                local_best_index[slot] = static_cast<int>(i);
+            }
+        }
+
+        #pragma omp critical
+        {
+            for (size_t i = 0; i < index_array.size(); ++i)
+            {
+                if (!local_found[i]) continue;
+
+                if (!found[i] || local_best_value[i] > best_value[i] ||
+                    (local_best_value[i] == best_value[i] && local_best_index[i] < best_index[i]))
+                {
+                    found[i] = 1;
+                    best_value[i] = local_best_value[i];
+                    best_index[i] = local_best_index[i];
+                }
+            }
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    py::array_t<int> result (std::vector<py::ssize_t>{py::ssize_t(index_array.size()),
+                                                      py::ssize_t(data.ndim())});
+    array<int> out {result.request()};
+    for (size_t i = 0; i < index_array.size(); ++i)
+    {
+        auto point = make_point<N>(best_index[i], darr.shape());
+        for (size_t dim = 0; dim < N; ++dim) out[i * N + dim] = static_cast<int>(point[N - dim - 1]);
+    }
+    return result;
+}
+
+template <typename T>
+py::array_t<int> maximum_position(const LabelResult & labels, py::array_t<T> data, unsigned threads)
+{
+    switch (data.ndim())
+    {
+        case 2: return maximum_position_nd<T, 2>(labels, data, threads);
+        case 3: return maximum_position_nd<T, 3>(labels, data, threads);
+        case 4: return maximum_position_nd<T, 4>(labels, data, threads);
+        case 5: return maximum_position_nd<T, 5>(labels, data, threads);
+        case 6: return maximum_position_nd<T, 6>(labels, data, threads);
+        case 7: return maximum_position_nd<T, 7>(labels, data, threads);
+        default:
+            throw std::invalid_argument("Unsupported number of dimensions: " + std::to_string(data.ndim()));
+    }
+}
+
+template <typename T, size_t N>
 py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py::array_t<T> data, T p0, T vmin, T xtol,
                            unsigned threads)
 {
@@ -606,14 +709,7 @@ py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py
                 labels_array.shape().begin(), labels_array.shape().end(),
                 darr.shape().begin(), darr.shape().end());
 
-    py::ssize_t max_label = 0;
-    for (auto label_id : index_array) if (label_id > max_label) max_label = label_id;
-
-    std::vector<int> label_to_slot (max_label + 1, -1);
-    for (size_t i = 0; i < index_array.size(); ++i)
-    {
-        if (index_array[i] > 0) label_to_slot[index_array[i]] = i;
-    }
+    auto label_lookup = make_label_to_slot(index_array);
 
     threads = std::max(1u, threads);
     std::vector<size_t> n_counts (index_array.size(), 0);
@@ -630,9 +726,9 @@ py::array_t<T> p_values_nd(const LabelResult & labels, py::array_t<T> larray, py
         for (long i = 0; i < static_cast<long>(labels_array.size()); ++i)
         {
             auto label_id = labels_array[i];
-            if (label_id <= 0 || label_id > max_label) continue;
+            if (label_id <= 0 || label_id > label_lookup.max_label) continue;
 
-            auto slot = label_to_slot[label_id];
+            auto slot = label_lookup.slot[label_id];
             if (slot < 0) continue;
 
             LineND<T, N> line {to_point<N>(lines, 2 * slot * N), to_point<N>(lines, 2 * slot * N + N)};
@@ -849,6 +945,11 @@ PYBIND11_MODULE(label, m)
 
     declare_label_func<double>(m, line_fit, "line_fit");
     declare_label_func<float>(m, line_fit, "line_fit");
+
+    m.def("maximum_position", &maximum_position<double>, py::arg("labels"), py::arg("data"), py::arg("num_threads") = 1);
+    m.def("maximum_position", &maximum_position<float>, py::arg("labels"), py::arg("data"), py::arg("num_threads") = 1);
+    m.def("maximum_position", &maximum_position<int>, py::arg("labels"), py::arg("data"), py::arg("num_threads") = 1);
+    m.def("maximum_position", &maximum_position<py::ssize_t>, py::arg("labels"), py::arg("data"), py::arg("num_threads") = 1);
 
     m.def("p_values", &p_values<double>, py::arg("labels"), py::arg("lines"), py::arg("data"), py::arg("p0"),
           py::arg("vmin"), py::arg("xtol"), py::arg("num_threads") = 1);

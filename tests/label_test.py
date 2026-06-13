@@ -5,7 +5,7 @@ from cbclib_v2 import default_rng, set_at
 from cbclib_v2.annotations import (BoolArray, CPArray, CuPy, CuPyNamespace, Generator, IntArray,
                                    NDArray, NumPy, NumPyNamespace, RealArray, Shape)
 from cbclib_v2.label import (LabelResult, Structure, binary_dilation, center_of_mass, covariance_matrix,
-                             label)
+                             label, maximum_position)
 
 TestNamespace = NumPyNamespace | CuPyNamespace
 TestGenerator = Generator[NDArray] | Generator[CPArray]
@@ -197,3 +197,90 @@ class TestLabelEdgeCases:
         assert labeled.labels[1, 1] == 1
         assert labeled.labels[1, 2] == 1
         assert NumPy.all(labeled.index == NumPy.array([1], dtype=NumPy.int32))
+
+class TestMaximumPosition:
+    @pytest.fixture(params=['cpu', 'gpu'])
+    def platform(self, request: pytest.FixtureRequest) -> str:
+        return request.param
+
+    @pytest.fixture
+    def xp(self, platform: str) -> TestNamespace:
+        if platform == 'cpu':
+            return NumPy
+        if platform == 'gpu':
+            if CuPy is None:
+                pytest.skip("CuPy is not available")
+            return CuPy
+        raise ValueError(f"Unknown platform: {platform}")
+
+    def label_result(self, labels: IntArray, index: IntArray) -> LabelResult:
+        return LabelResult(labels=labels, index=index)
+
+    @pytest.mark.parametrize('dtype', ['float32', 'float64', 'int32', 'int64'])
+    def test_2d_first_maximum(self, xp: TestNamespace, dtype: str):
+        labels = xp.asarray([[1, 1, 0], [2, 2, 2]], dtype=xp.int32)
+        index = xp.asarray([1, 2], dtype=int)
+        data = xp.asarray([[5, 7, 9], [4, 4, 3]], dtype=getattr(xp, dtype))
+        expected = xp.asarray([[0, 1], [1, 0]], dtype=xp.int32)
+
+        result = maximum_position(self.label_result(labels, index), data)
+
+        assert result.shape == expected.shape
+        assert result.dtype == xp.int32
+        assert xp.all(result == expected)
+
+    def test_3d_first_maximum(self, xp: TestNamespace):
+        labels = xp.zeros((2, 2, 3), dtype=xp.int32)
+        labels[0, 0, 1] = 1
+        labels[1, 0, 2] = 1
+        labels[1, 1, 0] = 2
+        labels[1, 1, 2] = 2
+
+        data = xp.zeros(labels.shape, dtype=float)
+        data[0, 0, 1] = 3.0
+        data[1, 0, 2] = 7.0
+        data[1, 1, 0] = 5.0
+        data[1, 1, 2] = 5.0
+
+        index = xp.asarray([1, 2], dtype=int)
+        expected = xp.asarray([[1, 0, 2], [1, 1, 0]], dtype=xp.int32)
+
+        result = maximum_position(self.label_result(labels, index), data)
+
+        assert xp.all(result == expected)
+
+    def test_missing_label_returns_first_position(self, xp: TestNamespace):
+        labels = xp.zeros((3, 4), dtype=xp.int32)
+        index = xp.asarray([5], dtype=int)
+        data = xp.arange(12).reshape(3, 4)
+
+        result = maximum_position(self.label_result(labels, index), data)
+
+        assert xp.all(result == xp.asarray([[0, 0]], dtype=xp.int32))
+
+    def test_unindexed_label_is_ignored(self, xp: TestNamespace):
+        labels = xp.asarray([[1, 99], [1, 99]], dtype=xp.int32)
+        index = xp.asarray([1], dtype=int)
+        data = xp.asarray([[1, 100], [5, 200]], dtype=xp.float32)
+
+        result = maximum_position(self.label_result(labels, index), data)
+
+        assert xp.all(result == xp.asarray([[1, 0]], dtype=xp.int32))
+
+    def test_empty_index(self, xp: TestNamespace):
+        labels = xp.zeros((3, 4), dtype=xp.int32)
+        index = xp.asarray([], dtype=int)
+        data = xp.arange(12).reshape(3, 4)
+
+        result = maximum_position(self.label_result(labels, index), data)
+
+        assert result.shape == (0, 2)
+        assert result.dtype == xp.int32
+
+    def test_shape_validation(self, xp: TestNamespace):
+        labels = xp.zeros((3, 4), dtype=xp.int32)
+        index = xp.asarray([1], dtype=int)
+        data = xp.zeros((3, 5), dtype=float)
+
+        with pytest.raises(ValueError, match="same shape"):
+            maximum_position(self.label_result(labels, index), data)
