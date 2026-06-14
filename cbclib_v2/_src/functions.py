@@ -442,7 +442,7 @@ def pixel_map(geometry: 'Detector', half_pixel_shift: bool=True,
                                "Please, check if you have installed the cbclib_v2 with GPU "
                                "support.")
 
-        out = CuPy.empty((3,) + geometry.shape[-2:], dtype=CuPy.float64)
+        out = xp.empty((3,) + geometry.shape[-2:], dtype=xp.float64)
         return cuda_online_detector.pixel_map(out, geometry, half_pixel_shift=half_pixel_shift)
 
     out = xp.zeros((3,) + geometry.shape)
@@ -490,7 +490,7 @@ def radius(geometry: 'Detector', center: Tuple[float, float], half_pixel_shift: 
                                "Please, check if you have installed the cbclib_v2 with GPU "
                                "support.")
 
-        out = CuPy.empty(geometry.shape[-2:], dtype=CuPy.float64)
+        out = xp.empty(geometry.shape[-2:], dtype=xp.float64)
         return cuda_online_detector.radius(out, geometry, center,
                                            half_pixel_shift=half_pixel_shift)
 
@@ -537,7 +537,7 @@ def radial_index(geometry: 'Detector', center: Tuple[float, float], n_bins: int,
                                "Please, check if you have installed the cbclib_v2 with GPU "
                                "support.")
 
-        out = CuPy.empty(geometry.shape[-2:], dtype=CuPy.int64)
+        out = xp.empty(geometry.shape[-2:], dtype=xp.int64)
         return cuda_online_detector.radial_index(out, geometry, center, n_bins,
                                                  half_pixel_shift=half_pixel_shift)
 
@@ -687,13 +687,14 @@ def _radial_profiles_gpu(data: CPIntArray | CPRealArray, radial_index: CPIntArra
         raise RuntimeError("online detector is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
+    xp = CuPy
     frame_size = int(radial_index.size)
     n_frames = int(data.size) // frame_size
-    ftype = CuPy.float64 if data.dtype.itemsize >= 8 else CuPy.float32
+    ftype = xp.float64 if data.dtype.itemsize >= 8 else xp.float32
 
-    whitefield = CuPy.empty((n_frames, n_bins), dtype=ftype)
-    std = CuPy.empty((n_frames, n_bins), dtype=ftype)
-    counts = CuPy.empty((n_frames, n_bins), dtype=radial_index.dtype)
+    whitefield = xp.empty((n_frames, n_bins), dtype=ftype)
+    std = xp.empty((n_frames, n_bins), dtype=ftype)
+    counts = xp.empty((n_frames, n_bins), dtype=radial_index.dtype)
     whitefield, std, counts = cuda_online_detector.radial_profiles(
         whitefield, std, counts, data, radial_index, n_bins, interval, clip_snr, n_iter, std_min
     )

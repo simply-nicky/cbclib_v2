@@ -372,10 +372,9 @@ def scale_background(frames: IntArray | int, images: Array, metadata: CrystMetad
         return metadata.to_data(images, frames)
 
     if params.method in ['robust-lsq', 'lsq']:
-        projection = metadata.projection(images, params.good_fields, params.method, params.r0,
+        projection = metadata.project(images, params.good_fields, params.method, params.r0,
                                          params.r1, params.n_iter, params.lm)
-        whitefields = metadata.project(projection)
-        return metadata.to_data(images, frames, whitefields)
+        return metadata.to_data(images, frames, projection)
 
     raise ValueError(f'Invalid method keyword: {params.method}')
 

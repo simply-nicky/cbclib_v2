@@ -101,6 +101,7 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
 
     #pragma omp parallel num_threads(threads)
     {
+        std::vector<D> values (n_reduce);
         std::vector<std::pair<D, size_t>> buffer (n_reduce);
 
         size_t j0 = r0 * n_reduce, j1 = r1 * n_reduce;
@@ -111,9 +112,13 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
         {
             e.run([&]
             {
-                auto islice = iarr.slice_back(i, seq.size());
+                size_t start = i * n_reduce, end = start + n_reduce;
 
-                for (size_t j = 0; j < n_reduce; j++) buffer[j] = {islice[j], 0};
+                for (size_t index = start, j = 0; index < end; index++, j++)
+                {
+                    values[j] = iarr[index];
+                    buffer[j] = {values[j], 0};
+                }
 
                 if (buffer.size())
                 {
@@ -136,9 +141,9 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
 
                 for (int n = 0; n < n_iter; n++)
                 {
-                    for (size_t j = 0; j < n_reduce; j++)
+                    for (size_t index = start, j = 0; index < end; index++, j++)
                     {
-                        buffer[j] = {(islice[j] - mean) * (islice[j] - mean), j};
+                        buffer[j] = {(values[j] - mean) * (values[j] - mean), j};
                     }
 
                     if (j0 != j1)
@@ -147,19 +152,19 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
                         if (j0) std::nth_element(buffer.begin(), buffer.begin() + j0, buffer.begin() + j1);
 
                         D sum = D();
-                        for (size_t j = j0; j < j1; j++) sum += islice[buffer[j].second];
+                        for (size_t j = j0; j < j1; j++) sum += values[buffer[j].second];
                         mean = sum / (j1 - j0);
                     }
                     else
                     {
                         std::nth_element(buffer.begin(), buffer.begin() + j0, buffer.end());
-                        mean = islice[buffer[j0].second];
+                        mean = values[buffer[j0].second];
                     }
                 }
 
-                for (size_t j = 0; j < n_reduce; j++)
+                for (size_t index = start, j = 0; index < end; index++, j++)
                 {
-                    buffer[j] = {(islice[j] - mean) * (islice[j] - mean), j};
+                    buffer[j] = {(values[j] - mean) * (values[j] - mean), j};
                 }
                 std::sort(buffer.begin(), buffer.end());
 
@@ -169,7 +174,7 @@ py::array_t<D> robust_mean(py::array_t<T> inp, U axis, double r0, double r1, int
                     cumsum += error;
                     if (lm * cumsum < j++ * error) break;
 
-                    sum += islice[index];
+                    sum += values[index];
                     var += error;
                     n_inliers++;
                 }

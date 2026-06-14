@@ -149,10 +149,10 @@ pixels that are always outside the linear regime of the detector:
 
    Masks from different sources can be added together by calling
    :meth:`~cbclib_v2.CrystData.import_mask` with ``update='multiply'``, which
-   multiplies the existing and incoming masks element-wise.  For example, a
+   multiplies the existing and incoming masks element-wise. For example, a
    static bad-pixel map from the detector calibration can be combined with a
    run-time ``'range'`` mask to reject both permanently dead pixels and
-   transiently saturated ones.  See [Sadri2022]_ for an automatic bad-pixel
+   transiently saturated ones. See [Sadri2022]_ for an automatic bad-pixel
    mask generation approach for X-ray pixel detectors.
 
    .. code-block:: python
@@ -199,7 +199,7 @@ The keyword arguments ``r0``, ``r1``, ``n_iter``, and ``lm`` control the
 FLkOS (Fast Least k-th Order Statistics) estimator:
 
 * ``r0`` / ``r1`` — lower and upper bounds on the expected fraction of
-  inliers.  Set ``r0`` conservatively (e.g. ``0.5``) and ``r1`` close to
+  inliers. Set ``r0`` conservatively (e.g. ``0.5``) and ``r1`` close to
   ``1.0`` for frames that are mostly background.
 * ``n_iter`` — number of Gaussian-fitting iterations.
 * ``lm`` — outlier threshold in units of the estimated standard deviation.
@@ -209,7 +209,7 @@ FLkOS (Fast Least k-th Order Statistics) estimator:
    Alternative methods are available through ``update_metadata``:
 
    * ``'median-poisson'`` — pixel-wise median as the whitefield with Poisson
-     noise (``std = √whitefield``).  Faster but less robust to bright outlier
+     noise (``std = √whitefield``). Faster but less robust to bright outlier
      pixels.
    * ``'robust-mean-poisson'`` — robust mean whitefield combined with Poisson
      noise.
@@ -231,22 +231,22 @@ that retains the full whitefield stack.
 
 .. code-block:: python
 
-    data_containers = []
+    meta_list = []
     for start, end in zip([0, 10, 20], [10, 20, 30]):
         frames = run.data(indices[start:end])
         d = cbc.CrystData(frames)
         d = d.update_mask(method='range', vmin=0, vmax=10_000_000)
         d = d.update_metadata(method='robust-mean-scale',
                               r0=0.5, r1=0.95, n_iter=2, lm=9.0)
-        data_containers.append(d)
+        meta_list.append(d.metadata())
 
     # Merge into one CrystMetadata object
-    metadata = cbc.CrystMetadata.from_data(*data_containers)
+    metadata = cbc.CrystMetadata.stack(*meta_list)
 
     cbc.write_hdf(metadata, 'results/metadata_multi.h5',
                   cbc.H5Handler(metadata.protocol))
 
-:meth:`~cbclib_v2.CrystMetadata.from_data` combines the per-container
+:meth:`~cbclib_v2.CrystMetadata.stack` combines the per-container
 estimates as follows:
 
 * The bad-pixel **mask** is the logical AND of all individual masks — a pixel
@@ -254,7 +254,7 @@ estimates as follows:
 * The **std** is the quadratic mean of the per-interval standard deviations:
   :math:`\sigma = \sqrt{\frac{1}{N}\sum_k \sigma_k^2}`.
 * The individual **whitefields** are stacked into a ``(N, ...)`` array stored
-  under the ``whitefields`` attribute.  The ``flatfield`` is initialised as
+  under the ``whitefields`` attribute. The ``flatfield`` is initialised as
   their mean.
 
 .. note::
@@ -300,7 +300,7 @@ Starting from a :class:`~cbclib_v2.CrystMetadata` object that contains a
 
 :meth:`~cbclib_v2.CrystMetadata.pca` computes the eigendecomposition of the
 covariance matrix of zero-mean whitefield fluctuations
-:math:`\Delta W_k = W_k - \bar{W}`.  It adds two new arrays to the container:
+:math:`\Delta W_k = W_k - \bar{W}`. It adds two new arrays to the container:
 
 * ``eigen_fields`` — principal-component images, shape ``(N, ...)``.
 * ``eigen_values`` — normalised eigenvalues (sum to 1) indicating the
@@ -308,7 +308,7 @@ covariance matrix of zero-mean whitefield fluctuations
 
 .. note::
 
-   At least two whitefields are required to perform PCA.  For a reliable
+   At least two whitefields are required to perform PCA. For a reliable
    decomposition, the number of background estimates should exceed the
    expected number of significant background modes (typically 2–5 for FEL
    experiments).
@@ -353,24 +353,21 @@ whitefield for every frame:
     data = data.update_snr(std_min=0.5)
 
 **Dynamic subtraction** projects each frame onto the PCA basis to obtain a
-per-frame whitefield before subtraction.  This compensates for shot-to-shot
+per-frame whitefield before subtraction. This compensates for shot-to-shot
 intensity fluctuations and slow beam-profile drift:
 
 .. code-block:: python
 
     # Fit each frame to the PCA basis using least squares
-    projection = metadata.projection(frames, method='lsq')
+    projection = metadata.project(frames, method='lsq')
 
     # Reconstruct the per-frame background: flatfield + linear combination of eigen_fields
-    whitefields = metadata.project(projection)
-
-    # Attach the per-frame background to the data
-    data = metadata.to_data(frames, whitefield=whitefields)
+    data = metadata.to_data(frames, projection=projection)
     data = data.update_snr(std_min=0.5)
 
-:meth:`~cbclib_v2.CrystMetadata.projection` solves a least-squares problem to
+:meth:`~cbclib_v2.CrystMetadata.project` solves a least-squares problem to
 find the coefficients of the PCA components that best explain the residual
-:math:`D_i - \bar{W}` for each frame :math:`i`.  The ``method`` argument
+:math:`D_i - \bar{W}` for each frame :math:`i`. The ``method`` argument
 accepts:
 
 * ``'lsq'`` — ordinary least squares.
@@ -382,7 +379,7 @@ background as :math:`\bar{W} + \sum_k c_{ik}\, e_k`, where :math:`c_{ik}`
 are the projection coefficients and :math:`e_k` are the eigen fields.
 
 :meth:`~cbclib_v2.CrystData.update_snr` then computes the SNR and stores it
-in ``data.snr``.  The ``std_min`` floor prevents division by near-zero noise
+in ``data.snr``. The ``std_min`` floor prevents division by near-zero noise
 estimates; a value of ``0.5`` is typical for photon-counting detectors.
 
 .. note::
@@ -390,7 +387,7 @@ estimates; a value of ``0.5`` is typical for photon-counting detectors.
    Dynamic subtraction requires that ``eigen_fields`` and ``eigen_values`` are
    present in the :class:`~cbclib_v2.CrystMetadata` container, i.e. that
    :meth:`~cbclib_v2.CrystMetadata.pca` has been called first
-   (:ref:`Scenario 3 <background-pca>`).  Static subtraction only needs
+   (:ref:`Scenario 3 <background-pca>`). Static subtraction only needs
    ``flatfield``, ``mask``, and ``std``.
 
 The resulting ``data.snr`` array is passed to the streak detector in the next
@@ -417,7 +414,7 @@ Summary
      - :meth:`~cbclib_v2.CrystData.update_metadata`
      - Estimate whitefield and std from a single batch of frames.
    * - 4
-     - :meth:`~cbclib_v2.CrystMetadata.from_data`
+     - :meth:`~cbclib_v2.CrystMetadata.stack`
      - Merge multiple background estimates into one model.
    * - 5
      - :meth:`~cbclib_v2.CrystMetadata.pca`
@@ -426,7 +423,7 @@ Summary
      - :meth:`~cbclib_v2.CrystMetadata.to_data`
      - Attach static background model to new data frames.
    * - 6b
-     - :meth:`~cbclib_v2.CrystMetadata.projection` + :meth:`~cbclib_v2.CrystMetadata.project`
+     - :meth:`~cbclib_v2.CrystMetadata.project` + :meth:`~cbclib_v2.CrystMetadata.to_data`
      - Fit and reconstruct a per-frame dynamic background.
    * - 7
      - :meth:`~cbclib_v2.CrystData.update_snr`

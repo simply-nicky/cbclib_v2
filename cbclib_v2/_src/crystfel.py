@@ -1027,7 +1027,7 @@ class Detector():
         with the assembled image grid and with :meth:`radial_index`.
 
         Args:
-            center: Beam center in CrystFEL lab-frame pixel coordinates.
+            center: Beam center ``(x, y)`` in CrystFEL lab-frame pixel coordinates.
             half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
                 pixel centres when ``True``.
             xp: Array namespace used for the output and backend dispatch.
@@ -1057,7 +1057,7 @@ class Detector():
         panel pixels are in the inclusive range ``[0, n_bins - 1]``.
 
         Args:
-            center: Beam center in CrystFEL lab-frame pixel coordinates.
+            center: Beam center ``(x, y)`` in CrystFEL lab-frame pixel coordinates.
             n_bins: Number of radial bins. Use enough bins to resolve sharp
                 powder rings or SAXS/WAXS structure without making per-bin
                 counts too sparse.

@@ -73,9 +73,40 @@ class CrystBase(DataContainer):
                 cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
         return self.replace(**cropped)
 
-class PCAProjection(NamedTuple):
+@dataclass
+class PCAProjection(DataContainer):
     good_fields : Sequence[int] | IntArray
     projection  : RealArray
+
+    def apply(self, metadata: CrystMetadata) -> RealArray:
+        """Reconstruct per-frame whitefields from PCA projection coefficients.
+
+        Computes :math:`\\bar{W} + \\sum_k c_{ik} e_k` for each frame
+        :math:`i`, where :math:`c_{ik}` are the projection coefficients and
+        :math:`e_k` are the eigen fields.
+
+        Args:
+            metadata: A :class:`CrystMetadata` containing the PCA decomposition
+                to apply.
+
+        Returns:
+            Per-frame whitefield array, shape ``(N, *frame_shape)``.
+
+        Example:
+            Reconstruct per-frame backgrounds and attach them to new data:
+
+            >>> proj = metadata.project(frames, method='lsq')
+            >>> whitefields = proj.apply(metadata)
+            >>> data = metadata.to_data(frames, whitefield=whitefields)
+        """
+        xp = self.__array_namespace__()
+
+        if metadata.is_empty(metadata.eigen_field):
+            return xp.tensordot(self.projection, metadata.flatfield[None], axes=((-1,), (0,)))
+
+        fields = xp.tensordot(self.projection, metadata.eigen_field[self.good_fields],
+                              axes=((-1,), (0,)))
+        return metadata.flatfield + fields
 
 @dataclass
 class CrystMetadata(CrystBase):
@@ -85,7 +116,6 @@ class CrystMetadata(CrystBase):
     images estimated from background frames. Optionally holds a PCA decomposition
     of whitefield variability for per-frame dynamic background subtraction.
 
-    Instances are typically created via :meth:`from_data` rather than directly.
     The container can be saved to and loaded from HDF5 files using
     :func:`~cbclib_v2.write_hdf` and :func:`~cbclib_v2.read_hdf` with the
     default protocol returned by :meth:`default_protocol`.
@@ -107,11 +137,10 @@ class CrystMetadata(CrystBase):
         Merge background estimates, decompose with PCA, and apply per-frame
         dynamic background subtraction:
 
-        >>> metadata = cbc.CrystMetadata.from_data(data_a, data_b, data_c)
+        >>> metadata = cbc.CrystMetadata.stack(meta_a, meta_b, meta_c)
         >>> metadata = metadata.pca()
-        >>> proj = metadata.projection(frames, method='lsq')
-        >>> whitefields = metadata.project(proj)
-        >>> data = metadata.to_data(frames, whitefield=whitefields)
+        >>> proj = metadata.project(frames, method='lsq')
+        >>> data = metadata.to_data(frames, projection=proj)
         >>> data = data.update_snr(std_min=0.5)
     """
     eigen_field : RealArray = field(default_factory=lambda: np.array([]))
@@ -158,17 +187,16 @@ class CrystMetadata(CrystBase):
         return H5Protocol.read(METADATA_PROTOCOL)
 
     @classmethod
-    def from_data(cls, *data_containers: 'CrystData') -> CrystMetadata:
-        """Build a :class:`CrystMetadata` from one or more :class:`CrystData` containers.
+    def stack(cls, *metadata_containers: 'CrystMetadata') -> CrystMetadata:
+        """Stack multiple :class:`CrystMetadata` objects into a single container.
 
         The mask is the element-wise AND of all individual masks. The standard
         deviation is the quadratic mean across containers. The individual
         whitefields are stacked along a new leading axis.
 
         Args:
-            *data_containers: One or more :class:`CrystData` objects that each
-                contain a ``whitefield`` and ``std``, produced by
-                :meth:`~CrystData.update_metadata`.
+            *metadata_containers: One or more :class:`CrystMetadata` objects that
+                each contain a ``flatfield`` and ``std``.
 
         Raises:
             ValueError: If no containers are supplied.
@@ -176,30 +204,24 @@ class CrystMetadata(CrystBase):
         Returns:
             A new :class:`CrystMetadata` with combined ``mask``, ``std``, and
             stacked ``whitefields``.
-
-        Example:
-            Merge three background batches into a single metadata object:
-
-            >>> metadata = cbc.CrystMetadata.from_data(data_a, data_b, data_c)
         """
-        if not data_containers:
-            raise ValueError('At least one CrystData container is required to create CrystMetadata')
-        xp = array_namespace(*data_containers)
+        if not metadata_containers:
+            raise ValueError('At least one CrystMetadata container is required to stack')
+        xp = array_namespace(*metadata_containers)
         mask, var = xp.ones(1, dtype=bool), xp.zeros(1)
         whitefields = []
 
         protocol = cls.default_protocol()
-        for data in data_containers:
-            metadata = data.metadata()
+        for metadata in metadata_containers:
             mask = mask & metadata.mask
             var = var + metadata.std ** 2
             whitefields.append(metadata.flatfield)
 
-        return cls(mask=mask, std=xp.sqrt(var / len(data_containers)),
+        return cls(mask=mask, std=xp.sqrt(var / len(metadata_containers)),
                    whitefields=xp.stack(whitefields, axis=0), protocol=protocol)
 
     def to_data(self, data: RealArray, frames: IntArray | int | None=None,
-                whitefield: RealArray=np.array([])) -> 'CrystData':
+                projection: PCAProjection | None=None) -> 'CrystData':
         """Attach this background model to a new array of detector frames.
 
         Creates a :class:`CrystData` container populated with ``mask`` and
@@ -213,22 +235,24 @@ class CrystMetadata(CrystBase):
                 ``(*batch_shape, *frame_shape)``.
             frames: Integer frame indices. Inferred from the leading dimensions
                 of ``data`` when ``None``.
-            whitefield: Per-frame whitefield array, shape ``(N, *frame_shape)``.
-                Defaults to ``flatfield`` (static subtraction) when empty.
+            projection: A :class:`PCAProjection` containing the PCA decomposition
+                to apply.
 
         Raises:
-            ValueError: If ``whitefield`` is empty and ``flatfield`` is absent.
-            ValueError: If the size of ``whitefield`` does not match ``data``.
+            ValueError: If ``projection`` is None and ``flatfield`` is absent.
+            ValueError: If ``projection`` is supplied but the resulting ``whitefield``
+                has a wrong size.
 
         Returns:
-            A new :class:`CrystData` with ``data``, ``frames``, ``mask``,
-            ``std``, and ``whitefield`` set.
+            A new :class:`CrystData` with ``data``, ``frames``, ``mask``, ``std``,
+            and ``whitefield`` set.
 
         Example:
             Apply static and dynamic background subtraction:
 
-            >>> data = metadata.to_data(frames)                          # static
-            >>> data = metadata.to_data(frames, whitefield=whitefields)  # dynamic
+            >>> data = metadata.to_data(frames)                       # static
+            >>> proj = metadata.project(frames, method='lsq')
+            >>> data = metadata.to_data(frames, projection=proj)      # dynamic
         """
         xp = self.__array_namespace__()
         if frames is None:
@@ -237,12 +261,13 @@ class CrystMetadata(CrystBase):
             frames = xp.array([frames,], dtype=int)
         data = xp.reshape(data, (frames.size,) + self.frame_shape)
 
-        if not whitefield.size:
+        if projection is None:
             if self.is_empty(self.flatfield):
                 raise ValueError('no flatfield in the container')
             return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
                              whitefield=self.flatfield)
 
+        whitefield = projection.apply(self)
         if whitefield.size != data.size:
             raise ValueError(f'whitefield size {whitefield.size} must be equal to data size '
                              f'{data.size}')
@@ -287,9 +312,9 @@ class CrystMetadata(CrystBase):
         effs = xp.tensordot(eig_vecs, fields, axes=((0,), (0,)))
         return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
-    def projection(self, data: RealArray, good_fields: Indices=slice(None),
-                   method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
-                   lm: float=9.0) -> PCAProjection:
+    def project(self, data: RealArray, good_fields: Indices=slice(None),
+                method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
+                lm: float=9.0) -> PCAProjection:
         """Project detector frames onto the PCA basis.
 
         Fits the residual :math:`D - \\bar{W}` for each frame to a linear
@@ -314,7 +339,6 @@ class CrystMetadata(CrystBase):
 
         Raises:
             ValueError: If ``flatfield`` is absent.
-            ValueError: If ``eigen_field`` is absent (call :meth:`pca` first).
 
         Returns:
             A :class:`PCAProjection` with fields ``good_fields`` (selected
@@ -324,20 +348,24 @@ class CrystMetadata(CrystBase):
         Example:
             Project frames onto the two dominant PCA components:
 
-            >>> proj = metadata.projection(frames, good_fields=[0, 1], method='lsq')
+            >>> proj = metadata.project(frames, good_fields=[0, 1], method='lsq')
             >>> whitefields = metadata.project(proj)
         """
         if self.is_empty(self.flatfield):
             raise ValueError('No flatfield in the container')
-        if self.is_empty(self.eigen_field):
-            raise ValueError('No eigen_field in the container')
-
-        good_fields = list_indices(good_fields, self.eigen_field.shape[0])
-        fields = self.eigen_field[good_fields]
-
         xp = self.__array_namespace__()
-        y: RealArray = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
-        W: RealArray = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
+
+        if self.is_empty(self.eigen_field):
+            good_fields = xp.array([], dtype=int)
+            y = xp.reshape(data, (data.size // prod(self.frame_shape), -1))
+            W = xp.reshape(self.flatfield, (1, -1))
+
+        else:
+            good_fields = list_indices(good_fields, self.eigen_field.shape[0])
+            fields = self.eigen_field[good_fields]
+
+            y = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
+            W = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
 
         if method == "robust-lsq":
             projection = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm)
@@ -347,37 +375,6 @@ class CrystMetadata(CrystBase):
             raise ValueError(f"Invalid method argument: {method}")
 
         return PCAProjection(good_fields=good_fields, projection=projection)
-
-    def project(self, projection: PCAProjection) -> RealArray:
-        """Reconstruct per-frame whitefields from PCA projection coefficients.
-
-        Computes :math:`\\bar{W} + \\sum_k c_{ik} e_k` for each frame
-        :math:`i`, where :math:`c_{ik}` are the projection coefficients and
-        :math:`e_k` are the eigen fields.
-
-        Args:
-            projection: A :class:`PCAProjection` returned by :meth:`projection`.
-
-        Raises:
-            ValueError: If ``eigen_field`` is absent.
-
-        Returns:
-            Per-frame whitefield array, shape ``(N, *frame_shape)``.
-
-        Example:
-            Reconstruct per-frame backgrounds and attach them to new data:
-
-            >>> proj = metadata.projection(frames, method='lsq')
-            >>> whitefields = metadata.project(proj)
-            >>> data = metadata.to_data(frames, whitefield=whitefields)
-        """
-        if self.is_empty(self.eigen_field):
-            raise ValueError('No eigen_field in the container')
-
-        xp = self.__array_namespace__()
-        fields = xp.tensordot(projection.projection, self.eigen_field[projection.good_fields],
-                              axes=((-1,), (0,)))
-        return self.flatfield + fields
 
 @dataclass
 class CrystData(CrystBase):

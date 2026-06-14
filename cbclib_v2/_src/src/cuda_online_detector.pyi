@@ -1,13 +1,13 @@
 from typing import Any, Tuple
 from ..annotations import CPBoolArray, CPIntArray, CPRealArray, IntArray, RealArray
 
-def pixel_map(out: CPRealArray, geometry: Any, half_pixel_shift: bool=True
+def pixel_map(out: RealArray, geometry: Any, half_pixel_shift: bool=True
               ) -> CPRealArray: ...
 
-def radius(out: CPRealArray, geometry: Any, center: Tuple[float, float],
+def radius(out: RealArray, geometry: Any, center: Tuple[float, float],
            half_pixel_shift: bool=True) -> CPRealArray: ...
 
-def radial_index(out: CPIntArray, geometry: Any, center: Tuple[float, float], n_bins: int,
+def radial_index(out: IntArray, geometry: Any, center: Tuple[float, float], n_bins: int,
                  half_pixel_shift: bool=True) -> CPIntArray: ...
 
 def radial_profiles(whitefield: CPRealArray, std: CPRealArray, counts: CPIntArray,
