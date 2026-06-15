@@ -19,10 +19,11 @@ class TestOnlineDetector:
     def xp(self, platform: str) -> TestNamespace:
         if platform == 'cpu':
             return NumPy
-        elif platform == 'gpu':
+        if platform == 'gpu':
+            if CuPy is None:
+                pytest.skip("CuPy is not available")
             return CuPy
-        else:
-            raise ValueError(f"Unknown platform: {platform}")
+        raise ValueError(f"Unknown platform: {platform}")
 
     @pytest.fixture
     def center(self) -> Tuple[int, int]:
