@@ -1,13 +1,13 @@
 from typing import Any, Tuple
 from ..annotations import IntArray, NDBoolArray, NDIntArray, NDRealArray, RealArray
 
-def pixel_map(geometry: Any, half_pixel_shift: bool=True, num_threads: int=1
+def pixel_map(out: RealArray, geometry: Any, half_pixel_shift: bool=True, num_threads: int=1
               ) -> NDRealArray: ...
 
-def radius(geometry: Any, center: Tuple[float, float],
+def radius(out: RealArray, geometry: Any, center: Tuple[int, int],
            half_pixel_shift: bool=True, num_threads: int=1) -> NDRealArray: ...
 
-def radial_index(geometry: Any, center: Tuple[float, float], n_bins: int,
+def radial_index(out: IntArray, geometry: Any, center: Tuple[int, int], n_bins: int,
                  half_pixel_shift: bool=True, num_threads: int=1) -> NDIntArray: ...
 
 def radial_profiles(data: NDIntArray | NDRealArray, radial_index: IntArray,

@@ -854,7 +854,8 @@ class IndexingScript(BaseScript):
         geometry = self.scan.data.geometry()
         hits_file = self.scan.scan_file(self.chunk_id, dir=self.scan.detect.streaks_dir)
         if not os.path.isfile(hits_file):
-            raise ValueError(f"No streaks file found at {hits_file}")
+            print(f"No streaks file found at {hits_file}")
+            return
 
         print(f"Loading detected streaks from {hits_file}...")
         dataframe = pd.read_hdf(hits_file, 'data')
@@ -876,7 +877,9 @@ class IndexingScript(BaseScript):
         setup = self.scan.setup.setup()
 
         print(f"Indexing {len(patterns):d} patterns...")
-        indexed = pool_indexing(patterns, xtals, setup, self.params, self.scan.system.platform, xp)
+        with self.scan.system.cpu_config():
+            indexed = pool_indexing(patterns, xtals, setup, self.params,
+                                    self.scan.system.platform, xp)
 
         output_path = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.xtals_dir,
                                           suffix=self.suffix)
@@ -927,26 +930,29 @@ class SBatchScripts:
         return SLURMScript(job_name="compile", command=command, parameters=script_spec)
 
     @classmethod
-    def index(cls, scan_file: str, params_file: str, xtals: str, suffix: str,
-              script_file: str, chunk_id: int | None=None, n_chunks: int | None=None
-              ) -> SLURMScript:
+    def index(cls, scan_file: str, params_file: str, script_file: str,
+              xtals: str | None=None, suffix: str | None=None, chunk_id: int | None=None,
+              n_chunks: int | None=None) -> SLURMScript:
         """Build a ``cbclib_cli index`` script.
 
         Args:
             scan_file: Path to the scan configuration JSON.
             params_file: Path to the indexing parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             xtals: Path to an initial crystal orientations HDF5 file
                 (empty string → use unit cell).
             suffix: Output directory suffix.
-            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             chunk_id: Optional chunk index for chunked processing.
             n_chunks: Optional total chunk count.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` for the indexing step.
         """
-        command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} " \
-                  f"{quote(xtals)} {quote(suffix)}"
+        command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} "
+        if xtals is not None:
+            command += f"--xtals {quote(xtals)} "
+        if suffix is not None:
+            command += f"--suffix {quote(suffix)} "
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
             command += f' --n_chunks {n_chunks:d}'
@@ -1035,8 +1041,8 @@ class SBatchArrayScripts:
     main        : ClassVar[str] = 'cbclib_cli'
 
     @classmethod
-    def index(cls, scan_file: str, params_file: str, xtals: str, suffix: str,
-              script_file: str, n_chunks: int) -> SLURMScript:
+    def index(cls, scan_file: str, params_file: str, script_file: str, n_chunks: int,
+              xtals: str | None=None, suffix: str | None=None) -> SLURMScript:
         """Build a ``cbclib_cli index`` array script for *n_chunks* tasks.
 
         Args:
@@ -1050,8 +1056,12 @@ class SBatchArrayScripts:
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
         """
-        command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} {quote(xtals)} "\
-                  f"{quote(suffix)} --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
+        command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} "\
+                  f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
+        if xtals is not None:
+            command += f" --xtals {quote(xtals)}"
+        if suffix is not None:
+            command += f" --suffix {quote(suffix)}"
         script_spec = ScriptSpec.read(script_file)
         script_spec.add_define('FILE_INDEX', '${SLURM_ARRAY_TASK_ID}')
         return SLURMScript(job_name="index_array", command=command, parameters=script_spec)

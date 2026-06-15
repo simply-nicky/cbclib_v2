@@ -82,5 +82,6 @@ parallelism.
 
    CPUConfig
    get_cpu_config
-   set_cpu_config
    reset_cpu_config
+   set_cpu_config
+   set_cpu_pool_worker

@@ -402,8 +402,7 @@ def binary_dilation(inp: BoolArray, structure: Structure, iterations: int=1,
     """
     ...
 
-def pixel_map(geometry: 'Detector', half_pixel_shift: bool=True,
-              xp: AnyNamespace=NumPy) -> RealArray:
+def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True) -> RealArray:
     """Compute a CrystFEL detector pixel-coordinate map.
 
     The map stores the lab-frame coordinate of every detector pixel described
@@ -414,26 +413,26 @@ def pixel_map(geometry: 'Detector', half_pixel_shift: bool=True,
 
     The result is the geometric bridge between a CrystFEL ``.geom`` file and
     array operations such as radial background estimation. NumPy and CuPy
-    inputs use the native online-detector kernels; other array namespaces use a
-    portable Python implementation that calls each panel's
+    outputs use the native online-detector kernels; other array namespaces use
+    a portable Python implementation that calls each panel's
     :meth:`~cbclib_v2.crystfel.Panel.to_detector` method.
 
     Args:
+        out: Output array with shape ``(3, *image_shape)``. Its namespace and
+            dtype select the backend and native overload.
         geometry: Parsed CrystFEL detector geometry.
         half_pixel_shift: Add a 0.5-pixel offset before transforming panel
             coordinates, so returned coordinates refer to pixel centres rather
             than pixel corners.
-        xp: Array namespace used for the output. ``NumPy`` selects the CPU
-            native kernel, ``CuPy`` selects the CUDA kernel, and other
-            namespaces use the portable implementation.
 
     Returns:
         Real array with shape ``(3, *image_shape)``. ``out[0]`` is ``x``,
         ``out[1]`` is ``y``, and ``out[2]`` is ``z`` in lab-frame pixel units.
     """
+    xp = array_namespace(out)
     if xp is NumPy:
         return online_detector.pixel_map(
-            geometry, half_pixel_shift=half_pixel_shift,
+            out, geometry, half_pixel_shift=half_pixel_shift,
             num_threads=get_cpu_config().effective_num_threads()
         )
     if xp is CuPy:
@@ -442,10 +441,11 @@ def pixel_map(geometry: 'Detector', half_pixel_shift: bool=True,
                                "Please, check if you have installed the cbclib_v2 with GPU "
                                "support.")
 
-        out = xp.empty((3,) + geometry.shape[-2:], dtype=xp.float64)
         return cuda_online_detector.pixel_map(out, geometry, half_pixel_shift=half_pixel_shift)
 
-    out = xp.zeros((3,) + geometry.shape)
+    if out.shape != (3,) + geometry.shape[-2:]:
+        raise ValueError("pixel_map output shape mismatch")
+    out[...] = 0
     for panel in geometry.panels.values():
         roi = panel.roi()
         ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[-2]),
@@ -457,8 +457,8 @@ def pixel_map(geometry: 'Detector', half_pixel_shift: bool=True,
         out[(2, ...) + roi] = z
     return out
 
-def radius(geometry: 'Detector', center: Tuple[float, float], half_pixel_shift: bool=True,
-           xp: AnyNamespace=NumPy) -> RealArray:
+def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
+           half_pixel_shift: bool=True) -> RealArray:
     """Compute each detector pixel's radius from the beam centre.
 
     Radii are measured in the assembled detector plane using the same
@@ -469,19 +469,21 @@ def radius(geometry: 'Detector', center: Tuple[float, float], half_pixel_shift: 
     :func:`radial_index`.
 
     Args:
+        out: Output array with shape ``image_shape``. Its namespace and dtype
+            select the backend and native overload.
         geometry: Parsed CrystFEL detector geometry.
         center: Beam centre ``(x, y)`` in CrystFEL lab-frame pixel units.
         half_pixel_shift: Add a 0.5-pixel offset before transforming panel
             coordinates, so distances are measured from pixel centres.
-        xp: Array namespace used for the output and backend dispatch.
 
     Returns:
         Real array with the detector image shape. Each value is the Euclidean
         distance from ``center`` in pixels.
     """
+    xp = array_namespace(out)
     if xp is NumPy:
         return online_detector.radius(
-            geometry, center, half_pixel_shift=half_pixel_shift,
+            out, geometry, center, half_pixel_shift=half_pixel_shift,
             num_threads=get_cpu_config().effective_num_threads()
         )
     if xp is CuPy:
@@ -490,16 +492,20 @@ def radius(geometry: 'Detector', center: Tuple[float, float], half_pixel_shift: 
                                "Please, check if you have installed the cbclib_v2 with GPU "
                                "support.")
 
-        out = xp.empty(geometry.shape[-2:], dtype=xp.float64)
         return cuda_online_detector.radius(out, geometry, center,
                                            half_pixel_shift=half_pixel_shift)
 
-    x, y, _ = pixel_map(geometry, half_pixel_shift=half_pixel_shift, xp=xp)
-    return xp.sqrt((x - center[0] - geometry.bounds[0]) ** 2 +
-                   (y - center[1] - geometry.bounds[1]) ** 2)
+    pixel_out = xp.empty((3,) + geometry.shape[-2:], dtype=out.dtype)
+    x, y, _ = pixel_map(pixel_out, geometry, half_pixel_shift=half_pixel_shift)
+    result = xp.sqrt((x - center[0] - geometry.bounds[0]) ** 2 +
+                     (y - center[1] - geometry.bounds[1]) ** 2)
+    if out.shape != geometry.shape[-2:]:
+        raise ValueError("radius output shape mismatch")
+    out[...] = result
+    return out
 
-def radial_index(geometry: 'Detector', center: Tuple[float, float], n_bins: int,
-                 half_pixel_shift: bool=True, xp: AnyNamespace=NumPy) -> IntArray:
+def radial_index(out: IntArray, geometry: 'Detector', center: Tuple[int, int],
+                 n_bins: int, half_pixel_shift: bool=True) -> IntArray:
     """Compute integer radial-bin indices for radial background estimation.
 
     The detector plane is divided into ``n_bins`` concentric annuli around
@@ -514,21 +520,23 @@ def radial_index(geometry: 'Detector', center: Tuple[float, float], n_bins: int,
     image. Valid panel pixels are in the inclusive range ``[0, n_bins - 1]``.
 
     Args:
+        out: Output array with shape ``image_shape``. Its namespace and
+            integer dtype select the backend and native overload.
         geometry: Parsed CrystFEL detector geometry.
         center: Beam centre ``(x, y)`` in CrystFEL lab-frame pixel units.
         n_bins: Number of radial bins. Must be at least 2 so a finite radial
             step can be computed.
         half_pixel_shift: Add a 0.5-pixel offset before transforming panel
             coordinates, so bins are assigned from pixel centres.
-        xp: Array namespace used for the output and backend dispatch.
 
     Returns:
         Integer array with the detector image shape. Values are radial-bin
         indices; ``-1`` denotes non-panel pixels on native backends.
     """
+    xp = array_namespace(out)
     if xp is NumPy:
         return online_detector.radial_index(
-            geometry, center, n_bins, half_pixel_shift=half_pixel_shift,
+            out, geometry, center, n_bins, half_pixel_shift=half_pixel_shift,
             num_threads=get_cpu_config().effective_num_threads()
         )
     if xp is CuPy:
@@ -537,13 +545,17 @@ def radial_index(geometry: 'Detector', center: Tuple[float, float], n_bins: int,
                                "Please, check if you have installed the cbclib_v2 with GPU "
                                "support.")
 
-        out = xp.empty(geometry.shape[-2:], dtype=xp.int64)
         return cuda_online_detector.radial_index(out, geometry, center, n_bins,
                                                  half_pixel_shift=half_pixel_shift)
 
     radius_step = geometry.max_radius(center) / (n_bins - 1)
-    return xp.asarray(xp.round(radius(geometry, center, half_pixel_shift, xp) / radius_step),
-                      dtype=int)
+    radius_out = xp.empty(geometry.shape[-2:], dtype=xp.float64)
+    radii = radius(radius_out, geometry, center, half_pixel_shift=half_pixel_shift)
+    result = xp.asarray(xp.round(radii / radius_step), dtype=out.dtype)
+    if out.shape != geometry.shape[-2:]:
+        raise ValueError("radial_index output shape mismatch")
+    out[...] = result
+    return out
 
 def _is_signal_cpu(data: IntArray | RealArray, whitefield: RealArray, std: RealArray,
                    radial_index: IntArray, min_snr: float=3.0, std_min: float=0.0

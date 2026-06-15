@@ -120,6 +120,42 @@ struct DetectorGeometry
     }
 };
 
+using PyDetectorGeometry = DetectorGeometry<double, py::ssize_t>;
+
+template <typename R, typename I>
+DetectorGeometry<R, I> cast_detector_geometry(const PyDetectorGeometry & geometry)
+{
+    DetectorGeometry<R, I> result;
+    result.panels.reserve(geometry.panels.size());
+    result.panel_offsets.reserve(geometry.panel_offsets.size());
+    result.shape = {static_cast<I>(geometry.shape[0]), static_cast<I>(geometry.shape[1])};
+    result.bounds = {static_cast<R>(geometry.bounds[0]), static_cast<R>(geometry.bounds[1]),
+                     static_cast<R>(geometry.bounds[2]), static_cast<R>(geometry.bounds[3])};
+    result.half_pixel_shift = geometry.half_pixel_shift;
+
+    for (const auto & panel : geometry.panels)
+    {
+        PanelGeometry<R, I> cast_panel;
+        cast_panel.offset = static_cast<I>(panel.offset);
+        cast_panel.bounds = {static_cast<I>(panel.bounds[0]), static_cast<I>(panel.bounds[1]),
+                             static_cast<I>(panel.bounds[2]), static_cast<I>(panel.bounds[3])};
+        cast_panel.shape = {static_cast<I>(panel.shape[0]), static_cast<I>(panel.shape[1])};
+        cast_panel.stride = {static_cast<I>(panel.stride[0]), static_cast<I>(panel.stride[1])};
+        cast_panel.corner = {static_cast<R>(panel.corner[0]), static_cast<R>(panel.corner[1])};
+        cast_panel.ss = {static_cast<R>(panel.ss[0]), static_cast<R>(panel.ss[1]),
+                         static_cast<R>(panel.ss[2])};
+        cast_panel.fs = {static_cast<R>(panel.fs[0]), static_cast<R>(panel.fs[1]),
+                         static_cast<R>(panel.fs[2])};
+        result.panels.push_back(cast_panel);
+    }
+
+    for (auto offset : geometry.panel_offsets)
+    {
+        result.panel_offsets.push_back(static_cast<I>(offset));
+    }
+    return result;
+}
+
 } // namespace cbclib
 
 namespace pybind11::detail {

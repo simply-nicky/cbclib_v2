@@ -6,7 +6,7 @@ from typing_extensions import Self
 from tqdm.auto import tqdm
 from .annotations import Array, AnyNamespace, IntArray, NDArray, NumPy, RealArray, ROI
 from .array_api import default_api, Platform
-from .config import get_cpu_config
+from .config import get_cpu_config, set_cpu_pool_worker
 from .crystfel import Detector
 from .cxi_protocol import H5Handler, LoadWorker, TrainIndices
 from .data_container import Container, array_namespace, list_indices
@@ -674,7 +674,8 @@ class StreaksWorker(LoadWorker[AllStreaks]):
 
     @classmethod
     def initializer(cls, loader: LoadWorker[NDArray], metapath: str, params: StreakFinderConfig,
-                    platform: Platform, detector: Detector | None):
+                    platform: Platform, detector: Detector | None, is_pool: bool=False) -> None:
+        set_cpu_pool_worker(is_pool)
         global streaks_worker
         streaks_worker = cls(loader, metapath, params, platform, detector)
 
@@ -711,7 +712,7 @@ def pool_detection(loader: LoadWorker[NDArray], indices: TrainIndices, metapath:
     streaks = []
     if platform == 'cpu' and num_threads > 1:
         with Pool(processes=num_threads, initializer=StreaksWorker.initializer,
-                  initargs=initargs) as pool:
+                  initargs=(*initargs, True)) as pool:
             for pattern in tqdm(pool.imap(StreaksWorker.run, zip(indices.index(), indices)),
                                 total=len(indices)):
                 streaks.append(pattern)
@@ -874,7 +875,8 @@ class IndexingWorker():
 
     @classmethod
     def initializer(cls, state: BaseSetup, params: IndexingConfig, xtal: XtalState,
-                    indexer: CBDIndexer):
+                    indexer: CBDIndexer, is_pool: bool=False) -> None:
+        set_cpu_pool_worker(is_pool)
         global indexing_worker
         indexing_worker = cls(state, params, xtal, indexer)
 
@@ -909,7 +911,7 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
     solutions : List[XtalList] = []
     if platform == 'cpu' and num_threads > 1:
         with Pool(processes=num_threads, initializer=IndexingWorker.initializer,
-                  initargs=(state, params, xtals, indexer)) as pool:
+                  initargs=(state, params, xtals, indexer, True)) as pool:
             iterator = zip(rlp_iterator, patterns)
             for solution in tqdm(pool.imap(IndexingWorker.run, iterator), total=len(patterns)):
                 solutions.append(solution)

@@ -1,11 +1,11 @@
-from typing import Callable, Iterator, Tuple, Type, TypeVar, get_type_hints, overload
+from typing import Callable, Generic, Iterator, Tuple, Type, TypeVar, get_type_hints, overload
 from typing_extensions import Self
 import pandas as pd
 from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, IntArray, JaxNumPy,
                                 RealArray, RealSequence, Shape)
 from .._src.array_api import array_namespace, asnumpy
-from .._src.data_container import ArrayContainer, Container, DataContainer, IndexedContainer
+from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer
 from .._src.parser import JSONParser, INIParser, Parser, get_extension
 from .._src.state import State, dynamic_fields, field, static_fields
 
@@ -72,9 +72,14 @@ def random_euler(shape: Shape=(), xp: AnyNamespace=JaxNumPy
         return EulerState(xp.asarray(angles))
     return random
 
-class BaseCell(Container):
-    angles  : RealArray | Tuple[Tuple[float, float, float], ...]
-    lengths : RealArray | Tuple[Tuple[float, float, float], ...]
+StaticAngles = Tuple[Tuple[float, float, float], ...]
+StaticLengths = Tuple[Tuple[float, float, float], ...]
+AnyAngles = TypeVar('AnyAngles', bound=RealArray | StaticAngles)
+AnyLengths = TypeVar('AnyLengths', bound=RealArray | StaticLengths)
+
+class BaseCell(Generic[AnyAngles, AnyLengths]):
+    angles  : AnyAngles
+    lengths : AnyLengths
 
     @classmethod
     def parser(cls, file_or_extension: str='ini') -> Parser:
@@ -99,16 +104,16 @@ class BaseCell(Container):
         vectors = xp.stack((a_vec, b_vec, c_vec), axis=-2)
         return XtalState(xp.asarray(xp.asarray(self.lengths)[..., None] * vectors, dtype=float))
 
-class FixedXtalCell(BaseCell, State, eq=True, unsafe_hash=True):
-    angles  : Tuple[Tuple[float, float, float], ...] = field(static=True)
-    lengths : Tuple[Tuple[float, float, float], ...] = field(static=True)
+class FixedXtalCell(BaseCell[StaticAngles, StaticLengths], State, eq=True, unsafe_hash=True):
+    angles  : StaticAngles = field(static=True)
+    lengths : StaticLengths = field(static=True)
 
     @classmethod
     def read(cls, file: str) -> 'FixedXtalCell':
         data = cls.parser(file).read(file)
         return cls(tuple(data['angles']), tuple(data['lengths']))
 
-class XtalCell(BaseCell, ArrayContainer, State):
+class XtalCell(BaseCell[RealArray, RealArray], ArrayContainer, State):
     angles  : RealArray
     lengths : RealArray
 
@@ -269,10 +274,14 @@ class XtalList(IndexedContainer, State):
         return self.to_xtals().to_dataframe(index=xp.asarray(self.index))
 
 Float = float | RealArray
+StaticFoc = Tuple[float, float, float]
+StaticPupil = Tuple[float, float, float, float]
+AnyFoc = TypeVar('AnyFoc', bound=StaticFoc | RealArray)
+AnyPupil = TypeVar('AnyPupil', bound=StaticPupil | RealArray)
 
-class BaseLens(Container):
-    foc_pos     : Tuple[float, float, float] | RealArray
-    pupil_roi   : Tuple[float, float, float, float] | RealArray
+class BaseLens(Generic[AnyFoc, AnyPupil]):
+    foc_pos     : AnyFoc
+    pupil_roi   : AnyPupil
 
     @property
     def pupil_min(self) -> Tuple[Float, Float]:
@@ -301,19 +310,19 @@ class BaseLens(Container):
     def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
         raise NotImplementedError
 
-class FixedLens(BaseLens, State, eq=True, unsafe_hash=True):
-    foc_pos     : Tuple[float, float, float] = field(static=True)
-    pupil_roi   : Tuple[float, float, float, float] = field(static=True)
+class FixedLens(BaseLens[StaticFoc, StaticPupil], State, eq=True, unsafe_hash=True):
+    foc_pos     : StaticFoc = field(static=True)
+    pupil_roi   : StaticPupil = field(static=True)
 
     @classmethod
     def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedLens':
         data = cls.parser(file).read(file)
         return cls(tuple(data['foc_pos']), tuple(data['pupil_roi']))
 
-class FixedPupilLens(DataContainer, BaseLens, State):
+class FixedPupilLens(BaseLens, DataContainer, State):
     foc_xy      : RealArray
     foc_z       : float = field(static=True)
-    pupil_roi   : Tuple[float, float, float, float] = field(static=True)
+    pupil_roi   : StaticPupil = field(static=True)
 
     @property
     def foc_pos(self) -> RealArray:
@@ -552,16 +561,20 @@ class TiltOverAxisState(ArrayContainer, State):
         xp = self.__array_namespace__()
         return TiltState(xp.stack((self.angles, self.alpha(), self.beta()), axis=-1))
 
-class BaseSetup(Container):
-    lens    : BaseLens
-    z       : Tuple[float, ...] | RealArray
+StaticZ = Tuple[float, ...]
+AnyLens = TypeVar('AnyLens', bound=BaseLens)
+AnyZ = TypeVar('AnyZ', bound=StaticZ | RealArray)
+
+class BaseSetup(Generic[AnyLens, AnyZ]):
+    lens    : AnyLens
+    z       : AnyZ
 
     @property
-    def foc_pos(self) -> Tuple[float, float, float] | RealArray:
+    def foc_pos(self) -> StaticFoc | RealArray:
         return self.lens.foc_pos
 
     @property
-    def pupil_roi(self) -> Tuple[float, float, float, float] | RealArray:
+    def pupil_roi(self) -> StaticPupil | RealArray:
         return self.lens.pupil_roi
 
     @property
@@ -587,7 +600,7 @@ class BaseSetup(Container):
 
         raise ValueError(f"Invalid format: {ext}")
 
-class FixedPupilSetup(BaseSetup, DataContainer, State):
+class FixedPupilSetup(BaseSetup[FixedPupilLens, RealArray], DataContainer, State):
     lens    : FixedPupilLens
     z       : RealArray
 
@@ -598,7 +611,7 @@ class FixedPupilSetup(BaseSetup, DataContainer, State):
         foc_z = float(data['foc_pos'][2])
         return cls(FixedPupilLens(foc_xy, foc_z, tuple(data['pupil_roi'])), xp.asarray(data['z']))
 
-class FixedApertureSetup(BaseSetup, DataContainer, State):
+class FixedApertureSetup(BaseSetup[FixedApertureLens, RealArray], DataContainer, State):
     lens    : FixedApertureLens
     z       : RealArray
 
@@ -608,23 +621,26 @@ class FixedApertureSetup(BaseSetup, DataContainer, State):
         lens = FixedLens(tuple(data['foc_pos']), tuple(data['pupil_roi']))
         return cls(FixedApertureLens.from_roi(lens), xp.asarray(data['z']))
 
-class FixedSetup(BaseSetup, State, eq=True, unsafe_hash=True):
+class FixedSetup(BaseSetup[FixedLens, StaticZ], State, eq=True, unsafe_hash=True):
     lens    : FixedLens = field(static=True)
-    z       : Tuple[float, ...] = field(static=True)
+    z       : StaticZ = field(static=True)
 
     @classmethod
     def read(cls, file: str) -> 'FixedSetup':
         data = cls.parser(file).read(file)
         return cls(FixedLens(tuple(data['foc_pos']), tuple(data['pupil_roi'])), tuple(data['z']))
 
-class BaseState(DataContainer, BaseSetup):
-    xtal    : XtalState
-    setup   : BaseSetup
+AnyXtal = TypeVar('AnyXtal', bound=XtalState)
+AnySetup = TypeVar('AnySetup', bound=BaseSetup)
+
+class BaseState(DataContainer, BaseSetup, Generic[AnyXtal, AnySetup]):
+    xtal    : AnyXtal
+    setup   : AnySetup
 
     @property
     def lens(self) -> BaseLens:
         return self.setup.lens
 
     @property
-    def z(self) -> Tuple[float, ...] | RealArray:
+    def z(self) -> StaticZ | RealArray:
         return self.setup.z

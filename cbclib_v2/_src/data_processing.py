@@ -12,13 +12,12 @@ batches.
 from __future__ import annotations
 from math import prod
 import os
-from typing import Literal, NamedTuple, Sequence, Tuple, cast
+from typing import Literal, Sequence, Tuple, cast
 from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
 import numpy as np
-from .array_api import array_namespace, default_rng
-from .crystfel import Detector
+from .array_api import array_namespace
 from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
@@ -968,7 +967,8 @@ class OnlineDetector(DataContainer):
         Estimate radial profiles and label online signal regions:
 
         >>> detector = read_crystfel('detector.geom')
-        >>> radial = detector.radial_index(center=(512.0, 512.0), n_bins=1024)
+        >>> radial = np.empty(detector.shape[-2:], dtype=np.int32)
+        >>> detector.radial_index(radial, center=(512, 512), n_bins=1024)
         >>> online = data.online_detector(Structure([1, 1], 1), radial, 1024)
         >>> profiles = online.profiles(clip_snr=4.0, n_iter=5)
         >>> regions = online.detect_regions(profiles, min_snr=5.0, npts=3)

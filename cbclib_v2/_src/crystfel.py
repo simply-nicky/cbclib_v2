@@ -950,7 +950,8 @@ class Detector():
             >>> assembler = detector.assembler()
             >>> assembled = assembler(frames)
         """
-        pix_x, pix_y, _ = self.pixel_map(xp=xp)
+        out = xp.empty((3,) + self.shape[-2:], dtype=xp.float64)
+        pix_x, pix_y, _ = self.pixel_map(out)
         pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
         pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
         return Assembler(pix_y, pix_x)
@@ -966,7 +967,7 @@ class Detector():
         """
         return self.panels[list(self.panels.keys())[module_id]]
 
-    def pixel_map(self, half_pixel_shift: bool=True, xp: AnyNamespace=NumPy):
+    def pixel_map(self, out: RealArray, half_pixel_shift: bool=True):
         """Compute the lab-frame coordinate map for detector pixels.
 
         This is the geometry-aware starting point for detector assembly and
@@ -983,11 +984,10 @@ class Detector():
         radii from pixel corners.
 
         Args:
+            out: Output array. Its namespace and dtype select the backend and
+                native overload.
             half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
                 pixel centres when ``True`` (default).
-            xp: Array namespace used for the output and backend dispatch.
-                ``NumPy`` uses the CPU native geometry kernel, ``CuPy`` uses
-                the CUDA kernel, and other namespaces use a portable fallback.
 
         Returns:
             Array of shape ``(3, *image_shape)``. ``out[0]`` is ``x``,
@@ -998,7 +998,7 @@ class Detector():
             :func:`~cbclib_v2.functions.pixel_map`: Low-level backend-dispatched
             implementation.
         """
-        return pixel_map(self, half_pixel_shift=half_pixel_shift, xp=xp)
+        return pixel_map(out, self, half_pixel_shift=half_pixel_shift)
 
     def max_radius(self, center: Tuple[float, float]) -> float:
         """Return the maximum radius from ``center`` to any detector pixel.
@@ -1016,8 +1016,8 @@ class Detector():
                     (corner[1] - center[1] - bounds[1]) ** 2) ** 0.5
                    for corner in corners)
 
-    def radii(self, center: Tuple[float, float], half_pixel_shift: bool=True,
-              xp: AnyNamespace=NumPy) -> RealArray:
+    def radii(self, out: RealArray, center: Tuple[int, int],
+              half_pixel_shift: bool=True) -> RealArray:
         """Return detector-pixel radii from the beam centre.
 
         Radii are computed in the same assembled detector coordinate system as
@@ -1027,10 +1027,11 @@ class Detector():
         with the assembled image grid and with :meth:`radial_index`.
 
         Args:
+            out: Output array. Its namespace and dtype select the backend and
+                native overload.
             center: Beam center ``(x, y)`` in CrystFEL lab-frame pixel coordinates.
             half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
                 pixel centres when ``True``.
-            xp: Array namespace used for the output and backend dispatch.
 
         Returns:
             Real array with the detector image shape. Each value is the
@@ -1039,10 +1040,10 @@ class Detector():
         See Also:
             :meth:`radial_index`: Discretise these radii into radial bins.
         """
-        return radius(self, center, half_pixel_shift=half_pixel_shift, xp=xp)
+        return radius(out, self, center, half_pixel_shift=half_pixel_shift)
 
-    def radial_index(self, center: Tuple[float, float], n_bins: int,
-                     half_pixel_shift: bool=True, xp: AnyNamespace=NumPy) -> IntArray:
+    def radial_index(self, out: IntArray, center: Tuple[int, int], n_bins: int,
+                     half_pixel_shift: bool=True) -> IntArray:
         """Return integer radial-bin indices for detector pixels.
 
         The detector plane is divided into ``n_bins`` concentric annuli around
@@ -1057,13 +1058,14 @@ class Detector():
         panel pixels are in the inclusive range ``[0, n_bins - 1]``.
 
         Args:
+            out: Output array. Its namespace and integer dtype select the
+                backend and native overload.
             center: Beam center ``(x, y)`` in CrystFEL lab-frame pixel coordinates.
             n_bins: Number of radial bins. Use enough bins to resolve sharp
                 powder rings or SAXS/WAXS structure without making per-bin
                 counts too sparse.
             half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
                 pixel centres when ``True``.
-            xp: Array namespace used for the output and backend dispatch.
 
         Returns:
             Integer radial-bin map with the detector image shape. Values index
@@ -1074,9 +1076,10 @@ class Detector():
             Build the radial lookup table used by online hit finding:
 
             >>> geometry = read_crystfel('detector.geom')
-            >>> radial = geometry.radial_index(center=(512.0, 512.0), n_bins=1024)
+            >>> radial = NumPy.empty(geometry.shape[-2:], dtype=NumPy.int32)
+            >>> geometry.radial_index(radial, center=(512, 512), n_bins=1024)
         """
-        return radial_index(self, center, n_bins, half_pixel_shift=half_pixel_shift, xp=xp)
+        return radial_index(out, self, center, n_bins, half_pixel_shift=half_pixel_shift)
 
     def to_detector(self, *coordinates: IntArray | RealArray, half_pixel_shift: bool=True,
                     units: Literal['pixel', 'meter']='pixel', tolerance: float=1.0

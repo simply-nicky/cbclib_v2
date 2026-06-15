@@ -11,7 +11,8 @@ if TYPE_CHECKING:
     from . import annotations, cuda, indexer, label, ndimage, scripts, slurm, streak_finder
     from ._src.array_api import (add_at, array_namespace, ascupy, asjax, asnumpy, default_api,
                                  default_rng, min_at, set_at)
-    from ._src.config import CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config
+    from ._src.config import (CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config,
+                              set_cpu_pool_worker)
     from ._src.crystfel import Detector, Panel, read_crystfel
     from ._src.cxi_protocol import (H5Files, H5Handler, H5Protocol, Kinds, LoadIndices, read_hdf,
                                     write_hdf)
@@ -37,6 +38,7 @@ _EXPORTS = {
     "get_cpu_config": ("._src.config", "get_cpu_config"),
     "reset_cpu_config": ("._src.config", "reset_cpu_config"),
     "set_cpu_config": ("._src.config", "set_cpu_config"),
+    "set_cpu_pool_worker": ("._src.config", "set_cpu_pool_worker"),
     "Detector": ("._src.crystfel", "Detector"),
     "Panel": ("._src.crystfel", "Panel"),
     "read_crystfel": ("._src.crystfel", "read_crystfel"),

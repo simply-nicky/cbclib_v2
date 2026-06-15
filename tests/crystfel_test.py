@@ -8,13 +8,16 @@ Tests cover:
 - Detector: Geometry calculations and transformations
 """
 from pathlib import Path
-import numpy as np
 import pytest
 from cbclib_v2 import read_crystfel
-from cbclib_v2.test_util import parse_crystfel_file
+from cbclib_v2.annotations import NumPy, NumPyNamespace
+from cbclib_v2.test_util import check_close, parse_crystfel_file
 
 class TestFullGeometryParsing:
     """Test complete geometry file parsing."""
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
 
     def test_file_with_regions_and_masks(self, tmp_path: Path) -> None:
         """Test CrystFELFile parsing with regions and masks."""
@@ -170,7 +173,7 @@ class TestFullGeometryParsing:
         assert detector.shape == (1, 512, 1024)
         assert detector.panels['panel'].shape == (1, 512, 1024)
 
-    def test_radii(self, tmp_path: Path) -> None:
+    def test_radii(self, tmp_path: Path, xp: NumPyNamespace) -> None:
         """Test detector radius generation in detector-frame coordinates."""
         geom_file = tmp_path / "radius.geom"
         content = (
@@ -189,10 +192,11 @@ class TestFullGeometryParsing:
         geom_file.write_text(content)
 
         detector = read_crystfel(str(geom_file))
-        radii = detector.radii((0.0, 0.0))
+        radii = xp.empty(detector.shape, dtype=xp.float64)
+        radii = detector.radii(radii, center=(0, 0))
 
         assert radii.shape == (3, 3)
-        np.testing.assert_allclose(radii, np.asarray([
+        check_close(radii, xp.asarray([
             [0.0, 1.0, 2.0],
             [1.0, 2.0 ** 0.5, 5.0 ** 0.5],
             [2.0, 5.0 ** 0.5, 8.0 ** 0.5],

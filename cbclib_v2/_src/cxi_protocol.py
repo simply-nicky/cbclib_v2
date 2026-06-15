@@ -53,7 +53,7 @@ class LoadWorker(Generic[Output]):
     def __call__(self, index: Any) -> Output:
         raise NotImplementedError
 
-    def initializer(self, *args, **kwargs):
+    def initializer(self, *args: Any, is_pool: bool=False, **kwargs: Any) -> None:
         raise NotImplementedError
 
     @staticmethod

@@ -201,16 +201,19 @@ void for_panel_range(const DetectorGeometry<R, I> & geometry, I begin, I end, Fu
 }
 
 template <typename R, typename I>
-py::array_t<R> pixel_map(DetectorGeometry<R, I> geometry, bool half_pixel_shift,
-                         unsigned threads)
+py::array_t<R> pixel_map(py::array_t<R> result, PyDetectorGeometry py_geometry,
+                         bool half_pixel_shift, unsigned threads)
 {
+    auto geometry = cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
+    if (result.ndim() != 3 || result.shape(0) != 3 ||
+        result.shape(1) != geometry.shape[0] || result.shape(2) != geometry.shape[1])
+    {
+        throw std::invalid_argument("pixel_map output shape mismatch");
+    }
 
-    std::vector<py::ssize_t> shape {3, geometry.shape[0], geometry.shape[1]};
-    py::array_t<R> result {shape};
     array<R> out {result.request()};
-    fill_array(result, R());
 
     I frame_size = geometry.size();
     I panel_size = geometry.panel_size();
@@ -237,15 +240,20 @@ py::array_t<R> pixel_map(DetectorGeometry<R, I> geometry, bool half_pixel_shift,
 }
 
 template <typename R, typename I>
-py::array_t<R> radius(DetectorGeometry<R, I> geometry, const std::tuple<R, R> & center,
-                      bool half_pixel_shift, unsigned threads)
+py::array_t<R> radius(py::array_t<R> result, PyDetectorGeometry py_geometry,
+                      std::tuple<py::ssize_t, py::ssize_t> center, bool half_pixel_shift,
+                      unsigned threads)
 {
+    auto geometry = cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
+    if (result.ndim() != 2 || result.shape(0) != geometry.shape[0] ||
+        result.shape(1) != geometry.shape[1])
+    {
+        throw std::invalid_argument("radius output shape mismatch");
+    }
 
-    py::array_t<R> result {{geometry.shape[0], geometry.shape[1]}};
     array<R> out {result.request()};
-    fill_array(result, R());
 
     I panel_size = geometry.panel_size();
     threads = std::max<unsigned>(1, std::min<unsigned>(threads, panel_size));
@@ -268,19 +276,25 @@ py::array_t<R> radius(DetectorGeometry<R, I> geometry, const std::tuple<R, R> & 
 }
 
 template <typename R, typename I>
-py::array_t<I> radial_index(DetectorGeometry<R, I> geometry, const std::tuple<R, R> & center,
-                            I n_bins, bool half_pixel_shift, unsigned threads)
+py::array_t<I> radial_index(py::array_t<I> result, PyDetectorGeometry py_geometry,
+                            std::tuple<py::ssize_t, py::ssize_t> center, I n_bins,
+                            bool half_pixel_shift, unsigned threads)
 {
+    auto geometry = cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
     if (n_bins <= 1) throw std::invalid_argument("n_bins must be greater than 1");
+    if (result.ndim() != 2 || result.shape(0) != geometry.shape[0] ||
+        result.shape(1) != geometry.shape[1])
+    {
+        throw std::invalid_argument("radial_index output shape mismatch");
+    }
 
     R max_radius = geometry.max_radius(center);
     if (max_radius <= R()) throw std::invalid_argument("max radius must be positive");
     R inv_radius_step = (n_bins - 1) / max_radius;
-    py::array_t<I> result {{geometry.shape[0], geometry.shape[1]}};
+
     array<I> out {result.request()};
-    fill_array(result, I(-1));
 
     I panel_size = geometry.panel_size();
     threads = std::max<unsigned>(1, std::min<unsigned>(threads, panel_size));
@@ -331,14 +345,15 @@ void accumulate_index(const array<T> & darr, const array<I> & rarr, I index, I f
 }
 
 template <typename T, typename R, typename I>
-ProfileResult<R, I> radial_profiles(py::array_t<T> data, py::array_t<I> radial_index,
-                                    I n_bins, I interval,
-                                    R clip_snr, I n_iter, R std_min, unsigned threads)
+ProfileResult<R, I> radial_profiles(py::array_t<T> data, py::array_t<I> radial_index, py::ssize_t n_bins,
+                                    py::ssize_t interval, double clip_snr, py::ssize_t n_iter, double std_min,
+                                    unsigned threads)
 {
     array<T> darr {data.request()};
     array<I> rarr {radial_index.request()};
 
-    ProfileParameters<R, I> params {n_bins, interval, clip_snr, std_min};
+    ProfileParameters<R, I> params {static_cast<I>(n_bins), static_cast<I>(interval),
+                                    static_cast<R>(clip_snr), static_cast<R>(std_min)};
 
     if (params.n_bins <= 1) throw std::invalid_argument("n_bins must be greater than 1");
     if (n_iter < 0) throw std::invalid_argument("n_iter must be non-negative");
@@ -474,8 +489,7 @@ ProfileResult<R, I> radial_profiles(py::array_t<T> data, py::array_t<I> radial_i
 
 template <typename T, typename R, typename I>
 py::array_t<bool> is_signal(py::array_t<T> data, py::array_t<R> whitefield, py::array_t<R> std,
-                            py::array_t<I> radial_index, R min_snr,
-                            R std_min, unsigned threads)
+                            py::array_t<I> radial_index, double min_snr, double std_min, unsigned threads)
 {
     array<T> darr {data.request()};
     array<R> warr {whitefield.request()};
@@ -517,7 +531,7 @@ py::array_t<bool> is_signal(py::array_t<T> data, py::array_t<R> whitefield, py::
             }
             else
             {
-                auto sigma = std::max(sarr[state.frame() * n_bins + bin], std_min);
+                auto sigma = std::max<R>(sarr[state.frame() * n_bins + bin], std_min);
                 out[state.index()] = darr[state.index()] >
                                      warr[state.frame() * n_bins + bin] + min_snr * sigma;
             }
@@ -545,34 +559,38 @@ PYBIND11_MODULE(online_detector, m)
         return;
     }
 
-    m.def("pixel_map", &pixel_map<double, py::ssize_t>, py::arg("geometry"),
-          py::arg("half_pixel_shift") = true, py::arg("num_threads") = 1);
-    m.def("pixel_map", &pixel_map<float, py::ssize_t>, py::arg("geometry"),
-          py::arg("half_pixel_shift") = true, py::arg("num_threads") = 1);
-    m.def("radius", &radius<double, py::ssize_t>, py::arg("geometry"), py::arg("center"),
-          py::arg("half_pixel_shift") = true, py::arg("num_threads") = 1);
-    m.def("radius", &radius<float, py::ssize_t>, py::arg("geometry"), py::arg("center"),
-          py::arg("half_pixel_shift") = true, py::arg("num_threads") = 1);
-    m.def("radial_index", &radial_index<double, py::ssize_t>, py::arg("geometry"),
-          py::arg("center"), py::arg("n_bins"), py::arg("half_pixel_shift") = true,
+    m.def("pixel_map", &pixel_map<double, py::ssize_t>, py::arg("out"),
+          py::arg("geometry"), py::arg("half_pixel_shift") = true,
           py::arg("num_threads") = 1);
-    m.def("radial_index", &radial_index<float, py::ssize_t>, py::arg("geometry"),
-          py::arg("center"), py::arg("n_bins"), py::arg("half_pixel_shift") = true,
+    m.def("pixel_map", &pixel_map<float, int>, py::arg("out"),
+          py::arg("geometry"), py::arg("half_pixel_shift") = true,
           py::arg("num_threads") = 1);
+    m.def("radius", &radius<double, py::ssize_t>, py::arg("out"),
+          py::arg("geometry"), py::arg("center"), py::arg("half_pixel_shift") = true,
+          py::arg("num_threads") = 1);
+    m.def("radius", &radius<float, int>, py::arg("out"), py::arg("geometry"),
+          py::arg("center"), py::arg("half_pixel_shift") = true,
+          py::arg("num_threads") = 1);
+    m.def("radial_index", &radial_index<double, py::ssize_t>, py::arg("out"),
+          py::arg("geometry"), py::arg("center"), py::arg("n_bins"),
+          py::arg("half_pixel_shift") = true, py::arg("num_threads") = 1);
+    m.def("radial_index", &radial_index<float, int>, py::arg("out"),
+          py::arg("geometry"), py::arg("center"), py::arg("n_bins"),
+          py::arg("half_pixel_shift") = true, py::arg("num_threads") = 1);
 
     m.def("radial_profiles", &radial_profiles<double, double, py::ssize_t>, py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
-    m.def("radial_profiles", &radial_profiles<float, float, py::ssize_t>, py::arg("data"),
+    m.def("radial_profiles", &radial_profiles<float, float, int>, py::arg("data"),
+          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
+          py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
+    m.def("radial_profiles", &radial_profiles<int, float, int>, py::arg("data"),
+          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
+          py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
+    m.def("radial_profiles", &radial_profiles<unsigned int, float, int>, py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
     m.def("radial_profiles", &radial_profiles<py::ssize_t, double, py::ssize_t>, py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
-    m.def("radial_profiles", &radial_profiles<int, float, py::ssize_t>, py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
-    m.def("radial_profiles", &radial_profiles<unsigned int, float, py::ssize_t>, py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0, py::arg("num_threads") = 1);
 
@@ -580,15 +598,11 @@ PYBIND11_MODULE(online_detector, m)
           py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0,
           py::arg("num_threads") = 1);
-    m.def("is_signal", &is_signal<float, float, py::ssize_t>, py::arg("data"),
+    m.def("is_signal", &is_signal<float, float, int>, py::arg("data"),
           py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0,
           py::arg("num_threads") = 1);
-    m.def("is_signal", &is_signal<py::ssize_t, double, py::ssize_t>, py::arg("data"),
-          py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
-          py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0,
-          py::arg("num_threads") = 1);
-    m.def("is_signal", &is_signal<int, float, py::ssize_t>, py::arg("data"),
+    m.def("is_signal", &is_signal<int, float, int>, py::arg("data"),
           py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0,
           py::arg("num_threads") = 1);
@@ -596,7 +610,7 @@ PYBIND11_MODULE(online_detector, m)
           py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0,
           py::arg("num_threads") = 1);
-    m.def("is_signal", &is_signal<unsigned int, float, py::ssize_t>, py::arg("data"),
+    m.def("is_signal", &is_signal<py::ssize_t, double, py::ssize_t>, py::arg("data"),
           py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0,
           py::arg("num_threads") = 1);

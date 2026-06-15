@@ -4,10 +4,10 @@ from ..annotations import CPBoolArray, CPIntArray, CPRealArray, IntArray, RealAr
 def pixel_map(out: RealArray, geometry: Any, half_pixel_shift: bool=True
               ) -> CPRealArray: ...
 
-def radius(out: RealArray, geometry: Any, center: Tuple[float, float],
+def radius(out: RealArray, geometry: Any, center: Tuple[int, int],
            half_pixel_shift: bool=True) -> CPRealArray: ...
 
-def radial_index(out: IntArray, geometry: Any, center: Tuple[float, float], n_bins: int,
+def radial_index(out: IntArray, geometry: Any, center: Tuple[int, int], n_bins: int,
                  half_pixel_shift: bool=True) -> CPIntArray: ...
 
 def radial_profiles(whitefield: CPRealArray, std: CPRealArray, counts: CPIntArray,

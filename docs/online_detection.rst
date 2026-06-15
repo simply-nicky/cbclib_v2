@@ -73,7 +73,7 @@ The online path has four pieces:
    CrystFEL geometry
           │
           ▼
-   Detector.radial_index(center, n_bins)
+   Detector.radial_index(radial_index, center, n_bins)
           │  integer radius bin per detector pixel
           ▼
    CrystData.online_detector(structure, radial_index, n_bins)
@@ -97,10 +97,13 @@ The geometry step starts from a CrystFEL ``.geom`` file:
 .. code-block:: python
 
    import cbclib_v2 as cbc
+   from cbclib_v2.annotations import NumPy
    from cbclib_v2.label import Structure
 
+   xp = NumPy
    geometry = cbc.read_crystfel("detector.geom")
-   radial_index = geometry.radial_index(center=(512.0, 512.0), n_bins=1024)
+   radial_index = xp.empty(geometry.shape, dtype=xp.int32)
+   radial_index = geometry.radial_index(radial_index, center=(512, 512), n_bins=1024)
 
 ``center`` is the direct-beam position in CrystFEL lab-frame pixel
 coordinates. It is not a module-local array coordinate. The helper methods

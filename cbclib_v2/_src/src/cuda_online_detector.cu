@@ -291,9 +291,10 @@ __global__ void is_signal_kernel(ArrayViewND<bool, N> out, ArrayViewND<T, N> dat
 }
 
 template <typename R, typename I>
-array_t<R> pixel_map(array_t<R> out, cbclib::DetectorGeometry<R, I> geometry,
+array_t<R> pixel_map(array_t<R> out, cbclib::PyDetectorGeometry py_geometry,
                      bool half_pixel_shift)
 {
+    auto geometry = cbclib::cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
     if (out.ndim() != 3 || out.shape(0) != 3 || out.shape(1) != geometry.shape[0] ||
@@ -302,7 +303,6 @@ array_t<R> pixel_map(array_t<R> out, cbclib::DetectorGeometry<R, I> geometry,
         throw std::invalid_argument("pixel_map output shape mismatch");
     }
 
-    out.fill(R());
     CudaDetectorGeometryOwner<R, I> owner(geometry, half_pixel_shift);
     I output_size = static_cast<I>(out.size());
     int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -314,9 +314,10 @@ array_t<R> pixel_map(array_t<R> out, cbclib::DetectorGeometry<R, I> geometry,
 }
 
 template <typename R, typename I>
-array_t<R> radius(array_t<R> out, cbclib::DetectorGeometry<R, I> geometry,
-                  std::tuple<R, R> center, bool half_pixel_shift)
+array_t<R> radius(array_t<R> out, cbclib::PyDetectorGeometry py_geometry,
+                  std::tuple<py::ssize_t, py::ssize_t> center, bool half_pixel_shift)
 {
+    auto geometry = cbclib::cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
     if (out.ndim() != 2 || out.shape(0) != geometry.shape[0] ||
@@ -325,7 +326,6 @@ array_t<R> radius(array_t<R> out, cbclib::DetectorGeometry<R, I> geometry,
         throw std::invalid_argument("radius output shape mismatch");
     }
 
-    out.fill(R());
     CudaDetectorGeometryOwner<R, I> owner(geometry, half_pixel_shift);
     I output_size = static_cast<I>(out.size());
     int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -338,9 +338,11 @@ array_t<R> radius(array_t<R> out, cbclib::DetectorGeometry<R, I> geometry,
 }
 
 template <typename R, typename I>
-array_t<I> radial_index(array_t<I> out, cbclib::DetectorGeometry<R, I> geometry,
-                        std::tuple<R, R> center, I n_bins, bool half_pixel_shift)
+array_t<I> radial_index(array_t<I> out, cbclib::PyDetectorGeometry py_geometry,
+                        std::tuple<py::ssize_t, py::ssize_t> center, I n_bins,
+                        bool half_pixel_shift)
 {
+    auto geometry = cbclib::cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
     if (n_bins <= 1) throw std::invalid_argument("n_bins must be greater than 1");
@@ -353,7 +355,6 @@ array_t<I> radial_index(array_t<I> out, cbclib::DetectorGeometry<R, I> geometry,
     R max_radius = geometry.max_radius(center);
     if (max_radius <= R()) throw std::invalid_argument("max radius must be positive");
 
-    out.fill(I(-1));
     CudaDetectorGeometryOwner<R, I> owner(geometry, half_pixel_shift);
     I output_size = static_cast<I>(out.size());
     int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -422,7 +423,7 @@ std::tuple<array_t<R>, array_t<R>, array_t<I>> radial_profiles_nd(
 template <typename T, typename R, typename I>
 std::tuple<array_t<R>, array_t<R>, array_t<I>> radial_profiles(
     array_t<R> whitefield, array_t<R> std, array_t<I> counts, array_t<T> data,
-    array_t<I> radial_index, I n_bins, I interval, R clip_snr, I n_iter, R std_min
+    array_t<I> radial_index, py::ssize_t n_bins, py::ssize_t interval, double clip_snr, py::ssize_t n_iter, double std_min
 )
 {
     if (n_bins <= 1) throw std::invalid_argument("n_bins must be greater than 1");
@@ -485,7 +486,7 @@ array_t<bool> is_signal_nd(array_t<bool> out, array_t<T> data, array_t<R> whitef
 
 template <typename T, typename R, typename I>
 array_t<bool> is_signal(array_t<bool> out, array_t<T> data, array_t<R> whitefield,
-                        array_t<R> std, array_t<I> radial_index, R min_snr, R std_min)
+                        array_t<R> std, array_t<I> radial_index, double min_snr, double std_min)
 {
     if (whitefield.size() != std.size())
     {
@@ -562,15 +563,7 @@ PYBIND11_MODULE(cuda_online_detector, m)
           py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0);
-    m.def("radial_profiles", &cu::radial_profiles<double, double, int>,
-          py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0);
     m.def("radial_profiles", &cu::radial_profiles<float, float, int>,
-          py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0f, py::arg("n_iter") = 3, py::arg("std_min") = 0.0f);
-    m.def("radial_profiles", &cu::radial_profiles<float, float, py::ssize_t>,
           py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0f, py::arg("n_iter") = 3, py::arg("std_min") = 0.0f);
@@ -578,15 +571,7 @@ PYBIND11_MODULE(cuda_online_detector, m)
           py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0f, py::arg("n_iter") = 3, py::arg("std_min") = 0.0f);
-    m.def("radial_profiles", &cu::radial_profiles<int, float, py::ssize_t>,
-          py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0f, py::arg("n_iter") = 3, py::arg("std_min") = 0.0f);
     m.def("radial_profiles", &cu::radial_profiles<unsigned int, float, int>,
-          py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0f, py::arg("n_iter") = 3, py::arg("std_min") = 0.0f);
-    m.def("radial_profiles", &cu::radial_profiles<unsigned int, float, py::ssize_t>,
           py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0f, py::arg("n_iter") = 3, py::arg("std_min") = 0.0f);
@@ -594,39 +579,20 @@ PYBIND11_MODULE(cuda_online_detector, m)
           py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
           py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
           py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0);
-    m.def("radial_profiles", &cu::radial_profiles<py::ssize_t, double, int>,
-          py::arg("whitefield"), py::arg("std"), py::arg("counts"), py::arg("data"),
-          py::arg("radial_index"), py::arg("n_bins"), py::arg("interval") = 1,
-          py::arg("clip_snr") = 3.0, py::arg("n_iter") = 3, py::arg("std_min") = 0.0);
 
     m.def("is_signal", &cu::is_signal<double, double, py::ssize_t>, py::arg("out"),
-          py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
-          py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0);
-    m.def("is_signal", &cu::is_signal<double, double, int>, py::arg("out"),
           py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0);
     m.def("is_signal", &cu::is_signal<float, float, int>, py::arg("out"),
           py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0f, py::arg("std_min") = 0.0f);
-    m.def("is_signal", &cu::is_signal<float, float, py::ssize_t>, py::arg("out"),
-          py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
-          py::arg("min_snr") = 3.0f, py::arg("std_min") = 0.0f);
     m.def("is_signal", &cu::is_signal<int, float, int>, py::arg("out"),
-          py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
-          py::arg("min_snr") = 3.0f, py::arg("std_min") = 0.0f);
-    m.def("is_signal", &cu::is_signal<int, float, py::ssize_t>, py::arg("out"),
           py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0f, py::arg("std_min") = 0.0f);
     m.def("is_signal", &cu::is_signal<unsigned int, float, int>, py::arg("out"),
           py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0f, py::arg("std_min") = 0.0f);
-    m.def("is_signal", &cu::is_signal<unsigned int, float, py::ssize_t>, py::arg("out"),
-          py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
-          py::arg("min_snr") = 3.0f, py::arg("std_min") = 0.0f);
     m.def("is_signal", &cu::is_signal<py::ssize_t, double, py::ssize_t>, py::arg("out"),
-          py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
-          py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0);
-    m.def("is_signal", &cu::is_signal<py::ssize_t, double, int>, py::arg("out"),
           py::arg("data"), py::arg("whitefield"), py::arg("std"), py::arg("radial_index"),
           py::arg("min_snr") = 3.0, py::arg("std_min") = 0.0);
 }
