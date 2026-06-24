@@ -327,15 +327,13 @@ class CBDIndexer(CBDSetup):
                 width: float) -> RealArray:
         xp = rotograms.__array_namespace__()
 
-        lines = (rotograms.lines + self.rho_map()) / xp.tile(self.step(shape, xp), 2)
-        lines = xp.concat((lines, xp.full(rotograms.lines.shape[:-1] + (1,), width)),
-                          axis=-1)
+        step = xp.asarray(self.step(shape, xp), dtype=rotograms.points.dtype)
+        points = (rotograms.points + self.rho_map()) / step
 
-        rmap = xp.zeros((len(rotograms),) + shape)
-        indices = xp.broadcast_to(rotograms.streak_id[..., None], lines.shape[:-1])
-        rmap = accumulate_lines(rmap, lines, indices, frames, kernel='gaussian',
+        rmap = xp.zeros((len(rotograms),) + shape, dtype=points.dtype)
+        return accumulate_lines(rmap, points, rotograms.streak_id, frames, width=width,
+                                kernel='gaussian',
                                 in_overlap='max', out_overlap='sum')
-        return xp.asarray(rmap)
 
     def to_peaks(self, rotomap: RealArray, threshold: float, n_max: int=30) -> BoolArray:
         xp = array_namespace(rotomap)

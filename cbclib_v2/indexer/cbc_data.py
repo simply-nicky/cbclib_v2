@@ -127,17 +127,16 @@ class CircleState(State, ArrayContainer):
         return (self.radius * xp.cos(theta))[..., None] * self.axis1 \
              + (self.radius * xp.sin(theta))[..., None] * self.axis2 + self.center
 
-class Rotograms(State, IndexedContainer, BaseLines):
+class Rotograms(State, IndexedContainer):
     index       : IntArray
     streak_id   : IntArray
-    lines       : RealArray
+    points      : RealArray
 
     @classmethod
     def from_tilts(cls, tilts: TiltOverAxisState, index: IntArray, streak_id: IntArray,
                    xp: AnyNamespace) -> 'Rotograms':
         points = tilts.axis * xp.atan(0.25 * tilts.angles[..., None])
-        lines = xp.concat((points[..., 1:, :], points[..., :-1, :]), axis=-1)
-        return cls(index, xp.asarray(streak_id), lines)
+        return cls(index, xp.asarray(streak_id), points)
 
     @property
     def angles(self) -> RealArray:
@@ -147,6 +146,11 @@ class Rotograms(State, IndexedContainer, BaseLines):
     @property
     def axis(self) -> RealArray:
         return self.points / self.angles[..., None]
+
+    @property
+    def lines(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.concat((self.points[..., 1:, :], self.points[..., :-1, :]), axis=-1)
 
 class Miller(State, ArrayContainer):
     index   : IntArray

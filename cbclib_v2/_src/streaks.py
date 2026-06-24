@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Tuple
 from typing_extensions import Self
 import pandas as pd
-from .annotations import AnyNamespace, BoolArray, IntArray, NumPy, RealArray, RealSequence
+from .annotations import AnyNamespace, BoolArray, IntArray, NumPy, RealArray
 from .array_api import array_namespace, asnumpy
 from .data_container import ArrayContainer, IndexedContainer
 from .functions import draw_lines
@@ -120,26 +120,6 @@ class BaseLines(ArrayContainer):
         xp = self.__array_namespace__()
         return xp.sqrt(xp.sum((self.project(point) - point)**2, axis=-1))
 
-    def to_lines(self, width: RealSequence | None=None) -> RealArray:
-        """Return line parameters ``(x0, y0, x1, y1[, width])`` as a plain array.
-
-        Args:
-            width: Line width in pixels, broadcast to the leading shape of
-                *self*.  If ``None``, width is omitted.
-
-        Returns:
-            Array of shape ``(..., 2 * ndim)`` when *width* is ``None``, or
-            ``(..., 2 * ndim + 1)`` otherwise.
-        """
-        xp = self.__array_namespace__()
-        if width is None:
-            lines = self.lines
-        else:
-            widths = xp.broadcast_to(xp.asarray(width), self.lines.shape[:-1] + (1,))
-            lines = xp.concat((self.lines, widths), axis=-1)
-
-        return lines
-
 @dataclass
 class Lines(BaseLines):
     """Minimal line-segment container without a frame index.
@@ -236,8 +216,8 @@ class BaseStreaks(IndexedContainer, BaseLines):
             *out* with streaks drawn in-place.
         """
         xp = self.__array_namespace__()
-        return draw_lines(out=out, lines=self.to_lines(width=width),
-                          idxs=xp.asarray(self.flat_index), kernel=kernel)
+        return draw_lines(out=out, lines=self.lines, idxs=xp.asarray(self.flat_index),
+                          width=width, kernel=kernel)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.

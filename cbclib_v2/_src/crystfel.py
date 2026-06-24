@@ -909,16 +909,18 @@ class Detector():
         x_min, y_min, x_max, y_max = self.bounds
         panels = []
         for panel in self.panels.values():
+            roi = tuple((item.start, item.stop) for item in panel.roi())
             panels.append({
                 'region': (panel.region.min_fs, panel.region.max_fs,
                            panel.region.min_ss, panel.region.max_ss),
+                'roi': roi,
                 'corner': (panel.corner.x, panel.corner.y),
                 'ss': (panel.ss.x, panel.ss.y, panel.ss.z),
                 'fs': (panel.fs.x, panel.fs.y, panel.fs.z),
             })
         return {
             'panels': panels,
-            'shape': self.shape[-2:],
+            'shape': self.shape,
             'bounds': (x_min, x_max, y_min, y_max),
         }
 
@@ -950,7 +952,7 @@ class Detector():
             >>> assembler = detector.assembler()
             >>> assembled = assembler(frames)
         """
-        out = xp.empty((3,) + self.shape[-2:], dtype=xp.float64)
+        out = xp.empty((3,) + self.shape, dtype=xp.float64)
         pix_x, pix_y, _ = self.pixel_map(out)
         pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
         pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
@@ -990,7 +992,7 @@ class Detector():
                 pixel centres when ``True`` (default).
 
         Returns:
-            Array of shape ``(3, *image_shape)``. ``out[0]`` is ``x``,
+            Array of shape ``(3, *detector_shape)``. ``out[0]`` is ``x``,
             ``out[1]`` is ``y``, and ``out[2]`` is ``z`` in lab-frame pixel
             units.
 
@@ -1076,7 +1078,7 @@ class Detector():
             Build the radial lookup table used by online hit finding:
 
             >>> geometry = read_crystfel('detector.geom')
-            >>> radial = NumPy.empty(geometry.shape[-2:], dtype=NumPy.int32)
+            >>> radial = NumPy.empty(geometry.shape, dtype=NumPy.int32)
             >>> geometry.radial_index(radial, center=(512, 512), n_bins=1024)
         """
         return radial_index(out, self, center, n_bins, half_pixel_shift=half_pixel_shift)

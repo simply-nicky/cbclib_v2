@@ -54,7 +54,7 @@ class TestOnlineDetector:
     @pytest.fixture
     def radial_index(self, xp: TestNamespace, geometry: Detector, center: Tuple[int, int],
                      n_bins: int) -> IntArray:
-        out = xp.empty(geometry.shape[-2:], dtype=xp.int32)
+        out = xp.empty(geometry.shape, dtype=xp.int32)
         return geometry.radial_index(out, center, n_bins)
 
     @pytest.fixture
@@ -122,12 +122,47 @@ class TestOnlineDetector:
     @pytest.fixture
     def unequal_radial_index(self, xp: TestNamespace, unequal_geometry: Detector,
                              center: Tuple[int, int], unequal_n_bins: int) -> IntArray:
-        out = xp.empty(unequal_geometry.shape[-2:], dtype=xp.int64)
+        out = xp.empty(unequal_geometry.shape, dtype=xp.int64)
         return unequal_geometry.radial_index(out, center, unequal_n_bins)
 
     @pytest.fixture
     def unequal_data(self, xp: TestNamespace) -> RealArray:
-        return xp.arange(10, dtype=float).reshape(1, 5, 2)
+        return xp.arange(10, dtype=float).reshape((1, 5, 2))
+
+    @pytest.fixture
+    def module_geometry(self, tmp_path: Path) -> Detector:
+        geom_file = tmp_path / "module_stack.geom"
+        geom_file.write_text(
+            "photon_energy = 12.0keV\n"
+            "clen = 0.1m\n"
+            "res = 1\n"
+            "dim0 = %\n"
+            "dim2 = ss\n"
+            "dim3 = fs\n"
+            "p0/dim1 = 0\n"
+            "p0/corner_x = -0.5\n"
+            "p0/corner_y = -0.5\n"
+            "p0/fs = +1.0x+0.0y\n"
+            "p0/ss = +0.0x+1.0y\n"
+            "p0/min_fs = 0\n"
+            "p0/max_fs = 2\n"
+            "p0/min_ss = 0\n"
+            "p0/max_ss = 1\n"
+            "p1/dim1 = 1\n"
+            "p1/corner_x = +9.5\n"
+            "p1/corner_y = -0.5\n"
+            "p1/fs = +1.0x+0.0y\n"
+            "p1/ss = +0.0x+1.0y\n"
+            "p1/min_fs = 0\n"
+            "p1/max_fs = 2\n"
+            "p1/min_ss = 0\n"
+            "p1/max_ss = 1\n"
+        )
+        return read_crystfel(str(geom_file))
+
+    @pytest.fixture
+    def module_data(self, xp: TestNamespace) -> RealArray:
+        return xp.arange(12, dtype=xp.float32).reshape((1, 2, 2, 3))
 
     def expected_profiles(self, data: RealArray, radial_index: IntArray, n_bins: int,
                           xp: TestNamespace) -> Tuple[RealArray, RealArray, IntArray]:
@@ -136,10 +171,10 @@ class TestOnlineDetector:
             frame_whitefield, frame_std, frame_counts = [], [], []
             for radius_bin in range(n_bins):
                 values = frame[radial_index == radius_bin]
-                frame_counts.append(values.size)
+                frame_counts.append(int(values.size))
                 if values.size:
-                    frame_whitefield.append(values.mean())
-                    frame_std.append(values.std())
+                    frame_whitefield.append(float(xp.mean(values)))
+                    frame_std.append(float(xp.std(values)))
                 else:
                     frame_whitefield.append(0.0)
                     frame_std.append(0.0)
@@ -151,8 +186,8 @@ class TestOnlineDetector:
     def test_without_clipping(self, geometry: Detector, center: Tuple[int, int],
                               smooth_data: RealArray, radial_index: IntArray,
                               n_bins: int, structure: Structure, xp: TestNamespace):
-        pixel_out = xp.empty((3,) + geometry.shape[-2:], dtype=xp.float32)
-        radius_out = xp.empty(geometry.shape[-2:], dtype=xp.float32)
+        pixel_out = xp.empty((3,) + geometry.shape, dtype=xp.float32)
+        radius_out = xp.empty(geometry.shape, dtype=xp.float32)
 
         pixel_result = geometry.pixel_map(pixel_out)
         radius_result = geometry.radii(radius_out, center)
@@ -160,15 +195,11 @@ class TestOnlineDetector:
         assert pixel_result.dtype == xp.float32
         assert radius_result.dtype == xp.float32
         assert radial_index.dtype == xp.int32
-        default_pixel_out = xp.empty((3,) + geometry.shape[-2:], dtype=xp.float64)
-        default_radius_out = xp.empty(geometry.shape[-2:], dtype=xp.float64)
-        default_pixel = (
-            geometry.pixel_map(default_pixel_out) if xp is xp else geometry.pixel_map(pixel_out)
-        )
-        default_radius = (
-            geometry.radii(default_radius_out, center) if xp is xp
-            else geometry.radii(radius_out, center)
-        )
+
+        default_pixel_out = xp.empty((3,) + geometry.shape, dtype=xp.float64)
+        default_radius_out = xp.empty(geometry.shape, dtype=xp.float64)
+        default_pixel = geometry.pixel_map(default_pixel_out)
+        default_radius = geometry.radii(default_radius_out, center)
         check_close(pixel_result, default_pixel)
         check_close(radius_result, default_radius)
 
@@ -213,6 +244,38 @@ class TestOnlineDetector:
         assert xp.sum(profiles.counts) == 10
         check_close(profiles.whitefield, expected_whitefield)
         check_close(profiles.std, expected_std)
+        assert xp.all(profiles.counts == expected_counts)
+
+    def test_module_stacked_geometry(self, module_geometry: Detector, module_data: RealArray,
+                                     center: Tuple[int, int], n_bins: int, structure: Structure,
+                                     xp: TestNamespace):
+        assert module_geometry.shape == (2, 2, 3)
+
+        pixel_out = xp.empty((3,) + module_geometry.shape, dtype=xp.float32)
+        radius_out = xp.empty(module_geometry.shape, dtype=xp.float32)
+        radial_out = xp.empty(module_geometry.shape, dtype=xp.int32)
+
+        pixel_result = module_geometry.pixel_map(pixel_out)
+        radius_result = module_geometry.radii(radius_out, center)
+        radial_index = module_geometry.radial_index(radial_out, center, n_bins)
+
+        assert pixel_result.shape == (3, 2, 2, 3)
+        assert radius_result.shape == (2, 2, 3)
+        assert radial_index.shape == (2, 2, 3)
+        check_close(pixel_result[0, 0], xp.asarray([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]]))
+        check_close(pixel_result[0, 1], xp.asarray([[10.0, 11.0, 12.0],
+                                                    [10.0, 11.0, 12.0]]))
+
+        detector = CrystData(data=module_data).online_detector(structure, radial_index, n_bins)
+        profiles = detector.profiles(n_iter=0)
+        expected_whitefield, expected_std, expected_counts = self.expected_profiles(
+            module_data, radial_index, n_bins, xp
+        )
+
+        assert profiles.whitefield.shape == (1, n_bins)
+        assert xp.sum(profiles.counts) == 12
+        check_close(profiles.whitefield, expected_whitefield)
+        check_close(profiles.std, expected_std, rtol=1e-6)
         assert xp.all(profiles.counts == expected_counts)
 
     @pytest.mark.parametrize("dtype", [NumPy.uint32, NumPy.int32])

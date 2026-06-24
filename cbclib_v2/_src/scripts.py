@@ -744,6 +744,7 @@ class IndexingConfig(BaseParameters):
     """
 
     shape           : Tuple[int, int, int]
+    q_max           : float
     width           : float
     threshold       : float
     n_max           : int
@@ -786,28 +787,23 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
     return indexer.refine_peaks(peaks, rotomap, params.vicinity.to_structure(3),
                                 params.connectivity.to_structure(3))
 
-def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState, state: BaseSetup,
+def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState, hkl: IntArray,
                         xp: AnyNamespace=NumPy) -> Iterator[MillerWithRLP]:
     """Generate Miller-index candidates for each pattern in *patterns*.
 
-    Computes the reciprocal-space extent of each pattern, determines which
-    Miller indices fall within a sphere of that radius, and yields one
-    :class:`~cbclib_v2.indexer.MillerWithRLP` per pattern.
+    Yields a generator of :class:`~cbclib_v2.indexer.MillerWithRLP` per pattern
+    from the given crystal state and Miller indices.
 
     Args:
         indexer: CBC indexer instance.
         patterns: Diffraction patterns container.
         xtal: Crystal state (unit cell and orientation).
-        state: Detector geometry state.
+        hkl: Miller indices to consider for indexing.
         xp: Array namespace.
 
     Yields:
         :class:`~cbclib_v2.indexer.MillerWithRLP` for each pattern.
     """
-    q1, q2 = indexer.patterns_to_q(patterns, state, xp)
-    q_abs = xp.stack((xp.sqrt(xp.sum(q1.q**2, axis=-1)), xp.sqrt(xp.sum(q2.q**2, axis=-1))))
-    q_max = xp.max(q_abs)
-    hkl = indexer.xtal.hkl_in_ball(q_max, xtal, xp)
     return indexer.xtal.hkl_range(patterns.unique_index(), hkl, xtal, xp)
 
 def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
@@ -835,7 +831,8 @@ def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params:
             number of patterns.
     """
     indexer = CBDIndexer()
-    rlp_iterator = indexing_candidates(indexer, patterns, xtals, state, xp)
+    hkl = indexer.xtal.hkl_in_ball(params.q_max, xtals, xp)
+    rlp_iterator = indexing_candidates(indexer, patterns, xtals, hkl, xp)
     solutions: List[XtalList] = []
 
     if len(xtals) == 1:
@@ -906,7 +903,8 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
     """
     num_threads = get_cpu_config().effective_num_threads()
     indexer = CBDIndexer()
-    rlp_iterator = indexing_candidates(indexer, patterns, xtals, state, xp)
+    hkl = indexer.xtal.hkl_in_ball(params.q_max, xtals, xp)
+    rlp_iterator = indexing_candidates(indexer, patterns, xtals, hkl, xp)
 
     solutions : List[XtalList] = []
     if platform == 'cpu' and num_threads > 1:

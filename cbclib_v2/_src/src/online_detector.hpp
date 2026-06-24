@@ -44,7 +44,7 @@ struct DetectorGeometry
 {
     std::vector<PanelGeometry<R, I>> panels;
     std::vector<I> panel_offsets;
-    std::array<I, 2> shape = {0, 0};
+    std::vector<I> shape;
     std::array<R, 4> bounds = {R(), R(), R(), R()}; // x_min, x_max, y_min, y_max
     bool half_pixel_shift = true;
 
@@ -79,12 +79,17 @@ struct DetectorGeometry
 
     I ndim() const
     {
-        return 2;
+        return shape.size();
     }
 
     I size() const
     {
-        return shape[0] * shape[1];
+        I result = 1;
+        for (auto dim : shape)
+        {
+            result *= dim;
+        }
+        return result;
     }
 
     I panel_size() const
@@ -95,8 +100,12 @@ struct DetectorGeometry
     void validate() const
     {
         if (panels.empty()) throw std::invalid_argument("detector geometry must not be empty");
-        if (shape[0] <= 0 || shape[1] <= 0)
-            throw std::invalid_argument("detector frame shape must not be empty");
+        if (shape.size() != 2 && shape.size() != 3)
+            throw std::invalid_argument("detector frame shape must be 2-D or 3-D");
+        for (auto dim : shape)
+        {
+            if (dim <= 0) throw std::invalid_argument("detector frame shape must not be empty");
+        }
 
         auto size = this->size();
         if (panel_offsets.size() != panels.size() + 1 || panel_offsets.front() != 0)
@@ -111,7 +120,16 @@ struct DetectorGeometry
             {
                 throw std::invalid_argument("detector panel offset size mismatch");
             }
-            I panel_end = panel.offset + (panel.shape[0] - 1) * panel.stride[0] + (panel.shape[1] - 1) * panel.stride[1] + 1;
+            if (panel.shape[0] <= 0 || panel.shape[1] <= 0)
+            {
+                throw std::invalid_argument("detector panel shape must not be empty");
+            }
+            if (panel.offset < 0 || panel.stride[0] <= 0 || panel.stride[1] <= 0)
+            {
+                throw std::invalid_argument("invalid detector panel frame layout");
+            }
+            I panel_end = panel.offset + (panel.shape[0] - 1) * panel.stride[0] +
+                          (panel.shape[1] - 1) * panel.stride[1] + 1;
             if (panel_end > size)
             {
                 throw std::invalid_argument("panel geometry exceeds detector frame size");
@@ -128,7 +146,11 @@ DetectorGeometry<R, I> cast_detector_geometry(const PyDetectorGeometry & geometr
     DetectorGeometry<R, I> result;
     result.panels.reserve(geometry.panels.size());
     result.panel_offsets.reserve(geometry.panel_offsets.size());
-    result.shape = {static_cast<I>(geometry.shape[0]), static_cast<I>(geometry.shape[1])};
+    result.shape.reserve(geometry.shape.size());
+    for (auto dim : geometry.shape)
+    {
+        result.shape.push_back(static_cast<I>(dim));
+    }
     result.bounds = {static_cast<R>(geometry.bounds[0]), static_cast<R>(geometry.bounds[1]),
                      static_cast<R>(geometry.bounds[2]), static_cast<R>(geometry.bounds[3])};
     result.half_pixel_shift = geometry.half_pixel_shift;
@@ -177,11 +199,11 @@ public:
                                            .cast<pybind11::dict>();
             value = Geometry();
             auto shape = protocol["shape"].cast<std::vector<I>>();
-            if (shape.size() != 2)
+            if (shape.size() != 2 && shape.size() != 3)
             {
                 return false;
             }
-            value.shape = {shape[0], shape[1]};
+            value.shape = shape;
 
             auto bounds = protocol["bounds"].cast<std::tuple<double, double, double, double>>();
             value.bounds[0] = static_cast<R>(std::get<0>(bounds));
@@ -215,7 +237,7 @@ public:
 
 private:
     static Panel panel_from_protocol(const pybind11::dict & protocol,
-                                     const std::array<I, 2> & shape)
+                                     const std::vector<I> & shape)
     {
         Panel panel;
         auto region = protocol["region"].cast<std::tuple<I, I, I, I>>();
@@ -223,10 +245,32 @@ private:
         panel.bounds[1] = std::get<1>(region);
         panel.bounds[2] = std::get<2>(region);
         panel.bounds[3] = std::get<3>(region);
-        panel.offset = panel.bounds[2] * shape[1] + panel.bounds[0];
-        panel.shape = {panel.bounds[3] - panel.bounds[2] + 1,
-                       panel.bounds[1] - panel.bounds[0] + 1};
-        panel.stride = {shape[1], 1};
+
+        auto roi = protocol["roi"].cast<std::vector<std::tuple<I, I>>>();
+        if (roi.size() != shape.size())
+        {
+            throw std::invalid_argument("panel ROI rank mismatch");
+        }
+
+        I ss_axis = static_cast<I>(shape.size() - 2);
+        I fs_axis = static_cast<I>(shape.size() - 1);
+        I ss_start = std::get<0>(roi[ss_axis]);
+        I ss_stop = std::get<1>(roi[ss_axis]);
+        I fs_start = std::get<0>(roi[fs_axis]);
+        I fs_stop = std::get<1>(roi[fs_axis]);
+        panel.shape = {ss_stop - ss_start, fs_stop - fs_start};
+        panel.stride = {shape[fs_axis], 1};
+        panel.offset = ss_start * panel.stride[0] + fs_start;
+        if (shape.size() == 3)
+        {
+            I module_start = std::get<0>(roi[0]);
+            I module_stop = std::get<1>(roi[0]);
+            if (module_stop - module_start != 1)
+            {
+                throw std::invalid_argument("panel module ROI must have length one");
+            }
+            panel.offset += module_start * shape[1] * shape[2];
+        }
 
         auto corner = protocol["corner"].cast<std::tuple<double, double>>();
         panel.corner = {static_cast<R>(std::get<0>(corner)),

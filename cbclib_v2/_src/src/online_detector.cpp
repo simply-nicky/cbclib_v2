@@ -201,19 +201,56 @@ void for_panel_range(const DetectorGeometry<R, I> & geometry, I begin, I end, Fu
 }
 
 template <typename R, typename I>
+bool frame_shape_matches(const py::buffer_info & buffer,
+                         const DetectorGeometry<R, I> & geometry)
+{
+    if (buffer.ndim != geometry.ndim())
+    {
+        return false;
+    }
+    for (I dim = 0; dim < geometry.ndim(); ++dim)
+    {
+        if (buffer.shape[dim] != geometry.shape[dim])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename R, typename I>
+bool pixel_map_shape_matches(const py::buffer_info & buffer,
+                             const DetectorGeometry<R, I> & geometry)
+{
+    if (buffer.ndim != geometry.ndim() + 1 || buffer.shape[0] != 3)
+    {
+        return false;
+    }
+    for (I dim = 0; dim < geometry.ndim(); ++dim)
+    {
+        if (buffer.shape[dim + 1] != geometry.shape[dim])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename R, typename I>
 py::array_t<R> pixel_map(py::array_t<R> result, PyDetectorGeometry py_geometry,
                          bool half_pixel_shift, unsigned threads)
 {
     auto geometry = cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
-    if (result.ndim() != 3 || result.shape(0) != 3 ||
-        result.shape(1) != geometry.shape[0] || result.shape(2) != geometry.shape[1])
+
+    auto buffer = result.request();
+    if (!pixel_map_shape_matches(buffer, geometry))
     {
         throw std::invalid_argument("pixel_map output shape mismatch");
     }
 
-    array<R> out {result.request()};
+    array<R> out {buffer};
 
     I frame_size = geometry.size();
     I panel_size = geometry.panel_size();
@@ -247,13 +284,14 @@ py::array_t<R> radius(py::array_t<R> result, PyDetectorGeometry py_geometry,
     auto geometry = cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
-    if (result.ndim() != 2 || result.shape(0) != geometry.shape[0] ||
-        result.shape(1) != geometry.shape[1])
+
+    auto buffer = result.request();
+    if (!frame_shape_matches(buffer, geometry))
     {
         throw std::invalid_argument("radius output shape mismatch");
     }
 
-    array<R> out {result.request()};
+    array<R> out {buffer};
 
     I panel_size = geometry.panel_size();
     threads = std::max<unsigned>(1, std::min<unsigned>(threads, panel_size));
@@ -284,8 +322,9 @@ py::array_t<I> radial_index(py::array_t<I> result, PyDetectorGeometry py_geometr
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
     if (n_bins <= 1) throw std::invalid_argument("n_bins must be greater than 1");
-    if (result.ndim() != 2 || result.shape(0) != geometry.shape[0] ||
-        result.shape(1) != geometry.shape[1])
+
+    auto buffer = result.request();
+    if (!frame_shape_matches(buffer, geometry))
     {
         throw std::invalid_argument("radial_index output shape mismatch");
     }
@@ -294,7 +333,7 @@ py::array_t<I> radial_index(py::array_t<I> result, PyDetectorGeometry py_geometr
     if (max_radius <= R()) throw std::invalid_argument("max radius must be positive");
     R inv_radius_step = (n_bins - 1) / max_radius;
 
-    array<I> out {result.request()};
+    array<I> out {buffer};
 
     I panel_size = geometry.panel_size();
     threads = std::max<unsigned>(1, std::min<unsigned>(threads, panel_size));

@@ -141,7 +141,8 @@ class TestNewStreakFinder:
     @pytest.fixture
     def image(self, lines: Lines, width: float, frames: IntArray, shape: Shape, noise: RealArray,
               xp: TestNamespace) -> RealArray:
-        return draw_lines(xp.zeros(shape), lines.to_lines(width), frames, kernel='biweight') + noise
+        return draw_lines(xp.zeros(shape), lines.lines, frames, width=width,
+                          kernel='biweight') + noise
 
     @pytest.fixture(params=[(1, 2)])
     def structure(self, request: pytest.FixtureRequest, shape: Shape) -> Structure:

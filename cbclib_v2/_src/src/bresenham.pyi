@@ -1,12 +1,14 @@
 from ..annotations import IntArray, NDRealArray, RealArray
 
 def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: IntArray,
-                     max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
-                     out_overlap: str='sum', num_threads: int=1) -> NDRealArray:
+                     widths: RealArray, max_val: float=1.0, kernel: str='rectangular',
+                     in_overlap: str='sum', out_overlap: str='sum',
+                     num_threads: int=1) -> NDRealArray:
     ...
 
-def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum',
+def draw_lines(out: RealArray, lines: RealArray, widths: RealArray,
+               idxs: IntArray | None=None, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum',
                num_threads: int=1) -> NDRealArray:
     """Draw thick lines with variable thickness and the antialiasing applied on a single frame.
 

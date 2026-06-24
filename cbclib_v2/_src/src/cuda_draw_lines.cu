@@ -28,6 +28,27 @@ struct LineData
         }
     }
 
+    HOST_DEVICE LineData(StridedIterator<T> iter, T width) : _M_tau(), _M_ctr(),
+                                                             _M_width(width)
+    {
+        for (csize_t n = 0; n < N; n++)
+        {
+            T a = iter[n], b = iter[N + n];
+            _M_ctr[n] = T(0.5) * (a + b);
+            _M_tau[n] = b - a;
+        }
+    }
+
+    HOST_DEVICE LineData(const PointND<T, N> & pt0, const PointND<T, N> & pt1, T width)
+        : _M_tau(), _M_ctr(), _M_width(width)
+    {
+        for (csize_t n = 0; n < N; n++)
+        {
+            _M_ctr[n] = T(0.5) * (pt0[n] + pt1[n]);
+            _M_tau[n] = pt1[n] - pt0[n];
+        }
+    }
+
     HOST_DEVICE T distance(const PointND<T, N> & point) const
     {
         auto mag = magnitude(_M_tau);
@@ -46,24 +67,92 @@ struct LineData
     HOST_DEVICE T width() const { return _M_width; }
 };
 
+HOST_DEVICE csize_t width_index(csize_t idx, csize_t group_size, csize_t n_lines,
+                                csize_t n_line_groups, csize_t n_widths)
+{
+    // Widths can be scalar, per generated line, or per leading line group.
+    if (n_widths == 1) return 0;
+    if (n_widths == n_lines) return idx;
+    if (n_widths == n_line_groups) return idx / group_size;
+    return 0;
+}
+
+void check_widths(csize_t n_widths, csize_t n_items, csize_t n_groups)
+{
+    if (n_widths != 1 && n_widths != n_items && n_widths != n_groups)
+    {
+        throw std::invalid_argument("Width array must be scalar or match number of items or "
+                                    "item groups");
+    }
+}
+
 // Building line data structures on device
 template <typename T, csize_t N>
-__global__ void build_lines_kernel(ArrayViewND<T, 2> lines, csize_t n_lines, DeviceRange<LineData<T, N>> line_data)
+__global__ void build_lines_kernel(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                                   csize_t group_size, csize_t n_line_groups,
+                                   DeviceRange<LineData<T, N>> line_data)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lines.shape(0)) return;
 
-    line_data[idx] = LineData<T, N>(lines.begin_at(idx * lines.strides(0), 1));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    line_data[idx] = LineData<T, N>(lines.begin_at(idx * lines.strides(0), 1), widths[widx]);
 }
 
 template <typename T, csize_t N>
-DeviceVector<LineData<T, N>> build_lines(const array_view<T, py::ssize_t> & lines)
+DeviceVector<LineData<T, N>> build_lines(const array_view<T, py::ssize_t> & lines,
+                                         const array_view<T, py::ssize_t> & widths,
+                                         csize_t group_size, csize_t n_line_groups)
 {
     DeviceVector<LineData<T, N>> line_data(lines.shape(0));
 
     int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((lines.shape(0) + block_size - 1) / block_size);
-    build_lines_kernel<T, N><<<num_blocks, block_size>>>(cast_to_nd<T, 2>(lines), lines.shape(0), line_data.view());
+    build_lines_kernel<T, N><<<num_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                         cast_to_nd<T, 1>(widths),
+                                                         group_size, n_line_groups,
+                                                         line_data.view());
+
+    handle_cuda_error(cudaGetLastError());
+    handle_cuda_error(cudaDeviceSynchronize());
+
+    return line_data;
+}
+
+template <typename T, csize_t N>
+__global__ void build_curve_lines_kernel(ArrayViewND<T, 3> curves, ArrayViewND<T, 1> widths,
+                                         DeviceRange<LineData<T, N>> line_data)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    csize_t n_segments = curves.shape(1) - 1;
+    if (idx >= curves.shape(0) * n_segments) return;
+
+    // Flatten each curve into adjacent line segments for the existing line kernel.
+    csize_t curve_idx = idx / n_segments;
+    csize_t segment_idx = idx % n_segments;
+    T width = widths.size() == 1 ? widths[0] : widths[curve_idx];
+    PointND<T, N> pt0, pt1;
+    for (csize_t n = 0; n < N; n++)
+    {
+        pt0[n] = curves.at(curve_idx, segment_idx, n);
+        pt1[n] = curves.at(curve_idx, segment_idx + 1, n);
+    }
+
+    line_data[idx] = LineData<T, N>(pt0, pt1, width);
+}
+
+template <typename T, csize_t N>
+DeviceVector<LineData<T, N>> build_curve_lines(const array_view<T, py::ssize_t> & curves,
+                                               const array_view<T, py::ssize_t> & widths)
+{
+    csize_t n_segments = curves.shape(1) - 1;
+    DeviceVector<LineData<T, N>> line_data(curves.shape(0) * n_segments);
+
+    int block_size = BLOCK_SIZE;
+    int num_blocks = static_cast<int>((line_data.size() + block_size - 1) / block_size);
+    build_curve_lines_kernel<T, N><<<num_blocks, block_size>>>(cast_to_nd<T, 3>(curves),
+                                                               cast_to_nd<T, 1>(widths),
+                                                               line_data.view());
 
     handle_cuda_error(cudaGetLastError());
     handle_cuda_error(cudaDeviceSynchronize());
@@ -172,6 +261,11 @@ struct IndexPair
 {
     csize_t line;
     csize_t term;
+    // Group identifies the object whose segments must be sewn with max composition.
+    // For raw line input the group is the line itself; for curves it is the parent curve.
+    csize_t group;
+    // Used to encode (term, group) into one sortable key inside AccumulateIndices.
+    csize_t group_count;
 };
 
 class AccumulateIndices
@@ -208,7 +302,7 @@ protected:
 
         HOST_DEVICE IndexPair operator*() const
         {
-            return { *idx_ptr, *term_ptr};
+            return { *idx_ptr, *term_ptr, 0, 1};
         }
     };
 
@@ -247,7 +341,9 @@ public:
         {
             csize_t pos = atomicAdd(&_M_counters[bin_idx], 1);
             _M_indices[_M_offsets[bin_idx] + pos] = _M_pair.line;
-            _M_terms[_M_offsets[bin_idx] + pos] = _M_pair.term;
+            // Sort by term first, then group. The accumulation kernel decodes the term
+            // with group_count and max-composes entries with identical encoded keys.
+            _M_terms[_M_offsets[bin_idx] + pos] = _M_pair.term * _M_pair.group_count + _M_pair.group;
         }
     };
 
@@ -324,6 +420,7 @@ protected:
         IndicesView _M_indices;
         const ShapeND<N> _M_grid;
         const PointND<T, N> _M_bin;
+        csize_t _M_group_count;
 
         HOST_DEVICE const IndicesView & indices() const { return _M_indices; }
         HOST_DEVICE IndicesRange indices(csize_t idx) const { return _M_indices[idx]; }
@@ -333,14 +430,15 @@ protected:
 
         HOST_DEVICE const PointND<T, N> & bin() const { return _M_bin; }
         HOST_DEVICE T bin(csize_t dim) const { return _M_bin[dim]; }
+        HOST_DEVICE csize_t group_count() const { return _M_group_count; }
 
         template <typename Func>
-        HOST_DEVICE void apply_to_line(StridedIterator<T> iter, Func func) const
+        HOST_DEVICE void apply_to_line(const PointND<T, N> & pt0, const PointND<T, N> & pt1,
+                                       T width, Func func) const
         {
-            T offset = math_traits<T>::ceil(iter[2 * N]) + 1;
+            if (width <= T()) return;
 
-            auto pt0 = iter;
-            auto pt1 = iter + N;
+            T offset = math_traits<T>::ceil(width) + 1;
 
             // Compute normalized direction vector tau
             T length = T();
@@ -381,6 +479,18 @@ protected:
                 func(bin_idx);
             }
         }
+
+        template <typename Func>
+        HOST_DEVICE void apply_to_line(StridedIterator<T> iter, T width, Func func) const
+        {
+            PointND<T, N> pt0, pt1;
+            for (csize_t n = 0; n < N; n++)
+            {
+                pt0[n] = iter[n];
+                pt1[n] = iter[N + n];
+            }
+            apply_to_line(pt0, pt1, width, func);
+        }
     };
 
 public:
@@ -390,7 +500,8 @@ public:
     DrawContext() = default;
 
     template <typename I, typename = std::enable_if_t<std::is_integral_v<I>>>
-    DrawContext(const I * shape, const I * grid) : m_grid(grid)
+    DrawContext(const I * shape, const I * grid, csize_t group_count=1)
+        : m_grid(grid), m_group_count(group_count)
     {
         for (csize_t i = 0; i < N; i++)
         {
@@ -409,7 +520,7 @@ public:
 
     const_view_type view() const
     {
-        return {m_indices.view(), m_grid, m_bin};
+        return {m_indices.view(), m_grid, m_bin, m_group_count};
     }
 
     void import_indices(Indices && indices)
@@ -421,6 +532,8 @@ protected:
     Indices m_indices; 		        // indices of lines in each bin on GPU
     ShapeND<N> m_grid;				// number of bins in each dimension
     PointND<T, N> m_bin;     	    // size of each bin in voxels
+    // Number of groups used to decode the composite accumulation keys.
+    csize_t m_group_count = 1;
 };
 
 template <class Indices, typename T, csize_t N>
@@ -493,7 +606,10 @@ __global__ void accumulate_thick_lines_kernel(
         point[N - i - 1] = coord[1 + i];
     }
 
+    csize_t previous_key = 0;
     csize_t previous_term = 0;
+    bool has_group = false;
+    T group_value = T();
     T term_value = T();
     for (auto index : context.indices(frame * context.grid().size() + bin_idx))
     {
@@ -501,59 +617,106 @@ __global__ void accumulate_thick_lines_kernel(
         T width = lines[index.line].width();
         if (width <= T()) continue;
 
-        if (index.term != previous_term)
-        {
-            // Commit previous term value to global volume
-            if constexpr (GlobalUpdate) volume[idx] = math_traits<T>::max(volume[idx], term_value);
-            else volume[idx] += term_value;
+        // index.term stores the encoded (term, group) key, not the raw term.
+        csize_t key = index.term;
+        csize_t term = key / context.group_count();
+        T value = max_val * kernel(dist / width);
 
-            // Start new term
-            previous_term = index.term;
-            term_value = T();
+        if (!has_group)
+        {
+            previous_key = key;
+            previous_term = term;
+            group_value = value;
+            has_group = true;
+            continue;
         }
 
-        // Accumulate within term
-        if constexpr (TermUpdate) term_value = math_traits<T>::max(term_value, max_val * kernel(dist / width));
-        else term_value += max_val * kernel(dist / width);
+        if (key != previous_key)
+        {
+            // Candidate indices are sorted by encoded key. Finish the previous group
+            // before adding it to the term accumulator with the requested in_overlap.
+            if constexpr (TermUpdate) term_value = math_traits<T>::max(term_value, group_value);
+            else term_value += group_value;
+
+            if (term != previous_term)
+            {
+                // A new term starts; commit the completed term to the output volume
+                // with the requested out_overlap.
+                if constexpr (GlobalUpdate)
+                    volume[idx] = math_traits<T>::max(volume[idx], term_value);
+                else volume[idx] += term_value;
+
+                previous_term = term;
+                term_value = T();
+            }
+
+            previous_key = key;
+            group_value = value;
+        }
+        else
+        {
+            // Multiple segments of one curve can hit the same voxel; sew them with max.
+            group_value = math_traits<T>::max(group_value, value);
+        }
     }
 
-    // Commit last term value to global volume
-    if constexpr (GlobalUpdate) volume[idx] = math_traits<T>::max(volume[idx], term_value);
-    else volume[idx] += term_value;
+    if (has_group)
+    {
+        if constexpr (TermUpdate) term_value = math_traits<T>::max(term_value, group_value);
+        else term_value += group_value;
+
+        if constexpr (GlobalUpdate) volume[idx] = math_traits<T>::max(volume[idx], term_value);
+        else volume[idx] += term_value;
+    }
 }
 
 // GPU preprocessing: build spatial index (device side)
 template <typename T, csize_t N>
-__global__ void count_lines(ArrayViewND<T, 2> lines, DrawContextView<DrawIndices, T, N> context, DeviceRange<csize_t> counts)
+__global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                            csize_t group_size, csize_t n_line_groups,
+                            DrawContextView<DrawIndices, T, N> context,
+                            DeviceRange<csize_t> counts)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lines.shape(0)) return;
 
-    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), Counter(counts.data()));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
+                          Counter(counts.data()));
 }
 
 template <typename T, csize_t N>
-__global__ void fill_indices(ArrayViewND<T, 2> lines, DrawContextView<DrawIndices, T, N> context, DrawIndicesView draw_indices,
+__global__ void fill_indices(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                             csize_t group_size, csize_t n_line_groups,
+                             DrawContextView<DrawIndices, T, N> context,
+                             DrawIndicesView draw_indices,
                              DeviceRange<csize_t> counters)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lines.shape(0)) return;
 
-    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), draw_indices.filler(idx, counters.data()));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
+                          draw_indices.filler(idx, counters.data()));
 }
 
 template <typename T, csize_t N>
-DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & lines, const py::ssize_t * shape, py::ssize_t * grid)
+DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & lines,
+                                             const array_view<T, py::ssize_t> & widths,
+                                             csize_t group_size, csize_t n_line_groups,
+                                             const py::ssize_t * shape, py::ssize_t * grid)
 {
-    constexpr csize_t L = 2 * N + 1;
     DrawContext<DrawIndices, T, N> context (shape, grid);
     DeviceVector<csize_t> max_counts (context.grid().size(), 0);
 
     // First pass: count lines per bin
-    csize_t n_lines = lines.size() / L;
+    csize_t n_lines = lines.shape(0);
     csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_lines + block_size - 1) / block_size;
-    count_lines<T, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), context.view(), max_counts.view());
+    count_lines<T, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                cast_to_nd<T, 1>(widths), group_size,
+                                                n_line_groups, context.view(),
+                                                max_counts.view());
     handle_cuda_error(cudaGetLastError());
 
     // Second pass: scan max_counts to get offsets
@@ -575,7 +738,10 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
     max_counts.fill(0);  // Reset max_counts to use as counters during filling
 
     // Third pass: fill in line indices
-    fill_indices<T, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), context.view(), indices.view(), max_counts.view());
+    fill_indices<T, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                 cast_to_nd<T, 1>(widths), group_size,
+                                                 n_line_groups, context.view(),
+                                                 indices.view(), max_counts.view());
     handle_cuda_error(cudaGetLastError());
 
     context.import_indices(std::move(indices));
@@ -583,7 +749,9 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
 }
 
 template <typename T, typename I, csize_t N>
-__global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<I, 1> idxs, csize_t n_frames,
+__global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                            csize_t group_size, csize_t n_line_groups,
+                            ArrayViewND<I, 1> idxs, csize_t n_frames,
                             DrawContextView<DrawIndices, T, N> context, DeviceRange<csize_t> counts)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -592,11 +760,15 @@ __global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<I, 1> idxs, csi
     csize_t frame = static_cast<csize_t>(idxs[idx]);
     if (frame >= n_frames) return;
 
-    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), Counter(counts.data() + frame * context.grid().size()));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
+                          Counter(counts.data() + frame * context.grid().size()));
 }
 
 template <typename T, typename I, csize_t N>
-__global__ void fill_indices(ArrayViewND<T, 2> lines, ArrayViewND<I, 1> idxs, csize_t n_frames,
+__global__ void fill_indices(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                             csize_t group_size, csize_t n_line_groups,
+                             ArrayViewND<I, 1> idxs, csize_t n_frames,
                              DrawContextView<DrawIndices, T, N> context, DrawIndicesView draw_indices,
                              DeviceRange<csize_t> counters)
 {
@@ -606,21 +778,32 @@ __global__ void fill_indices(ArrayViewND<T, 2> lines, ArrayViewND<I, 1> idxs, cs
     csize_t frame = static_cast<csize_t>(idxs[idx]);
     if (frame >= n_frames) return;
 
-    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), draw_indices.filler(frame * context.grid().size(), idx, counters.data()));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
+                          draw_indices.filler(frame * context.grid().size(), idx,
+                                              counters.data()));
 }
 
 template <typename T, typename I, csize_t N>
-DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & lines, const array_view<I, py::ssize_t> & idxs, csize_t n_frames, const py::ssize_t * shape, py::ssize_t * grid)
+DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & lines,
+                                             const array_view<T, py::ssize_t> & widths,
+                                             csize_t group_size, csize_t n_line_groups,
+                                             const array_view<I, py::ssize_t> & idxs,
+                                             csize_t n_frames, const py::ssize_t * shape,
+                                             py::ssize_t * grid)
 {
-    constexpr csize_t L = 2 * N + 1;
     DrawContext<DrawIndices, T, N> context (shape, grid);
     DeviceVector<csize_t> max_counts (n_frames * context.grid().size(), 0);
 
     // First pass: count lines per bin
-    csize_t n_lines = lines.size() / L;
+    csize_t n_lines = lines.shape(0);
     csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_lines + block_size - 1) / block_size;
-    count_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(idxs), n_frames, context.view(), max_counts.view());
+    count_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                   cast_to_nd<T, 1>(widths), group_size,
+                                                   n_line_groups, cast_to_nd<I, 1>(idxs),
+                                                   n_frames, context.view(),
+                                                   max_counts.view());
     handle_cuda_error(cudaGetLastError());
     handle_cuda_error(cudaDeviceSynchronize());
 
@@ -645,7 +828,11 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
     max_counts.fill(0);  // Reset max_counts to use as counters during filling
 
     // Third pass: fill in line indices
-    fill_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(idxs), n_frames, context.view(), indices.view(), max_counts.view());
+    fill_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                    cast_to_nd<T, 1>(widths), group_size,
+                                                    n_line_groups, cast_to_nd<I, 1>(idxs),
+                                                    n_frames, context.view(),
+                                                    indices.view(), max_counts.view());
     handle_cuda_error(cudaGetLastError());
     handle_cuda_error(cudaDeviceSynchronize());
 
@@ -654,51 +841,72 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
 }
 
 template <typename T, typename I, csize_t N>
-__global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<I, 1> terms, csize_t n_terms, ArrayViewND<I, 1> frames,  csize_t n_frames,
+__global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                            ArrayViewND<I, 1> terms, csize_t group_size,
+                            csize_t n_line_groups,
+                            csize_t n_terms, ArrayViewND<I, 1> frames,  csize_t n_frames,
                             DrawContextView<AccumulateIndices, T, N> context, DeviceRange<csize_t> counts)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lines.shape(0)) return;
 
-    csize_t term = static_cast<csize_t>(terms[idx]);
+    csize_t term = static_cast<csize_t>(terms[idx / group_size]);
     if (term >= n_terms) return;
     csize_t frame = static_cast<csize_t>(frames[term]);
     if (frame >= n_frames) return;
 
-    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), Counter(counts.data() + (frame * context.grid().size())));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
+                          Counter(counts.data() + (frame * context.grid().size())));
 }
 
 template <typename T, typename I, csize_t N>
-__global__ void fill_indices(ArrayViewND<T, 2> lines, ArrayViewND<I, 1> terms, csize_t n_terms, ArrayViewND<I, 1> frames,  csize_t n_frames,
+__global__ void fill_indices(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                             ArrayViewND<I, 1> terms, csize_t group_size,
+                             csize_t n_line_groups,
+                             csize_t n_terms, ArrayViewND<I, 1> frames,  csize_t n_frames,
                              typename DrawContext<AccumulateIndices, T, N>::const_view_type context, AccumulateIndicesView acc_indices,
                              DeviceRange<csize_t> counters)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lines.shape(0)) return;
 
-    csize_t term = static_cast<csize_t>(terms[idx]);
+    csize_t term = static_cast<csize_t>(terms[idx / group_size]);
     if (term >= n_terms) return;
     csize_t frame = static_cast<csize_t>(frames[term]);
     if (frame >= n_frames) return;
 
-    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), acc_indices.filler(frame * context.grid().size(), IndexPair{idx, term}, counters.data()));
+    csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
+    context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
+                          acc_indices.filler(frame * context.grid().size(),
+                                             IndexPair{idx, term, idx, lines.shape(0)},
+                                             counters.data()));
 }
 
 template <typename T, typename I, csize_t N>
-DrawContext<AccumulateIndices, T, N> build_context(const array_view<T, py::ssize_t> & lines, const array_view<I, py::ssize_t> & terms, const array_view<I, py::ssize_t> & frames,
-                                                   csize_t n_frames, const py::ssize_t * shape, py::ssize_t * grid)
+DrawContext<AccumulateIndices, T, N> build_context(const array_view<T, py::ssize_t> & lines,
+                                                   const array_view<T, py::ssize_t> & widths,
+                                                   const array_view<I, py::ssize_t> & terms,
+                                                   const array_view<I, py::ssize_t> & frames,
+                                                   csize_t group_size, csize_t n_line_groups,
+                                                   csize_t n_frames,
+                                                   const py::ssize_t * shape, py::ssize_t * grid)
 {
-    constexpr csize_t L = 2 * N + 1;
-    DrawContext<AccumulateIndices, T, N> context (shape, grid);
+    DrawContext<AccumulateIndices, T, N> context (shape, grid, lines.shape(0));
     DeviceVector<csize_t> max_counts (n_frames * context.grid().size(), 0);
 
     // First pass: count lines per bin
-    csize_t n_lines = lines.size() / L;
+    csize_t n_lines = lines.shape(0);
     csize_t n_terms = frames.size();
     csize_t block_size = BLOCK_SIZE;
     csize_t n_blocks = (n_lines + block_size - 1) / block_size;
-    count_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(terms), n_terms, cast_to_nd<I, 1>(frames), n_frames,
-                                                   context.view(), max_counts.view());
+    count_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                   cast_to_nd<T, 1>(widths),
+                                                   cast_to_nd<I, 1>(terms),
+                                                   group_size, n_line_groups, n_terms,
+                                                   cast_to_nd<I, 1>(frames), n_frames,
+                                                   context.view(),
+                                                   max_counts.view());
     handle_cuda_error(cudaGetLastError());
 
     // Second pass: scan max_counts to get offsets
@@ -724,8 +932,13 @@ DrawContext<AccumulateIndices, T, N> build_context(const array_view<T, py::ssize
     max_counts.fill(0);  // Reset max_counts to use as counters during filling
 
     // Third pass: fill in line indices
-    fill_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines), cast_to_nd<I, 1>(terms), n_terms, cast_to_nd<I, 1>(frames), n_frames,
-                                                    context.view(), indices.view(), max_counts.view());
+    fill_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 2>(lines),
+                                                    cast_to_nd<T, 1>(widths),
+                                                    cast_to_nd<I, 1>(terms),
+                                                    group_size, n_line_groups, n_terms,
+                                                    cast_to_nd<I, 1>(frames), n_frames,
+                                                    context.view(), indices.view(),
+                                                    max_counts.view());
     handle_cuda_error(cudaGetLastError());
 
     // Fourth pass: sort within each bin [offsets[i], offsets[i + 1]) by term (ascending)
@@ -758,6 +971,156 @@ DrawContext<AccumulateIndices, T, N> build_context(const array_view<T, py::ssize
         );
 
         // Copy results back in place (device-to-device)
+        sorted_terms.to_device(indices.terms());
+        sorted_indices.to_device(indices.indices());
+    }
+
+    context.import_indices(std::move(indices));
+    return context;
+}
+
+template <typename T, csize_t N>
+HOST_DEVICE PointND<T, N> curve_point(ArrayViewND<T, 3> curves, csize_t curve_idx,
+                                      csize_t point_idx)
+{
+    PointND<T, N> point;
+    for (csize_t n = 0; n < N; n++) point[n] = curves.at(curve_idx, point_idx, n);
+    return point;
+}
+
+template <typename T, typename I, csize_t N>
+__global__ void count_curve_lines(ArrayViewND<T, 3> curves, ArrayViewND<T, 1> widths,
+                                  ArrayViewND<I, 1> terms, csize_t n_terms,
+                                  ArrayViewND<I, 1> frames, csize_t n_frames,
+                                  DrawContextView<AccumulateIndices, T, N> context,
+                                  DeviceRange<csize_t> counts)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    csize_t n_segments = curves.shape(1) - 1;
+    if (idx >= curves.shape(0) * n_segments) return;
+
+    // idx addresses a generated segment; curve_idx maps it back to the parent curve.
+    csize_t curve_idx = idx / n_segments;
+    csize_t segment_idx = idx % n_segments;
+    csize_t term = static_cast<csize_t>(terms[curve_idx]);
+    if (term >= n_terms) return;
+    csize_t frame = static_cast<csize_t>(frames[term]);
+    if (frame >= n_frames) return;
+
+    T width = widths.size() == 1 ? widths[0] : widths[curve_idx];
+    context.apply_to_line(curve_point<T, N>(curves, curve_idx, segment_idx),
+                          curve_point<T, N>(curves, curve_idx, segment_idx + 1), width,
+                          Counter(counts.data() + frame * context.grid().size()));
+}
+
+template <typename T, typename I, csize_t N>
+__global__ void fill_curve_indices(ArrayViewND<T, 3> curves, ArrayViewND<T, 1> widths,
+                                   ArrayViewND<I, 1> terms, csize_t n_terms,
+                                   ArrayViewND<I, 1> frames, csize_t n_frames,
+                                   typename DrawContext<AccumulateIndices, T, N>::const_view_type context,
+                                   AccumulateIndicesView acc_indices, DeviceRange<csize_t> counters)
+{
+    csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    csize_t n_segments = curves.shape(1) - 1;
+    if (idx >= curves.shape(0) * n_segments) return;
+
+    // idx must match the flattened LineData produced by build_curve_lines_kernel.
+    csize_t curve_idx = idx / n_segments;
+    csize_t segment_idx = idx % n_segments;
+    csize_t term = static_cast<csize_t>(terms[curve_idx]);
+    if (term >= n_terms) return;
+    csize_t frame = static_cast<csize_t>(frames[term]);
+    if (frame >= n_frames) return;
+
+    T width = widths.size() == 1 ? widths[0] : widths[curve_idx];
+    context.apply_to_line(curve_point<T, N>(curves, curve_idx, segment_idx),
+                          curve_point<T, N>(curves, curve_idx, segment_idx + 1), width,
+                          acc_indices.filler(frame * context.grid().size(),
+                                             IndexPair{idx, term, curve_idx, curves.shape(0)},
+                                             counters.data()));
+}
+
+template <typename T, typename I, csize_t N>
+DrawContext<AccumulateIndices, T, N> build_curve_context(
+                                                         const array_view<T, py::ssize_t> & curves,
+                                                         const array_view<T, py::ssize_t> & widths,
+                                                         const array_view<I, py::ssize_t> & terms,
+                                                         const array_view<I, py::ssize_t> & frames,
+                                                         csize_t n_frames, const py::ssize_t * shape,
+                                                         py::ssize_t * grid)
+{
+    DrawContext<AccumulateIndices, T, N> context (shape, grid, curves.shape(0));
+    DeviceVector<csize_t> max_counts (n_frames * context.grid().size(), 0);
+
+    // Build a spatial context over generated curve segments without materializing
+    // a line coordinate array; indices still point into build_curve_lines output.
+    csize_t n_segments = curves.shape(1) - 1;
+    csize_t n_curve_lines = curves.shape(0) * n_segments;
+    csize_t n_terms = frames.size();
+    csize_t block_size = BLOCK_SIZE;
+    csize_t n_blocks = (n_curve_lines + block_size - 1) / block_size;
+    count_curve_lines<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 3>(curves),
+                                                         cast_to_nd<T, 1>(widths),
+                                                         cast_to_nd<I, 1>(terms), n_terms,
+                                                         cast_to_nd<I, 1>(frames), n_frames,
+                                                         context.view(), max_counts.view());
+    handle_cuda_error(cudaGetLastError());
+
+    DeviceVector<csize_t> offsets (n_frames * context.grid().size() + 1, 0);
+    void * d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+
+    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes, max_counts.data(),
+                                  offsets.data() + 1, n_frames * context.grid().size());
+
+    DeviceVector<char> temp_storage (temp_storage_bytes);
+    cub::DeviceScan::InclusiveSum(temp_storage.data(), temp_storage_bytes, max_counts.data(),
+                                  offsets.data() + 1, n_frames * context.grid().size());
+
+    csize_t total_indices = 0;
+    handle_cuda_error(cudaMemcpy(&total_indices, offsets.data() + n_frames * context.grid().size(),
+                                 sizeof(csize_t), cudaMemcpyDeviceToHost));
+    AccumulateIndices indices (
+        DeviceVector<csize_t>(total_indices),
+        DeviceVector<csize_t>(total_indices),
+        std::move(offsets)
+    );
+    max_counts.fill(0);
+
+    fill_curve_indices<T, I, N><<<n_blocks, block_size>>>(cast_to_nd<T, 3>(curves),
+                                                          cast_to_nd<T, 1>(widths),
+                                                          cast_to_nd<I, 1>(terms), n_terms,
+                                                          cast_to_nd<I, 1>(frames), n_frames,
+                                                          context.view(), indices.view(),
+                                                          max_counts.view());
+    handle_cuda_error(cudaGetLastError());
+
+    if (total_indices > 1)
+    {
+        DeviceVector<csize_t> sorted_terms(total_indices);
+        DeviceVector<csize_t> sorted_indices(total_indices);
+
+        cub::DeviceSegmentedRadixSort::SortPairs(
+            d_temp_storage, temp_storage_bytes,
+            indices.terms().data(), sorted_terms.data(),
+            indices.indices().data(), sorted_indices.data(),
+            static_cast<int>(total_indices),
+            static_cast<int>(n_frames * context.grid().size()),
+            indices.offsets().data(),
+            indices.offsets().data() + 1
+        );
+
+        temp_storage.resize(temp_storage_bytes);
+        cub::DeviceSegmentedRadixSort::SortPairs(
+            temp_storage.data(), temp_storage_bytes,
+            indices.terms().data(), sorted_terms.data(),
+            indices.indices().data(), sorted_indices.data(),
+            static_cast<int>(total_indices),
+            static_cast<int>(n_frames * context.grid().size()),
+            indices.offsets().data(),
+            indices.offsets().data() + 1
+        );
+
         sorted_terms.to_device(indices.terms());
         sorted_indices.to_device(indices.indices());
     }
@@ -801,25 +1164,31 @@ std::array<py::ssize_t, N> make_grid(const py::ssize_t * shape, csize_t n_lines)
 
 // Main drawing function in 2D
 template <typename T, csize_t N, int Update, kernels::type K>
-array_t<T> draw_lines_nd_no_index(array_t<T> out, array_t<T> lines, T max_val, std::optional<std::array<py::ssize_t, N>> grid)
+array_t<T> draw_lines_nd_no_index(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                                  T max_val, std::optional<std::array<py::ssize_t, N>> grid)
 {
-    constexpr csize_t L = 2 * N + 1;
+    constexpr csize_t L = 2 * N;
     constexpr auto kernel = kernels_t<T, cuda::kernel_traits>::template select<K>();
 
     if (out.ndim() != N) throw std::invalid_argument("Output array has incorrect number of dimensions");
     if (lines.shape(lines.ndim() - 1) != L) throw std::invalid_argument("Line array has incorrect shape");
+    if (widths.ndim() != 1) widths = widths.reshape({widths.size()});
 
     auto shape = out.shape();
     csize_t n_lines = lines.size() / L;
+    csize_t n_line_groups = lines.shape(0);
+    csize_t group_size = n_line_groups ? n_lines / n_line_groups : 0;
 
     // Early return for empty output or no lines
     if (out.size() == 0 || n_lines == 0) return out;
+    check_widths(widths.size(), n_lines, n_line_groups);
 
     if (lines.ndim() != 2) lines = lines.reshape({n_lines, L});
     if (!grid) grid = make_grid<N>(shape, n_lines);
 
-    auto line_data = build_lines<T, N>(lines.view());
-    auto context = build_context<T, N>(lines.view(), shape, grid->data());
+    auto line_data = build_lines<T, N>(lines.view(), widths.view(), group_size, n_line_groups);
+    auto context = build_context<T, N>(lines.view(), widths.view(), group_size, n_line_groups,
+                                       shape, grid->data());
 
     int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
@@ -833,21 +1202,27 @@ array_t<T> draw_lines_nd_no_index(array_t<T> out, array_t<T> lines, T max_val, s
 }
 
 template <typename T, typename I, csize_t N, int Update, kernels::type K>
-array_t<T> draw_lines_nd_with_index(array_t<T> out, array_t<T> lines, array_t<I> idxs, T max_val, std::optional<std::array<py::ssize_t, N>> grid)
+array_t<T> draw_lines_nd_with_index(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                                    array_t<I> idxs, T max_val,
+                                    std::optional<std::array<py::ssize_t, N>> grid)
 {
-    constexpr csize_t L = 2 * N + 1;
+    constexpr csize_t L = 2 * N;
     constexpr auto kernel = kernels_t<T, cuda::kernel_traits>::template select<K>();
     if (out.ndim() < N) throw std::invalid_argument("Output array has insufficient number of dimensions");
     if (lines.shape(lines.ndim() - 1) != L) throw std::invalid_argument("Line array has incorrect shape");
 
     if (idxs.ndim() != 1) idxs = idxs.reshape({idxs.size()});
+    if (widths.ndim() != 1) widths = widths.reshape({widths.size()});
 
     auto shape = out.shape() + (out.ndim() - N);
     csize_t n_lines = lines.size() / L;
+    csize_t n_line_groups = lines.shape(0);
+    csize_t group_size = n_line_groups ? n_lines / n_line_groups : 0;
     csize_t n_frames = std::reduce(out.shape(), shape, csize_t(1), std::multiplies());
 
     // Early return for empty output
     if (out.size() == 0 || n_lines == 0) return out;
+    check_widths(widths.size(), n_lines, n_line_groups);
 
     std::vector<py::ssize_t> old_shape;
     if (out.ndim() != N + 1)
@@ -865,8 +1240,9 @@ array_t<T> draw_lines_nd_with_index(array_t<T> out, array_t<T> lines, array_t<I>
         grid = make_grid<N>(shape, lines_per_frame);
     }
 
-    auto line_data = build_lines<T, N>(lines.view());
-    auto context = build_context<T, I, N>(lines.view(), idxs.view(), n_frames, shape, grid->data());
+    auto line_data = build_lines<T, N>(lines.view(), widths.view(), group_size, n_line_groups);
+    auto context = build_context<T, I, N>(lines.view(), widths.view(), group_size, n_line_groups,
+                                          idxs.view(), n_frames, shape, grid->data());
 
     int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
@@ -882,54 +1258,78 @@ array_t<T> draw_lines_nd_with_index(array_t<T> out, array_t<T> lines, array_t<I>
 }
 
 template <typename T, typename I, csize_t N, int Update, kernels::type K>
-array_t<T> draw_lines_nd_impl(array_t<T> out, array_t<T> lines, std::optional<array_t<I>> idxs, T max_val, std::optional<std::array<py::ssize_t, N>> grid)
+array_t<T> draw_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                              std::optional<array_t<I>> idxs, T max_val,
+                              std::optional<std::array<py::ssize_t, N>> grid)
 {
-    if (idxs) return draw_lines_nd_with_index<T, I, N, Update, K>(out, lines, *idxs, max_val, grid);
-    else return draw_lines_nd_no_index<T, N, Update, K>(out, lines, max_val, grid);
+    if (idxs)
+    {
+        return draw_lines_nd_with_index<T, I, N, Update, K>(
+            out, lines, widths, *idxs, max_val, grid
+        );
+    }
+    else return draw_lines_nd_no_index<T, N, Update, K>(out, lines, widths, max_val, grid);
 }
 
 template <typename T, typename I, csize_t N, int Update>
-array_t<T> draw_lines_nd(array_t<T> out, array_t<T> lines, std::optional<array_t<I>> idxs, T max_val, std::string kernel_name, std::optional<std::array<py::ssize_t, N>> grid)
+array_t<T> draw_lines_nd(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                         std::optional<array_t<I>> idxs, T max_val,
+                         std::string kernel_name, std::optional<std::array<py::ssize_t, N>> grid)
 {
     auto ktype = kernels::get_type(kernel_name);
     switch (ktype)
     {
         case kernels::biweight:
-            return draw_lines_nd_impl<T, I, N, Update, kernels::biweight>(out, lines, idxs, max_val, grid);
+            return draw_lines_nd_impl<T, I, N, Update, kernels::biweight>(
+                out, lines, widths, idxs, max_val, grid);
         case kernels::gaussian:
-            return draw_lines_nd_impl<T, I, N, Update, kernels::gaussian>(out, lines, idxs, max_val, grid);
+            return draw_lines_nd_impl<T, I, N, Update, kernels::gaussian>(
+                out, lines, widths, idxs, max_val, grid);
         case kernels::parabolic:
-            return draw_lines_nd_impl<T, I, N, Update, kernels::parabolic>(out, lines, idxs, max_val, grid);
+            return draw_lines_nd_impl<T, I, N, Update, kernels::parabolic>(
+                out, lines, widths, idxs, max_val, grid);
         case kernels::rectangular:
-            return draw_lines_nd_impl<T, I, N, Update, kernels::rectangular>(out, lines, idxs, max_val, grid);
+            return draw_lines_nd_impl<T, I, N, Update, kernels::rectangular>(
+                out, lines, widths, idxs, max_val, grid);
         case kernels::triangular:
-            return draw_lines_nd_impl<T, I, N, Update, kernels::triangular>(out, lines, idxs, max_val, grid);
+            return draw_lines_nd_impl<T, I, N, Update, kernels::triangular>(
+                out, lines, widths, idxs, max_val, grid);
         default:
             throw std::invalid_argument("Invalid kernel type");
     }
 }
 
 template <typename T, typename I, int Update>
-array_t<T> draw_lines_2d_3d(array_t<T> out, array_t<T> lines, std::optional<array_t<I>> idxs, T max_val, std::string kernel, std::optional<std::vector<py::ssize_t>> grid)
+array_t<T> draw_lines_2d_3d(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                            std::optional<array_t<I>> idxs, T max_val, std::string kernel,
+                            std::optional<std::vector<py::ssize_t>> grid)
 {
     size_t L = lines.shape(lines.ndim() - 1);
-    if (out.ndim() >= 2 && L == 5)
+    if (out.ndim() >= 2 && L == 4)
     {
         if (grid)
         {
             if (grid->size() != 2) throw std::invalid_argument("Grid size must match output array dimensions");
-            return draw_lines_nd<T, I, 2, Update>(out, lines, idxs, max_val, kernel, std::array<py::ssize_t, 2>{(*grid)[0], (*grid)[1]});
+            return draw_lines_nd<T, I, 2, Update>(
+                out, lines, widths, idxs, max_val, kernel,
+                std::array<py::ssize_t, 2>{(*grid)[0], (*grid)[1]}
+            );
         }
-        return draw_lines_nd<T, I, 2, Update>(out, lines, idxs, max_val, kernel, std::nullopt);
+        return draw_lines_nd<T, I, 2, Update>(out, lines, widths, idxs, max_val, kernel,
+                                              std::nullopt);
     }
-    else if (out.ndim() >= 3 && L == 7)
+    else if (out.ndim() >= 3 && L == 6)
     {
         if (grid)
         {
             if (grid->size() != 3) throw std::invalid_argument("Grid size must match output array dimensions");
-            return draw_lines_nd<T, I, 3, Update>(out, lines, idxs, max_val, kernel, std::array<py::ssize_t, 3>{(*grid)[0], (*grid)[1], (*grid)[2]});
+            return draw_lines_nd<T, I, 3, Update>(
+                out, lines, widths, idxs, max_val, kernel,
+                std::array<py::ssize_t, 3>{(*grid)[0], (*grid)[1], (*grid)[2]}
+            );
         }
-        return draw_lines_nd<T, I, 3, Update>(out, lines, idxs, max_val, kernel, std::nullopt);
+        return draw_lines_nd<T, I, 3, Update>(out, lines, widths, idxs, max_val, kernel,
+                                              std::nullopt);
     }
     else
     {
@@ -938,17 +1338,23 @@ array_t<T> draw_lines_2d_3d(array_t<T> out, array_t<T> lines, std::optional<arra
 }
 
 template <typename T, typename I>
-array_t<T> draw_lines(array_t<T> out, array_t<T> lines, std::optional<array_t<I>> idxs, T max_val, std::string kernel, std::string overlap, std::optional<std::vector<py::ssize_t>> grid)
+array_t<T> draw_lines(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                      std::optional<array_t<I>> idxs, T max_val, std::string kernel,
+                      std::string overlap, std::optional<std::vector<py::ssize_t>> grid)
 {
-    if (overlap == "sum") return draw_lines_2d_3d<T, I, 0>(out, lines, idxs, max_val, kernel, grid);
-    else if (overlap == "max") return draw_lines_2d_3d<T, I, 1>(out, lines, idxs, max_val, kernel, grid);
+    if (overlap == "sum")
+        return draw_lines_2d_3d<T, I, 0>(out, lines, widths, idxs, max_val, kernel, grid);
+    else if (overlap == "max")
+        return draw_lines_2d_3d<T, I, 1>(out, lines, widths, idxs, max_val, kernel, grid);
     else throw std::invalid_argument("Invalid overlap keyword: " + overlap);
 }
 
 template <typename T, typename I, csize_t N, int Update, kernels::type K>
-array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<I> terms, array_t<I> frames, T max_val, std::optional<std::array<py::ssize_t, N>> grid)
+array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<T> widths,
+                                    array_t<I> terms, array_t<I> frames, T max_val,
+                                    std::optional<std::array<py::ssize_t, N>> grid)
 {
-    constexpr csize_t L = 2 * N + 1;
+    constexpr csize_t L = 2 * N;
     constexpr auto kernel = kernels_t<T, cuda::kernel_traits>::template select<K>();
 
     if (out.ndim() < N) throw std::invalid_argument("Output array has incorrect number of dimensions");
@@ -956,20 +1362,26 @@ array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<I>
 
     if (frames.ndim() != 1) frames = frames.reshape({frames.size()});
     if (terms.ndim() != 1) terms = terms.reshape({terms.size()});
+    if (widths.ndim() != 1) widths = widths.reshape({widths.size()});
 
     auto shape = out.shape() + out.ndim() - N;
-    csize_t n_lines = lines.size() / lines.shape(lines.ndim() - 1);
+    csize_t n_line_groups = lines.shape(0);
+    csize_t n_lines = lines.size() / L;
+    csize_t group_size = n_line_groups ? n_lines / n_line_groups : 0;
     csize_t n_frames = std::reduce(out.shape(), shape, csize_t(1), std::multiplies());
 
     // Early return for empty output
     if (out.size() == 0 || n_lines == 0) return out;
 
-    if (terms.size() != n_lines) throw std::invalid_argument("Number of term indices does not match number of lines");
+    if (terms.size() != n_line_groups)
+        throw std::invalid_argument("Number of term indices does not match number of line groups");
+    check_widths(widths.size(), n_lines, n_line_groups);
     std::vector<py::ssize_t> old_shape;
     if (out.ndim() != N + 1)
     {
         old_shape = std::vector<py::ssize_t> (out.shape(), out.shape() + out.ndim());
-        std::vector<py::ssize_t> new_shape (out.shape() + out.ndim() - N, out.shape() + out.ndim());
+        std::vector<py::ssize_t> new_shape (out.shape() + out.ndim() - N,
+                                            out.shape() + out.ndim());
         new_shape.insert(new_shape.begin(), n_frames);
         out = out.reshape(new_shape);
     }
@@ -981,8 +1393,73 @@ array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<I>
         grid = make_grid<N>(shape, lines_per_frame);
     }
 
-    auto line_data = build_lines<T, N>(lines.view());
-    auto context = build_context<T, I, N>(lines.view(), terms.view(), frames.view(), n_frames, shape, grid->data());
+    auto line_data = build_lines<T, N>(lines.view(), widths.view(), group_size, n_line_groups);
+    auto context = build_context<T, I, N>(lines.view(), widths.view(), terms.view(),
+                                          frames.view(), group_size, n_line_groups, n_frames,
+                                          shape, grid->data());
+
+    int block_size = BLOCK_SIZE;
+    int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
+
+    accumulate_thick_lines_kernel<T, N, Update><<<num_blocks, block_size>>>(
+        cast_to_nd<T, N + 1>(out.view()), line_data.view(), context.view(), max_val, kernel);
+
+    handle_cuda_error(cudaGetLastError());
+    handle_cuda_error(cudaDeviceSynchronize());
+
+    if (old_shape.size()) out = out.reshape(old_shape);
+    return out;
+}
+
+template <typename T, typename I, csize_t N, int Update, kernels::type K>
+array_t<T> accumulate_curves_nd_impl(array_t<T> out, array_t<T> curves, array_t<T> widths,
+                                     array_t<I> terms, array_t<I> frames, T max_val,
+                                     std::optional<std::array<py::ssize_t, N>> grid)
+{
+    constexpr auto kernel = kernels_t<T, cuda::kernel_traits>::template select<K>();
+
+    if (out.ndim() < N) throw std::invalid_argument("Output array has incorrect number of dimensions");
+    if (curves.ndim() != 3)
+        throw std::invalid_argument("Curve array must have shape (n_curves, n_points, ndim)");
+    if (curves.shape(2) != N)
+        throw std::invalid_argument("Curve point dimension does not match output array");
+    if (curves.shape(1) < 2) throw std::invalid_argument("Curve must contain at least two points");
+
+    if (frames.ndim() != 1) frames = frames.reshape({frames.size()});
+    if (terms.ndim() != 1) terms = terms.reshape({terms.size()});
+    if (widths.ndim() != 1) widths = widths.reshape({widths.size()});
+
+    auto shape = out.shape() + out.ndim() - N;
+    csize_t n_curves = curves.shape(0);
+    csize_t n_frames = std::reduce(out.shape(), shape, csize_t(1), std::multiplies());
+
+    if (out.size() == 0 || n_curves == 0) return out;
+
+    if (terms.size() != n_curves)
+        throw std::invalid_argument("Number of term indices does not match number of curves");
+    if (widths.size() != 1 && widths.size() != n_curves)
+        throw std::invalid_argument("Width array must be scalar or match number of curves");
+
+    std::vector<py::ssize_t> old_shape;
+    if (out.ndim() != N + 1)
+    {
+        old_shape = std::vector<py::ssize_t> (out.shape(), out.shape() + out.ndim());
+        std::vector<py::ssize_t> new_shape (out.shape() + out.ndim() - N,
+                                            out.shape() + out.ndim());
+        new_shape.insert(new_shape.begin(), n_frames);
+        out = out.reshape(new_shape);
+    }
+
+    if (!grid)
+    {
+        csize_t n_curve_lines = n_curves * (curves.shape(1) - 1);
+        csize_t lines_per_frame = n_curve_lines / n_frames + ((n_curve_lines % n_frames) ? 1 : 0);
+        grid = make_grid<N>(shape, lines_per_frame);
+    }
+
+    auto line_data = build_curve_lines<T, N>(curves.view(), widths.view());
+    auto context = build_curve_context<T, I, N>(curves.view(), widths.view(), terms.view(),
+                                                frames.view(), n_frames, shape, grid->data());
 
     int block_size = BLOCK_SIZE;
     int num_blocks = static_cast<int>((out.size() + block_size - 1) / block_size);
@@ -998,47 +1475,119 @@ array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<I>
 }
 
 template <typename T, typename I, csize_t N, int Update>
-array_t<T> accumulate_lines_nd(array_t<T> out, array_t<T> larr, array_t<I> terms, array_t<I> frames, T max_val, std::string kernel_name, std::optional<std::array<py::ssize_t, N>> grid)
+array_t<T> accumulate_lines_nd(array_t<T> out, array_t<T> larr, array_t<T> widths,
+                               array_t<I> terms, array_t<I> frames, T max_val,
+                               std::string kernel_name,
+                               std::optional<std::array<py::ssize_t, N>> grid)
 {
     auto ktype = kernels::get_type(kernel_name);
     switch (ktype)
     {
         case kernels::biweight:
-            return accumulate_lines_nd_impl<T, I, N, Update, kernels::biweight>(out, larr, terms, frames, max_val, grid);
+            return accumulate_lines_nd_impl<T, I, N, Update, kernels::biweight>(
+                out, larr, widths, terms, frames, max_val, grid);
         case kernels::gaussian:
-            return accumulate_lines_nd_impl<T, I, N, Update, kernels::gaussian>(out, larr, terms, frames, max_val, grid);
+            return accumulate_lines_nd_impl<T, I, N, Update, kernels::gaussian>(
+                out, larr, widths, terms, frames, max_val, grid);
         case kernels::parabolic:
-            return accumulate_lines_nd_impl<T, I, N, Update, kernels::parabolic>(out, larr, terms, frames, max_val, grid);
+            return accumulate_lines_nd_impl<T, I, N, Update, kernels::parabolic>(
+                out, larr, widths, terms, frames, max_val, grid);
         case kernels::rectangular:
-            return accumulate_lines_nd_impl<T, I, N, Update, kernels::rectangular>(out, larr, terms, frames, max_val, grid);
+            return accumulate_lines_nd_impl<T, I, N, Update, kernels::rectangular>(
+                out, larr, widths, terms, frames, max_val, grid);
         case kernels::triangular:
-            return accumulate_lines_nd_impl<T, I, N, Update, kernels::triangular>(out, larr, terms, frames, max_val, grid);
+            return accumulate_lines_nd_impl<T, I, N, Update, kernels::triangular>(
+                out, larr, widths, terms, frames, max_val, grid);
+        default:
+            throw std::invalid_argument("Invalid kernel type");
+    }
+}
+
+template <typename T, typename I, csize_t N, int Update>
+array_t<T> accumulate_curves_nd(array_t<T> out, array_t<T> curves, array_t<T> widths,
+                                array_t<I> terms, array_t<I> frames, T max_val,
+                                std::string kernel_name,
+                                std::optional<std::array<py::ssize_t, N>> grid)
+{
+    auto ktype = kernels::get_type(kernel_name);
+    switch (ktype)
+    {
+        case kernels::biweight:
+            return accumulate_curves_nd_impl<T, I, N, Update, kernels::biweight>(
+                out, curves, widths, terms, frames, max_val, grid);
+        case kernels::gaussian:
+            return accumulate_curves_nd_impl<T, I, N, Update, kernels::gaussian>(
+                out, curves, widths, terms, frames, max_val, grid);
+        case kernels::parabolic:
+            return accumulate_curves_nd_impl<T, I, N, Update, kernels::parabolic>(
+                out, curves, widths, terms, frames, max_val, grid);
+        case kernels::rectangular:
+            return accumulate_curves_nd_impl<T, I, N, Update, kernels::rectangular>(
+                out, curves, widths, terms, frames, max_val, grid);
+        case kernels::triangular:
+            return accumulate_curves_nd_impl<T, I, N, Update, kernels::triangular>(
+                out, curves, widths, terms, frames, max_val, grid);
         default:
             throw std::invalid_argument("Invalid kernel type");
     }
 }
 
 template <typename T, typename I, int Update>
-array_t<T> accumulate_lines_2d_3d(array_t<T> out, array_t<T> larr, array_t<I> terms, array_t<I> frames, T max_val, std::string kernel, std::optional<std::vector<py::ssize_t>> grid)
+array_t<T> accumulate_lines_2d_3d(array_t<T> out, array_t<T> larr, array_t<I> terms,
+                                  array_t<I> frames, array_t<T> widths,
+                                  T max_val, std::string kernel,
+                                  std::optional<std::vector<py::ssize_t>> grid)
 {
     size_t L = larr.shape(larr.ndim() - 1);
-    if (out.ndim() >= 2 && L == 5)
+    if (out.ndim() >= 2 && L == 2)
+    {
+        if (grid)
+        {
+            if (grid->size() != 2)
+                throw std::invalid_argument("Grid size must match output array dimensions");
+            return accumulate_curves_nd<T, I, 2, Update>(
+                out, larr, widths, terms, frames, max_val, kernel,
+                std::array<py::ssize_t, 2>{(*grid)[0], (*grid)[1]});
+        }
+        return accumulate_curves_nd<T, I, 2, Update>(out, larr, widths, terms, frames,
+                                                     max_val, kernel, std::nullopt);
+    }
+    else if (out.ndim() >= 3 && L == 3)
+    {
+        if (grid)
+        {
+            if (grid->size() != 3)
+                throw std::invalid_argument("Grid size must match output array dimensions");
+            return accumulate_curves_nd<T, I, 3, Update>(
+                out, larr, widths, terms, frames, max_val, kernel,
+                std::array<py::ssize_t, 3>{(*grid)[0], (*grid)[1], (*grid)[2]});
+        }
+        return accumulate_curves_nd<T, I, 3, Update>(out, larr, widths, terms, frames,
+                                                     max_val, kernel, std::nullopt);
+    }
+    else if (out.ndim() >= 2 && L == 4)
     {
         if (grid)
         {
             if (grid->size() != 2) throw std::invalid_argument("Grid size must match output array dimensions");
-            return accumulate_lines_nd<T, I, 2, Update>(out, larr, terms, frames, max_val, kernel, std::array<py::ssize_t, 2>{(*grid)[0], (*grid)[1]});
+            return accumulate_lines_nd<T, I, 2, Update>(
+                out, larr, widths, terms, frames, max_val, kernel,
+                std::array<py::ssize_t, 2>{(*grid)[0], (*grid)[1]});
         }
-        return accumulate_lines_nd<T, I, 2, Update>(out, larr, terms, frames, max_val, kernel, std::nullopt);
+        return accumulate_lines_nd<T, I, 2, Update>(out, larr, widths, terms, frames,
+                                                    max_val, kernel, std::nullopt);
     }
-    else if (out.ndim() >= 3 && L == 7)
+    else if (out.ndim() >= 3 && L == 6)
     {
         if (grid)
         {
             if (grid->size() != 3) throw std::invalid_argument("Grid size must match output array dimensions");
-            return accumulate_lines_nd<T, I, 3, Update>(out, larr, terms, frames, max_val, kernel, std::array<py::ssize_t, 3>{(*grid)[0], (*grid)[1], (*grid)[2]});
+            return accumulate_lines_nd<T, I, 3, Update>(
+                out, larr, widths, terms, frames, max_val, kernel,
+                std::array<py::ssize_t, 3>{(*grid)[0], (*grid)[1], (*grid)[2]});
         }
-        return accumulate_lines_nd<T, I, 3, Update>(out, larr, terms, frames, max_val, kernel, std::nullopt);
+        return accumulate_lines_nd<T, I, 3, Update>(out, larr, widths, terms, frames,
+                                                    max_val, kernel, std::nullopt);
     }
     else
     {
@@ -1047,12 +1596,15 @@ array_t<T> accumulate_lines_2d_3d(array_t<T> out, array_t<T> larr, array_t<I> te
 }
 
 template <typename T, typename I>
-array_t<T> accumulate_lines(array_t<T> out, array_t<T> larr, array_t<I> terms, array_t<I> frames, T max_val, std::string kernel, std::string in_overlap, std::string out_overlap, std::optional<std::vector<py::ssize_t>> grid)
+array_t<T> accumulate_lines(array_t<T> out, array_t<T> larr, array_t<I> terms, array_t<I> frames,
+                            array_t<T> widths, T max_val, std::string kernel,
+                            std::string in_overlap, std::string out_overlap,
+                            std::optional<std::vector<py::ssize_t>> grid)
 {
-    if (in_overlap =="sum" && out_overlap == "sum") return accumulate_lines_2d_3d<T, I, 0>(out, larr, terms, frames, max_val, kernel, grid);
-    if (in_overlap =="max" && out_overlap == "sum") return accumulate_lines_2d_3d<T, I, 1>(out, larr, terms, frames, max_val, kernel, grid);
-    if (in_overlap =="sum" && out_overlap == "max") return accumulate_lines_2d_3d<T, I, 2>(out, larr, terms, frames, max_val, kernel, grid);
-    if (in_overlap =="max" && out_overlap == "max") return accumulate_lines_2d_3d<T, I, 3>(out, larr, terms, frames, max_val, kernel, grid);
+    if (in_overlap =="sum" && out_overlap == "sum") return accumulate_lines_2d_3d<T, I, 0>(out, larr, terms, frames, widths, max_val, kernel, grid);
+    if (in_overlap =="max" && out_overlap == "sum") return accumulate_lines_2d_3d<T, I, 1>(out, larr, terms, frames, widths, max_val, kernel, grid);
+    if (in_overlap =="sum" && out_overlap == "max") return accumulate_lines_2d_3d<T, I, 2>(out, larr, terms, frames, widths, max_val, kernel, grid);
+    if (in_overlap =="max" && out_overlap == "max") return accumulate_lines_2d_3d<T, I, 3>(out, larr, terms, frames, widths, max_val, kernel, grid);
     throw std::invalid_argument("Invalid overlap keyword: " + in_overlap + ", " + out_overlap);
 }
 
@@ -1081,6 +1633,7 @@ PYBIND11_MODULE(cuda_draw_lines, m)
           py::arg("lines"),
           py::arg("terms"),
           py::arg("frames"),
+          py::arg("widths"),
           py::arg("max_val") = 1.0f,
           py::arg("kernel") = "rectangular",
           py::arg("in_overlap") = "sum",
@@ -1091,6 +1644,7 @@ PYBIND11_MODULE(cuda_draw_lines, m)
           py::arg("lines"),
           py::arg("terms"),
           py::arg("frames"),
+          py::arg("widths"),
           py::arg("max_val") = 1.0,
           py::arg("kernel") = "rectangular",
           py::arg("in_overlap") = "sum",
@@ -1100,6 +1654,7 @@ PYBIND11_MODULE(cuda_draw_lines, m)
     m.def("draw_lines", &cu::draw_lines<float, int>,
           py::arg("out"),
           py::arg("lines"),
+          py::arg("widths"),
           py::arg("idxs") = nullptr,
           py::arg("max_val") = 1.0f,
           py::arg("kernel") = "rectangular",
@@ -1108,6 +1663,7 @@ PYBIND11_MODULE(cuda_draw_lines, m)
     m.def("draw_lines", &cu::draw_lines<double, long>,
           py::arg("out"),
           py::arg("lines"),
+          py::arg("widths"),
           py::arg("idxs") = nullptr,
           py::arg("max_val") = 1.0,
           py::arg("kernel") = "rectangular",

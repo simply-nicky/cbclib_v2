@@ -104,45 +104,44 @@ class TestDrawLine():
     @pytest.fixture
     def image(self, out: RealArray, lines: Lines, width: float, indices: IntArray, max_val: float,
               kernel: str) -> RealArray:
-        return draw_lines(out, lines.to_lines(width), indices, max_val=max_val, kernel=kernel)
+        return draw_lines(out, lines.lines, indices, width=width, max_val=max_val, kernel=kernel)
 
     @pytest.fixture
     def accumulated(self, out: RealArray, lines: Lines, width: float, terms: IntArray,
                     frames: IntArray, max_val: float, kernel: str) -> RealArray:
-        return accumulate_lines(out, lines.to_lines(width), terms, frames, max_val, kernel)
+        return accumulate_lines(out, lines.lines, terms, frames, width=width, max_val=max_val,
+                                kernel=kernel)
 
     def test_ref_count(self, lines: Lines, width: float, shape: Shape, ndim: int,
                        xp: TestNamespace):
         out = xp.zeros(shape[-ndim:])
-        lines_array = lines.to_lines(width)
+        lines_array = lines.lines
         out_refcount = sys.getrefcount(out)
         lines_refcount = sys.getrefcount(lines_array)
 
-        out = draw_lines(out, lines_array)
+        out = draw_lines(out, lines_array, width=width)
 
         assert out_refcount == sys.getrefcount(out)
         assert lines_refcount == sys.getrefcount(lines_array)
 
     def test_empty_lines(self, shape: Shape, ndim: int, xp: TestNamespace):
-        image = draw_lines(xp.zeros(shape[-ndim:]), xp.zeros((0, 2 * ndim + 1)))
+        image = draw_lines(xp.zeros(shape[-ndim:]), xp.zeros((0, 2 * ndim)), width=1.0)
         assert xp.sum(image) == 0.0
 
     @pytest.mark.xfail(raises=ValueError)
     def test_image_wrong_size_lines(self, out: RealArray, lines: Lines, width: float,
                                     indices: IntArray):
-        _ = draw_lines(out, lines.to_lines(width)[::2], indices)
+        _ = draw_lines(out, lines.lines[::2], indices, width=width)
 
     def test_zero_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
                         xp: TestNamespace):
-        zero_lines = lines.to_lines(0.0)
-        image = draw_lines(out, zero_lines, indices, kernel=kernel)
+        image = draw_lines(out, lines.lines, indices, width=0.0, kernel=kernel)
 
         assert xp.sum(image) == 0
 
     def test_negative_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
                             xp: TestNamespace):
-        neg_lines = lines.to_lines(-1.0)
-        image = draw_lines(out, neg_lines, indices, kernel=kernel)
+        image = draw_lines(out, lines.lines, indices, width=-1.0, kernel=kernel)
 
         assert xp.sum(image) == 0
 
@@ -171,3 +170,122 @@ class TestDrawLine():
 
     def test_accumulate_lines(self, accumulated, image_numpy: RealArray):
         check_close(accumulated, image_numpy)
+
+class TestAccumulateCurves():
+    @pytest.fixture(params=['cpu', 'gpu'])
+    def platform(self, request: pytest.FixtureRequest) -> str:
+        return request.param
+
+    @pytest.fixture
+    def xp(self, platform: str) -> TestNamespace:
+        if platform == 'cpu':
+            return NumPy
+        if platform == 'gpu':
+            if CuPy is None:
+                pytest.skip("CuPy is not available")
+            return CuPy
+        raise ValueError(f"Unknown platform: {platform}")
+
+    @pytest.fixture
+    def out(self, xp: TestNamespace) -> RealArray:
+        return xp.zeros((1, 12, 12, 12))
+
+    @pytest.fixture
+    def frames(self, xp: TestNamespace) -> IntArray:
+        return xp.array([0])
+
+    def test_internal_max(self, out: RealArray, frames: IntArray, xp: TestNamespace):
+        curve = xp.array([[[5.0, 5.0, 5.0],
+                           [6.0, 5.0, 5.0],
+                           [7.0, 5.0, 5.0]]])
+        terms = xp.array([0])
+
+        image = accumulate_lines(out, curve, terms, frames, width=0.6, kernel='rectangular',
+                                 in_overlap='sum')
+
+        assert image[0, 5, 5, 6] == 1.0
+
+    def test_curves_overlap(self, out: RealArray, frames: IntArray, xp: TestNamespace):
+        curves = xp.array([[[5.0, 5.0, 5.0],
+                            [7.0, 5.0, 5.0]],
+                           [[5.0, 5.0, 5.0],
+                            [7.0, 5.0, 5.0]]])
+        terms = xp.array([0, 0])
+
+        image_sum = accumulate_lines(out.copy(), curves, terms, frames, width=0.6,
+                                     kernel='rectangular', in_overlap='sum')
+        image_max = accumulate_lines(out.copy(), curves, terms, frames, width=0.6,
+                                     kernel='rectangular', in_overlap='max')
+
+        assert image_sum[0, 5, 5, 6] == 2.0
+        assert image_max[0, 5, 5, 6] == 1.0
+
+    def test_curve_fail(self, out: RealArray, frames: IntArray, xp: TestNamespace):
+        curve = xp.array([[[5.0, 5.0, 5.0]]])
+        terms = xp.array([0])
+
+        with pytest.raises(ValueError, match="at least two points"):
+            _ = accumulate_lines(out, curve, terms, frames, width=0.6)
+
+    def test_curve_matches_line(self, out: RealArray, frames: IntArray, xp: TestNamespace):
+        curve = xp.array([[[5.0, 5.0, 5.0],
+                           [7.0, 5.0, 5.0]]])
+        line = xp.array([[5.0, 5.0, 5.0, 7.0, 5.0, 5.0]])
+        terms = xp.array([0])
+
+        curve_image = accumulate_lines(out.copy(), curve, terms, frames, width=0.6,
+                                       kernel='rectangular')
+        line_image = accumulate_lines(out.copy(), line, terms, frames, width=0.6,
+                                      kernel='rectangular')
+
+        check_close(curve_image, line_image)
+
+    def test_oblique_curve_matches_line_regression(self, xp: TestNamespace):
+        out = xp.zeros((1, 16, 16, 16))
+        curve = xp.array([[[9.479237896005714, 7.303016452804371, 8.176423218945516],
+                           [9.22149370307207, 8.238012375216442, 7.043417998706573]]])
+        line = xp.reshape(curve, (1, 6))
+        terms = xp.array([0])
+        frames = xp.array([0])
+
+        curve_image = accumulate_lines(out.copy(), curve, terms, frames, width=1.5,
+                                       kernel='rectangular')
+        line_image = accumulate_lines(out.copy(), line, terms, frames, width=1.5,
+                                      kernel='rectangular')
+
+        check_close(curve_image, line_image)
+        assert float(line_image[0, 8, 8, 8]) == 1.0
+
+    @pytest.mark.parametrize("ndim,shape,curves", [
+        (2, (1, 32, 32), [[[5.25, 5.75], [9.75, 7.25]],
+                          [[13.5, 4.25], [15.25, 12.75]],
+                          [[4.5, 20.5], [18.25, 18.75]],
+                          [[22.0, 8.0], [27.5, 14.5]]]),
+        (3, (1, 24, 24, 24), [[[5.25, 5.75, 6.5], [9.75, 7.25, 8.25]],
+                              [[13.5, 4.25, 7.0], [15.25, 12.75, 9.5]],
+                              [[4.5, 20.5, 5.5], [18.25, 18.75, 7.25]],
+                              [[16.0, 8.0, 18.0], [20.5, 14.5, 12.5]]]),
+    ])
+    def test_generated_curves_match_lines(self, ndim: int, shape: Shape, curves: RealArray,
+                                          xp: TestNamespace):
+        out = xp.zeros(shape)
+        curve_array = xp.asarray(curves)
+        line_array = xp.reshape(curve_array, (curve_array.shape[0], 2 * ndim))
+        terms = xp.arange(curve_array.shape[0])
+        frames = xp.zeros(curve_array.shape[0], dtype=terms.dtype)
+
+        curve_image = accumulate_lines(out.copy(), curve_array, terms, frames, width=1.5,
+                                       kernel='rectangular')
+        line_image = accumulate_lines(out.copy(), line_array, terms, frames, width=1.5,
+                                      kernel='rectangular')
+
+        check_close(curve_image, line_image)
+
+    def test_grouped_segments(self, out: RealArray, frames: IntArray, xp: TestNamespace):
+        lines = xp.array([[[5.0, 5.0, 5.0, 6.0, 5.0, 5.0],
+                           [6.0, 5.0, 5.0, 7.0, 5.0, 5.0]]])
+        terms = xp.array([0])
+
+        image = accumulate_lines(out, lines, terms, frames, width=0.6, kernel='rectangular')
+
+        assert float(image[0, 5, 5, 6]) == 2.0

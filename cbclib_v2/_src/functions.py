@@ -13,7 +13,7 @@ from math import prod
 from typing import (TYPE_CHECKING, Callable, NamedTuple, Optional, Protocol, Sequence, Tuple,
                     cast, overload)
 import warnings
-from .annotations import (AnyNamespace, Array, BoolArray, CPArray, CPBoolArray, CPIntArray,
+from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray,
                           CPRealArray, CuPy, IntArray, IntSequence, JaxArray, JaxBoolArray,
                           JaxIntArray, JaxNumPy, JaxRealArray, NDArray, NDBoolArray, NDIntArray,
                           NDRealArray, NumPy, RealArray)
@@ -190,68 +190,83 @@ else:
                            "the cbclib_v2 with GPU support.")
 
 def _accumulate_lines_cpu(out: RealArray, lines: RealArray, terms: IntArray,
-                          frames: IntArray, max_val: float=1.0,
-                          kernel: str='rectangular', in_overlap: str='sum',
+                          frames: IntArray, width: RealArray | float=1.0,
+                          max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
                           out_overlap: str='sum') -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()
+
+    xp = NumPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines, terms, frames = asnumpy(lines), asnumpy(terms), asnumpy(frames)
     return bresenham.accumulate_lines(out=out, lines=lines, terms=terms, frames=frames,
-                                      max_val=max_val, kernel=kernel,
+                                      widths=width, max_val=max_val, kernel=kernel,
                                       in_overlap=in_overlap, out_overlap=out_overlap,
                                       num_threads=num_threads)
 
 def _accumulate_lines_gpu(out: RealArray, lines: RealArray, terms: IntArray,
-                          frames: IntArray, max_val: float=1.0,
+                          frames: IntArray, width: RealArray | float=1.0,
+                          max_val: float=1.0,
                           kernel: str='rectangular', in_overlap: str='sum',
                           out_overlap: str='sum') -> CPRealArray:
     if cuda_draw_lines is None:
         raise RuntimeError("accumulate_lines is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
+    xp = CuPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines, terms, frames = ascupy(lines), ascupy(terms), ascupy(frames)
+    widths = ascupy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
     return cuda_draw_lines.accumulate_lines(out=out, lines=lines, terms=terms, frames=frames,
-                                            max_val=max_val, kernel=kernel,
-                                            in_overlap=in_overlap, out_overlap=out_overlap)
+                                            widths=widths, max_val=max_val, kernel=kernel,
+                                            in_overlap=in_overlap,
+                                            out_overlap=out_overlap)
 
 @overload
 def accumulate_lines(out: NDRealArray, lines: NDRealArray, terms: NDIntArray,
-                     frames: NDIntArray, max_val: float=1.0, kernel: str='rectangular',
+                     frames: NDIntArray, width: RealArray | float=1.0,
+                     max_val: float=1.0, kernel: str='rectangular',
                      in_overlap: str='sum', out_overlap: str='sum') -> NDRealArray: ...
 
 @overload
 def accumulate_lines(out: CPRealArray, lines: CPRealArray, terms: CPIntArray,
-                     frames: CPIntArray, max_val: float=1.0, kernel: str='rectangular',
+                     frames: CPIntArray, width: RealArray | float=1.0,
+                     max_val: float=1.0, kernel: str='rectangular',
                      in_overlap: str='sum', out_overlap: str='sum') -> CPRealArray: ...
 
 @overload
 def accumulate_lines(out: JaxRealArray, lines: JaxRealArray, terms: JaxIntArray,
-                     frames: JaxIntArray, max_val: float=1.0, kernel: str='rectangular',
+                     frames: JaxIntArray, width: RealArray | float=1.0,
+                     max_val: float=1.0, kernel: str='rectangular',
                      in_overlap: str='sum', out_overlap: str='sum') -> JaxRealArray: ...
 
 @overload
 def accumulate_lines(out: Array, lines: Array, terms: IntArray, frames: IntArray,
-                     max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular', in_overlap: str='sum',
                      out_overlap: str='sum') -> RealArray: ...
 
 @array_dispatch("out", cpu_impl=_accumulate_lines_cpu, gpu_impl=_accumulate_lines_gpu)
 def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: IntArray,
-                     max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular', in_overlap: str='sum',
                      out_overlap: str='sum') -> RealArray:
-    """Accumulate thick lines with variable thickness across multiple frames.
+    """Accumulate thick lines or curves across multiple frames.
 
     Automatically dispatches to CPU or CUDA backend based on current device context.
 
     Args:
-        out: Output array where the lines will be accumulated.
-        lines: A dictionary of the detected lines. Each array of lines must have a shape of
-            (N, 5), where N is the number of lines. Each line is comprised of 5 parameters
-            as follows:
-
-            * [x0, y0], [x1, y1] : The coordinates of the line's ends.
-            * width : Line's width.
-
-        terms: Term indices specifying to which term each line belongs.
+        out: Output array where the geometries will be accumulated.
+        lines: Array of shape ``(..., 2 * ndim)`` with segment endpoints, or
+            ``(..., n_points, ndim)`` with curve points. Curve points are sewn internally
+            with a local maximum before overlap between curves is applied.
+        terms: Term indices specifying to which term each line or curve belongs.
         frames: Frame indices specifying to which frame each term belongs.
+        width: Line or curve width in pixels. A scalar applies to all geometries; arrays
+            must broadcast to the leading geometry shape.
         max_val: Maximum pixel value of a drawn line.
         kernel: Choose one of the supported kernel functions. The following kernels
             are available:
@@ -266,7 +281,7 @@ def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: 
         out_overlap: How to combine output overlapping pixels ('sum', 'max', 'min').
 
     Returns:
-        Output array with the lines accumulated.
+        Output array with the lines or curves accumulated.
 
     See Also:
         :func:`draw_lines`: Draw lines on a single frame.
@@ -274,56 +289,73 @@ def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: 
     ...
 
 def _draw_lines_cpu(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
-                    max_val: float=1.0, kernel: str='rectangular',
+                    width: RealArray | float=1.0, max_val: float=1.0, kernel: str='rectangular',
                     overlap: str='sum') -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()
+
+    xp = NumPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines = asnumpy(lines)
     idxs = asnumpy(idxs) if idxs is not None else None
-    return bresenham.draw_lines(out=out, lines=lines, idxs=idxs, max_val=max_val,
+    return bresenham.draw_lines(out=out, lines=lines, idxs=idxs, widths=width, max_val=max_val,
                                 kernel=kernel, overlap=overlap, num_threads=num_threads)
 
 def _draw_lines_gpu(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
-                    max_val: float=1.0, kernel: str='rectangular',
+                    width: RealArray | float=1.0, max_val: float=1.0, kernel: str='rectangular',
                     overlap: str='sum') -> CPRealArray:
     if cuda_draw_lines is None:
         raise RuntimeError("draw_lines is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
+    xp = CuPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines = ascupy(lines)
+    widths = ascupy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
     idxs = ascupy(idxs) if idxs is not None else None
-    return cuda_draw_lines.draw_lines(out=out, lines=lines, idxs=idxs, max_val=max_val,
-                                      kernel=kernel, overlap=overlap)
+    return cuda_draw_lines.draw_lines(out=out, lines=lines, widths=widths, idxs=idxs,
+                                      max_val=max_val, kernel=kernel, overlap=overlap)
 
 @overload
 def draw_lines(out: NDRealArray, lines: NDRealArray, idxs: NDIntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum'
+               width: RealArray | float=1.0, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum'
                ) -> NDRealArray: ...
 
 @overload
 def draw_lines(out: CPRealArray, lines: CPRealArray, idxs: CPIntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum'
+               width: RealArray | float=1.0, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum'
                ) -> CPRealArray: ...
 
 @overload
 def draw_lines(out: JaxRealArray, lines: JaxRealArray, idxs: JaxIntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum'
+               width: RealArray | float=1.0, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum'
                ) -> JaxRealArray: ...
 
 @overload
-def draw_lines(out: Array, lines: Array, idxs: IntArray | None=None, max_val: float=1.0,
+def draw_lines(out: Array, lines: Array, idxs: IntArray | None=None,
+               width: RealArray | float=1.0, max_val: float=1.0,
                kernel: str='rectangular', overlap: str='sum') -> RealArray: ...
 
 @array_dispatch("out", cpu_impl=_draw_lines_cpu, gpu_impl=_draw_lines_gpu)
-def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None, max_val: float=1.0,
-               kernel: str='rectangular', overlap: str='sum') -> RealArray:
+def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
+               width: RealArray | float=1.0, max_val: float=1.0, kernel: str='rectangular',
+               overlap: str='sum') -> RealArray:
     """Draw thick lines with variable thickness and antialiasing.
 
     Automatically dispatches to CPU or CUDA backend based on current device context.
 
     Args:
         out: Output array to draw lines on.
-        lines: Array of shape (N, 5) with [x0, y0, x1, y1, width] for each line.
+        lines: Array of shape ``(..., 2 * ndim)`` with segment endpoints.
         idxs: Optional frame indices for each line. If None, all lines drawn to single frame.
+        width: Line width in pixels. A scalar applies to all lines; arrays must broadcast
+            to the leading line shape.
         max_val: Maximum pixel value for drawn lines.
         kernel: Kernel function for antialiasing. Options:
             - 'rectangular': Uniform (box) kernel
@@ -418,7 +450,7 @@ def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True)
     :meth:`~cbclib_v2.crystfel.Panel.to_detector` method.
 
     Args:
-        out: Output array with shape ``(3, *image_shape)``. Its namespace and
+        out: Output array with shape ``(3, *detector_shape)``. Its namespace and
             dtype select the backend and native overload.
         geometry: Parsed CrystFEL detector geometry.
         half_pixel_shift: Add a 0.5-pixel offset before transforming panel
@@ -426,7 +458,7 @@ def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True)
             than pixel corners.
 
     Returns:
-        Real array with shape ``(3, *image_shape)``. ``out[0]`` is ``x``,
+        Real array with shape ``(3, *detector_shape)``. ``out[0]`` is ``x``,
         ``out[1]`` is ``y``, and ``out[2]`` is ``z`` in lab-frame pixel units.
     """
     xp = array_namespace(out)
@@ -443,7 +475,7 @@ def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True)
 
         return cuda_online_detector.pixel_map(out, geometry, half_pixel_shift=half_pixel_shift)
 
-    if out.shape != (3,) + geometry.shape[-2:]:
+    if out.shape != (3,) + geometry.shape:
         raise ValueError("pixel_map output shape mismatch")
     out[...] = 0
     for panel in geometry.panels.values():
@@ -452,9 +484,9 @@ def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True)
                                        xp.arange(panel.shape[-1]), indexing='ij')
 
         x, y, z = panel.to_detector(ss_grid, fs_grid, half_pixel_shift)
-        out[(0, ...) + roi] = x
-        out[(1, ...) + roi] = y
-        out[(2, ...) + roi] = z
+        out[(0,) + roi] = x
+        out[(1,) + roi] = y
+        out[(2,) + roi] = z
     return out
 
 def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
@@ -469,7 +501,7 @@ def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
     :func:`radial_index`.
 
     Args:
-        out: Output array with shape ``image_shape``. Its namespace and dtype
+        out: Output array with shape ``detector_shape``. Its namespace and dtype
             select the backend and native overload.
         geometry: Parsed CrystFEL detector geometry.
         center: Beam centre ``(x, y)`` in CrystFEL lab-frame pixel units.
@@ -495,11 +527,11 @@ def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
         return cuda_online_detector.radius(out, geometry, center,
                                            half_pixel_shift=half_pixel_shift)
 
-    pixel_out = xp.empty((3,) + geometry.shape[-2:], dtype=out.dtype)
+    pixel_out = xp.empty((3,) + geometry.shape, dtype=out.dtype)
     x, y, _ = pixel_map(pixel_out, geometry, half_pixel_shift=half_pixel_shift)
     result = xp.sqrt((x - center[0] - geometry.bounds[0]) ** 2 +
                      (y - center[1] - geometry.bounds[1]) ** 2)
-    if out.shape != geometry.shape[-2:]:
+    if out.shape != geometry.shape:
         raise ValueError("radius output shape mismatch")
     out[...] = result
     return out
@@ -520,7 +552,7 @@ def radial_index(out: IntArray, geometry: 'Detector', center: Tuple[int, int],
     image. Valid panel pixels are in the inclusive range ``[0, n_bins - 1]``.
 
     Args:
-        out: Output array with shape ``image_shape``. Its namespace and
+        out: Output array with shape ``detector_shape``. Its namespace and
             integer dtype select the backend and native overload.
         geometry: Parsed CrystFEL detector geometry.
         center: Beam centre ``(x, y)`` in CrystFEL lab-frame pixel units.
@@ -549,10 +581,10 @@ def radial_index(out: IntArray, geometry: 'Detector', center: Tuple[int, int],
                                                  half_pixel_shift=half_pixel_shift)
 
     radius_step = geometry.max_radius(center) / (n_bins - 1)
-    radius_out = xp.empty(geometry.shape[-2:], dtype=xp.float64)
+    radius_out = xp.empty(geometry.shape, dtype=xp.float64)
     radii = radius(radius_out, geometry, center, half_pixel_shift=half_pixel_shift)
     result = xp.asarray(xp.round(radii / radius_step), dtype=out.dtype)
-    if out.shape != geometry.shape[-2:]:
+    if out.shape != geometry.shape:
         raise ValueError("radial_index output shape mismatch")
     out[...] = result
     return out

@@ -39,22 +39,27 @@ struct CudaPanelGeometry
 };
 
 template <typename R, typename I>
-struct CudaDetectorGeometry
+struct CudaDetectorView
 {
     DeviceRange<CudaPanelGeometry<R, I>> panels;
     DeviceRange<I> panel_offsets;
-    PointND<I, 2> shape;
+    PointND<I, 3> shape;
     PointND<R, 4> bounds;   // x_min, x_max, y_min, y_max
+    I ndims = 2;
     bool half_pixel_shift = true;
 
     HOST_DEVICE I ndim() const
     {
-        return 2;
+        return ndims;
     }
 
     HOST_DEVICE I size() const
     {
-        return shape[0] * shape[1];
+        if (ndims == 2)
+        {
+            return shape[0] * shape[1];
+        }
+        return shape[0] * shape[1] * shape[2];
     }
 
     HOST_DEVICE I panel_size() const
@@ -72,11 +77,11 @@ struct CudaDetectorGeometry
 };
 
 template <typename R, typename I>
-class CudaDetectorGeometryOwner
+class CudaDetectorGeometry
 {
 public:
-    CudaDetectorGeometryOwner(const cbclib::DetectorGeometry<R, I> & geometry,
-                              bool half_pixel_shift)
+    CudaDetectorGeometry(const cbclib::DetectorGeometry<R, I> & geometry,
+                         bool half_pixel_shift)
     {
         std::vector<CudaPanelGeometry<R, I>> panels;
         panels.reserve(geometry.panels.size());
@@ -99,23 +104,33 @@ public:
         m_panel_offsets = DeviceVector<I>::from_host(geometry.panel_offsets.data(),
                                                      geometry.panel_offsets.size());
 
-        m_geometry.panels = m_panels.view();
-        m_geometry.panel_offsets = m_panel_offsets.view();
-        m_geometry.shape = PointND<I, 2>(geometry.shape[0], geometry.shape[1]);
-        m_geometry.bounds = PointND<R, 4>(geometry.bounds[0], geometry.bounds[1],
-                                          geometry.bounds[2], geometry.bounds[3]);
-        m_geometry.half_pixel_shift = half_pixel_shift;
+        m_ndims = static_cast<I>(geometry.ndim());
+        if (geometry.ndim() == 2)
+        {
+            m_shape = PointND<I, 3>(geometry.shape[0], geometry.shape[1], I(1));
+        }
+        else
+        {
+            m_shape = PointND<I, 3>(geometry.shape[0], geometry.shape[1], geometry.shape[2]);
+        }
+        m_bounds = PointND<R, 4>(geometry.bounds[0], geometry.bounds[1],
+                                 geometry.bounds[2], geometry.bounds[3]);
+        m_half_pixel_shift = half_pixel_shift;
     }
 
-    const CudaDetectorGeometry<R, I> & geometry() const
+    CudaDetectorView<R, I> view()
     {
-        return m_geometry;
+        return {m_panels.view(), m_panel_offsets.view(), m_shape, m_bounds, m_ndims,
+                m_half_pixel_shift};
     }
 
 private:
     DeviceVector<CudaPanelGeometry<R, I>> m_panels;
     DeviceVector<I> m_panel_offsets;
-    CudaDetectorGeometry<R, I> m_geometry;
+    PointND<I, 3> m_shape;
+    PointND<R, 4> m_bounds;
+    I m_ndims = 2;
+    bool m_half_pixel_shift = true;
 };
 
 template <typename R, typename I>
@@ -128,16 +143,33 @@ struct PanelPoint
 };
 
 template <typename R, typename I>
-__device__ PanelPoint<R, I> panel_point_at(const CudaDetectorGeometry<R, I> & geometry,
+__device__ PanelPoint<R, I> panel_point_at(const CudaDetectorView<R, I> & geometry,
                                            I frame_index)
 {
-    I y = frame_index / geometry.shape[1];
-    I x = frame_index - y * geometry.shape[1];
+    I module = 0;
+    I y = 0;
+    I x = 0;
+    if (geometry.ndims == 2)
+    {
+        y = frame_index / geometry.shape[1];
+        x = frame_index - y * geometry.shape[1];
+    }
+    else
+    {
+        I module_size = geometry.shape[1] * geometry.shape[2];
+        module = frame_index / module_size;
+        I module_index = frame_index - module * module_size;
+        y = module_index / geometry.shape[2];
+        x = module_index - y * geometry.shape[2];
+    }
 
     for (I panel_index = 0; panel_index < geometry.panels.size(); ++panel_index)
     {
         const auto & panel = geometry.panels[panel_index];
-        if (x >= panel.bounds[0] && x <= panel.bounds[1] &&
+        I panel_module = geometry.ndims == 3 ? panel.offset / (geometry.shape[1] *
+                         geometry.shape[2]) : I();
+        if ((geometry.ndims == 2 || module == panel_module) &&
+            x >= panel.bounds[0] && x <= panel.bounds[1] &&
             y >= panel.bounds[2] && y <= panel.bounds[3])
         {
             return {panel, y - panel.bounds[2], x - panel.bounds[0], true};
@@ -146,8 +178,8 @@ __device__ PanelPoint<R, I> panel_point_at(const CudaDetectorGeometry<R, I> & ge
     return {CudaPanelGeometry<R, I>(), I(), I(), false};
 }
 
-template <typename R, typename I>
-__global__ void pixel_map_kernel(ArrayViewND<R, 3> out, CudaDetectorGeometry<R, I> geometry)
+template <typename R, typename I, csize_t N>
+__global__ void pixel_map_kernel(ArrayViewND<R, N> out, CudaDetectorView<R, I> geometry)
 {
     I index = blockIdx.x * blockDim.x + threadIdx.x;
     I frame_size = geometry.size();
@@ -167,8 +199,8 @@ __global__ void pixel_map_kernel(ArrayViewND<R, 3> out, CudaDetectorGeometry<R, 
         out[index] = point.panel.lab_z(point.ss, point.fs, geometry.half_pixel_shift);
 }
 
-template <typename R, typename I>
-__global__ void radius_kernel(ArrayViewND<R, 2> out, CudaDetectorGeometry<R, I> geometry,
+template <typename R, typename I, csize_t N>
+__global__ void radius_kernel(ArrayViewND<R, N> out, CudaDetectorView<R, I> geometry,
                               PointND<R, 2> center)
 {
     I index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -180,8 +212,8 @@ __global__ void radius_kernel(ArrayViewND<R, 2> out, CudaDetectorGeometry<R, I> 
     out[index] = geometry.radius(point.panel, center, point.ss, point.fs);
 }
 
-template <typename R, typename I>
-__global__ void radial_index_kernel(ArrayViewND<I, 2> out, CudaDetectorGeometry<R, I> geometry,
+template <typename R, typename I, csize_t N>
+__global__ void radial_index_kernel(ArrayViewND<I, N> out, CudaDetectorView<R, I> geometry,
                                     PointND<R, 2> center, R inv_radius_step, I n_bins)
 {
     I index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -290,6 +322,53 @@ __global__ void is_signal_kernel(ArrayViewND<bool, N> out, ArrayViewND<T, N> dat
     out[index] = static_cast<R>(data[index]) > whitefield.at(frame, bin) + min_snr * sigma;
 }
 
+template <typename T, typename R, typename I>
+bool frame_shape_matches(const array_t<T> & out, const cbclib::DetectorGeometry<R, I> & geometry)
+{
+    if (out.ndim() != geometry.ndim())
+    {
+        return false;
+    }
+    for (I dim = 0; dim < geometry.ndim(); ++dim)
+    {
+        if (out.shape(dim) != geometry.shape[dim])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename R, typename I>
+bool pixel_map_shape_matches(const array_t<R> & out,
+                             const cbclib::DetectorGeometry<R, I> & geometry)
+{
+    if (out.ndim() != geometry.ndim() + 1 || out.shape(0) != 3)
+    {
+        return false;
+    }
+    for (I dim = 0; dim < geometry.ndim(); ++dim)
+    {
+        if (out.shape(dim + 1) != geometry.shape[dim])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename R, typename I, csize_t N>
+array_t<R> pixel_map_nd(array_t<R> out, const CudaDetectorView<R, I> & geometry)
+{
+    I output_size = static_cast<I>(out.size());
+    int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    pixel_map_kernel<R, I, N><<<num_blocks, BLOCK_SIZE>>>(cast_to_nd<R, N>(out.view()),
+                                                          geometry);
+    handle_cuda_error(cudaGetLastError());
+    handle_cuda_error(cudaDeviceSynchronize());
+    return out;
+}
+
 template <typename R, typename I>
 array_t<R> pixel_map(array_t<R> out, cbclib::PyDetectorGeometry py_geometry,
                      bool half_pixel_shift)
@@ -297,17 +376,27 @@ array_t<R> pixel_map(array_t<R> out, cbclib::PyDetectorGeometry py_geometry,
     auto geometry = cbclib::cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
-    if (out.ndim() != 3 || out.shape(0) != 3 || out.shape(1) != geometry.shape[0] ||
-        out.shape(2) != geometry.shape[1])
+    if (!pixel_map_shape_matches(out, geometry))
     {
         throw std::invalid_argument("pixel_map output shape mismatch");
     }
 
-    CudaDetectorGeometryOwner<R, I> owner(geometry, half_pixel_shift);
+    CudaDetectorGeometry<R, I> cuda_geometry(geometry, half_pixel_shift);
+    if (geometry.ndim() == 2)
+    {
+        return pixel_map_nd<R, I, 3>(out, cuda_geometry.view());
+    }
+    return pixel_map_nd<R, I, 4>(out, cuda_geometry.view());
+}
+
+template <typename R, typename I, csize_t N>
+array_t<R> radius_nd(array_t<R> out, const CudaDetectorView<R, I> & geometry,
+                     PointND<R, 2> center)
+{
     I output_size = static_cast<I>(out.size());
     int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    pixel_map_kernel<R, I><<<num_blocks, BLOCK_SIZE>>>(cast_to_nd<R, 3>(out.view()),
-                                                       owner.geometry());
+    radius_kernel<R, I, N><<<num_blocks, BLOCK_SIZE>>>(cast_to_nd<R, N>(out.view()),
+                                                       geometry, center);
     handle_cuda_error(cudaGetLastError());
     handle_cuda_error(cudaDeviceSynchronize());
     return out;
@@ -320,18 +409,29 @@ array_t<R> radius(array_t<R> out, cbclib::PyDetectorGeometry py_geometry,
     auto geometry = cbclib::cast_detector_geometry<R, I>(py_geometry);
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
-    if (out.ndim() != 2 || out.shape(0) != geometry.shape[0] ||
-        out.shape(1) != geometry.shape[1])
+    if (!frame_shape_matches(out, geometry))
     {
         throw std::invalid_argument("radius output shape mismatch");
     }
 
-    CudaDetectorGeometryOwner<R, I> owner(geometry, half_pixel_shift);
+    CudaDetectorGeometry<R, I> cuda_geometry(geometry, half_pixel_shift);
+    PointND<R, 2> center_point(std::get<0>(center), std::get<1>(center));
+    if (geometry.ndim() == 2)
+    {
+        return radius_nd<R, I, 2>(out, cuda_geometry.view(), center_point);
+    }
+    return radius_nd<R, I, 3>(out, cuda_geometry.view(), center_point);
+}
+
+template <typename R, typename I, csize_t N>
+array_t<I> radial_index_nd(array_t<I> out, const CudaDetectorView<R, I> & geometry,
+                           PointND<R, 2> center, R inv_radius_step, I n_bins)
+{
     I output_size = static_cast<I>(out.size());
     int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    PointND<R, 2> center_point(std::get<0>(center), std::get<1>(center));
-    radius_kernel<R, I><<<num_blocks, BLOCK_SIZE>>>(cast_to_nd<R, 2>(out.view()),
-                                                    owner.geometry(), center_point);
+    radial_index_kernel<R, I, N><<<num_blocks, BLOCK_SIZE>>>(cast_to_nd<I, N>(out.view()),
+                                                             geometry, center,
+                                                             inv_radius_step, n_bins);
     handle_cuda_error(cudaGetLastError());
     handle_cuda_error(cudaDeviceSynchronize());
     return out;
@@ -346,8 +446,7 @@ array_t<I> radial_index(array_t<I> out, cbclib::PyDetectorGeometry py_geometry,
     geometry.half_pixel_shift = half_pixel_shift;
     geometry.validate();
     if (n_bins <= 1) throw std::invalid_argument("n_bins must be greater than 1");
-    if (out.ndim() != 2 || out.shape(0) != geometry.shape[0] ||
-        out.shape(1) != geometry.shape[1])
+    if (!frame_shape_matches(out, geometry))
     {
         throw std::invalid_argument("radial_index output shape mismatch");
     }
@@ -355,17 +454,16 @@ array_t<I> radial_index(array_t<I> out, cbclib::PyDetectorGeometry py_geometry,
     R max_radius = geometry.max_radius(center);
     if (max_radius <= R()) throw std::invalid_argument("max radius must be positive");
 
-    CudaDetectorGeometryOwner<R, I> owner(geometry, half_pixel_shift);
-    I output_size = static_cast<I>(out.size());
-    int num_blocks = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    CudaDetectorGeometry<R, I> cuda_geometry(geometry, half_pixel_shift);
     PointND<R, 2> center_point(std::get<0>(center), std::get<1>(center));
     R inv_radius_step = (n_bins - 1) / max_radius;
-    radial_index_kernel<R, I><<<num_blocks, BLOCK_SIZE>>>(cast_to_nd<I, 2>(out.view()),
-                                                          owner.geometry(), center_point,
-                                                          inv_radius_step, n_bins);
-    handle_cuda_error(cudaGetLastError());
-    handle_cuda_error(cudaDeviceSynchronize());
-    return out;
+    if (geometry.ndim() == 2)
+    {
+        return radial_index_nd<R, I, 2>(out, cuda_geometry.view(), center_point,
+                                        inv_radius_step, n_bins);
+    }
+    return radial_index_nd<R, I, 3>(out, cuda_geometry.view(), center_point,
+                                    inv_radius_step, n_bins);
 }
 
 template <typename T, typename R, typename I, csize_t N>
