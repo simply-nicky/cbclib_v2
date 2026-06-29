@@ -265,7 +265,8 @@ class XtalList(IndexedContainer, State):
         return XtalState(self.basis)
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy) -> 'XtalList':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
+                         ) -> 'XtalList':
         xtals = XtalState.import_dataframe(df, xp)
         return cls(xp.asarray(df['index']), xtals.basis)
 
@@ -644,3 +645,44 @@ class BaseState(DataContainer, BaseSetup, Generic[AnyXtal, AnySetup]):
     @property
     def z(self) -> StaticZ | RealArray:
         return self.setup.z
+
+# Some predefined experimental setups
+
+class FixedState(BaseState[XtalState, FixedSetup], State):
+    xtal     : XtalState
+    setup    : FixedSetup
+
+class SerialFixedState(BaseState, State):
+    cell     : XtalCell
+    rotation : RotationState
+    setup    : FixedSetup
+
+    @property
+    def xtal(self) -> XtalState:
+        return self.cell.to_basis() @ self.rotation
+
+class FixedPupilState(BaseState[XtalState, FixedPupilSetup], State):
+    xtal     : XtalState
+    setup    : FixedPupilSetup
+
+class SerialFixedPupilState(BaseState, State):
+    cell     : XtalCell
+    rotation : RotationState
+    setup    : FixedPupilSetup
+
+    @property
+    def xtal(self) -> XtalState:
+        return self.cell.to_basis() @ self.rotation
+
+class FixedApertureState(BaseState[XtalState, FixedApertureSetup], State):
+    xtal     : XtalState
+    setup    : FixedApertureSetup
+
+class SerialFixedApertureState(BaseState, State):
+    cell     : XtalCell
+    rotation : RotationState
+    setup    : FixedApertureSetup
+
+    @property
+    def xtal(self) -> XtalState:
+        return self.cell.to_basis() @ self.rotation

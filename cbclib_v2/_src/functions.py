@@ -17,7 +17,7 @@ from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray,
                           CPRealArray, CuPy, IntArray, IntSequence, JaxArray, JaxBoolArray,
                           JaxIntArray, JaxNumPy, JaxRealArray, NDArray, NDBoolArray, NDIntArray,
                           NDRealArray, NumPy, RealArray)
-from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform
+from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform, set_at
 from .config import get_cpu_config
 from .data_container import DataContainer
 from .src import bresenham, label as cpu_label, median as cpu_median, online_detector, streak_finder
@@ -477,16 +477,16 @@ def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True)
 
     if out.shape != (3,) + geometry.shape:
         raise ValueError("pixel_map output shape mismatch")
-    out[...] = 0
+    out = set_at(out, ..., 0)
     for panel in geometry.panels.values():
         roi = panel.roi()
         ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[-2]),
                                        xp.arange(panel.shape[-1]), indexing='ij')
 
         x, y, z = panel.to_detector(ss_grid, fs_grid, half_pixel_shift)
-        out[(0,) + roi] = x
-        out[(1,) + roi] = y
-        out[(2,) + roi] = z
+        out = set_at(out, (0,) + roi, x)
+        out = set_at(out, (1,) + roi, y)
+        out = set_at(out, (2,) + roi, z)
     return out
 
 def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
@@ -529,11 +529,10 @@ def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
 
     pixel_out = xp.empty((3,) + geometry.shape, dtype=out.dtype)
     x, y, _ = pixel_map(pixel_out, geometry, half_pixel_shift=half_pixel_shift)
-    result = xp.sqrt((x - center[0] - geometry.bounds[0]) ** 2 +
-                     (y - center[1] - geometry.bounds[1]) ** 2)
+    out = xp.sqrt((x - center[0] - geometry.bounds[0]) ** 2 +
+                  (y - center[1] - geometry.bounds[1]) ** 2)
     if out.shape != geometry.shape:
         raise ValueError("radius output shape mismatch")
-    out[...] = result
     return out
 
 def radial_index(out: IntArray, geometry: 'Detector', center: Tuple[int, int],
@@ -583,10 +582,9 @@ def radial_index(out: IntArray, geometry: 'Detector', center: Tuple[int, int],
     radius_step = geometry.max_radius(center) / (n_bins - 1)
     radius_out = xp.empty(geometry.shape, dtype=xp.float64)
     radii = radius(radius_out, geometry, center, half_pixel_shift=half_pixel_shift)
-    result = xp.asarray(xp.round(radii / radius_step), dtype=out.dtype)
+    out = xp.asarray(xp.round(radii / radius_step), dtype=out.dtype)
     if out.shape != geometry.shape:
         raise ValueError("radial_index output shape mismatch")
-    out[...] = result
     return out
 
 def _is_signal_cpu(data: IntArray | RealArray, whitefield: RealArray, std: RealArray,

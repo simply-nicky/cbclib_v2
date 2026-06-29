@@ -463,9 +463,8 @@ class CBDLoss():
         projected = self.projector(points, state, xp)
         return xp.mean(xp.sum(self.loss_fn(projected, points.kin), axis=-1), axis=-1)
 
-    def __call__(self, data: CBData, state: BaseState) -> RealArray:
-        xp = state.__array_namespace__()
-        points = self.project_data(data, state, xp)
+    def distances(self, data: CBData, points: CBDPoints, state: BaseState, xp: AnyNamespace
+                  ) -> RealArray:
         dist = self.distance_matrix(points, state, xp)
         dist = xp.min(dist, axis=-1)
 
@@ -473,12 +472,17 @@ class CBDLoss():
             # Sorting distances according to frame_id
             # lexsort is not implemented in CuPy
             indices = xp.lexsort((dist, data.points.index), axis=0)
-            return xp.mean(dist[indices] * data.mask)
+            return dist[indices] * data.mask
 
         if isinstance(data, CBDataInShell):
-            return xp.mean(dist * data.mask)
+            return dist * data.mask
 
-        return xp.mean(dist)
+        return dist
+
+    def __call__(self, data: CBData, state: BaseState) -> RealArray:
+        xp = state.__array_namespace__()
+        points = self.project_data(data, state, xp)
+        return self.distances(data, points, state, xp).mean()
 
     def index(self, data: CBData, state: BaseState) -> Miller:
         xp = state.__array_namespace__()
@@ -491,13 +495,28 @@ class CBDLoss():
     def per_pattern(self, data: CBData, state: BaseState) -> RealArray:
         xp = state.__array_namespace__()
         points = self.project_data(data, state, xp)
-        dist = self.distance_matrix(points, state, xp)
-        dist = xp.min(dist, axis=-1)
-        return add_at(xp.zeros(len(state.xtal)), points.index, dist)
-
-    def per_streak(self, data: CBData, state: BaseState) -> RealArray:
-        xp = state.__array_namespace__()
-        crit = self.per_pattern(data, state)
+        dist = self.distances(data, points, state, xp)
+        crit = add_at(xp.zeros(len(state.xtal)), data.points.index, dist)
         n_streaks = add_at(xp.zeros(len(state.xtal)), data.points.index,
                            xp.ones_like(data.points.index))
         return crit / n_streaks
+
+    def distance_ratios(self, patterns: Patterns, data: CBData, state: BaseState,
+                        xp: AnyNamespace) -> RealArray:
+        points = self.project_data(data, state, xp)
+        kin_dist = self.distance_matrix(points, state, xp)
+        kin_dist = xp.min(kin_dist, axis=-1)
+
+        detected = self.model.points_to_kout(patterns.points, state, xp)
+        kout = kxy_to_k(detected.points)
+        kout_dist = xp.sum(self.loss_fn(kout[..., 0, :], kout[..., 1, :]), axis=-1)
+        return safe_divide(kin_dist, kout_dist, xp)
+
+    def pattern_fitness(self, threshold: float, patterns: Patterns, data: CBData, state: BaseState
+                        ) -> RealArray:
+        xp = state.__array_namespace__()
+        ratios = self.distance_ratios(patterns, data, state, xp)
+        n_good = add_at(xp.zeros(len(state.xtal)), data.points.index, ratios < threshold)
+        n_streaks = add_at(xp.zeros(len(state.xtal)), data.points.index,
+                           xp.ones_like(data.points.index))
+        return safe_divide(n_good, n_streaks, xp)

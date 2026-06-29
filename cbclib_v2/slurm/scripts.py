@@ -1,24 +1,27 @@
 from argparse import ArgumentParser
 from dataclasses import dataclass
+import json
 from multiprocessing import cpu_count
 import os
 import re
 from shlex import quote
 from typing import ClassVar, Iterator, List, Literal, Type
 import h5py
+from jax import config as jax_config
 import pandas as pd
 from tqdm.auto import tqdm
 from ..cuda import Allocator, set_allocator
-from .._src.annotations import AnyNamespace, NumPy
-from .._src.array_api import default_api, default_rng, Platform
+from .._src.annotations import AnyNamespace, IntArray, JaxNumPy, NumPy
+from .._src.array_api import asnumpy, default_api, default_rng, Platform
 from .._src.config import CPUConfig
 from .._src.data_container import compute_index
 from .._src.data_processing import CrystMetadata
 from .._src.cxi_protocol import H5Handler, TrainIndices, write_hdf
 from .._src.run import BaseRun, RunConfig, open_run
 from .._src.scripts import (BaseParameters, FinderConfig, IndexingConfig,
-                            MetadataParameters, RegionFinderConfig, StreakFinderConfig)
-from .._src.scripts import create_metadata, pool_detection, pool_indexing
+                            MetadataParameters, RefinementConfig, RegionFinderConfig,
+                            StreakFinderConfig)
+from .._src.scripts import create_metadata, pool_detection, pool_indexing, refine_patterns
 from .._src.streaks import StackedStreaks, Streaks
 from ..indexer import FixedSetup, XtalCell, XtalList, XtalState
 from .slurm_manager import SLURMScript, ScriptSpec
@@ -80,6 +83,11 @@ class SystemConfig(BaseParameters):
     def array_api(self) -> AnyNamespace:
         """Return the array namespace matching :attr:`platform` (NumPy or CuPy)."""
         return default_api(self.platform)
+
+    def jax_api(self) -> AnyNamespace:
+        """Return JAX NumPy configured to use :attr:`platform` as its default backend."""
+        jax_config.update("jax_platform_name", self.platform)
+        return JaxNumPy
 
 @dataclass
 class DetectConfig(BaseParameters):
@@ -149,9 +157,9 @@ class SetupConfig(BaseParameters):
     """Crystal geometry and unit-cell file paths.
 
     Corresponds to the ``"setup"`` section of ``scan.json`` (see
-    :doc:`/workflows`).  Used by ``cbclib_cli index`` and the SLURM
-    indexing job to locate the detector geometry and crystal unit-cell
-    files.
+    :doc:`/workflows`).  Used by ``cbclib_cli index`` / ``cbclib_cli refine``
+    and the corresponding SLURM jobs to locate detector geometry, crystal
+    unit-cell information, indexed orientations, and refined solutions.
 
     Attributes:
         setup_file: Path to the detector geometry JSON file (read by
@@ -159,11 +167,13 @@ class SetupConfig(BaseParameters):
         unit_file: Path to the crystal unit-cell JSON file (read by
             :class:`~cbclib_v2.indexer.XtalCell`).
         xtals_dir: Directory where per-chunk indexing results are written.
+        solutions_dir: Directory where per-chunk refined solutions are written.
     """
 
     setup_file      : str
     unit_file       : str
     xtals_dir       : str
+    solutions_dir   : str
 
     def unit_cell(self, xp: AnyNamespace=NumPy) -> XtalCell:
         """Load the crystal unit cell from :attr:`unit_file`.
@@ -464,18 +474,25 @@ class CompileStreaks(BaseScript):
 
     @classmethod
     def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
+        initial.add_argument('kind', type=str, choices=['streaks', 'regions'],
+                             help='Type of detection to compile')
         initial.add_argument('scan', type=str, help='Path to a scan parameters JSON file')
         return initial
 
     @classmethod
     def parser_description(cls) -> str:
-        return "Compile detected streaks into a single table"
+        return "Compile detected streaks into merged tables"
 
     @classmethod
     def from_file(cls, kind: DetectionKind, scan_file: str) -> 'CompileStreaks':
         return cls(kind, scan_file)
 
     def run(self):
+        def pandas_hdf_keys(path: str) -> List[str]:
+            """Return the Pandas table keys stored in an HDF5 file."""
+            with pd.HDFStore(path, mode='r') as store:
+                return [key.lstrip('/') for key in store.keys()]
+
         scan = ScanConfig.read(self.scan_file)
         print(f'Assembling streaks for a scan {scan.scan_num:d}...')
 
@@ -488,17 +505,23 @@ class CompileStreaks(BaseScript):
             raise ValueError(f'Invalid detection kind: {self.kind}')
 
         scan_dir = scan.scan_subdir(hits_dir)
-        scan_files = list(scan.list_files(scan_dir))
+        scan_files = list(sorted(scan.list_files(scan_dir)))
 
         print(f'Found {len(scan_files)} streak files for run {scan.scan_num:d}')
         output_path = os.path.join(hits_dir, scan.scan_file())
         print(f'Writing the detected streaks to the file: {output_path}')
 
-        tables: List[pd.DataFrame | pd.Series] = []
+        tables: dict[str, List[pd.DataFrame | pd.Series]] = {}
         for scan_file in scan_files:
-            path = os.path.join(scan_dir, scan_file)
-            tables.append(pd.read_hdf(path, 'data'))
-        pd.concat(tables).to_hdf(output_path, key='data')
+            for key in pandas_hdf_keys(scan_file):
+                tables.setdefault(key, []).append(pd.read_hdf(scan_file, key))
+
+        if not tables:
+            raise ValueError(f"No Pandas tables found in files under {scan_dir}")
+
+        for index, key in enumerate(tables):
+            mode = 'w' if index == 0 else 'a'
+            pd.concat(tables[key]).to_hdf(output_path, key=key, mode=mode)
 
 @dataclass
 class CreateMetadata(BaseScript):
@@ -576,6 +599,7 @@ class CreateMetaList(BaseScript):
     params      : MetadataParameters
     chunk_id    : int | None
     n_chunks    : int | None
+    n_backgrounds : int | None
 
     def __post_init__(self):
         if self.n_chunks is not None:
@@ -591,6 +615,8 @@ class CreateMetaList(BaseScript):
                              help='Path to a metadata parameters JSON file')
         initial.add_argument('--chunk_id', '-c', type=int, help='ID of the chunk to process')
         initial.add_argument('--n_chunks', '-n', type=int, help='Total number of chunks')
+        initial.add_argument('--n_backgrounds', '-b', type=int,
+                             help='Number of background estimates to compute')
         return initial
 
     @classmethod
@@ -598,11 +624,12 @@ class CreateMetaList(BaseScript):
         return "Calculate a list of CBD metadata"
 
     @classmethod
-    def from_file(cls, scan_file: str, params_file: str, chunk_id: int | None, n_chunks: int | None
+    def from_file(cls, scan_file: str, params_file: str, chunk_id: int | None, n_chunks: int | None,
+                  n_backgrounds: int | None = None
                   ) -> 'CreateMetaList':
         scan = ScanConfig.read(scan_file)
         params = MetadataParameters.read(params_file)
-        return cls(scan, params, chunk_id, n_chunks)
+        return cls(scan, params, chunk_id, n_chunks, n_backgrounds)
 
     def run(self):
         print("Configuring the script...")
@@ -622,8 +649,9 @@ class CreateMetaList(BaseScript):
         offsets = xp.arange(0, self.scan.metalist.n_frames) - self.scan.metalist.n_frames // 2
         spacing = min(self.scan.metalist.spacing, len(indices) - len(offsets))
 
-        centers = xp.arange(-int(offsets[0]), len(indices) - int(offsets[-1]),
-                            spacing)
+        n_backgrounds = self.n_backgrounds or (len(indices) - len(offsets)) // spacing
+        centers = xp.linspace(-int(offsets[0]), len(indices) - int(offsets[-1]) - 1,
+                              n_backgrounds, dtype=int)
         frames = centers[:, None] + offsets
         print(f"Creating a metadata list of {frames.shape[0]:d} points...")
 
@@ -729,6 +757,34 @@ class DetectHits(BaseScript):
             return 'regions'
         raise ValueError(f"Invalid parameters type for detection: {type(self.params)}")
 
+    @staticmethod
+    def metadata_dataframe(run: BaseRun[TrainIndices], chunk: TrainIndices,
+                           hit_frames: IntArray, xp: AnyNamespace) -> pd.DataFrame:
+        """Build a per-hit-frame metadata table for a detection chunk."""
+
+        def metadata_value(value: str | int | tuple[str, ...] | tuple[int, ...]
+                           ) -> str | int:
+            """Return a scalar HDF5 table value for a frame provenance field."""
+            if isinstance(value, tuple):
+                return json.dumps(value)
+            return value
+
+        chunk_indices = xp.asarray(list(chunk.index()))
+        hit_indices = xp.where(xp.isin(chunk_indices, asnumpy(hit_frames)))[0]
+        hit_chunk = chunk[hit_indices]
+
+        pulse_ids = asnumpy(run.metadata('pulse_id', hit_chunk))
+        if pulse_ids.ndim > 1:
+            pulse_ids = pulse_ids[:, 0]
+
+        records = list(hit_chunk.records())
+        return pd.DataFrame({
+            'index': [record.index for record in records],
+            'filename': [metadata_value(record.filename) for record in records],
+            'file_index': [metadata_value(record.file_index) for record in records],
+            'pulse_id': pulse_ids,
+        })
+
     def run(self):
         xp = self.scan.system.array_api()
 
@@ -769,14 +825,7 @@ class DetectHits(BaseScript):
             else:
                 print("Preparing the file...")
                 df = hits.to_dataframe()
-                hit_indices = xp.where(xp.isin(xp.array(list(chunk.index())), hit_frames))[0]
-                pulse_ids = run.metadata('pulse_id', chunk[hit_indices])
-                pulse_ids = pulse_ids[hits.reset_index().index]
-                # If data for each module is saved in a separate file
-                # pulse_ids for each module will be stacked along the second axis
-                if pulse_ids.ndim > 1:
-                    pulse_ids = pulse_ids[:, 0]
-                df['pulse_id'] = pulse_ids
+                metadata = self.metadata_dataframe(run, chunk, hit_frames, xp)
 
                 if self.kind == 'streaks':
                     output_dir = self.scan.detect.streaks_dir
@@ -790,6 +839,7 @@ class DetectHits(BaseScript):
                 print(f"The results will be saved to {output_path}")
 
                 df.to_hdf(output_path, key='data')
+                metadata.to_hdf(output_path, key='metadata')
 
 @dataclass
 class IndexingScript(BaseScript):
@@ -902,6 +952,105 @@ class IndexingScript(BaseScript):
             output_file['files/hits_file'] = hits_file
             output_file['files/setup_file'] = self.scan.setup.setup_file
 
+@dataclass
+class RefinementScript(BaseScript):
+    """Implements ``cbclib_cli refine``.
+
+    Loads a per-chunk indexed crystal orientations file, refines the orientations
+    against the detected streaks, and writes the refinement result to an HDF5
+    file.  The output stores champion orientations under ``data``, all refined
+    candidates under ``candidates``, the optimisation trace under ``stats``, and
+    input-file provenance under ``files``.
+
+    Attributes:
+        scan: Scan configuration.
+        params: Refinement configuration.
+        suffix: Suffix appended to the indexing input and refinement output directories.
+        chunk_id: Zero-based chunk index (``None`` = whole scan).
+        n_chunks: Total number of chunks (``None`` = whole scan).
+    """
+
+    scan        : ScanConfig
+    params      : RefinementConfig
+    suffix      : str
+    chunk_id    : int | None
+    n_chunks    : int | None
+
+    def __post_init__(self):
+        if self.n_chunks is not None:
+            if self.chunk_id is None:
+                raise ValueError("chunk_id must be provided when n_chunks is specified")
+            self.chunk_id = compute_index(self.chunk_id, self.n_chunks)
+
+    @classmethod
+    def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
+        initial.add_argument('scan', type=str,
+                             help='Path to a scan parameters JSON file')
+        initial.add_argument('parameters', type=str,
+                             help='Path to a refinement parameters JSON file')
+        initial.add_argument('--suffix', '-s', type=str, default=str(),
+                             help='Suffix shared by indexing input and refinement output folders')
+        initial.add_argument('--chunk_id', '-c', type=int, help='ID of the chunk to process')
+        initial.add_argument('--n_chunks', '-n', type=int, help='Total number of chunks')
+        return initial
+
+    @classmethod
+    def parser_description(cls) -> str:
+        return "Refine indexed crystal orientations in CBD patterns"
+
+    @classmethod
+    def from_file(cls, scan_file: str, params_file: str, suffix: str, chunk_id: int | None,
+                  n_chunks: int | None) -> 'RefinementScript':
+        scan = ScanConfig.read(scan_file)
+        params = RefinementConfig.read(params_file)
+        return cls(scan, params, suffix, chunk_id, n_chunks)
+
+    def run(self):
+        print("Configuring the script...")
+        xp = self.scan.system.jax_api()
+
+        geometry = self.scan.data.geometry()
+        xtals_file = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.xtals_dir,
+                                         suffix=self.suffix)
+        if not os.path.isfile(xtals_file):
+            print(f"No indexed crystal orientations file found at {xtals_file}")
+            return
+
+        print(f"Loading indexed crystal orientations from {xtals_file}...")
+        df = pd.read_hdf(xtals_file, 'data')
+        xtal_list = XtalList.import_dataframe(df, xp=xp)
+
+        hits_file = self.scan.scan_file(self.chunk_id, dir=self.scan.detect.streaks_dir)
+        if not os.path.isfile(hits_file):
+            print(f"No streaks file found at {hits_file}")
+            return
+
+        print(f"Loading detected streaks from {hits_file}...")
+        dataframe = pd.read_hdf(hits_file, 'data')
+        if 'module_id' in dataframe.columns:
+            num_modules = geometry.num_modules
+            streaks = StackedStreaks.import_dataframe(dataframe, num_modules=num_modules, xp=xp)
+        else:
+            streaks = Streaks.import_dataframe(dataframe, xp=xp)
+        assembled = geometry.to_streaks(streaks)
+        patterns = geometry.to_patterns(assembled)
+
+        print(f"Refining {len(xtal_list):d} crystal orientations...")
+        with self.scan.system.cpu_config():
+            result = refine_patterns(patterns, xtal_list, self.scan.setup.setup_file,
+                                     self.params)
+
+        output_path = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.solutions_dir,
+                                          suffix=self.suffix)
+        dir_path = os.path.dirname(output_path)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+
+        print(f"Saving the refined crystal orientations to {output_path}...")
+        result.save(output_path, files={'xtals_file': xtals_file,
+                                        'hits_file': hits_file,
+                                        'setup_file': self.scan.setup.setup_file})
+
 class SBatchScripts:
     """Factory for single ``sbatch`` job scripts.
 
@@ -981,7 +1130,8 @@ class SBatchScripts:
 
     @classmethod
     def metalist(cls, scan_file: str, params_file: str, script_file: str,
-                 chunk_id: int | None=None, n_chunks: int | None=None) -> SLURMScript:
+                 chunk_id: int | None=None, n_chunks: int | None=None,
+                 n_backgrounds: int | None=None) -> SLURMScript:
         """Build a ``cbclib_cli metalist`` script.
 
         Args:
@@ -990,6 +1140,7 @@ class SBatchScripts:
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             chunk_id: Optional chunk index.
             n_chunks: Optional total chunk count.
+            n_backgrounds: Optional number of background estimates to compute.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` for the metalist step.
@@ -998,6 +1149,8 @@ class SBatchScripts:
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
             command += f' --n_chunks {n_chunks:d}'
+        if n_backgrounds is not None:
+            command += f' --n_backgrounds {n_backgrounds:d}'
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="metalist", command=command, parameters=script_spec)
 
@@ -1028,6 +1181,33 @@ class SBatchScripts:
             command += ' --frames-only'
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="detect", command=command, parameters=script_spec)
+
+    @classmethod
+    def refine(cls, scan_file: str, params_file: str, script_file: str,
+               suffix: str | None=None, chunk_id: int | None=None,
+               n_chunks: int | None=None) -> SLURMScript:
+        """Build a ``cbclib_cli refine`` script.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the refinement parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            suffix: Input/output directory suffix shared with the indexed
+                orientation file and refined solution file.
+            chunk_id: Optional chunk index.
+            n_chunks: Optional total chunk count.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` for the refinement step.
+        """
+        command = f"{cls.main} refine {quote(scan_file)} {quote(params_file)}"
+        if suffix is not None:
+            command += f" --suffix {quote(suffix)}"
+        if chunk_id is not None and n_chunks is not None:
+            command += f' --chunk_id {chunk_id:d}'
+            command += f' --n_chunks {n_chunks:d}'
+        script_spec = ScriptSpec.read(script_file)
+        return SLURMScript(job_name="refine", command=command, parameters=script_spec)
 
 class SBatchArrayScripts:
     """Factory for ``sbatch --array`` job scripts.
@@ -1107,6 +1287,30 @@ class SBatchArrayScripts:
         script_spec.add_define('FILE_INDEX', '${SLURM_ARRAY_TASK_ID}')
         return SLURMScript(job_name="detect_array", command=command, parameters=script_spec)
 
+    @classmethod
+    def refine(cls, scan_file: str, params_file: str, script_file: str, n_chunks: int,
+               suffix: str | None=None) -> SLURMScript:
+        """Build a ``cbclib_cli refine`` array script for *n_chunks* tasks.
+
+        Args:
+            scan_file: Path to the scan configuration JSON.
+            params_file: Path to the refinement parameters JSON.
+            script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            n_chunks: Total number of array tasks.
+            suffix: Input/output directory suffix shared with indexing results
+                and refinement solutions.
+
+        Returns:
+            :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
+        """
+        command = f"{cls.main} refine {quote(scan_file)} {quote(params_file)}" \
+                  f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
+        if suffix is not None:
+            command += f" --suffix {quote(suffix)}"
+        script_spec = ScriptSpec.read(script_file)
+        script_spec.add_define('FILE_INDEX', '${SLURM_ARRAY_TASK_ID}')
+        return SLURMScript(job_name="refine_array", command=command, parameters=script_spec)
+
 class Scripts:
     """Namespace exposing all ``cbclib_cli`` pipeline scripts and the CLI parser.
 
@@ -1125,6 +1329,7 @@ class Scripts:
         metalist: :class:`CreateMetaList` — compute PCA metalist.
         detect: :class:`DetectHits` — run streak or region detection.
         index: :class:`IndexingScript` — index detected patterns.
+        refine: :class:`RefinementScript` — refine indexed orientations.
     """
 
     sbatch          : ClassVar[Type[SBatchScripts]] = SBatchScripts
@@ -1134,6 +1339,7 @@ class Scripts:
     metadata        : ClassVar[Type[CreateMetadata]] = CreateMetadata
     metalist        : ClassVar[Type[CreateMetaList]] = CreateMetaList
     detect          : ClassVar[Type[DetectHits]] = DetectHits
+    refine          : ClassVar[Type[RefinementScript]] = RefinementScript
 
     @classmethod
     def parser(cls) -> ArgumentParser:
@@ -1181,12 +1387,19 @@ def main():
     elif args['command'] == 'metalist':
         print(f"JSON file with the metadata parameters: {args['parameters']}")
         script = CreateMetaList.from_file(args['scan'], args['parameters'],
-                                          args['chunk_id'], args['n_chunks'])
+                                          args['chunk_id'], args['n_chunks'],
+                                          args['n_backgrounds'])
         script.run()
     elif args['command'] == 'detect':
         print(f"JSON file with the streak finding parameters: {args['parameters']}")
         script = DetectHits.from_file(args['kind'], args['scan'], args['parameters'],
                                       args['chunk_id'], args['n_chunks'], args['frames_only'])
+        script.run()
+    elif args['command'] == 'refine':
+        print(f"JSON file with the refinement parameters: {args['parameters']}")
+        script = RefinementScript.from_file(args['scan'], args['parameters'],
+                                            args['suffix'], args['chunk_id'],
+                                            args['n_chunks'])
         script.run()
     else:
         raise ValueError(f"Invalid command: {args['command']}")

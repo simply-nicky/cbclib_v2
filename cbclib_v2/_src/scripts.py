@@ -1,11 +1,22 @@
 from functools import partial
+from math import log
+import os
+import logging
+import sys
 from multiprocessing import Pool
-from typing import Any, Callable, Iterator, List, Literal, Tuple, Type, overload
+from typing import Any, Callable, Iterator, List, Literal, Tuple, Type, cast, overload
 from dataclasses import InitVar, dataclass, field
+import h5py
+from jax import jit, value_and_grad
+from optax import (GradientTransformation, Params, Schedule, Updates, adadelta, adam,
+                   apply_updates, constant_schedule, cosine_decay_schedule,
+                   cosine_onecycle_schedule, exponential_decay, global_norm,
+                   linear_schedule, sgd)
+import pandas as pd
 from typing_extensions import Self
 from tqdm.auto import tqdm
 from .annotations import Array, AnyNamespace, IntArray, NDArray, NumPy, RealArray, ROI
-from .array_api import default_api, Platform
+from .array_api import asnumpy, default_api, Platform
 from .config import get_cpu_config, set_cpu_pool_worker
 from .crystfel import Detector
 from .cxi_protocol import H5Handler, LoadWorker, TrainIndices
@@ -14,9 +25,11 @@ from .data_processing import CrystData, CrystMetadata
 from .functions import Structure
 from .parser import from_container, from_file
 from .streaks import StackedStreaks, Streaks
-from ..indexer.cbc_data import MillerWithRLP, Patterns
-from ..indexer.cbc_indexing import CBDIndexer
-from ..indexer.cbc_setup import BaseSetup, TiltOverAxisState, XtalList, XtalState
+from ..indexer.cbc_data import CBData, MillerWithRLP, Patterns
+from ..indexer.cbc_indexing import CBDIndexer, CBDLoss, CBDModel
+from ..indexer.cbc_setup import (BaseSetup, BaseState, FixedApertureSetup, FixedApertureState,
+                                 FixedPupilSetup, FixedPupilState, FixedSetup, FixedState,
+                                 TiltOverAxisState, XtalList, XtalState)
 
 class BaseParameters(Container):
     """Base class for JSON-serialisable parameter containers.
@@ -919,3 +932,269 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
             solutions.append(worker((candidates, pattern)))
 
     return XtalList.concatenate(solutions)
+
+@dataclass
+class ModelDataParameters(BaseParameters):
+    keep        : Literal['best', 'in-shell', 'all']
+    quantile    : float
+    q_abs       : float
+    points      : List[float]
+
+    def cbd_data(self, patterns: Patterns, model: CBDModel, state: BaseState) -> CBData:
+        data = model.init_data(patterns, state, values=self.points)
+        if self.keep == 'best':
+            return model.keep_best(data, quantile=self.quantile)
+        if self.keep == 'in-shell':
+            return model.keep_in_shell(data, q_abs=self.q_abs, state=state)
+        if self.keep == 'all':
+            return data
+        raise ValueError(f'Invalid keep keyword: {self.keep}')
+
+@dataclass
+class LossParameters(BaseParameters):
+    kind        : Literal['l1', 'l2', 'log_cosh']
+    projector   : Literal['line', 'pupil']
+
+    def cbd_loss(self, model: CBDModel) -> CBDLoss:
+        if self.projector == 'line':
+            return model.line_loss(loss=self.kind)
+        if self.projector == 'pupil':
+            return model.pupil_loss(loss=self.kind)
+        raise ValueError(f'Invalid projector keyword: {self.projector}')
+
+@dataclass
+class ScheduleParameters(BaseParameters):
+    kind            : Literal['constant', 'cosine', 'cosine-onecycle', 'exponential', 'linear']
+    learning_rate   : float
+    min_lr          : float
+    num_steps       : int
+
+    def scheduler(self) -> Schedule:
+        if self.kind == 'constant':
+            return constant_schedule(self.learning_rate)
+        if self.kind == 'cosine':
+            alpha = self.min_lr / self.learning_rate
+            return cosine_decay_schedule(self.learning_rate, self.num_steps, alpha)
+        if self.kind == 'cosine-onecycle':
+            div_factor = self.learning_rate / self.min_lr
+            return cosine_onecycle_schedule(self.num_steps, peak_value=self.learning_rate,
+                                            final_div_factor=div_factor)
+        if self.kind == 'exponential':
+            decay = -log(self.min_lr / self.learning_rate) / self.num_steps
+            return exponential_decay(self.learning_rate, self.num_steps, decay,
+                                     end_value=self.min_lr)
+        if self.kind == 'linear':
+            return linear_schedule(self.learning_rate, end_value=self.min_lr,
+                                   transition_steps=self.num_steps)
+        raise ValueError(f'Invalid scheduler kind: {self.kind}')
+
+@dataclass
+class OptimiseParameters(BaseParameters):
+    schedule        : ScheduleParameters
+    method          : Literal['adadelta', 'adam', 'sgd']
+    log_every       : int = 0
+    trace_every     : int = 1
+
+    def optimiser(self) -> Tuple[GradientTransformation, Schedule]:
+        schedule = self.schedule.scheduler()
+        if self.method == 'adadelta':
+            return adadelta(schedule), schedule
+        if self.method == 'adam':
+            return adam(schedule), schedule
+        if self.method == 'sgd':
+            return sgd(schedule), schedule
+        raise ValueError(f'Invalid optimiser method: {self.method}')
+
+LossFn = Callable[[CBData, BaseState], RealArray]
+LossGradFn = Callable[[CBData, BaseState], Tuple[RealArray, BaseState]]
+ApplyUpdatesFn = Callable[[BaseState, Updates], BaseState]
+
+@dataclass
+class RefinementConfig(BaseParameters):
+    data : ModelDataParameters
+    loss : LossParameters
+    optimise : OptimiseParameters
+    setup : Literal['fixed', 'fixed-aperture', 'fixed-pupil']
+    threshold : float
+
+    def initial(self, xtal: XtalState, setup_file: str) -> BaseState:
+        if self.setup == 'fixed':
+            setup = FixedSetup.read(setup_file)
+            return FixedState(xtal=xtal, setup=setup)
+        if self.setup == 'fixed-aperture':
+            setup = FixedApertureSetup.read(setup_file)
+            return FixedApertureState(xtal=xtal, setup=setup)
+        if self.setup == 'fixed-pupil':
+            setup = FixedPupilSetup.read(setup_file)
+            return FixedPupilState(xtal=xtal, setup=setup)
+        raise ValueError(f'Invalid setup keyword: {self.setup}')
+
+@dataclass
+class RefinementStats(Container):
+    step            : List[int] = field(default_factory=list)
+    loss            : List[float] = field(default_factory=list)
+    learning_rate   : List[float] = field(default_factory=list)
+    grad_norm       : List[float] = field(default_factory=list)
+    update_norm     : List[float] = field(default_factory=list)
+
+    @staticmethod
+    def norm(updates: Any | None) -> float:
+        if updates is None:
+            return 0.0
+        if isinstance(updates, (int, float)):
+            return abs(float(updates))
+        return float(global_norm(updates))
+
+    def append(self, step: int, loss: float, learning_rate: float,
+               grad: BaseState, updates: Updates | None):
+        self.step.append(step)
+        self.loss.append(loss)
+        self.learning_rate.append(learning_rate)
+        self.grad_norm.append(self.norm(grad))
+        self.update_norm.append(self.norm(updates))
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return the optimisation trace as a tabular record."""
+        return pd.DataFrame(self.to_dict())
+
+    def save(self, file: str, key: str='stats', mode: str='a') -> None:
+        """Write the optimisation trace to an HDF5 table.
+
+        Args:
+            file: Output HDF5 file path.
+            key: HDF5 table key used for the trace.
+            mode: Pandas HDF5 open mode.
+        """
+        self.to_dataframe().to_hdf(file, key=key, mode=mode)
+
+@dataclass
+class RefineResult(Container):
+    index   : IntArray
+    state   : BaseState
+    loss    : RealArray
+    fitness : RealArray
+    stats   : RefinementStats
+
+    def champions_only(self) -> 'RefineResult':
+        xp = self.state.__array_namespace__()
+        idxs = xp.lexsort((self.loss, self.index))
+        sorted_index = self.index[idxs]
+        firsts = xp.searchsorted(sorted_index, xp.unique_values(sorted_index))
+        champions = idxs[firsts]
+        state = self.state.replace(xtal=self.state.xtal[champions])
+        return RefineResult(self.index[champions], state, self.loss[champions],
+                            self.fitness[champions], self.stats)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return refined orientations with per-solution refinement metrics."""
+        df = self.state.xtal.to_dataframe(index=self.index)
+        df['loss'] = asnumpy(self.loss)
+        df['fitness'] = asnumpy(self.fitness)
+        return df
+
+    def save(self, file: str, files: dict[str, str] | None=None) -> None:
+        """Write champion solutions, all candidates, and refinement trace to HDF5.
+
+        The ``data`` table contains one champion solution per pattern and is
+        intended as the default downstream input.  The ``candidates`` and
+        ``stats`` tables retain diagnostic information from refinement.
+
+        Args:
+            file: Output HDF5 file path.
+            files: Optional source-file paths written under the ``files`` HDF5 group.
+        """
+        dir_path = os.path.dirname(file)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+
+        self.champions_only().to_dataframe().to_hdf(file, key='data', mode='w')
+        self.to_dataframe().to_hdf(file, key='candidates', mode='a')
+        self.stats.save(file, mode='a')
+
+        if files is not None:
+            with h5py.File(file, 'a') as output_file:
+                for name, path in files.items():
+                    key = f'files/{name}'
+                    if key in output_file:
+                        del output_file[key]
+                    output_file[key] = path
+
+def optimisation_loop(data: CBData, initial: BaseState, optimiser: GradientTransformation,
+                      schedule: Schedule, loss_grad_fn: LossGradFn,
+                      num_steps: int, trace_every: int=1, log_every: int=0,
+                      logger: logging.Logger | None=None
+                      ) -> Tuple[BaseState, RefinementStats]:
+    stats = RefinementStats()
+
+    state = initial
+    apply_updates_fn : ApplyUpdatesFn = cast(ApplyUpdatesFn, apply_updates)
+    trace_every = max(trace_every, 1)
+    log_every = max(log_every, 0)
+
+    opt_state = optimiser.init(cast(Params, state))
+
+    loss, grad = loss_grad_fn(data, state)
+    stats.append(0, float(loss), float(schedule(0)), grad, None)
+    if logger is not None:
+        logger.info("step=%d loss=%.6e lr=%.6e grad_norm=%.6e update_norm=%.6e",
+                    stats.step[-1], stats.loss[-1], stats.learning_rate[-1],
+                    stats.grad_norm[-1], stats.update_norm[-1])
+
+    for step in range(1, num_steps + 1):
+        updates, opt_state = optimiser.update(cast(Updates, grad), opt_state)
+        update_norm = global_norm(updates)
+        state = apply_updates_fn(state, updates)
+        loss, grad = loss_grad_fn(data, state)
+
+        if step % trace_every == 0 or step == num_steps:
+            stats.append(step, float(loss), float(schedule(step - 1)), grad, update_norm)
+
+        if logger is not None and log_every and (step % log_every == 0 or step == num_steps):
+            logger.info("step=%d loss=%.6e lr=%.6e grad_norm=%.6e update_norm=%.6e",
+                        step, float(loss), float(schedule(step - 1)), float(global_norm(grad)),
+                        float(update_norm))
+
+    return state, stats
+
+def default_refinement_logger() -> logging.Logger:
+    """Return the default refinement logger writing progress messages to stdout."""
+    logger = logging.getLogger(f'{__name__}.refinement')
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in logger.handlers:
+        handler.close()
+    logger.handlers.clear()
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(handler)
+    return logger
+
+def refine_patterns(patterns: Patterns, xtal_list: XtalList, setup_file: str,
+                    params: RefinementConfig, logger: logging.Logger | None=None
+                    ) -> RefineResult:
+    model = CBDModel()
+    target = patterns.loc[xtal_list.index]
+    initial = params.initial(xtal_list.to_xtals(), setup_file)
+
+    loss = params.loss.cbd_loss(model)
+    data = params.data.cbd_data(target, model, initial)
+    loss_grad_fn : LossGradFn = jit(value_and_grad(jit(loss), argnums=1))
+
+    solver, schedule = params.optimise.optimiser()
+
+    if logger is None:
+        logger = default_refinement_logger()
+    logger.info("refining %d patterns with %s/%s/%s for %d steps",
+                len(initial.xtal), params.optimise.method, params.loss.kind,
+                params.loss.projector, params.optimise.schedule.num_steps)
+
+    state, stats = optimisation_loop(data, initial, solver, schedule, loss_grad_fn,
+                                     params.optimise.schedule.num_steps,
+                                     params.optimise.trace_every, params.optimise.log_every,
+                                     logger)
+    criterion = loss.per_pattern(data, state)
+    fitness = loss.pattern_fitness(params.threshold, target, data, state)
+    return RefineResult(xtal_list.index, state, criterion, fitness, stats)

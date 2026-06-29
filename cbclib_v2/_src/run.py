@@ -13,7 +13,7 @@ from .annotations import (AnyNamespace, Array, ArrayNamespace, CPArray, Indices,
                           NumPy)
 from .crystfel import Detector as Geometry, read_crystfel
 from .cxi_protocol import (H5Files, H5Protocol, H5Handler, H5ReadWorker, LoadWorker, StackIndices,
-                           TrainIndices, WorkerType)
+                           TrainIndexRecord, TrainIndices, WorkerType)
 from .data_container import Container, list_indices, split, to_list
 from .scripts import BaseParameters
 
@@ -37,7 +37,7 @@ class RunLocator:
     variant    : str | None = None
 
     @classmethod
-    def coerce(cls, locator: int | 'RunLocator') -> 'RunLocator':
+    def coerce(cls, locator: 'int | RunLocator') -> 'RunLocator':
         """Return *locator* as a :class:`RunLocator`."""
         if isinstance(locator, cls):
             return locator
@@ -530,6 +530,11 @@ class FileStackIndices(TrainIndices):
             yield from range(self.total)
         else:
             yield from self.indices
+
+    def records(self) -> Iterator[TrainIndexRecord]:
+        for index, file_indices in zip(self.index(), self):
+            filenames, file_idxs = zip(*file_indices)
+            yield TrainIndexRecord(index, tuple(filenames), tuple(file_idxs))
 
     def split(self, num_chunks: int) -> Iterator["FileStackIndices"]:
         if self.indices is None:
