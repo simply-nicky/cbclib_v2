@@ -21,6 +21,7 @@ dependencies = [
     'optax',
     'pandas',
     'pybind11>=2.10.0',
+    'pytables',
     'tqdm'
 ]
 license = "GPL-3.0-or-later"
