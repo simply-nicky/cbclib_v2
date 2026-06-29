@@ -18,6 +18,7 @@ dependencies = [
     'hdf5plugin',
     'jax',
     'numpy>=2.1.0',
+    'optax',
     'pandas',
     'pybind11>=2.10.0',
     'tqdm'

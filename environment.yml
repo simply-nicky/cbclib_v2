@@ -10,6 +10,7 @@ dependencies:
   - libxcrypt
   - llvm-openmp
   - numpy
+  - optax
   - pandas
   - pybind11
   - pytables

@@ -13,6 +13,7 @@ dependencies:
   - llvm-openmp
   - numpy
   - numpydoc
+  - optax
   - matplotlib
   - pandas
   - pybind11
