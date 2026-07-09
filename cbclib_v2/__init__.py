@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexedContainer,
                                       split, to_list)
     from ._src.data_processing import CrystData, CrystMetadata, RegionDetector, StreakDetector
+    from ._src.polar_streak_finder import (CenterResult, PolarStreakFinder, ProvisionalStreaks,
+                                           calibrate_center, simulate_tangential_streaks)
     from ._src.run import (BaseRun, RunConfig, RunLocator, LCLSConfig, LCLSRun, SwissFELConfig,
                            SwissFELRun, XFELRun, XFELConfig, open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
@@ -60,6 +62,11 @@ _EXPORTS = {
     "OnlineDetector": ("._src.data_processing", "OnlineDetector"),
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),
+    "CenterResult": ("._src.polar_streak_finder", "CenterResult"),
+    "PolarStreakFinder": ("._src.polar_streak_finder", "PolarStreakFinder"),
+    "ProvisionalStreaks": ("._src.polar_streak_finder", "ProvisionalStreaks"),
+    "calibrate_center": ("._src.polar_streak_finder", "calibrate_center"),
+    "simulate_tangential_streaks": ("._src.polar_streak_finder", "simulate_tangential_streaks"),
     "RunConfig": ("._src.run", "RunConfig"),
     "RunLocator": ("._src.run", "RunLocator"),
     "BaseRun": ("._src.run", "BaseRun"),
@@ -86,6 +93,7 @@ _SUBMODULES = {
     "indexer",
     "label",
     "ndimage",
+    "polar_streak_finder",
     "scripts",
     "slurm",
     "streak_finder",

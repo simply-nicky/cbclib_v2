@@ -25,6 +25,7 @@ from .data_processing import CrystData, CrystMetadata
 from .functions import Structure
 from .parser import from_container, from_file
 from .streaks import StackedStreaks, Streaks
+from .polar_streak_finder import PolarStreakFinder, calibrate_center
 from ..indexer.cbc_data import CBData, MillerWithRLP, Patterns
 from ..indexer.cbc_indexing import CBDIndexer, CBDLoss, CBDModel
 from ..indexer.cbc_setup import (BaseSetup, BaseState, FixedApertureSetup, FixedApertureState,
@@ -571,6 +572,52 @@ class StreakFinderConfig(BaseParameters):
     center      : Tuple[float, float] | None = None
     std_min     : float = 0.0
 
+@dataclass
+class PolarStreakParameters(Container):
+    """Detection parameters for the polar / tangential streak route (WIP).
+
+    Attributes:
+        na_length: Local streak-probe length in pixels (~ streak length, set by
+            the numerical aperture); also the default seed non-max-suppression
+            distance for centre calibration.
+        r_bounds: ``(r_min, r_max)`` resolution annulus in pixels about the seed
+            centre used when calibrating the beam centre.
+        vmin: SNR threshold for foreground pixels.
+        n_seeds: Maximum centre-calibration seeds per frame.
+        n_angles: Number of probe orientations tested per seed.
+        min_anisotropy: Minimum orientation contrast to accept a seed.
+        weight_exponent: Resolution weight exponent in the centre solve.
+    """
+
+    na_length       : float
+    r_bounds        : Tuple[float, float]
+    vmin            : float
+    n_seeds         : int = 20
+    n_angles        : int = 64
+    min_anisotropy  : float = 0.1
+    weight_exponent : float = 1.0
+
+@dataclass
+class PolarStreakConfig(BaseParameters):
+    """Full configuration for the polar / tangential streak route (WIP).
+
+    Passed to :func:`detect_polar_streaks`.  Mirrors :class:`StreakFinderConfig`
+    so it flows through :func:`run_detection` / :class:`StreaksWorker` unchanged.
+
+    Attributes:
+        polar: Polar / tangential detection parameters.
+        scaling: Background scaling configuration.
+        center: Calibrated ``(x, y)`` beam centre in pixels (from
+            :func:`calibrate_center`).  Used for the polar remap and, when set,
+            for the post-detection concentric filter.
+        std_min: Minimum per-pixel standard deviation used in SNR computation.
+    """
+
+    polar       : PolarStreakParameters
+    scaling     : ScalingParameters
+    center      : Tuple[float, float] | None = None
+    std_min     : float = 0.0
+
 def detect_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadata,
                    params: StreakFinderConfig) -> StackedStreaks | Streaks:
     """Run the full streak-detection pipeline on a batch of frames.
@@ -610,14 +657,46 @@ def detect_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadat
         return streaks.replace(index=streaks.index + frames)
     return streaks.replace(index=frames[streaks.index])
 
+def detect_polar_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadata,
+                         params: PolarStreakConfig) -> AllStreaks:
+    """Run the polar / tangential streak route on a batch of frames (WIP).
+
+    Subtracts the background, computes SNR, and runs
+    :class:`~cbclib_v2.polar_streak_finder.PolarStreakFinder` about the
+    calibrated ``params.center``.  The per-frame detection algorithm is the next
+    milestone; today the finder returns an empty result so the pipeline runs
+    end-to-end.  Use :func:`~cbclib_v2.polar_streak_finder.calibrate_center` to
+    obtain ``params.center`` first.
+
+    Args:
+        frames: Scalar frame index or array of frame indices.
+        images: Raw detector images, shape ``(n_frames, *frame_shape)``.
+        metadata: Background model from :meth:`ScalingParameters.metadata`.
+        params: Polar-route configuration.
+
+    Returns:
+        Detected streaks as :class:`~cbclib_v2.Streaks` /
+        :class:`~cbclib_v2.StackedStreaks` with global frame indices.
+    """
+    data = scale_background(frames, images, metadata, params.scaling)
+    data = data.update_snr(params.std_min)
+    center = params.center if params.center is not None else (0.0, 0.0)
+    finder = PolarStreakFinder(asnumpy(data.snr), center, data.num_modules)
+    streaks = finder.detect()
+    if isinstance(frames, int):
+        return streaks.replace(index=streaks.index + frames)
+    return streaks.replace(index=frames[streaks.index])
+
 DetectionFunc = Callable[[IntArray | int, Array, CrystMetadata], AllStreaks]
-FinderConfig = RegionFinderConfig | StreakFinderConfig
+FinderConfig = RegionFinderConfig | StreakFinderConfig | PolarStreakConfig
 
 def detect_patterns(params: FinderConfig) -> DetectionFunc:
     if isinstance(params, StreakFinderConfig):
         return partial(detect_streaks, params=params)
     if isinstance(params, RegionFinderConfig):
         return partial(detect_regions, params=params)
+    if isinstance(params, PolarStreakConfig):
+        return partial(detect_polar_streaks, params=params)
     raise ValueError(f'Invalid parameters type: {type(params)}')
 
 def run_detection(loader: LoadWorker[NDArray], indices: TrainIndices, metapath: str,
