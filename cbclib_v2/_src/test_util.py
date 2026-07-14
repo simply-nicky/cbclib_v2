@@ -1,10 +1,9 @@
 from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax.test_util import check_grads
-from ..indexer import BaseState, FixedLens, FixedPupilLens, FixedPupilSetup, FixedSetup, XtalState
+from ..indexer import FixedLens, FixedPupilLens, FixedPupilSetup, FixedSetup, XtalState
 from .annotations import Array, ArrayLike, AnyNamespace, ComplexArray, RealArray
 from .array_api import array_namespace
-from .state import State, field
 
 class TestSetup():
     basis           = [[[-0.00088935, -0.00893378, -0.00057904],
@@ -53,10 +52,6 @@ class TestSetup():
         if xp is None:
             return tuple([cls.smp_dist + cls.foc_pos[2],] * size)
         return xp.array([cls.smp_dist + cls.foc_pos[2],] * size)
-
-class FixedState(BaseState, State):
-    xtal    : XtalState
-    setup   : FixedSetup = field(default_factory=TestSetup.fixed_setup, static=True)
 
 _atol = {np.dtype(np.float32): 1e-4, np.dtype(np.float64): 1e-5,
          np.dtype(np.complex64): 1e-4, np.dtype(np.complex128): 1e-5}

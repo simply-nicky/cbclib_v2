@@ -434,6 +434,15 @@ class ArrayContainer(DataContainer):
             raise ValueError("No uniform shape found among array fields")
         return tuple(shape)
 
+    @property
+    def size(self) -> int:
+        """Total number of elements in the common leading shape.
+
+        Returns:
+            Product of the integers in :attr:`shape`.
+        """
+        return prod(self.shape)
+
     def __getitem__(self: Self, indices: MultiIndices | BoolArray) -> Self:
         """Index into the container, returning a new container of the same type.
 
@@ -447,7 +456,7 @@ class ArrayContainer(DataContainer):
             New container instance with the indexed array fields.
         """
         data = {attr: val[indices] for attr, val in self.contents().items()
-                if isinstance(val, Array)}
+                if isinstance(val, (Array, ArrayContainer))}
         return self.replace(**data)
 
     def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:

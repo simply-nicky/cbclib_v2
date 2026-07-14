@@ -85,7 +85,6 @@ instance/
 
 # Sphinx documentation
 docs/_build/
-docs/_templates/
 
 # PyBuilder
 target/
@@ -145,6 +144,7 @@ dmypy.json
 
 # CODEX settings
 .codex/
+AGENTS.md
 
 # Auto generated RST files from docstrings
 docs/generated

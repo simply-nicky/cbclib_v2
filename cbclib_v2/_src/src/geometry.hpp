@@ -1,6 +1,7 @@
 #ifndef GEOMETRY_
 #define GEOMETRY_
 #include "include.hpp"
+#include "numpy.hpp"
 
 namespace cbclib {
 
@@ -283,6 +284,49 @@ template <typename T>
 using Point = PointND<T, 2>;
 
 template <typename T, size_t N>
+struct LineDataND
+{
+    PointND<T, N> center, tau;
+    T magnitude;
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    PointND<W, N> project_to_streak(const PointND<V, N> & point) const
+    {
+        if (magnitude)
+        {
+            auto r = point - center;
+            auto r_tau = static_cast<W>(dot(tau, r)) / magnitude;
+            return std::clamp<W>(r_tau, -0.5, 0.5) * tau + center;
+        }
+        return center;
+    }
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
+    W distance(const PointND<V, N> & point) const
+    {
+        return amplitude(point - project_to_streak(point));
+    }
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
+    PointND<W, N> project_to_line(const PointND<V, N> & point) const
+    {
+        if (magnitude)
+        {
+            auto r = point - center;
+            auto r_tau = static_cast<W>(dot(tau, r)) / magnitude;
+            return r_tau * tau + center;
+        }
+        return center;
+    }
+
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
+    W normal_distance(const PointND<V, N> & point) const
+    {
+        return amplitude(point - project_to_line(point));
+    }
+};
+
+template <typename T, size_t N>
 struct LineND
 {
     PointND<T, N> pt0 {}, pt1 {};   // endpoints
@@ -316,48 +360,39 @@ struct LineND
     PointND<T, N> tangent() const {return pt1 - pt0;}
     PointND<T, N> center() const {return (pt0 + pt1) / T(2);}
 
-    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
-    PointND<W, N> project_to_streak(const PointND<V, N> & point) const
+    LineDataND<T, N> projector() const
     {
         auto tau = tangent();
         auto mag = magnitude(tau);
+        return LineDataND<T, N>{center(), tau, mag};
+    }
 
-        if (mag)
-        {
-            auto ctr = center();
-            auto r = point - ctr;
-            auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            return std::clamp<W>(r_tau, -0.5, 0.5) * tau + ctr;
-        }
-        return pt0;
+    template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<V &>()))>
+    PointND<W, N> project_to_streak(const PointND<V, N> & point) const
+    {
+        auto data = projector();
+        return data.project_to_streak(point);
     }
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
     W distance(const PointND<V, N> & point) const
     {
-        return amplitude(point - project_to_streak(point));
+        auto data = projector();
+        return data.distance(point);
     }
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
     PointND<W, N> project_to_line(const PointND<V, N> & point) const
     {
-        auto tau = tangent();
-        auto mag = magnitude(tau);
-
-        if (mag)
-        {
-            auto ctr = center();
-            auto r = point - ctr;
-            auto r_tau = static_cast<W>(dot(tau, r)) / mag;
-            return r_tau * tau + ctr;
-        }
-        return pt0;
+        auto data = projector();
+        return data.project_to_line(point);
     }
 
     template <typename V, typename U = std::common_type_t<T, V>, typename W = decltype(std::sqrt(std::declval<U &>()))>
     W normal_distance(const PointND<V, N> & point) const
     {
-        return amplitude(point - project_to_line(point));
+        auto data = projector();
+        return data.normal_distance(point);
     }
 
     friend std::ostream & operator<<(std::ostream & os, const LineND<T, N> & line)
@@ -373,6 +408,70 @@ struct LineND
 
 template <typename T>
 using Line = LineND<T, 2>;
+
+template <typename T, size_t N>
+class CurveND
+{
+public:
+    CurveND() = default;
+
+    CurveND(const array<T> & points) : m_points(points)
+    {
+        if (m_points.ndim() != 2)
+            throw std::invalid_argument("Curve points must have exactly two dimensions");
+        if (m_points.shape(1) != N)
+            throw std::invalid_argument("Curve point size (" + std::to_string(m_points.shape(1)) +
+                                        ") does not match curve dimension (" + std::to_string(N) + ")");
+    }
+
+    size_t size() const
+    {
+        return m_points.shape(0);
+    }
+
+    PointND<T, N> point(size_t index) const
+    {
+        PointND<T, N> pt;
+        for (size_t n = 0; n < N; n++) pt[n] = m_points.at(index, n);
+        return pt;
+    }
+
+    LineND<T, N> segment(size_t index) const
+    {
+        if (index + 1 >= size())
+            throw std::out_of_range("Curve segment index is out of range");
+        return LineND<T, N>{point(index), point(index + 1)};
+    }
+
+    std::pair<PointND<long, N>, PointND<long, N>> bounds(T width) const
+    {
+        if (size() < 2)
+            throw std::invalid_argument("Curve must contain at least two points");
+
+        auto lo = point(0);
+        auto hi = lo;
+        for (size_t i = 1; i < size(); i++)
+        {
+            auto pt = point(i);
+            for (size_t n = 0; n < N; n++)
+            {
+                lo[n] = std::min(lo[n], pt[n]);
+                hi[n] = std::max(hi[n], pt[n]);
+            }
+        }
+
+        PointND<long, N> ilo, ihi;
+        for (size_t n = 0; n < N; n++)
+        {
+            ilo[n] = static_cast<long>(std::floor(lo[n] - width));
+            ihi[n] = static_cast<long>(std::ceil(hi[n] + width));
+        }
+        return std::make_pair(ilo, ihi);
+    }
+
+private:
+    array<T> m_points;
+};
 
 namespace detail{
 

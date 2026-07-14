@@ -27,6 +27,20 @@ from .annotations import (AnyNamespace, Array, ArrayNamespace, Attribute, CPArra
                           Indices, IntArray, IntSequence, JaxArray, NDArray, NumPy, NumPyNamespace,
                           Shape)
 
+@dataclass(frozen=True)
+class TrainIndexRecord:
+    """Map a logical frame index to the HDF5 source frame address.
+
+    Attributes:
+        index: Logical frame index used by detection and streak containers.
+        filename: Source file path, or one path per stacked detector module.
+        file_index: Frame index inside the source file, or one index per
+            stacked detector module.
+    """
+    index       : int
+    filename    : str | Tuple[str, ...]
+    file_index  : int | Tuple[int, ...]
+
 class DataIndices:
     def __iter__(self) -> Iterator[Any]:
         raise NotImplementedError
@@ -44,6 +58,9 @@ class TrainIndices(DataIndices):
     def index(self) -> Iterator[int]:
         raise NotImplementedError
 
+    def records(self) -> Iterator[TrainIndexRecord]:
+        raise NotImplementedError
+
     def split(self: Self, num_chunks: int) -> Self:
         raise NotImplementedError
 
@@ -53,7 +70,7 @@ class LoadWorker(Generic[Output]):
     def __call__(self, index: Any) -> Output:
         raise NotImplementedError
 
-    def initializer(self, *args, **kwargs):
+    def initializer(self, *args: Any, is_pool: bool=False, **kwargs: Any) -> None:
         raise NotImplementedError
 
     @staticmethod
@@ -185,6 +202,10 @@ class StackIndices(TrainIndices):
             yield from range(len(self))
         else:
             yield from self.indices
+
+    def records(self) -> Iterator[TrainIndexRecord]:
+        for index, (filename, file_index) in zip(self.index(), self):
+            yield TrainIndexRecord(index, filename, file_index)
 
     def split(self, num_chunks: int) -> Iterator["StackIndices"]:
         if self.indices is None:

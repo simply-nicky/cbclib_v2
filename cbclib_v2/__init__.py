@@ -11,15 +11,16 @@ if TYPE_CHECKING:
     from . import annotations, cuda, indexer, label, ndimage, scripts, slurm, streak_finder
     from ._src.array_api import (add_at, array_namespace, ascupy, asjax, asnumpy, default_api,
                                  default_rng, min_at, set_at)
-    from ._src.config import CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config
+    from ._src.config import (CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config,
+                              set_cpu_pool_worker)
     from ._src.crystfel import Detector, Panel, read_crystfel
     from ._src.cxi_protocol import (H5Files, H5Handler, H5Protocol, Kinds, LoadIndices, read_hdf,
                                     write_hdf)
-    from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexArray, split,
-                                      to_list)
+    from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexedContainer,
+                                      split, to_list)
     from ._src.data_processing import CrystData, CrystMetadata, RegionDetector, StreakDetector
-    from ._src.run import (BaseRun, RunConfig, SwissFELConfig, SwissFELRun, XFELRun, XFELRunConfig,
-                           open_run)
+    from ._src.run import (BaseRun, RunConfig, RunLocator, LCLSConfig, LCLSRun, SwissFELConfig,
+                           SwissFELRun, XFELRun, XFELConfig, open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
     from ._src.streaks import Lines, StackedStreaks, Streaks
 
@@ -37,6 +38,7 @@ _EXPORTS = {
     "get_cpu_config": ("._src.config", "get_cpu_config"),
     "reset_cpu_config": ("._src.config", "reset_cpu_config"),
     "set_cpu_config": ("._src.config", "set_cpu_config"),
+    "set_cpu_pool_worker": ("._src.config", "set_cpu_pool_worker"),
     "Detector": ("._src.crystfel", "Detector"),
     "Panel": ("._src.crystfel", "Panel"),
     "read_crystfel": ("._src.crystfel", "read_crystfel"),
@@ -50,16 +52,20 @@ _EXPORTS = {
     "Container": ("._src.data_container", "Container"),
     "DataContainer": ("._src.data_container", "DataContainer"),
     "ArrayContainer": ("._src.data_container", "ArrayContainer"),
-    "IndexArray": ("._src.data_container", "IndexArray"),
+    "IndexedContainer": ("._src.data_container", "IndexedContainer"),
     "split": ("._src.data_container", "split"),
     "to_list": ("._src.data_container", "to_list"),
     "CrystData": ("._src.data_processing", "CrystData"),
     "CrystMetadata": ("._src.data_processing", "CrystMetadata"),
+    "OnlineDetector": ("._src.data_processing", "OnlineDetector"),
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),
     "RunConfig": ("._src.run", "RunConfig"),
+    "RunLocator": ("._src.run", "RunLocator"),
     "BaseRun": ("._src.run", "BaseRun"),
-    "XFELRunConfig": ("._src.run", "XFELRunConfig"),
+    "LCLSConfig": ("._src.run", "LCLSConfig"),
+    "LCLSRun": ("._src.run", "LCLSRun"),
+    "XFELConfig": ("._src.run", "XFELConfig"),
     "XFELRun": ("._src.run", "XFELRun"),
     "SwissFELConfig": ("._src.run", "SwissFELConfig"),
     "SwissFELRun": ("._src.run", "SwissFELRun"),

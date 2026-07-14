@@ -1,24 +1,30 @@
 from typing import Tuple
-from math import prod
-from .._src.annotations import (Array, AnyNamespace, BoolArray, IntArray, JaxNumPy, RealArray,
-                                Shape)
+from .._src.annotations import Array, AnyNamespace, BoolArray, IntArray, RealArray, Shape
 
-def arange(shape: Shape, xp: AnyNamespace = JaxNumPy) -> IntArray:
-    return xp.reshape(xp.arange(prod(shape), dtype=int), shape)
-
-def safe_sqrt(x: Array, xp: AnyNamespace = JaxNumPy) -> Array:
+def safe_sqrt(x: Array, xp: AnyNamespace) -> Array:
     _x = xp.where(x <= 0.0, 0.0, x)
     return xp.where(x <= 0.0, 0.0, xp.sqrt(_x))
 
-def safe_divide(x: Array, y: Array, xp: AnyNamespace = JaxNumPy) -> Array:
+def safe_divide(x: Array, y: Array, xp: AnyNamespace) -> Array:
     _y = xp.where(y == 0.0, 1.0, y)
     return xp.where(y == 0.0, 0.0, x / _y)
 
-def kxy_to_k(kxy: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
+def kxy_to_k(kxy: RealArray, xp: AnyNamespace) -> RealArray:
     kz = safe_sqrt(1 - xp.sum(kxy[..., :2]**2, axis=-1), xp)
     return xp.stack((kxy[..., 0], kxy[..., 1], kz), axis=-1)
 
-def euler_angles(rmats: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
+def broadcast_to(array: Array, idxs: IntArray, suffix: Shape, xp: AnyNamespace) -> Array:
+    array = xp.reshape(array, (-1,) + suffix)
+    if array.shape[0] == 1:
+        return array[0]
+    return xp.reshape(array[xp.reshape(idxs, -1)], idxs.shape + suffix)
+
+def expand_to_rank(array: RealArray, ndim: int) -> RealArray:
+    while array.ndim < ndim:
+        array = array[..., None, :]
+    return array
+
+def euler_angles(rmats: RealArray, xp: AnyNamespace) -> RealArray:
     r"""Calculate Euler angles with Bunge convention [EUL]_.
 
     Args:
@@ -44,7 +50,7 @@ def euler_angles(rmats: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
     gamma = xp.where(gamma < 0.0, gamma + 2 * xp.pi, gamma)
     return xp.stack((alpha, beta, gamma), axis=-1)
 
-def euler_matrix(angles: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
+def euler_matrix(angles: RealArray, xp: AnyNamespace) -> RealArray:
     r"""Calculate rotation matrices from Euler angles with Bunge convention [EUL]_.
 
     Args:
@@ -67,7 +73,7 @@ def euler_matrix(angles: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
                       cos[..., 1]], axis=-1)
     return xp.stack((row0, row1, row2), axis=-2)
 
-def tilt_angles(rmats: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
+def tilt_angles(rmats: RealArray, xp: AnyNamespace) -> RealArray:
     r"""Calculate an axis of rotation and a rotation angle for a rotation matrix.
 
     Args:
@@ -88,7 +94,7 @@ def tilt_angles(rmats: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
                      xp.acos(vec[..., 2] / rabs),
                      xp.atan2(vec[..., 1], vec[..., 0])], axis=-1)
 
-def tilt_matrix(angles: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
+def tilt_matrix(angles: RealArray, xp: AnyNamespace) -> RealArray:
     r"""Calculate a rotation matrix for a set of three angles set of three angles :math:`\theta,
     \alpha, \beta`, a rotation angle :math:`\theta`, an angle between the axis of rotation and
     OZ axis :math:`\alpha`, and a polar angle of the axis of rotation :math:`\beta`.
@@ -114,8 +120,7 @@ def tilt_matrix(angles: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
                      vec[..., 0]**2 + vec[..., 3]**2 - vec[..., 1]**2 - vec[..., 2]**2], axis=-1)
     return xp.stack((row0, row1, row2), axis=-2)
 
-def det_to_k(pts: RealArray, src: RealArray, idxs: IntArray, xp: AnyNamespace = JaxNumPy
-             ) -> RealArray:
+def det_to_k(pts: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
     """Convert coordinates on the detector ``x`, ``y`` to wave-vectors originating from
     the source points ``src``.
 
@@ -127,14 +132,13 @@ def det_to_k(pts: RealArray, src: RealArray, idxs: IntArray, xp: AnyNamespace = 
     Returns:
         A set of wave-vectors.
     """
-    src = xp.reshape(xp.reshape(src, (-1, 3))[xp.reshape(idxs, -1)], idxs.shape + (3,))
+    src = expand_to_rank(src, pts.ndim)
     xy = pts - src[..., :2]
     norm = xp.sqrt(xp.sum(xy**2, axis=-1) + src[..., 2]**2)
     vec = xp.concat((xy, xp.broadcast_to(-src[..., 2], pts.shape[:-1])[..., None]), axis=-1)
     return vec / norm[..., None]
 
-def k_to_det(k: RealArray, src: RealArray, idxs: IntArray, xp: AnyNamespace = JaxNumPy
-             ) -> RealArray:
+def k_to_det(k: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
     """Convert wave-vectors originating from the source points ``src`` to coordinates on the
     detector.
 
@@ -146,15 +150,13 @@ def k_to_det(k: RealArray, src: RealArray, idxs: IntArray, xp: AnyNamespace = Ja
     Returns:
         A tuple of x and y coordinates in meters.
     """
-    src = xp.reshape(xp.reshape(src, (-1, 3))[xp.reshape(idxs, -1)], idxs.shape + (3,))
-    src = xp.broadcast_to(src, k.shape)
     kz = xp.where(k[..., 2] == 0, 1.0, k[..., 2])
     pos = xp.where((k[..., 2] == 0)[..., None], 0.0,
                    xp.stack((src[..., 0] - k[..., 0] / kz * src[..., 2],
                              src[..., 1] - k[..., 1] / kz * src[..., 2]), axis=-1))
     return pos
 
-def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: AnyNamespace = JaxNumPy) -> RealArray:
+def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
     """Convert wave-vectors originating from the source point ``src`` to sample
     planes at the z coordinate ``z``.
 
@@ -169,18 +171,20 @@ def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: AnyNamespace = JaxN
     """
     kz = xp.where(k[..., 2, None], k[..., 2, None], 1.0)
     theta = xp.where(k[..., 2, None], k[..., :2] / kz, 0)
-    xy = src[:2] + theta * (z - src[2])[..., None]
+    xy = src[..., :2] + theta * (z - src[..., 2])[..., None]
     return xp.stack((xy[..., 0], xy[..., 1], xp.broadcast_to(z, xy.shape[:-1])), axis=-1)
 
 def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray,
-                    xp: AnyNamespace = JaxNumPy) -> RealArray:
+                    xp: AnyNamespace) -> RealArray:
+    vmin = expand_to_rank(vmin, point.ndim)
+    vmax = expand_to_rank(vmax, point.ndim)
     return xp.clip(point, vmin, vmax)
 
 def circle(r: RealArray, center: RealArray, vec1: RealArray, vec2: RealArray, theta: RealArray,
-           xp: AnyNamespace = JaxNumPy) -> RealArray:
+           xp: AnyNamespace) -> RealArray:
     return (r * xp.cos(theta))[..., None] * vec1 + (r * xp.sin(theta))[..., None] * vec2 + center
 
-def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6, xp: AnyNamespace = JaxNumPy
+def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6, *, xp: AnyNamespace
                  ) -> Tuple[RealArray, BoolArray]:
     r"""Calculate the source lines for a set of reciprocal lattice points ``q``.
 
@@ -192,11 +196,11 @@ def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6, xp: AnyNamesp
     Returns:
         A set of source lines in the aperture function.
     """
-    tau = edges[:, 1] - edges[:, 0]
-    point = edges[:, 0]
+    tau = edges[..., 1, :] - edges[..., 0, :]
+    point = edges[..., 0, :]
     q_mag = xp.sum(q**2, axis=-1)
 
-    f1 = -0.5 * q_mag[..., None] - xp.sum(edges[:, 0] * q[..., None, :2], axis=-1)
+    f1 = -0.5 * q_mag[..., None] - xp.sum(point * q[..., None, :2], axis=-1)
     f2 = xp.sum(tau * q[..., None, :2], axis=-1)
 
     a = f2 * f2 + q[..., None, 2]**2 * xp.sum(tau**2, axis=-1)
@@ -204,14 +208,14 @@ def source_lines(q: RealArray, edges: RealArray, atol: float=2e-6, xp: AnyNamesp
     c = f1 * f1 - q[..., None, 2]**2 * (1 - xp.sum(point**2, axis=-1))
 
     def get_k(t):
-        return kxy_to_k(point + t[..., None] * tau, xp)
+        return kxy_to_k(point[..., None, :] + t[..., None] * tau[..., None, :], xp)
 
     delta = xp.where(b * b > a * c, b * b - a * c, 0.0)
 
     a = xp.where(a == 0.0, 1.0, a)
     t0 = xp.where(a == 0.0, 0.0, (b - xp.sqrt(delta)) / a)
     t1 = xp.where(a == 0.0, 0.0, (b + xp.sqrt(delta)) / a)
-    t = xp.stack((t0, t1), axis=-2)
+    t = xp.stack((t0, t1), axis=-1)
 
     kin = get_k(t)
     prod = xp.abs(xp.sum(kin * q[..., None, None, :], axis=-1) + 0.5 * q_mag[..., None, None])

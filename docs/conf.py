@@ -55,6 +55,18 @@ autosummary_generate = True
 
 # Show members inherited from cbclib_v2 base classes but suppress stdlib noise
 # (e.g. str methods surfacing on Kinds, object methods on dataclasses).
+def _autodoc_skip_stdlib_member(app: Any, what: str, name: str, obj: Any,
+                                skip: bool, options: Any) -> bool:
+    """Hide members inherited from low-level stdlib bases."""
+    owner = getattr(obj, '__objclass__', None)
+    if owner in (object, str):
+        return True
+
+    qualname = getattr(obj, '__qualname__', '')
+    if qualname.startswith(('object.', 'str.')):
+        return True
+
+    return skip
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
@@ -190,4 +202,5 @@ def _autodoc_process_pybind11(app: Any, what: str, name: str, obj: Any,
             return
 
 def setup(app: Any) -> None:
+    app.connect('autodoc-skip-member', _autodoc_skip_stdlib_member)
     app.connect('autodoc-process-docstring', _autodoc_process_pybind11, priority=100)

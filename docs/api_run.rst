@@ -16,8 +16,11 @@ See :doc:`io_layer` for a narrative introduction.
 
    open_run
    RunConfig
+   RunLocator
    BaseRun
-   XFELRunConfig
+   XFELConfig
    XFELRun
    SwissFELConfig
    SwissFELRun
+   LCLSConfig
+   LCLSRun

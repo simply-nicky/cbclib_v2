@@ -13,6 +13,7 @@ from .annotations import (Array, AnyNamespace, DataclassInstance, IntArray, NDAr
                           RealArray, Shape)
 from .array_api import array_namespace, set_at
 from .data_container import Container
+from .functions import pixel_map, radius, radial_index
 from .streaks import StackedStreaks, Streaks
 from ..indexer import Patterns
 
@@ -109,6 +110,8 @@ class BoolParser(AttributeParser[bool], SimpleParser):
     def parse(self, value: str):
         if value == 'true':
             self.__value__ = True
+        elif value == 'false':
+            self.__value__ = False
         elif value.isdigit():
             self.__value__ = bool(int(value))
         else:
@@ -337,35 +340,52 @@ class MaskDataParser(ParsingContainer):
     mask_badbits        : BitIntParser = field(default_factory=BitIntParser)
 
 wl_units = {'A': Unit(1e-10), 'm': Unit()}
-E_units = {'eV': Unit(), 'keV': Unit(1e-3)}
+E_units = {'eV': Unit(), 'keV': Unit(1e3)}
+voltage_units = {'V': Unit(), 'kV': Unit(1e3)}
 length_units = {'mm': Unit(1e-3), 'm': Unit()}
 
 DEFAULT_WL = FloatParser(float('nan'), wl_units)
 DEFAULT_PE = FloatParser(float('nan'), E_units)
+DEFAULT_EV = FloatParser(float('nan'), voltage_units)
 DEFAULT_CLEN = FloatParser(float('nan'), length_units)
+DEFAULT_DATA = StringParser('/data/data')
+DEFAULT_DIM = DimensionsParser(['ss', 'fs'])
 
 @dataclass
 class PanelParser(ParsingContainer):
     # Beam parameters
 
     # wavelength of the radiation
-    wavelength          : FloatParser = field(default_factory=lambda: DEFAULT_WL)
+    wavelength          : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_WL))
     # energy of a single photon
-    photon_energy       : FloatParser = field(default_factory=lambda: DEFAULT_PE)
+    photon_energy       : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_PE))
+    # accelerating voltage for electron diffraction
+    electron_voltage    : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_EV))
     # bandwidth of the radiation as a fraction of wavelength
     bandwidth           : FloatParser = field(default_factory=FloatParser)
 
     # Physical locations
 
     # overall z-pozition for the detector
-    clen                : FloatParser = field(default_factory=lambda: DEFAULT_CLEN)
+    clen                : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_CLEN))
+    # per-frame shift of the entire detector in x
+    detector_shift_x    : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_CLEN))
+    # per-frame shift of the entire detector in y
+    detector_shift_y    : FloatParser = field(default_factory=lambda: deepcopy(DEFAULT_CLEN))
 
     # Data locations
 
     # location of the data in the data file
-    data                : StringParser = field(default_factory=StringParser)
+    data                : StringParser = field(default_factory=lambda: deepcopy(DEFAULT_DATA))
     # range of pixels in the data block that correspond to this panel
     region              : PixelRegionParser = field(default_factory=PixelRegionParser)
+
+    # Peak list data
+
+    # location of an existing peak list in the data file
+    peak_list           : StringParser = field(default_factory=StringParser)
+    # layout of the peak list, e.g. cxi, list3 or auto
+    peak_list_type      : StringParser = field(default_factory=StringParser)
 
     # Pixel size
 
@@ -377,7 +397,7 @@ class PanelParser(ParsingContainer):
     # (x, y) position of the corner
     corner              : CornerParser = field(default_factory=CornerParser)
     # offset of the panel
-    coffset             : FloatParser = field(default_factory=lambda: FloatParser(0.0))
+    coffset             : FloatParser = field(default_factory=lambda: FloatParser(0.0, length_units))
     # vector of the fast scan direction
     fs                  : DirectionParser = field(default_factory=DirectionParser)
     # vector of the slow scan direction
@@ -386,7 +406,7 @@ class PanelParser(ParsingContainer):
     # Data dimensionality
 
     # dimension structure of the panel
-    dim                 : DimensionsParser = field(default_factory=DimensionsParser)
+    dim                 : DimensionsParser = field(default_factory=lambda: deepcopy(DEFAULT_DIM))
 
     # Detector gain data
 
@@ -407,6 +427,12 @@ class PanelParser(ParsingContainer):
     no_index            : BoolParser = field(default_factory=BoolParser)
     # mark a border of n pixels around the edge of the panel as bad
     mask_edge_pixels    : IntParser = field(default_factory=lambda: IntParser(0))
+    # mark pixels below this value as bad
+    flag_lessthan       : FloatParser = field(default_factory=FloatParser)
+    # mark pixels above this value as bad
+    flag_morethan       : FloatParser = field(default_factory=FloatParser)
+    # mark pixels equal to this value as bad
+    flag_equal          : FloatParser = field(default_factory=FloatParser)
 
     # Mask data
     masks               : List[MaskDataParser] = field(default_factory=list)
@@ -418,6 +444,12 @@ class PanelParser(ParsingContainer):
         if key.startswith('dim'):
             self.dim.parse(key, value)
         elif key.startswith('mask'):
+            aliases = {
+                'mask': 'mask0_data',
+                'mask_good': 'mask0_goodbits',
+                'mask_bad': 'mask0_badbits',
+            }
+            key = aliases.get(key, key)
             m = re.match(r'^mask(\d?)_(data|file|goodbits|badbits)$', key)
             if m:
                 if not m.group(1):
@@ -430,6 +462,8 @@ class PanelParser(ParsingContainer):
                     for _ in range(len(self.masks), index + 1):
                         self.masks.append(MaskDataParser())
                 self.masks[index].parse('mask_' + m.group(2), value)
+            else:
+                super().parse(key, value)
         else:
             super().parse(key, value)
 
@@ -444,6 +478,7 @@ RegionParser = BadPixelRegionParser | CoordRegionParser
 class DetectorParser():
     bad_regions        : OrderedDictType[str, RegionParser] = field(default_factory=OrderedDict)
     panels             : OrderedDictType[str, PanelParser] = field(default_factory=OrderedDict)
+    groups             : Dict[str, List[str]] = field(default_factory=dict)
 
     def check_bad_regions(self):
         for region_name, region in self.bad_regions.items():
@@ -460,7 +495,9 @@ def parse_crystfel_file(filename: str) -> DetectorParser:
         for attr, value in file:
             path = [item for item in re.split("(/)", attr) if item != "/"]
             if len(path) == 1:
-                if attr.startswith(('group', 'rigid_group')):
+                if attr.startswith('group_'):
+                    detector.groups[attr[6:]] = [item.strip() for item in value.split(',')]
+                elif attr.startswith('rigid_group'):
                     pass
                 else:
                     default_panel.parse(attr, value)
@@ -583,6 +620,8 @@ class Panel(Container):
     wavelength          : float
     # energy of a single photon
     photon_energy       : float
+    # accelerating voltage for electron diffraction
+    electron_voltage    : float
     # bandwidth of the radiation as a fraction of wavelength
     bandwidth           : float
 
@@ -590,6 +629,10 @@ class Panel(Container):
 
     # overall z-pozition for the detector
     clen                : float
+    # per-frame shift of the entire detector in x
+    detector_shift_x    : float
+    # per-frame shift of the entire detector in y
+    detector_shift_y    : float
 
     # Data locations
 
@@ -597,6 +640,13 @@ class Panel(Container):
     data                : str
     # range of pixels in the data block that correspond to this panel
     region              : PixelRegion
+
+    # Peak list data
+
+    # location of an existing peak list in the data file
+    peak_list           : str
+    # layout of the peak list, e.g. cxi, list3 or auto
+    peak_list_type      : str
 
     # Pixel size
 
@@ -638,6 +688,12 @@ class Panel(Container):
     no_index            : bool
     # mark a border of n pixels around the edge of the panel as bad
     mask_edge_pixels    : int
+    # mark pixels below this value as bad
+    flag_lessthan       : float
+    # mark pixels above this value as bad
+    flag_morethan       : float
+    # mark pixels equal to this value as bad
+    flag_equal          : float
 
     # Mask data
     masks               : List[MaskData]
@@ -824,7 +880,8 @@ class Detector():
 
     @property
     def bounds(self) -> Tuple[float, float, float, float]:
-        """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame pixel units."""
+        """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame
+        pixel units."""
         x, y = [], []
         for panel in self.panels.values():
             x0, y0, x1, y1 = panel.bounds
@@ -846,6 +903,26 @@ class Detector():
     def num_modules(self) -> int:
         """Number of detector modules (product of all axes except the last two ss/fs axes)."""
         return prod(self.shape) // prod(self.shape[-2:])
+
+    def __geometry_protocol__(self) -> Dict[str, Any]:
+        """Return a compact CrystFEL geometry protocol for native online detection."""
+        x_min, y_min, x_max, y_max = self.bounds
+        panels = []
+        for panel in self.panels.values():
+            roi = tuple((item.start, item.stop) for item in panel.roi())
+            panels.append({
+                'region': (panel.region.min_fs, panel.region.max_fs,
+                           panel.region.min_ss, panel.region.max_ss),
+                'roi': roi,
+                'corner': (panel.corner.x, panel.corner.y),
+                'ss': (panel.ss.x, panel.ss.y, panel.ss.z),
+                'fs': (panel.fs.x, panel.fs.y, panel.fs.z),
+            })
+        return {
+            'panels': panels,
+            'shape': self.shape,
+            'bounds': (x_min, x_max, y_min, y_max),
+        }
 
     @property
     def pixel_size(self) -> float:
@@ -875,9 +952,10 @@ class Detector():
             >>> assembler = detector.assembler()
             >>> assembled = assembler(frames)
         """
-        pix_x, pix_y, _ = self.pixel_map(xp=xp)
-        pix_x = xp.asarray(xp.round(pix_x - pix_x.min()), dtype=int)
-        pix_y = xp.asarray(xp.round(pix_y - pix_y.min()), dtype=int)
+        out = xp.empty((3,) + self.shape, dtype=xp.float64)
+        pix_x, pix_y, _ = self.pixel_map(out)
+        pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
+        pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
         return Assembler(pix_y, pix_x)
 
     def panel(self, module_id: int) -> Panel:
@@ -891,29 +969,119 @@ class Detector():
         """
         return self.panels[list(self.panels.keys())[module_id]]
 
-    def pixel_map(self, half_pixel_shift: bool=True, xp: AnyNamespace=NumPy):
-        """Compute the (x, y, z) lab-frame coordinate map for all panels.
+    def pixel_map(self, out: RealArray, half_pixel_shift: bool=True):
+        """Compute the lab-frame coordinate map for detector pixels.
+
+        This is the geometry-aware starting point for detector assembly and
+        online radial background estimation. For every pixel covered by a panel
+        in this CrystFEL geometry, the returned map stores the corresponding
+        ``(x, y, z)`` coordinate in lab-frame pixel units. The ``x`` and ``y``
+        components describe the position in the detector plane; ``z`` includes
+        the camera length and panel ``coffset`` converted to pixels.
+
+        With ``half_pixel_shift=True`` (the default), panel-local integer
+        coordinates are shifted by 0.5 before applying the ``fs`` and ``ss``
+        vectors, so coordinates refer to pixel centres. This matches the
+        convention used by radial-profile hit finding and avoids measuring
+        radii from pixel corners.
 
         Args:
+            out: Output array. Its namespace and dtype select the backend and
+                native overload.
             half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
                 pixel centres when ``True`` (default).
-            xp: Array namespace; defaults to NumPy.
 
         Returns:
-            Array of shape ``(3, *detector_shape)`` with x, y, z coordinates
-            in lab-frame pixel units.
-        """
-        pixel_map = xp.zeros((3,) + self.shape)
-        for panel in self.panels.values():
-            roi = panel.roi()
-            ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[-2]),
-                                           xp.arange(panel.shape[-1]), indexing='ij')
+            Array of shape ``(3, *detector_shape)``. ``out[0]`` is ``x``,
+            ``out[1]`` is ``y``, and ``out[2]`` is ``z`` in lab-frame pixel
+            units.
 
-            x, y, z = panel.to_detector(ss_grid, fs_grid, half_pixel_shift)
-            pixel_map[(0, ...) + roi] = x
-            pixel_map[(1, ...) + roi] = y
-            pixel_map[(2, ...) + roi] = z
-        return pixel_map
+        See Also:
+            :func:`~cbclib_v2.functions.pixel_map`: Low-level backend-dispatched
+            implementation.
+        """
+        return pixel_map(out, self, half_pixel_shift=half_pixel_shift)
+
+    def max_radius(self, center: Tuple[float, float]) -> float:
+        """Return the maximum radius from ``center`` to any detector pixel.
+
+        Args:
+            center: Beam center in CrystFEL lab-frame pixel coordinates.
+
+        Returns:
+            Maximum radius from ``center`` to any detector pixel in pixels.
+        """
+        bounds = self.bounds
+        min_pt, max_pt = bounds[:2], bounds[2:]
+        corners = [min_pt, (min_pt[0], max_pt[1]), (max_pt[0], min_pt[1]), max_pt]
+        return max(((corner[0] - center[0] - bounds[0]) ** 2 +
+                    (corner[1] - center[1] - bounds[1]) ** 2) ** 0.5
+                   for corner in corners)
+
+    def radii(self, out: RealArray, center: Tuple[int, int],
+              half_pixel_shift: bool=True) -> RealArray:
+        """Return detector-pixel radii from the beam centre.
+
+        Radii are computed in the same assembled detector coordinate system as
+        :meth:`pixel_map`. The ``center`` should be the direct-beam position in
+        CrystFEL lab-frame pixel coordinates, not an array index in a single
+        module. The detector bounds are handled internally so the output aligns
+        with the assembled image grid and with :meth:`radial_index`.
+
+        Args:
+            out: Output array. Its namespace and dtype select the backend and
+                native overload.
+            center: Beam center ``(x, y)`` in CrystFEL lab-frame pixel coordinates.
+            half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
+                pixel centres when ``True``.
+
+        Returns:
+            Real array with the detector image shape. Each value is the
+            Euclidean distance from ``center`` in pixels.
+
+        See Also:
+            :meth:`radial_index`: Discretise these radii into radial bins.
+        """
+        return radius(out, self, center, half_pixel_shift=half_pixel_shift)
+
+    def radial_index(self, out: IntArray, center: Tuple[int, int], n_bins: int,
+                     half_pixel_shift: bool=True) -> IntArray:
+        """Return integer radial-bin indices for detector pixels.
+
+        The detector plane is divided into ``n_bins`` concentric annuli around
+        ``center``. Each pixel is assigned the nearest radial bin, producing the
+        compact lookup table used by
+        :meth:`~cbclib_v2.CrystData.online_detector`,
+        :func:`~cbclib_v2.radial_profiles`, and
+        :class:`~cbclib_v2.RadialProfiles`.
+
+        Native CPU/CUDA backends mark non-panel pixels in the assembled image
+        as ``-1`` so they can be ignored during profile accumulation. Valid
+        panel pixels are in the inclusive range ``[0, n_bins - 1]``.
+
+        Args:
+            out: Output array. Its namespace and integer dtype select the
+                backend and native overload.
+            center: Beam center ``(x, y)`` in CrystFEL lab-frame pixel coordinates.
+            n_bins: Number of radial bins. Use enough bins to resolve sharp
+                powder rings or SAXS/WAXS structure without making per-bin
+                counts too sparse.
+            half_pixel_shift: Add a 0.5-pixel offset to place coordinates at
+                pixel centres when ``True``.
+
+        Returns:
+            Integer radial-bin map with the detector image shape. Values index
+            compact radial profiles; ``-1`` denotes non-panel pixels on native
+            backends.
+
+        Example:
+            Build the radial lookup table used by online hit finding:
+
+            >>> geometry = read_crystfel('detector.geom')
+            >>> radial = NumPy.empty(geometry.shape, dtype=NumPy.int32)
+            >>> geometry.radial_index(radial, center=(512, 512), n_bins=1024)
+        """
+        return radial_index(out, self, center, n_bins, half_pixel_shift=half_pixel_shift)
 
     def to_detector(self, *coordinates: IntArray | RealArray, half_pixel_shift: bool=True,
                     units: Literal['pixel', 'meter']='pixel', tolerance: float=1.0
@@ -1089,4 +1257,5 @@ def read_crystfel(file: str) -> Detector:
             detector.bad_regions[name] = CoordRegion(**region.value())
         else:
             raise RuntimeError(f'Invalid region type: {type(region)}')
+    detector.groups = parsed.groups
     return detector

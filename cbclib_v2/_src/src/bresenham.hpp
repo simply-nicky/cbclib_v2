@@ -36,71 +36,33 @@ private:
 }
 
 template <typename T, size_t N>
-struct BaseError
+struct BresenhamError
 {
-    PointND<T, N> derror {};    // derivative of error
-    T error = T();              // current error
+    // Signed error to one coordinate plane that contains the continuous line.
+    PointND<T, N> normal {};
+    T error = T();
 
-    BaseError() = default;
+    BresenhamError() = default;
 
-    BaseError(PointND<T, N> derr, T err) : derror(std::move(derr)), error(err) {}
-
-    BaseError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
-        derror(std::move(derr)), error(dot(derror, point - origin)) {}
+    BresenhamError(PointND<T, N> normal, const PointND<long, N> & point,
+                   const PointND<T, N> & origin) :
+        normal(std::move(normal)), error(dot(this->normal, point - origin)) {}
 
     T error_at() const {return error;}
 
-    // Return e(x + sx, y + sy)
-    T error_at(const PointND<T, N> & step) const
+    BresenhamError & increment(long x, size_t axis)
     {
-        return error_at() + dot(step, derror);
-    }
-
-    BaseError & increment(long x, size_t axis)
-    {
-        error += x * derror[axis];
+        error += x * normal[axis];
         return *this;
     }
-};
 
-template <typename T, size_t N>
-struct TangentError : public BaseError<T, N>
-{
-    using BaseError<T, N>::error;
-    T length = T();
-
-    TangentError() = default;
-
-    TangentError(PointND<T, N> derr, T err) : BaseError<T, N>(std::move(derr), err), length(amplitude(derr)) {}
-
-    TangentError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
-        BaseError<T, N>(std::move(derr), point, origin), length(amplitude(derr)) {}
-
-    T error_at() const {return std::max(std::max(-error, error - length * length), T());}
-};
-
-template <typename T, size_t N>
-struct NormalError : public BaseError<T, N>
-{
-    using BaseError<T, N>::derror;
-
-    NormalError() = default;
-
-    NormalError(PointND<T, N> derr, const PointND<long, N> & point, const PointND<T, N> & origin) :
-        BaseError<T, N>(std::move(derr), point, origin) {}
-
-    using BaseError<T, N>::error_at;
-
-    // We need to choose one out of three option:
-    //      1) increment only x, error e_x
-    //      2) increment only y, error e_y
-    //      3) increment both, error e_xy
-    // We need to choose an option with the minimal absolute error
     std::pair<bool, bool> is_next(const PointND<long, N> & step, size_t axis1, size_t axis2) const
     {
-        auto e_x = error_at() + step[axis1] * derror[axis1];
-        auto e_y = error_at() + step[axis2] * derror[axis2];
-        auto e_xy = e_x + step[axis2] * derror[axis2];
+        // Choose whether the next Bresenham step advances axis1, axis2, or both by
+        // taking the move that keeps the line closest to this coordinate plane.
+        auto e_x = error_at() + step[axis1] * normal[axis1];
+        auto e_y = error_at() + step[axis2] * normal[axis2];
+        auto e_xy = e_x + step[axis2] * normal[axis2];
 
         if (std::abs(e_y) < std::abs(e_x))
         {
@@ -124,27 +86,6 @@ public:
     using value_type = PointND<long, N>;
     using pointer = PointND<long, N> *;
     using reference = const PointND<long, N> &;
-
-    LineIterator & flip(size_t axis)
-    {
-        step[axis] *= -1;
-        update();
-        return *this;
-    }
-
-    LineIterator & flip(const std::array<bool, N> & to_flip)
-    {
-        for (size_t i = 0; i < N; i++) if (to_flip[i]) step[i] *= -1;
-        update();
-        return *this;
-    }
-
-    LineIterator & move(size_t axis)
-    {
-        increment(step[axis], axis);
-        update();
-        return *this;
-    }
 
     LineIterator & operator++()
     {
@@ -175,32 +116,23 @@ private:
     constexpr static size_t NumPairs = UniquePairs<N>::NumPairs;
 
     PointND<long, N> step {}, current {};
+    // next marks which axes should advance on the next central-line step.
     PointND<bool, N> next {};
-    TangentError<T, N> terror {};
-    std::array<NormalError<T, N>, NumPairs> nerrors {};
+    std::array<BresenhamError<T, N>, NumPairs> errors {};
 
     LineIterator(PointND<long, N> current) : current(std::move(current)) {}
 
-    LineIterator(PointND<long, N> step, PointND<long, N> current, TangentError<T, N> terror, std::array<NormalError<T, N>, NumPairs> nerrors) :
-        step(std::move(step)), current(std::move(current)), next(), terror(std::move(terror)), nerrors(std::move(nerrors))
+    LineIterator(PointND<long, N> step, PointND<long, N> current,
+                 std::array<BresenhamError<T, N>, NumPairs> errors) :
+        step(std::move(step)), current(std::move(current)), next(), errors(std::move(errors))
     {
-        update();
-    }
-
-    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix ...>>>
-    LineIterator(const LineIterator & p, Ix ... axes) :
-        step(p.step), current(p.current), next(), terror(p.terror), nerrors(p.nerrors)
-    {
-        (step[axes] = ... = 0);
         update();
     }
 
     LineIterator & increment(long x, size_t axis)
     {
         current[axis] += x;
-
-        terror.increment(x, axis);
-        for (auto index : axes().indices(axis)) nerrors[index].increment(x, axis);
+        for (auto index : axes().indices(axis)) errors[index].increment(x, axis);
 
         return *this;
     }
@@ -209,12 +141,13 @@ private:
     {
         for (size_t i = 0; i < N; i++) next[i] = step[i];
 
+        // Intersect all pairwise 2D Bresenham decisions into one N-D step mask.
         for (size_t i = 0; i < NumPairs; i++)
         {
             auto [axis1, axis2] = axes().pairs(i);
             if (step[axis1] && step[axis2])
             {
-                auto [first, second] = nerrors[i].is_next(step, axis1, axis2);
+                auto [first, second] = errors[i].is_next(step, axis1, axis2);
                 next[axis1] &= first;
                 next[axis2] &= second;
             }
@@ -246,20 +179,17 @@ public:
     BresenhamPlotter(LineND<T, N> l, long offset) :
         line(std::move(l)), m_axis(long_axis())
     {
+        // Extend the central-line walk past both endpoints so the thick capsule ends
+        // are covered before exact segment-distance filtering trims candidates.
         auto tau = (pt1() - pt0()) / amplitude(pt1() - pt0());
         m_pt0 = (pt0() - std::abs(offset / tau[m_axis]) * tau).round();
         m_pt1 = (pt1() + std::abs(offset / tau[m_axis]) * tau).round();
         m_pt1 += step();
     }
 
-    iterator begin(PointND<long, N> point) const
-    {
-        return iterator(step(), std::move(point), tangent_error(point), normal_errors(point));
-    }
-
     iterator begin() const
     {
-        return iterator(step(), m_pt0, tangent_error(m_pt0), normal_errors(m_pt0));
+        return iterator(step(), m_pt0, errors(m_pt0));
     }
 
     iterator end() const
@@ -267,28 +197,8 @@ public:
         return iterator(m_pt1);
     }
 
-    template <typename ... Ix, typename = std::enable_if_t<is_all_integral_v<Ix ...>>>
-    iterator collapse(const iterator & iter, Ix ... axes) const
-    {
-        return iterator(iter, axes...);
-    }
-
     size_t axis() const {return m_axis;}
     size_t axis(size_t offset) const {return (axis() + offset) % N;}
-
-    T normal_error(const iterator & iter) const
-    {
-        T error = T();
-        for (size_t i = 0; i < NumPairs; i++) error += std::pow(iter.nerrors[i].error_at() / iter.terror.length, 2);
-        return error;
-    }
-
-    T error(const iterator & iter, T width) const
-    {
-        if (width <= T()) return std::numeric_limits<T>::infinity();
-        auto error = std::pow(iter.terror.error_at() / iter.terror.length, 2) + normal_error(iter);
-        return error / (width * width);
-    }
 
     bool is_next(const iterator & iter, size_t axis) const
     {
@@ -334,16 +244,12 @@ private:
         return point;
     }
 
-    std::array<NormalError<T, N>, NumPairs> normal_errors(const PointND<long, N> & point) const
+    std::array<BresenhamError<T, N>, NumPairs> errors(const PointND<long, N> & point) const
     {
-        std::array<NormalError<T, N>, NumPairs> errors;
-        for (size_t i = 0; i < NumPairs; i++) errors[i] = NormalError<T, N>(normal(iterator::axes().pairs(i)), point, pt0());
-        return errors;
-    }
-
-    TangentError<T, N> tangent_error(const PointND<long, N> & point) const
-    {
-        return TangentError<T, N>(line.tangent(), point, pt0());
+        std::array<BresenhamError<T, N>, NumPairs> result;
+        for (size_t i = 0; i < NumPairs; i++)
+            result[i] = BresenhamError<T, N>(normal(iterator::axes().pairs(i)), point, pt0());
+        return result;
     }
 };
 
@@ -354,29 +260,34 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_2d(const LineND<T, 2> & line, T width, Func && func)
 {
-    // Initialize with a line and an offset from the start and end points
-    BresenhamPlotter<T, 2, true> p {line, long(std::ceil(width) + 1)};
+    if (width <= T()) return;
 
-    // Walking along the central line
+    // Bresenham chooses dominant-axis slices; exact projection decides inclusion.
+    BresenhamPlotter<T, 2, true> p {line, long(std::ceil(width) + 1)};
+    auto projector = line.projector();
+    auto radius = long(std::ceil(width)) + 1;
+    auto inv_width2 = T(1) / (width * width);
+
+    auto ax0 = p.axis();
+    auto ax1 = p.axis(1);
+
+    auto emit = [&projector, &func, inv_width2](const PointND<long, 2> & ipt)
+    {
+        auto closest = projector.project_to_streak(ipt);
+        T error = magnitude(closest - ipt) * inv_width2;
+        if (error <= T(1)) std::forward<Func>(func)(ipt, error);
+    };
+
     for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
-        // We fill the orthogonal plane if we stepped the longest axis
-        if (p.is_next(iter, p.axis()))
+        // Emit one orthogonal interval per dominant-axis step.
+        if (p.is_next(iter, ax0))
         {
-            std::forward<Func>(func)(*iter, p.error(iter, width));
-
-            // Filling the first half
-            for (auto iter_x = std::next(p.collapse(iter, p.axis()));
-                 p.normal_error(iter_x) < width * width; ++iter_x)
+            for (long d1 = -radius; d1 <= radius; d1++)
             {
-                std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
-            }
-
-            // Filling the second half
-            for (auto iter_x = std::next(p.collapse(iter, p.axis()).flip(p.axis(1)));
-                 p.normal_error(iter_x) < width * width; ++iter_x)
-            {
-                std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
+                auto ipt = *iter;
+                ipt[ax1] += d1;
+                emit(ipt);
             }
         }
     }
@@ -391,38 +302,38 @@ template <typename T, class Func, typename = std::enable_if_t<
 >>
 void draw_line_3d(const LineND<T, 3> & line, T width, Func && func)
 {
-    // Initialize with a line and an offset from the start and end points
-    BresenhamPlotter<T, 3, true> p {line, long(std::ceil(width) + 1)};
+    if (width <= T()) return;
 
-    // Walking along the central line
+    // Bresenham chooses dominant-axis slices; exact projection decides inclusion.
+    BresenhamPlotter<T, 3, true> p {line, long(std::ceil(width) + 1)};
+    auto projector = line.projector();
+    auto radius = long(std::ceil(width)) + 1;
+    auto inv_width2 = T(1) / (width * width);
+
+    auto ax0 = p.axis();
+    auto ax1 = p.axis(1);
+    auto ax2 = p.axis(2);
+
+    auto emit = [&projector, &func, inv_width2](const PointND<long, 3> & ipt)
+    {
+        auto closest = projector.project_to_streak(ipt);
+        T error = magnitude(closest - ipt) * inv_width2;
+        if (error <= T(1)) std::forward<Func>(func)(ipt, error);
+    };
+
     for (auto iter = p.begin(); iter != p.end(); ++iter)
     {
-        // We fill the orthogonal plane if we stepped the longest axis
-        if (p.is_next(iter, p.axis()))
+        // Emit one orthogonal box per dominant-axis step.
+        if (p.is_next(iter, ax0))
         {
-            std::forward<Func>(func)(*iter, p.error(iter, width));
-
-            // The orthogonal plane is divided in four quadrants
-            for (size_t i = 0; i < 4; i++)
+            for (long d1 = -radius; d1 <= radius; d1++)
             {
-                // The flipping mask of the size N
-                std::array<bool, 3> flip {};
-                flip[p.axis(1)] |= i & 1;
-                flip[p.axis(2)] |= i >> 1;
-
-                for (auto iter_xy = p.collapse(iter, p.axis()).flip(flip).move(p.axis(1 + ((i & 1) ^ (i >> 1))));
-                     p.normal_error(iter_xy) < width * width; ++iter_xy)
+                for (long d2 = -radius; d2 <= radius; d2++)
                 {
-                    std::forward<Func>(func)(*iter_xy, p.error(iter_xy, width));
-
-                    for (size_t j = 1; j < 3; j++) if (p.is_next(iter_xy, p.axis(j)))
-                    {
-                        for (auto iter_x = std::next(p.collapse(iter_xy, p.axis(j)));
-                             p.normal_error(iter_x) < width * width; ++iter_x)
-                        {
-                            std::forward<Func>(func)(*iter_x, p.error(iter_x, width));
-                        }
-                    }
+                    auto ipt = *iter;
+                    ipt[ax1] += d1;
+                    ipt[ax2] += d2;
+                    emit(ipt);
                 }
             }
         }
@@ -440,6 +351,77 @@ void draw_line_nd(const LineND<T, N> & line, T width, Func && func)
 
     if constexpr(N == 2) detail::draw_line_2d(line, width, std::forward<Func>(func));
     else detail::draw_line_3d(line, width, std::forward<Func>(func));
+}
+
+namespace detail {
+
+template <typename T, size_t N, class Func, typename = std::enable_if_t<
+    std::is_invocable_v<remove_cvref_t<Func>, const PointND<long, N> &, T>
+>>
+void draw_segment_box_nd(const LineND<T, N> & line, T width, Func && func)
+{
+    if (width <= T()) return;
+
+    PointND<long, N> lo, hi;
+    for (size_t n = 0; n < N; n++)
+    {
+        lo[n] = std::floor(std::min(line.pt0[n], line.pt1[n]) - width);
+        hi[n] = std::ceil(std::max(line.pt0[n], line.pt1[n]) + width);
+    }
+
+    T inv_width = T(1) / (width * width);
+    auto projector = line.projector();
+
+    auto emit = [&projector, &func, inv_width](const PointND<long, N> & ipt)
+    {
+        auto closest = projector.project_to_streak(ipt);
+        T error = magnitude(closest - ipt) * inv_width;
+        if (error <= T(1)) std::forward<Func>(func)(ipt, error);
+    };
+
+    if constexpr(N == 2)
+    {
+        for (long y = lo[1]; y <= hi[1]; y++)
+        {
+            for (long x = lo[0]; x <= hi[0]; x++)
+            {
+                emit(PointND<long, 2>{x, y});
+            }
+        }
+    }
+    else
+    {
+        for (long z = lo[2]; z <= hi[2]; z++)
+        {
+            for (long y = lo[1]; y <= hi[1]; y++)
+            {
+                for (long x = lo[0]; x <= hi[0]; x++)
+                {
+                    emit(PointND<long, 3>{x, y, z});
+                }
+
+            }
+
+        }
+    }
+}
+
+}
+
+template <typename T, size_t N, class Func, typename = std::enable_if_t<
+    std::is_invocable_v<remove_cvref_t<Func>, const PointND<long, N> &, T>
+>>
+void draw_curve_nd(const CurveND<T, N> & curve, T width, Func && func)
+{
+    static_assert(N == 2 || N == 3);
+
+    if (curve.size() < 2)
+        throw std::invalid_argument("Curve must contain at least two points");
+
+    for (size_t i = 0; i + 1 < curve.size(); i++)
+    {
+        detail::draw_segment_box_nd(curve.segment(i), width, std::forward<Func>(func));
+    }
 }
 
 }

@@ -6,13 +6,23 @@ dependencies:
   - cxx-compiler
   - h5py
   - hdf5plugin
+  - ipympl
   - jax
+  - jupyter
   - libxcrypt
   - llvm-openmp
   - numpy
+  - numpydoc
   - optax
+  - matplotlib
   - pandas
   - pybind11
+  - pydata-sphinx-theme>=0.15
   - pytables
-  - python==3.11
+  - pytest
+  - pytest-asyncio
+  - python=3.11
+  - scipy
+  - sphinx>=7
+  - sphinx-copybutton
   - tqdm

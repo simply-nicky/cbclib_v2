@@ -4,7 +4,7 @@ import pytest
 from cbclib_v2 import Lines, default_rng
 from cbclib_v2.annotations import (CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
                                    NumPy, NumPyNamespace, RealArray, Shape)
-from cbclib_v2.label import CPLabelResult, LabelResult, NPLabelResult, Structure, label, p_values
+from cbclib_v2.label import LabelResult, Structure, label, p_values
 from cbclib_v2.ndimage import draw_lines
 from cbclib_v2.streak_finder import PeakLabels, PatternStreakFinder, Streaks, streak_labels
 from cbclib_v2.streak_finder import n_signal, detect_peaks, peak_labels
@@ -68,14 +68,6 @@ class TestNewStreakFinder:
         log_terms = log_term + log_offsets
         max_term = xp.max(log_terms)
         return max_term + xp.log(xp.sum(xp.exp(log_terms - max_term)))
-
-    def labels_and_index(self, labeled: LabelResult, xp: TestNamespace
-                         ) -> Tuple[IntArray, IntArray]:
-        if isinstance(labeled, CPLabelResult):
-            return labeled.labels, labeled.index
-        if isinstance(labeled, NPLabelResult):
-            return labeled.labels, labeled.index
-        raise TypeError("Unknown LabelResult type")
 
     @pytest.fixture(params=['cpu', 'gpu'])
     def platform(self, request: pytest.FixtureRequest) -> str:
@@ -149,7 +141,8 @@ class TestNewStreakFinder:
     @pytest.fixture
     def image(self, lines: Lines, width: float, frames: IntArray, shape: Shape, noise: RealArray,
               xp: TestNamespace) -> RealArray:
-        return draw_lines(xp.zeros(shape), lines.to_lines(width), frames, kernel='biweight') + noise
+        return draw_lines(xp.zeros(shape), lines.lines, frames, width=width,
+                          kernel='biweight') + noise
 
     @pytest.fixture(params=[(1, 2)])
     def structure(self, request: pytest.FixtureRequest, shape: Shape) -> Structure:
@@ -349,7 +342,7 @@ class TestNewStreakFinder:
                       finder: PatternStreakFinder, xtol: float, xp: TestNamespace):
         assert p_values.size == detected.shape[0]
 
-        labels, index = self.labels_and_index(labeled, xp)
+        labels, index = labeled.labels, labeled.index
         for label, line, p_val in zip(index, detected, p_values):
             indices = xp.stack(xp.where(labels == label), axis=-1)
             dists = Lines(line).distance(indices[..., ::-1])

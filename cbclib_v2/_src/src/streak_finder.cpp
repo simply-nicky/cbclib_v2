@@ -6,13 +6,13 @@ static constexpr size_t L = 4; // Linelet size in 2D, should be 2 * N for N-dime
 
 namespace cbclib {
 
-template <typename T>
-py::array_t<lint_t> detect_peaks(py::array_t<lint_t> labels, py::array_t<T> data, Structure structure, size_t radius, T vmin, unsigned threads)
+template <typename L, typename T>
+py::array_t<lint_t> detect_peaks(py::array_t<L> labels, py::array_t<T> data, Structure structure, size_t radius, T vmin, unsigned threads)
 {
     if (structure.rank() != data.ndim()) throw std::invalid_argument("Structure must have rank " + std::to_string(data.ndim()) + " to match data dimensions");
     check_equal("labels and data must have the same shape", labels.shape(), labels.shape() + labels.ndim(), data.shape(), data.shape() + data.ndim());
 
-    array<lint_t> larr {labels.request()};
+    array<L> larr {labels.request()};
     array<T> darr {data.request()};
 
     PeaksIndexer indexer (darr.shape(), radius);
@@ -594,8 +594,10 @@ PYBIND11_MODULE(streak_finder, m)
             return as_pyarray(std::move(result), std::vector<py::ssize_t>{py::ssize_t(pattern.size()), L});
         }, py::arg("labels"), py::arg("lines"));
 
-    m.def("detect_peaks", &detect_peaks<double>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
-    m.def("detect_peaks", &detect_peaks<float>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("detect_peaks", &detect_peaks<int, double>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("detect_peaks", &detect_peaks<int, float>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("detect_peaks", &detect_peaks<long, double>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
+    m.def("detect_peaks", &detect_peaks<long, float>, py::arg("labels"), py::arg("data"), py::arg("structure"), py::arg("radius"), py::arg("vmin"), py::arg("num_threads")=1);
 
     m.def("line_fit", &line_fit<double>, py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("num_threads")=1);
     m.def("line_fit", &line_fit<float>, py::arg("labels"), py::arg("peaks"), py::arg("data"), py::arg("structure"), py::arg("vmin"), py::arg("num_threads")=1);

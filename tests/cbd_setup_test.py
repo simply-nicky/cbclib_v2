@@ -1,9 +1,10 @@
 import pytest
 from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, NDArray, NumPyNamespace, NumPy, RealArray
-from cbclib_v2.indexer import (CBDModel, CBDPoints, LaueVectors, Miller, MillerWithRLP, RotationState,
-                               XtalCell, XtalState)
-from cbclib_v2.test_util import FixedState, TestSetup, check_close
+from cbclib_v2.indexer import (CBDModel, CBDPoints, MaskedLaueVectors, Miller, MillerWithRLP,
+                               FixedApertureState, FixedPupilState, FixedState, RotationState,
+                               ResolvedState, XtalCell, XtalState)
+from cbclib_v2.test_util import TestSetup, check_close
 
 class TestCBDSetup():
     @pytest.fixture
@@ -16,7 +17,11 @@ class TestCBDSetup():
 
     @pytest.fixture
     def state(self, xp: NumPyNamespace) -> FixedState:
-        return FixedState(TestSetup.xtal(xp))
+        return FixedState(TestSetup.xtal(xp), TestSetup.fixed_setup())
+
+    @pytest.fixture
+    def resolved(self, state: FixedState, xp: NumPyNamespace) -> ResolvedState:
+        return state.resolve(xp)
 
     def skew_symmetric(self, vec: RealArray, xp: NumPyNamespace) -> RealArray:
         return xp.linalg.cross(xp.eye(vec.shape[-1]), vec[..., None, :])
@@ -52,9 +57,9 @@ class TestCBDSetup():
         return request.param
 
     @pytest.fixture
-    def miller(self, rng: Generator[NDArray], q_abs: float, num_points: int,
-               model: CBDModel, state: FixedState) -> Miller:
-        miller = model.hkl_in_aperture(q_abs, state)
+    def miller(self, rng: Generator[NDArray], q_abs: float, num_points: int, model: CBDModel,
+               resolved: ResolvedState, xp: NumPyNamespace) -> Miller:
+        miller = model.hkl_in_aperture(q_abs, resolved, xp)
         idxs = rng.choice(miller.hkl.shape[0], size=(num_points,))
         return miller[idxs]
 
@@ -64,14 +69,14 @@ class TestCBDSetup():
         return model.xtal.hkl_to_q(miller, state.xtal, xp)
 
     @pytest.fixture
-    def laue(self, rlp: MillerWithRLP, model: CBDModel, state: FixedState,
-             xp: NumPyNamespace) -> LaueVectors:
-        return model.lens.source_lines(rlp, state.lens, xp)
+    def laue(self, rlp: MillerWithRLP, model: CBDModel, resolved: ResolvedState,
+             xp: NumPyNamespace) -> MaskedLaueVectors:
+        return model.lens.source_lines(rlp, resolved.setup.lens, xp)
 
     @pytest.fixture
-    def points(self, laue: LaueVectors, model: CBDModel, state: FixedState,
+    def points(self, laue: MaskedLaueVectors, model: CBDModel, resolved: ResolvedState,
                xp: NumPyNamespace) -> CBDPoints:
-        return model.kout_to_points(laue, state, xp)
+        return model.kout_to_points(laue, resolved.setup, xp)
 
     def text_xtal_to_cell(self, xtal: XtalState, ormatrix: RotationState,
                           cell: XtalCell, xp: NumPyNamespace):
@@ -97,14 +102,18 @@ class TestCBDSetup():
         rlp = model.xtal.q_to_hkl(rlp, state.xtal, xp)
         assert xp.all(rlp.hkl_indices == miller.hkl_indices)
 
-    def test_laue(self, laue: LaueVectors, model: CBDModel,
-                  state: FixedState, xp: NumPyNamespace):
+    def test_laue(self, laue: MaskedLaueVectors, model: CBDModel,
+                  resolved: ResolvedState, xp: NumPyNamespace):
         check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
-        check_close(laue.kin, model.lens.project_to_pupil(laue.kin, state.lens, xp))
+        valid = xp.broadcast_to(laue.mask, laue.kin.shape[:-1])
+        kin = model.lens.project_to_pupil(laue.kin, laue.index, resolved.setup.lens, xp)
+        check_close(laue.kin[valid], kin[valid])
 
-    def test_points_and_kout(self, laue: LaueVectors, points: CBDPoints, model: CBDModel,
-                             state: FixedState, xp: NumPyNamespace):
-        check_close(model.points_to_kout(points, state, xp).kout, laue.kout)
+    def test_points_and_kout(self, laue: MaskedLaueVectors, points: CBDPoints,
+                             model: CBDModel, resolved: ResolvedState, xp: NumPyNamespace):
+        valid = xp.broadcast_to(laue.mask, laue.kout.shape[:-1])
+        kout = model.points_to_kout(points, resolved.setup, xp).kout
+        check_close(kout[valid], laue.kout[valid])
 
     def test_rotation_to_tilt(self, ormatrix: RotationState, xp: NumPyNamespace):
         tilt = ormatrix.to_tilt()
@@ -114,3 +123,21 @@ class TestCBDSetup():
     def test_rotation_to_tilt_over_axis(self, ormatrix: RotationState):
         tilt_over_axis = ormatrix.to_tilt().to_tilt_over_axis()
         check_close(ormatrix.matrix, tilt_over_axis.to_tilt().to_rotation().matrix)
+
+    def test_fixed_pupil_state_from_resolved(self, resolved: ResolvedState, xp: NumPyNamespace):
+        restored = FixedPupilState.from_resolved(resolved)
+        converted = restored.resolve(xp)
+
+        check_close(converted.xtal.basis, resolved.xtal.basis)
+        check_close(converted.setup.lens.foc_pos, resolved.setup.lens.foc_pos)
+        check_close(converted.setup.lens.pupil_roi, resolved.setup.lens.pupil_roi)
+        check_close(converted.setup.z, resolved.setup.z)
+
+    def test_fixed_aperture_state_from_resolved(self, resolved: ResolvedState, xp: NumPyNamespace):
+        restored = FixedApertureState.from_resolved(resolved)
+        converted = restored.resolve(xp)
+
+        check_close(converted.xtal.basis, resolved.xtal.basis)
+        check_close(converted.setup.lens.foc_pos, resolved.setup.lens.foc_pos)
+        check_close(converted.setup.lens.pupil_roi, resolved.setup.lens.pupil_roi)
+        check_close(converted.setup.z, resolved.setup.z)

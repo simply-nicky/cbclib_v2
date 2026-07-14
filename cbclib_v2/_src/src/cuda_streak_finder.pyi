@@ -21,7 +21,7 @@ class Streaks:
 
 LabelsTuple = Tuple[IntArray, int, int, int, int]
 
-def detect_peaks(peaks: CPIntArray, labels: CPIntArray, data: RealArray, structure: Structure,
+def detect_peaks(peaks: CPIntArray, labels: IntArray, data: RealArray, structure: Structure,
                  radius: int, vmin: float) -> CPIntArray: ...
 
 def line_fit(out: CPRealArray, labels: LabelsTuple, peaks: IntArray, data: RealArray,

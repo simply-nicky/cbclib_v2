@@ -286,6 +286,7 @@ class JobStatus:
         state: SLURM state string.
         time_used: Elapsed run time.
         nodes: Number of allocated nodes.
+        job_id_raw: Unique SLURM job id for this allocation.
     """
     id          : JobID
     partition   : str
@@ -295,12 +296,14 @@ class JobStatus:
     state       : str
     time_used   : str
     nodes       : int
+    job_id_raw  : int
 
     def format_filename(self, pattern: str) -> str:
         """Format a SLURM output or error filename pattern.
 
-        Supports common SLURM placeholders: ``%j``, ``%J``, ``%N``, ``%s``,
-        ``%u``, ``%x``, and ``%%``. Unknown placeholders are left unchanged.
+        Supports common SLURM placeholders: ``%j``, ``%J``, ``%A``, ``%a``,
+        ``%N``, ``%s``, ``%u``, ``%x``, and ``%%``. Unknown placeholders are
+        left unchanged.
 
         Args:
             pattern: Filename pattern to format.
@@ -308,8 +311,10 @@ class JobStatus:
         Returns:
             Formatted filename.
         """
-        mapping = {'j': str(self.id), 'J': str(self.id), 'N': self.hostname,
-                   's': str(self.id), 'u': self.user, 'x': self.name}
+        task_id = str(self.id.task_id) if self.id.task_id is not None else str()
+        mapping = {'j': str(self.job_id_raw), 'J': str(self.job_id_raw),
+                   'A': str(self.id.id), 'a': task_id, 'N': self.hostname,
+                   's': str(self.job_id_raw), 'u': self.user, 'x': self.name}
 
         def repl(m: re.Match[str]) -> str:
             ch = m.group(1)
@@ -343,15 +348,31 @@ class SLURMJobManager:
 
         for line in lines:
             value = line.strip()
-            if not re.fullmatch(r"\d+(?:_\d+)?", value):
-                continue
+            parsed: List[JobID] = []
+            if re.fullmatch(r"\d+(?:_\d+)?", value):
+                parsed = [JobID.from_string(value)]
+            else:
+                match = re.fullmatch(r"(\d+)_\[(.+)\]", value)
+                if match is None:
+                    continue
+                job_id = int(match.group(1))
+                for task_range in match.group(2).split(','):
+                    task_range = task_range.split('%', 1)[0]
+                    parts = task_range.split(':', 1)
+                    step = int(parts[1]) if len(parts) == 2 else 1
+                    limits = parts[0].split('-', 1)
+                    start = int(limits[0])
+                    stop = int(limits[1]) if len(limits) == 2 else start
+                    parsed.extend(JobID(job_id, task_id)
+                                  for task_id in range(start, stop + 1, step))
 
-            job_id = JobID.from_string(value)
-            if job_id not in seen:
-                job_ids.append(job_id)
-                seen.add(job_id)
+            for job_id in parsed:
+                if job_id not in seen:
+                    job_ids.append(job_id)
+                    seen.add(job_id)
 
-        return sorted(job_ids, key=lambda jid: (jid.id, -1 if jid.task_id is None else jid.task_id))
+        sorter = lambda jid: (jid.id, -1 if jid.task_id is None else jid.task_id)
+        return sorted(job_ids, key=sorter)
 
     @staticmethod
     def _parse_status_row(values: List[str]) -> JobStatus | None:
@@ -361,13 +382,14 @@ class SLURMJobManager:
         jid, partition, name, nodelist, user, state, time_used, nodes = values[:8]
         try:
             job_id = JobID.from_string(jid)
+            job_id_raw = int(values[8]) if len(values) > 8 and values[8] else job_id.id
         except ValueError:
             return None
 
         hostname = (nodelist.split(',')[0].strip() if nodelist else '')
         return JobStatus(id=job_id, partition=partition, name=name,
                          hostname=hostname, user=user, state=state, time_used=time_used,
-                         nodes=int(nodes))
+                         nodes=int(nodes), job_id_raw=job_id_raw)
 
     @staticmethod
     def _split_slurm_rows(output: str) -> List[List[str]]:
@@ -388,7 +410,7 @@ class SLURMJobManager:
 
         proc = subprocess.run(
             [self.config.squeue, "-j", self._base_job_ids(job_ids), "-r", "-h",
-             "-o", "%i|%P|%j|%N|%u|%T|%M|%D"],
+             "-o", "%i|%P|%j|%N|%u|%T|%M|%D|%A"],
             capture_output=True,
             text=True,
             check=False,
@@ -410,7 +432,7 @@ class SLURMJobManager:
 
         proc = subprocess.run(
             [self.config.sacct, "-j", self._base_job_ids(job_ids), "-n", "-P", "-X",
-             "--format=JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes"],
+             "--format=JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes,JobIDRaw"],
             capture_output=True,
             text=True,
             check=False,
@@ -736,11 +758,11 @@ class SLURMJobManager:
             RuntimeError: If SLURM output cannot be parsed or a query command
                 fails.
         """
-        # id | partition | name | nodelist | user | state | time_used | nodes
-        formatter = "JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes"
+        # id | partition | name | nodelist | user | state | time_used | nodes | raw_id
+        formatter = "JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes,JobIDRaw"
 
         try:
-            values = await self.squeue_async(job_id, formatter="%i|%P|%j|%N|%u|%T|%M|%D")
+            values = await self.squeue_async(job_id, formatter="%i|%P|%j|%N|%u|%T|%M|%D|%A")
         except RuntimeError:
             values = await self.sacct_async(job_id, formatter=formatter)
         else:
@@ -753,10 +775,12 @@ class SLURMJobManager:
         if len(values) < 8:
             raise RuntimeError(f"Unexpected squeue output: {values}")
         jid, partition, name, nodelist, user, state, time_used, nodes = values[:8]
+        parsed_id = JobID.from_string(jid)
+        job_id_raw = int(values[8]) if len(values) > 8 and values[8] else parsed_id.id
         hostname = (nodelist.split(',')[0].strip() if nodelist else '')
-        return JobStatus(id=JobID.from_string(jid), partition=partition, name=name,
+        return JobStatus(id=parsed_id, partition=partition, name=name,
                          hostname=hostname, user=user, state=state, time_used=time_used,
-                         nodes=int(nodes))
+                         nodes=int(nodes), job_id_raw=job_id_raw)
 
     def get_state(self, job_id: JobID) -> str | None:
         """Return the SLURM state string for one job.

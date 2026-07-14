@@ -6,21 +6,26 @@ backends based on the device context set via :mod:`cbclib_v2.device`.
 See Also:
     :mod:`cbclib_v2.device`: Device context management for backend selection.
 """
+from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
 from math import prod
 from typing import (TYPE_CHECKING, Callable, NamedTuple, Optional, Protocol, Sequence, Tuple,
                     cast, overload)
 import warnings
-from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray, CPRealArray,
-                          CuPy, IntArray, IntSequence, JaxArray, JaxBoolArray, JaxIntArray,
-                          JaxNumPy, JaxRealArray, NDArray, NDBoolArray, NDIntArray,
+from .annotations import (Array, BoolArray, CPArray, CPBoolArray, CPIntArray,
+                          CPRealArray, CuPy, IntArray, IntSequence, JaxArray, JaxBoolArray,
+                          JaxIntArray, JaxNumPy, JaxRealArray, NDArray, NDBoolArray, NDIntArray,
                           NDRealArray, NumPy, RealArray)
-from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform
+from .array_api import array_namespace, ascupy, asjax, asnumpy, get_platform, set_at
 from .config import get_cpu_config
-from .src import bresenham, label as cpu_label, median as cpu_median, streak_finder
+from .data_container import DataContainer
+from .src import bresenham, label as cpu_label, median as cpu_median, online_detector, streak_finder
 from .src.label import Structure
 from .src.streak_finder import Streaks as NPStreaks
+
+if TYPE_CHECKING:
+    from .crystfel import Detector
 
 def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
     """Dispatch to CPU or GPU implementation based on array namespace/device.
@@ -128,7 +133,8 @@ class PeakLabels(NamedTuple):
         return self.labels, self.n_seeds, self.n_labels, self.n_good, self.radius
 
 if CuPy is not None or TYPE_CHECKING:
-    from .src import cuda_draw_lines, cuda_label, cuda_median, cuda_streak_finder
+    from .src import (cuda_draw_lines, cuda_label, cuda_median, cuda_online_detector,
+                      cuda_streak_finder)
     from cupyx.scipy import ndimage as _ndimage
     from .src.cuda_streak_finder import Streaks as CPStreaks
 
@@ -168,6 +174,7 @@ else:
     cuda_draw_lines = None
     cuda_label = None
     cuda_median = None
+    cuda_online_detector = None
     cupy_ndimage = None
     cuda_streak_finder = None
 
@@ -183,68 +190,83 @@ else:
                            "the cbclib_v2 with GPU support.")
 
 def _accumulate_lines_cpu(out: RealArray, lines: RealArray, terms: IntArray,
-                          frames: IntArray, max_val: float=1.0,
-                          kernel: str='rectangular', in_overlap: str='sum',
+                          frames: IntArray, width: RealArray | float=1.0,
+                          max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
                           out_overlap: str='sum') -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()
+
+    xp = NumPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines, terms, frames = asnumpy(lines), asnumpy(terms), asnumpy(frames)
     return bresenham.accumulate_lines(out=out, lines=lines, terms=terms, frames=frames,
-                                      max_val=max_val, kernel=kernel,
+                                      widths=width, max_val=max_val, kernel=kernel,
                                       in_overlap=in_overlap, out_overlap=out_overlap,
                                       num_threads=num_threads)
 
 def _accumulate_lines_gpu(out: RealArray, lines: RealArray, terms: IntArray,
-                          frames: IntArray, max_val: float=1.0,
+                          frames: IntArray, width: RealArray | float=1.0,
+                          max_val: float=1.0,
                           kernel: str='rectangular', in_overlap: str='sum',
                           out_overlap: str='sum') -> CPRealArray:
     if cuda_draw_lines is None:
         raise RuntimeError("accumulate_lines is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
+    xp = CuPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines, terms, frames = ascupy(lines), ascupy(terms), ascupy(frames)
+    widths = ascupy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
     return cuda_draw_lines.accumulate_lines(out=out, lines=lines, terms=terms, frames=frames,
-                                            max_val=max_val, kernel=kernel,
-                                            in_overlap=in_overlap, out_overlap=out_overlap)
+                                            widths=widths, max_val=max_val, kernel=kernel,
+                                            in_overlap=in_overlap,
+                                            out_overlap=out_overlap)
 
 @overload
 def accumulate_lines(out: NDRealArray, lines: NDRealArray, terms: NDIntArray,
-                     frames: NDIntArray, max_val: float=1.0, kernel: str='rectangular',
+                     frames: NDIntArray, width: RealArray | float=1.0,
+                     max_val: float=1.0, kernel: str='rectangular',
                      in_overlap: str='sum', out_overlap: str='sum') -> NDRealArray: ...
 
 @overload
 def accumulate_lines(out: CPRealArray, lines: CPRealArray, terms: CPIntArray,
-                     frames: CPIntArray, max_val: float=1.0, kernel: str='rectangular',
+                     frames: CPIntArray, width: RealArray | float=1.0,
+                     max_val: float=1.0, kernel: str='rectangular',
                      in_overlap: str='sum', out_overlap: str='sum') -> CPRealArray: ...
 
 @overload
 def accumulate_lines(out: JaxRealArray, lines: JaxRealArray, terms: JaxIntArray,
-                     frames: JaxIntArray, max_val: float=1.0, kernel: str='rectangular',
+                     frames: JaxIntArray, width: RealArray | float=1.0,
+                     max_val: float=1.0, kernel: str='rectangular',
                      in_overlap: str='sum', out_overlap: str='sum') -> JaxRealArray: ...
 
 @overload
 def accumulate_lines(out: Array, lines: Array, terms: IntArray, frames: IntArray,
-                     max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular', in_overlap: str='sum',
                      out_overlap: str='sum') -> RealArray: ...
 
 @array_dispatch("out", cpu_impl=_accumulate_lines_cpu, gpu_impl=_accumulate_lines_gpu)
 def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: IntArray,
-                     max_val: float=1.0, kernel: str='rectangular', in_overlap: str='sum',
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular', in_overlap: str='sum',
                      out_overlap: str='sum') -> RealArray:
-    """Accumulate thick lines with variable thickness across multiple frames.
+    """Accumulate thick lines or curves across multiple frames.
 
     Automatically dispatches to CPU or CUDA backend based on current device context.
 
     Args:
-        out: Output array where the lines will be accumulated.
-        lines: A dictionary of the detected lines. Each array of lines must have a shape of
-            (N, 5), where N is the number of lines. Each line is comprised of 5 parameters
-            as follows:
-
-            * [x0, y0], [x1, y1] : The coordinates of the line's ends.
-            * width : Line's width.
-
-        terms: Term indices specifying to which term each line belongs.
+        out: Output array where the geometries will be accumulated.
+        lines: Array of shape ``(..., 2 * ndim)`` with segment endpoints, or
+            ``(..., n_points, ndim)`` with curve points. Curve points are sewn internally
+            with a local maximum before overlap between curves is applied.
+        terms: Term indices specifying to which term each line or curve belongs.
         frames: Frame indices specifying to which frame each term belongs.
+        width: Line or curve width in pixels. A scalar applies to all geometries; arrays
+            must broadcast to the leading geometry shape.
         max_val: Maximum pixel value of a drawn line.
         kernel: Choose one of the supported kernel functions. The following kernels
             are available:
@@ -259,7 +281,7 @@ def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: 
         out_overlap: How to combine output overlapping pixels ('sum', 'max', 'min').
 
     Returns:
-        Output array with the lines accumulated.
+        Output array with the lines or curves accumulated.
 
     See Also:
         :func:`draw_lines`: Draw lines on a single frame.
@@ -267,56 +289,73 @@ def accumulate_lines(out: RealArray, lines: RealArray, terms: IntArray, frames: 
     ...
 
 def _draw_lines_cpu(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
-                    max_val: float=1.0, kernel: str='rectangular',
+                    width: RealArray | float=1.0, max_val: float=1.0, kernel: str='rectangular',
                     overlap: str='sum') -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()
+
+    xp = NumPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines = asnumpy(lines)
     idxs = asnumpy(idxs) if idxs is not None else None
-    return bresenham.draw_lines(out=out, lines=lines, idxs=idxs, max_val=max_val,
+    return bresenham.draw_lines(out=out, lines=lines, idxs=idxs, widths=width, max_val=max_val,
                                 kernel=kernel, overlap=overlap, num_threads=num_threads)
 
 def _draw_lines_gpu(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
-                    max_val: float=1.0, kernel: str='rectangular',
+                    width: RealArray | float=1.0, max_val: float=1.0, kernel: str='rectangular',
                     overlap: str='sum') -> CPRealArray:
     if cuda_draw_lines is None:
         raise RuntimeError("draw_lines is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
 
+    xp = CuPy
+    if isinstance(width, (int, float)):
+        width = xp.asarray([width,], dtype=lines.dtype)
     lines = ascupy(lines)
+    widths = ascupy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
     idxs = ascupy(idxs) if idxs is not None else None
-    return cuda_draw_lines.draw_lines(out=out, lines=lines, idxs=idxs, max_val=max_val,
-                                      kernel=kernel, overlap=overlap)
+    return cuda_draw_lines.draw_lines(out=out, lines=lines, widths=widths, idxs=idxs,
+                                      max_val=max_val, kernel=kernel, overlap=overlap)
 
 @overload
 def draw_lines(out: NDRealArray, lines: NDRealArray, idxs: NDIntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum'
+               width: RealArray | float=1.0, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum'
                ) -> NDRealArray: ...
 
 @overload
 def draw_lines(out: CPRealArray, lines: CPRealArray, idxs: CPIntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum'
+               width: RealArray | float=1.0, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum'
                ) -> CPRealArray: ...
 
 @overload
 def draw_lines(out: JaxRealArray, lines: JaxRealArray, idxs: JaxIntArray | None=None,
-               max_val: float=1.0, kernel: str='rectangular', overlap: str='sum'
+               width: RealArray | float=1.0, max_val: float=1.0,
+               kernel: str='rectangular', overlap: str='sum'
                ) -> JaxRealArray: ...
 
 @overload
-def draw_lines(out: Array, lines: Array, idxs: IntArray | None=None, max_val: float=1.0,
+def draw_lines(out: Array, lines: Array, idxs: IntArray | None=None,
+               width: RealArray | float=1.0, max_val: float=1.0,
                kernel: str='rectangular', overlap: str='sum') -> RealArray: ...
 
 @array_dispatch("out", cpu_impl=_draw_lines_cpu, gpu_impl=_draw_lines_gpu)
-def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None, max_val: float=1.0,
-               kernel: str='rectangular', overlap: str='sum') -> RealArray:
+def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
+               width: RealArray | float=1.0, max_val: float=1.0, kernel: str='rectangular',
+               overlap: str='sum') -> RealArray:
     """Draw thick lines with variable thickness and antialiasing.
 
     Automatically dispatches to CPU or CUDA backend based on current device context.
 
     Args:
         out: Output array to draw lines on.
-        lines: Array of shape (N, 5) with [x0, y0, x1, y1, width] for each line.
+        lines: Array of shape ``(..., 2 * ndim)`` with segment endpoints.
         idxs: Optional frame indices for each line. If None, all lines drawn to single frame.
+        width: Line width in pixels. A scalar applies to all lines; arrays must broadcast
+            to the leading line shape.
         max_val: Maximum pixel value for drawn lines.
         kernel: Kernel function for antialiasing. Options:
             - 'rectangular': Uniform (box) kernel
@@ -395,47 +434,346 @@ def binary_dilation(inp: BoolArray, structure: Structure, iterations: int=1,
     """
     ...
 
-class NPLabelResult(NamedTuple):
-    """Result of a connected-component labeling operation (CPU backend)."""
+def pixel_map(out: RealArray, geometry: 'Detector', half_pixel_shift: bool=True) -> RealArray:
+    """Compute a CrystFEL detector pixel-coordinate map.
 
-    labels      : NDIntArray
-    index       : NDIntArray
+    The map stores the lab-frame coordinate of every detector pixel described
+    by ``geometry``. The first axis has length 3 and contains ``x``, ``y``,
+    and ``z`` coordinates in CrystFEL pixel units. The ``x``/``y`` axes follow
+    the CrystFEL detector convention; ``z`` is the detector distance in pixels
+    including panel ``coffset`` values.
 
-    @classmethod
-    def from_array(cls, labels: NDIntArray, index: NDIntArray | None=None) -> 'NPLabelResult':
-        if index is None:
-            present = NumPy.unique(labels)
-            index = present[present > 0]
-        else:
-            index = NumPy.asarray(index)
-            if NumPy.any(index <= 0):
-                raise ValueError("index array must contain positive label ids")
+    The result is the geometric bridge between a CrystFEL ``.geom`` file and
+    array operations such as radial background estimation. NumPy and CuPy
+    outputs use the native online-detector kernels; other array namespaces use
+    a portable Python implementation that calls each panel's
+    :meth:`~cbclib_v2.crystfel.Panel.to_detector` method.
 
-        return cls(labels=NumPy.asarray(labels, dtype=NumPy.dtype('l')), index=index.astype('l'))
+    Args:
+        out: Output array with shape ``(3, *detector_shape)``. Its namespace and
+            dtype select the backend and native overload.
+        geometry: Parsed CrystFEL detector geometry.
+        half_pixel_shift: Add a 0.5-pixel offset before transforming panel
+            coordinates, so returned coordinates refer to pixel centres rather
+            than pixel corners.
+
+    Returns:
+        Real array with shape ``(3, *detector_shape)``. ``out[0]`` is ``x``,
+        ``out[1]`` is ``y``, and ``out[2]`` is ``z`` in lab-frame pixel units.
+    """
+    xp = array_namespace(out)
+    if xp is NumPy:
+        return online_detector.pixel_map(
+            out, geometry, half_pixel_shift=half_pixel_shift,
+            num_threads=get_cpu_config().effective_num_threads()
+        )
+    if xp is CuPy:
+        if cuda_online_detector is None:
+            raise RuntimeError("online detector is not compiled for the current platform. "
+                               "Please, check if you have installed the cbclib_v2 with GPU "
+                               "support.")
+
+        return cuda_online_detector.pixel_map(out, geometry, half_pixel_shift=half_pixel_shift)
+
+    if out.shape != (3,) + geometry.shape:
+        raise ValueError("pixel_map output shape mismatch")
+    out = set_at(out, ..., 0)
+    for panel in geometry.panels.values():
+        roi = panel.roi()
+        ss_grid, fs_grid = xp.meshgrid(xp.arange(panel.shape[-2]),
+                                       xp.arange(panel.shape[-1]), indexing='ij')
+
+        x, y, z = panel.to_detector(ss_grid, fs_grid, half_pixel_shift)
+        out = set_at(out, (0,) + roi, x)
+        out = set_at(out, (1,) + roi, y)
+        out = set_at(out, (2,) + roi, z)
+    return out
+
+def radius(out: RealArray, geometry: 'Detector', center: Tuple[int, int],
+           half_pixel_shift: bool=True) -> RealArray:
+    """Compute each detector pixel's radius from the beam centre.
+
+    Radii are measured in the assembled detector plane using the same
+    lab-frame pixel coordinates as :func:`pixel_map`. The ``center`` argument
+    is a CrystFEL lab-frame coordinate, usually the direct-beam position. The
+    detector bounds are subtracted internally so the returned radii align with
+    the image grid used by :meth:`~cbclib_v2.Detector.assembler` and
+    :func:`radial_index`.
+
+    Args:
+        out: Output array with shape ``detector_shape``. Its namespace and dtype
+            select the backend and native overload.
+        geometry: Parsed CrystFEL detector geometry.
+        center: Beam centre ``(x, y)`` in CrystFEL lab-frame pixel units.
+        half_pixel_shift: Add a 0.5-pixel offset before transforming panel
+            coordinates, so distances are measured from pixel centres.
+
+    Returns:
+        Real array with the detector image shape. Each value is the Euclidean
+        distance from ``center`` in pixels.
+    """
+    xp = array_namespace(out)
+    if xp is NumPy:
+        return online_detector.radius(
+            out, geometry, center, half_pixel_shift=half_pixel_shift,
+            num_threads=get_cpu_config().effective_num_threads()
+        )
+    if xp is CuPy:
+        if cuda_online_detector is None:
+            raise RuntimeError("online detector is not compiled for the current platform. "
+                               "Please, check if you have installed the cbclib_v2 with GPU "
+                               "support.")
+
+        return cuda_online_detector.radius(out, geometry, center,
+                                           half_pixel_shift=half_pixel_shift)
+
+    pixel_out = xp.empty((3,) + geometry.shape, dtype=out.dtype)
+    x, y, _ = pixel_map(pixel_out, geometry, half_pixel_shift=half_pixel_shift)
+    out = xp.sqrt((x - center[0] - geometry.bounds[0]) ** 2 +
+                  (y - center[1] - geometry.bounds[1]) ** 2)
+    if out.shape != geometry.shape:
+        raise ValueError("radius output shape mismatch")
+    return out
+
+def radial_index(out: IntArray, geometry: 'Detector', center: Tuple[int, int],
+                 n_bins: int, half_pixel_shift: bool=True) -> IntArray:
+    """Compute integer radial-bin indices for radial background estimation.
+
+    The detector plane is divided into ``n_bins`` concentric annuli around
+    ``center``. Each detector pixel receives the nearest integer radial-bin
+    index, computed as ``round(radius / radius_step)`` where
+    ``radius_step = geometry.max_radius(center) / (n_bins - 1)``. The compact
+    profile arrays used by :func:`radial_profiles` and
+    :class:`~cbclib_v2.RadialProfiles` are indexed with this map.
+
+    Native CPU/CUDA kernels also mark pixels that do not belong to any panel as
+    ``-1`` so radial-profile code can ignore gaps in the assembled detector
+    image. Valid panel pixels are in the inclusive range ``[0, n_bins - 1]``.
+
+    Args:
+        out: Output array with shape ``detector_shape``. Its namespace and
+            integer dtype select the backend and native overload.
+        geometry: Parsed CrystFEL detector geometry.
+        center: Beam centre ``(x, y)`` in CrystFEL lab-frame pixel units.
+        n_bins: Number of radial bins. Must be at least 2 so a finite radial
+            step can be computed.
+        half_pixel_shift: Add a 0.5-pixel offset before transforming panel
+            coordinates, so bins are assigned from pixel centres.
+
+    Returns:
+        Integer array with the detector image shape. Values are radial-bin
+        indices; ``-1`` denotes non-panel pixels on native backends.
+    """
+    xp = array_namespace(out)
+    if xp is NumPy:
+        return online_detector.radial_index(
+            out, geometry, center, n_bins, half_pixel_shift=half_pixel_shift,
+            num_threads=get_cpu_config().effective_num_threads()
+        )
+    if xp is CuPy:
+        if cuda_online_detector is None:
+            raise RuntimeError("online detector is not compiled for the current platform. "
+                               "Please, check if you have installed the cbclib_v2 with GPU "
+                               "support.")
+
+        return cuda_online_detector.radial_index(out, geometry, center, n_bins,
+                                                 half_pixel_shift=half_pixel_shift)
+
+    radius_step = geometry.max_radius(center) / (n_bins - 1)
+    radius_out = xp.empty(geometry.shape, dtype=xp.float64)
+    radii = radius(radius_out, geometry, center, half_pixel_shift=half_pixel_shift)
+    out = xp.asarray(xp.round(radii / radius_step), dtype=out.dtype)
+    if out.shape != geometry.shape:
+        raise ValueError("radial_index output shape mismatch")
+    return out
+
+def _is_signal_cpu(data: IntArray | RealArray, whitefield: RealArray, std: RealArray,
+                   radial_index: IntArray, min_snr: float=3.0, std_min: float=0.0
+                   ) -> NDBoolArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return online_detector.is_signal(data=data, whitefield=whitefield, std=std,
+                                     radial_index=radial_index, min_snr=min_snr, std_min=std_min,
+                                     num_threads=num_threads)
+
+def _is_signal_gpu(data: IntArray | RealArray, whitefield: RealArray, std: RealArray,
+                   radial_index: IntArray, min_snr: float=3.0, std_min: float=0.0
+                   ) -> CPBoolArray:
+    if cuda_online_detector is None:
+        raise RuntimeError("online detector is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    out = CuPy.empty(data.shape, dtype=bool)
+    return cuda_online_detector.is_signal(out=out, data=data, whitefield=whitefield, std=std,
+                                          radial_index=radial_index, min_snr=min_snr,
+                                          std_min=std_min)
+
+@array_dispatch("data", cpu_impl=_is_signal_cpu, gpu_impl=_is_signal_gpu)
+def is_signal(data: IntArray | RealArray, whitefield: RealArray, std: RealArray,
+              radial_index: IntArray, min_snr: float=3.0, std_min: float=0.0) -> BoolArray:
+    """Identify pixels above a compact radial residual-SNR threshold.
+
+    ``whitefield`` and ``std`` are compact per-frame radial profiles, indexed
+    by ``radial_index``. For each pixel, the function compares the raw detector
+    value to the profile value of that pixel's radial bin and returns ``True``
+    when the residual SNR is at least ``min_snr``.
+
+    Args:
+        data: Raw detector frame stack. The trailing dimensions must match
+            ``radial_index``.
+        whitefield: Per-frame radial mean profile, shape
+            ``(n_frames, n_bins)``.
+        std: Per-frame radial standard-deviation profile, shape
+            ``(n_frames, n_bins)``.
+        radial_index: Integer radial-bin map for one detector frame. Valid
+            pixels index ``whitefield``/``std``; ``-1`` pixels are ignored by
+            native backends.
+        min_snr: Minimum residual SNR for a pixel to be considered signal.
+        std_min: Lower bound for the standard deviation used in the SNR
+            denominator.
+
+    Returns:
+        Boolean array with the same shape as ``data``. ``True`` marks online
+        signal pixels.
+    """
+    ...
+
+@dataclass
+class RadialProfiles(DataContainer):
+    """Compact per-frame radial background profiles.
+
+    Stores the online detector's background estimate as one value per radial
+    bin instead of one value per detector pixel. The profiles are expanded back
+    to pixels through a ``radial_index`` lookup when calling :meth:`is_signal`.
+
+    Attributes:
+        whitefield: Per-frame radial mean intensity, shape
+            ``(n_frames, n_bins)``.
+        std: Per-frame radial standard deviation, shape
+            ``(n_frames, n_bins)``.
+        counts: Number of valid pixels contributing to each radial bin, shape
+            ``(n_frames, n_bins)``.
+    """
+
+    whitefield  : RealArray
+    std         : RealArray
+    counts      : IntArray
 
     @property
-    def shape(self) -> Tuple[int, ...]:
-        return self.labels.shape
+    def n_bins(self) -> int:
+        return self.whitefield.shape[-1]
 
-    def to_array(self, index: NDIntArray, out: NDIntArray | None=None) -> NDIntArray:
-        if index.size != self.index.size:
-            raise ValueError("Index array size does not match number of regions")
+    def scale(self, scale: RealArray) -> 'RadialProfiles':
+        """Scale whitefield and noise profiles by per-frame intensity factors.
 
-        if out is None:
-            out = NumPy.zeros(self.labels.shape, dtype=index.dtype)
-        elif out.shape != self.labels.shape:
-            raise ValueError("out array shape does not match region shape")
+        The mean profile scales linearly with intensity. The standard deviation
+        is scaled by ``sqrt(scale)``, matching Poisson-like count statistics.
 
-        max_label = int(NumPy.max(self.index)) if self.index.size else 0
-        label_map = NumPy.zeros(max_label + 1, dtype=out.dtype)
-        label_map[self.index] = index
+        Args:
+            scale: Non-negative scale factor broadcastable to
+                ``whitefield.shape``.
 
-        mask = (self.labels > 0) & (self.labels <= max_label)
-        out[...] = 0
-        out[mask] = label_map[self.labels[mask]]
-        return out
+        Returns:
+            New :class:`RadialProfiles` with scaled ``whitefield`` and ``std``.
+        """
+        xp = self.__array_namespace__()
+        scale = xp.clip(xp.asarray(scale), 0.0, xp.inf)
+        return self.replace(whitefield=self.whitefield * scale, std=self.std * xp.sqrt(scale))
 
-class CPLabelResult(NamedTuple):
+    def is_signal(self, data: IntArray | RealArray, radial_index: IntArray,
+                  min_snr: float=3.0, std_min: float=0.0) -> BoolArray:
+        """Identify pixels that exceed this profile's radial SNR threshold.
+
+        Args:
+            data: Raw detector frame stack.
+            radial_index: Integer radial-bin map matching one frame.
+            min_snr: Minimum residual SNR for a pixel to be considered signal.
+            std_min: Lower bound for the radial standard deviation used in the
+                SNR denominator.
+
+        Returns:
+            Boolean signal mask with the same shape as ``data``.
+        """
+        return is_signal(data=data, whitefield=self.whitefield, std=self.std,
+                         radial_index=radial_index, min_snr=min_snr, std_min=std_min)
+
+    def to_array(self, radial_index: IntArray) -> Tuple[RealArray, RealArray]:
+        """Expand compact radial profiles to full-frame arrays.
+
+        Args:
+            radial_index: Integer radial-bin map matching one detector frame.
+
+        Returns:
+            Tuple ``(whitefield, std)`` expanded to detector-pixel layout.
+        """
+        xp = self.__array_namespace__()
+        indices = radial_index.reshape(-1)
+        whitefield = xp.take_along_axis(self.whitefield, indices[None, ...], axis=-1)
+        std = xp.take_along_axis(self.std, indices[None, ...], axis=-1)
+        shape = (self.whitefield.shape[0],) + radial_index.shape
+        return whitefield.reshape(shape), std.reshape(shape)
+
+def _radial_profiles_cpu(data: NDIntArray | NDRealArray, radial_index: IntArray,
+                         n_bins: int, interval: int=1, clip_snr: float=3.0, n_iter: int=3,
+                         std_min: float=0.0) -> RadialProfiles:
+    num_threads = get_cpu_config().effective_num_threads()
+    whitefield, std, counts = online_detector.radial_profiles(
+        data, radial_index, n_bins, interval, clip_snr, n_iter, std_min,
+        num_threads=num_threads
+    )
+    return RadialProfiles(whitefield, std, counts)
+
+def _radial_profiles_gpu(data: CPIntArray | CPRealArray, radial_index: CPIntArray,
+                         n_bins: int, interval: int=1, clip_snr: float=3.0, n_iter: int=3,
+                         std_min: float=0.0) -> RadialProfiles:
+    if cuda_online_detector is None:
+        raise RuntimeError("online detector is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    xp = CuPy
+    frame_size = int(radial_index.size)
+    n_frames = int(data.size) // frame_size
+    ftype = xp.float64 if data.dtype.itemsize >= 8 else xp.float32
+
+    whitefield = xp.empty((n_frames, n_bins), dtype=ftype)
+    std = xp.empty((n_frames, n_bins), dtype=ftype)
+    counts = xp.empty((n_frames, n_bins), dtype=radial_index.dtype)
+    whitefield, std, counts = cuda_online_detector.radial_profiles(
+        whitefield, std, counts, data, radial_index, n_bins, interval, clip_snr, n_iter, std_min
+    )
+    return RadialProfiles(whitefield, std, counts)
+
+@array_dispatch("data", cpu_impl=_radial_profiles_cpu, gpu_impl=_radial_profiles_gpu)
+def radial_profiles(data: IntArray | RealArray, radial_index: IntArray, n_bins: int,
+                    interval: int=1, clip_snr: float=3.0, n_iter: int=3,
+                    std_min: float=0.0) -> RadialProfiles:
+    """Compute compact radial background profiles for online detection.
+
+    Pixels are grouped by ``radial_index`` and reduced to one mean and standard
+    deviation per radial bin for each frame. The estimate is robustified by
+    iteratively rejecting pixels above ``mean + clip_snr * std`` before
+    recomputing the profiles, which keeps sparse diffraction signal from
+    biasing the radial background.
+
+    Args:
+        data: Raw detector frame stack. The trailing dimensions must match
+            ``radial_index``.
+        radial_index: Integer radial-bin map for one detector frame, usually
+            created with :meth:`~cbclib_v2.Detector.radial_index`.
+        n_bins: Number of radial bins represented in the compact profiles.
+        interval: Process every ``interval``-th radial bin together in the
+            native kernels. The default keeps the binning exact.
+        clip_snr: SNR threshold used to reject bright outliers between profile
+            iterations.
+        n_iter: Number of outlier-rejection iterations.
+        std_min: Lower bound for the returned per-bin standard deviation.
+
+    Returns:
+        :class:`RadialProfiles` with ``whitefield``, ``std``, and ``counts``
+        arrays of shape ``(n_frames, n_bins)``.
+    """
+    ...
+
+class LabelResult(NamedTuple):
     """Result of a connected-component labeling operation (GPU/CuPy backend).
 
     Stores the label map as a dense CuPy integer array together with a
@@ -447,17 +785,14 @@ class CPLabelResult(NamedTuple):
             each pixel set to its region index (0 for background).
         index: 1-D CuPy integer array of region indices ``[1, …, n_labels]``.
     """
+    labels      : IntArray
+    index       : IntArray
 
-    labels      : CPIntArray
-    index       : CPIntArray
-
-LabelResult = NPLabelResult | CPLabelResult
-
-def _label_cpu(inp: NDBoolArray | NDIntArray, structure: Structure, npts: int=1) -> NPLabelResult:
+def _label_cpu(inp: NDBoolArray | NDIntArray, structure: Structure, npts: int=1) -> LabelResult:
     num_threads = get_cpu_config().effective_num_threads()
     labels, index = cpu_label.label(inp=inp, structure=structure, npts=npts,
                                     num_threads=num_threads)
-    return NPLabelResult(labels=labels, index=index)
+    return LabelResult(labels=labels, index=index)
 
 def _label_gpu(inp: CPBoolArray | CPIntArray, structure: Structure, npts: int=1) -> LabelResult:
     if cuda_label is None:
@@ -467,19 +802,7 @@ def _label_gpu(inp: CPBoolArray | CPIntArray, structure: Structure, npts: int=1)
     xp = CuPy
     labels = xp.empty_like(inp, dtype=xp.int32)
     labels, n_labels = cuda_label.label(out=labels, inp=inp, structure=structure, npts=npts)
-    return CPLabelResult(labels=labels, index=xp.arange(1, n_labels + 1, dtype=int))
-
-@overload
-def label(inp: NDBoolArray | NDIntArray, structure: Structure, npts: int=1) -> NPLabelResult: ...
-
-@overload
-def label(inp: CPBoolArray | CPIntArray, structure: Structure, npts: int=1) -> CPLabelResult: ...
-
-@overload
-def label(inp: JaxBoolArray | JaxIntArray, structure: Structure, npts: int=1) -> LabelResult: ...
-
-@overload
-def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> LabelResult: ...
+    return LabelResult(labels=labels, index=xp.arange(1, n_labels + 1, dtype=int))
 
 @array_dispatch("inp", cpu_impl=_label_cpu, gpu_impl=_label_gpu)
 def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> LabelResult:
@@ -504,11 +827,12 @@ def label(inp: BoolArray | IntArray, structure: Structure, npts: int=1) -> Label
     """
     ...
 
-def _center_of_mass_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArray:
+def _center_of_mass_cpu(labels: LabelResult, data: NDRealArray) -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()
-    return cpu_label.center_of_mass(labels=labels, data=data, num_threads=num_threads)
+    return cpu_label.center_of_mass(labels=(labels.labels, labels.index), data=data,
+                                    num_threads=num_threads)
 
-def _center_of_mass_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
+def _center_of_mass_gpu(labels: LabelResult, data: CPRealArray) -> CPRealArray:
     if cuda_label is None:
         raise RuntimeError("center_of_mass is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
@@ -518,10 +842,10 @@ def _center_of_mass_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
     return cuda_label.center_of_mass(out=out, labels=labels.labels, index=labels.index, data=data)
 
 @overload
-def center_of_mass(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
+def center_of_mass(labels: LabelResult, data: NDRealArray) -> NDRealArray: ...
 
 @overload
-def center_of_mass(labels: CPLabelResult, data: CPRealArray) -> CPRealArray: ...
+def center_of_mass(labels: LabelResult, data: CPRealArray) -> CPRealArray: ...
 
 @overload
 def center_of_mass(labels: LabelResult, data: JaxRealArray) -> JaxRealArray: ...
@@ -550,12 +874,13 @@ def center_of_mass(labels: LabelResult, data: RealArray) -> RealArray:
     """
     ...
 
-def _covariance_matrix_cpu(labels: NPLabelResult, data: RealArray) -> NDRealArray:
+def _covariance_matrix_cpu(labels: LabelResult, data: NDRealArray) -> NDRealArray:
     num_threads = get_cpu_config().effective_num_threads()
-    matrices = cpu_label.covariance_matrix(labels=labels, data=data, num_threads=num_threads)
+    matrices = cpu_label.covariance_matrix(labels=(labels.labels, labels.index), data=data,
+                                           num_threads=num_threads)
     return matrices.reshape(-1, data.ndim, data.ndim)
 
-def _covariance_matrix_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArray:
+def _covariance_matrix_gpu(labels: LabelResult, data: CPRealArray) -> CPRealArray:
     if cuda_label is None:
         raise RuntimeError("covariance_matrix is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
@@ -566,10 +891,10 @@ def _covariance_matrix_gpu(labels: CPLabelResult, data: RealArray) -> CPRealArra
                                         data=data)
 
 @overload
-def covariance_matrix(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
+def covariance_matrix(labels: LabelResult, data: NDRealArray) -> NDRealArray: ...
 
 @overload
-def covariance_matrix(labels: CPLabelResult, data: CPRealArray) -> CPRealArray: ...
+def covariance_matrix(labels: LabelResult, data: CPRealArray) -> CPRealArray: ...
 
 @overload
 def covariance_matrix(labels: LabelResult, data: JaxRealArray) -> JaxRealArray: ...
@@ -599,59 +924,6 @@ def covariance_matrix(labels: LabelResult, data: RealArray) -> RealArray:
     """
     ...
 
-@overload
-def index(labels: NPLabelResult) -> NDIntArray: ...
-
-@overload
-def index(labels: CPLabelResult) -> CPIntArray: ...
-
-def index(labels: LabelResult) -> NDIntArray | CPIntArray:
-    """Return a 1-D integer array of the region indices present in *labels*.
-
-    For the CPU backend (:class:`~cbclib_v2.label.LabelResult`) this is
-    ``[1, 2, …, n_regions]``; for the GPU backend
-    (:class:`~cbclib_v2.label.CPLabelResult`) it is the stored
-    :attr:`~cbclib_v2.label.CPLabelResult.index` array.
-
-    Args:
-        labels: Labeled regions returned by :func:`label`.
-
-    Returns:
-        1-D integer array of length *n_regions* containing the label
-        index of each region.
-    """
-    if isinstance(labels, NPLabelResult):
-        return labels.index
-    if isinstance(labels, CPLabelResult):
-        return labels.index
-    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
-
-@overload
-def labels(labels: NPLabelResult) -> NDIntArray: ...
-
-@overload
-def labels(labels: CPLabelResult) -> CPIntArray: ...
-
-def labels(labels: LabelResult) -> NDIntArray | CPIntArray:
-    """Return the dense per-pixel label array from a :class:`~cbclib_v2.label.LabelResult`.
-
-    Each pixel in the returned array contains the integer index of the
-    region it belongs to, or ``0`` for background.
-
-    Args:
-        labels: Labeled regions returned by :func:`label`.
-
-    Returns:
-        Integer array of the same spatial shape as the original input to
-        :func:`label`, with each pixel set to its region index (0 for
-        background).
-    """
-    if isinstance(labels, NPLabelResult):
-        return labels.labels
-    if isinstance(labels, CPLabelResult):
-        return labels.labels
-    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
-
 def to_ellipse(matrix: RealArray) -> RealArray:
     xp = array_namespace(matrix)
     if matrix.size == 0:
@@ -665,10 +937,10 @@ def to_ellipse(matrix: RealArray) -> RealArray:
     return xp.stack((a, b, theta), axis=-1)
 
 @overload
-def ellipse_fit(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
+def ellipse_fit(labels: LabelResult, data: NDRealArray) -> NDRealArray: ...
 
 @overload
-def ellipse_fit(labels: CPLabelResult, data: CPRealArray) -> CPRealArray: ...
+def ellipse_fit(labels: LabelResult, data: CPRealArray) -> CPRealArray: ...
 
 @overload
 def ellipse_fit(labels: LabelResult, data: JaxRealArray) -> JaxRealArray: ...
@@ -699,7 +971,7 @@ def ellipse_fit(labels: LabelResult, data: RealArray) -> RealArray:
     covmat = covariance_matrix(labels, data)
     return to_ellipse(covmat)
 
-def to_line(centers: RealArray, matrix: RealArray) -> RealArray:
+def to_line(centers: CPRealArray, matrix: CPRealArray) -> CPRealArray:
     xp = array_namespace(centers, matrix)
     if centers.size == 0 and matrix.size == 0:
         return xp.empty((0, 2 * centers.shape[-1]), dtype=centers.dtype)
@@ -716,18 +988,33 @@ def to_line(centers: RealArray, matrix: RealArray) -> RealArray:
     return xp.concat((centers[..., ::-1] + hw[..., None] * tau,
                       centers[..., ::-1] - hw[..., None] * tau), axis=-1)
 
+def _line_fit_cpu(labels: LabelResult, data: NDRealArray) -> NDRealArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return cpu_label.line_fit(labels=(labels.labels, labels.index), data=data,
+                              num_threads=num_threads)
+
+def _line_fit_gpu(labels: LabelResult, data: CPRealArray) -> CPRealArray:
+    if cuda_label is None:
+        raise RuntimeError("line_fit is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    centers = _center_of_mass_gpu(labels, data)
+    covmat = _covariance_matrix_gpu(labels, data)
+    return to_line(centers, covmat)
+
 @overload
-def line_fit(labels: NPLabelResult, data: NDRealArray) -> NDRealArray: ...
+def line_fit(labels: LabelResult, data: NDRealArray) -> NDRealArray: ...
 
 @overload
 def line_fit(labels: LabelResult, data: JaxRealArray) -> JaxRealArray: ...
 
 @overload
-def line_fit(labels: CPLabelResult, data: CPRealArray) -> CPRealArray: ...
+def line_fit(labels: LabelResult, data: CPRealArray) -> CPRealArray: ...
 
 @overload
 def line_fit(labels: LabelResult, data: RealArray) -> RealArray: ...
 
+@array_dispatch("data", cpu_impl=_line_fit_cpu, gpu_impl=_line_fit_gpu)
 def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
     """Fit a line to each labeled region using image moments.
 
@@ -748,17 +1035,75 @@ def line_fit(labels: LabelResult, data: RealArray) -> RealArray:
         of the two endpoint coordinates ``(x1, ..., x2, ...)`` of the fitted
         line segment.
     """
-    if isinstance(labels, NPLabelResult):
-        num_threads = get_cpu_config().effective_num_threads()
-        return cpu_label.line_fit(labels, data, num_threads)
-    if isinstance(labels, CPLabelResult):
-        centers = _center_of_mass_gpu(labels, data)
-        covmat = _covariance_matrix_gpu(labels, data)
-        return to_line(centers, covmat)
-    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
+    ...
+
+def _maximum_position_cpu(labels: LabelResult, data: NDIntArray | NDRealArray) -> NDIntArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return cpu_label.maximum_position(labels=(labels.labels, labels.index), data=data,
+                                      num_threads=num_threads)
+
+def _maximum_position_gpu(labels: LabelResult, data: CPIntArray | CPRealArray) -> CPIntArray:
+    if cuda_label is None:
+        raise RuntimeError("maximum_position is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+    if labels.labels.shape != data.shape:
+        raise ValueError("labels and data must have the same shape")
+
+    xp = CuPy
+    out = xp.empty((labels.index.shape[0], data.ndim), dtype=xp.int32)
+    return cuda_label.maximum_position(out=out, labels=labels.labels, index=labels.index,
+                                       data=data)
 
 @overload
-def p_values(labels: NPLabelResult, lines: NDRealArray, data: NDRealArray, p0: float, vmin: float,
+def maximum_position(labels: LabelResult, data: NDIntArray | NDRealArray) -> NDIntArray: ...
+
+@overload
+def maximum_position(labels: LabelResult, data: CPIntArray | CPRealArray) -> CPIntArray: ...
+
+@overload
+def maximum_position(labels: LabelResult, data: JaxIntArray | JaxRealArray) -> JaxIntArray: ...
+
+@overload
+def maximum_position(labels: LabelResult, data: IntArray | RealArray) -> IntArray: ...
+
+@array_dispatch("data", cpu_impl=_maximum_position_cpu, gpu_impl=_maximum_position_gpu)
+def maximum_position(labels: LabelResult, data: IntArray | RealArray) -> IntArray:
+    """Find the first maximum position in each labeled region.
+
+    For each label listed in ``labels.index``, the function returns the
+    coordinate of the first pixel, in flat row-major traversal order, whose
+    value is maximal within that labeled region.  Labels with no matching
+    pixels return the coordinate of the first array element.
+
+    Args:
+        labels: Labeled regions returned by :func:`label`.
+        data: Intensity array with the same spatial shape as the label array.
+
+    Returns:
+        Integer array of shape ``(N, data.ndim)`` with one coordinate row for
+        each of the *N* labels in ``labels.index``.
+    """
+    ...
+
+def _p_values_cpu(labels: LabelResult, lines: NDRealArray, data: NDRealArray, p0: float, vmin: float,
+                  xtol: float) -> NDRealArray:
+    num_threads = get_cpu_config().effective_num_threads()
+    return cpu_label.p_values(labels=(labels.labels, labels.index), lines=lines, data=data, p0=p0,
+                              vmin=vmin, xtol=xtol, num_threads=num_threads)
+
+def _p_values_gpu(labels: LabelResult, lines: CPRealArray, data: CPRealArray, p0: float, vmin: float,
+                  xtol: float) -> CPRealArray:
+    if cuda_label is None:
+        raise RuntimeError("label is not compiled for the current platform. "
+                           "Please, check if you have installed the cbclib_v2 with GPU support.")
+
+    xp = CuPy
+    out = xp.empty(labels.index.shape, dtype=data.dtype)
+    return cuda_label.p_values(out=out, labels=labels.labels, index=labels.index, lines=lines,
+                               data=data, p0=p0, vmin=vmin, xtol=xtol)
+
+@overload
+def p_values(labels: LabelResult, lines: NDRealArray, data: NDRealArray, p0: float, vmin: float,
              xtol: float) -> NDRealArray: ...
 
 @overload
@@ -766,13 +1111,14 @@ def p_values(labels: LabelResult, lines: JaxRealArray, data: JaxRealArray, p0: f
              xtol: float) -> JaxRealArray: ...
 
 @overload
-def p_values(labels: CPLabelResult, lines: CPRealArray, data: CPRealArray, p0: float, vmin: float,
+def p_values(labels: LabelResult, lines: CPRealArray, data: CPRealArray, p0: float, vmin: float,
              xtol: float) -> CPRealArray: ...
 
 @overload
 def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, vmin: float,
              xtol: float) -> RealArray: ...
 
+@array_dispatch("data", cpu_impl=_p_values_cpu, gpu_impl=_p_values_gpu)
 def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, vmin: float,
              xtol: float) -> RealArray:
     """Compute the log-binomial tail probability for each labeled streak region.
@@ -810,19 +1156,7 @@ def p_values(labels: LabelResult, lines: RealArray, data: RealArray, p0: float, 
         region.  Values are negative; a more negative value indicates
         stronger statistical evidence for a real streak.
     """
-    if isinstance(labels, NPLabelResult):
-        num_threads = get_cpu_config().effective_num_threads()
-        return cpu_label.p_values(labels=labels, lines=lines, data=data, p0=p0, vmin=vmin,
-                                  xtol=xtol, num_threads=num_threads)
-    if isinstance(labels, CPLabelResult):
-        if cuda_label is None:
-            raise RuntimeError("label is not compiled for the current platform. "
-                               "Please, check if you have installed the cbclib_v2 with GPU support.")
-
-        out = CuPy.empty(labels.index.shape, dtype=data.dtype)
-        return cuda_label.p_values(out=out, labels=labels.labels, index=labels.index, lines=lines,
-                                   data=data, p0=p0, vmin=vmin, xtol=xtol)
-    raise ValueError("Invalid labels type. Expected NPLabelResult or CPLabelResult.")
+    ...
 
 @overload
 def median(inp: NDRealArray, axis: IntSequence=0) -> NDRealArray: ...
@@ -996,7 +1330,6 @@ def _robust_lsq_gpu(W: IntArray | RealArray, y: IntArray | RealArray,
 
     for _ in range(n_iter):
         errors = (y - xp.tensordot(fits, W, axes=(-1, 0)))**2
-        # idxs = xp.argsort(errors, axis=-1)
         idxs = xp.argpartition(errors, (j0, j1), axis=-1)
         fits = cuda_median.lsq(fits, W, y, idxs[..., j0:j1])
 
@@ -1040,17 +1373,16 @@ def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: int | Tup
 
 # New GPU-friendly streak detection algorithm
 
-def _detect_peaks_cpu(data: RealArray, labeled: NPLabelResult, radius: int, vmin: float) -> NDIntArray:
+def _detect_peaks_cpu(data: RealArray, labeled: LabelResult, radius: int, vmin: float) -> NDIntArray:
     num_threads = get_cpu_config().effective_num_threads()
     radii = [0,] * (data.ndim - 2) + [1, 1]
-
     return streak_finder.detect_peaks(labeled.labels, data, Structure(radii, 1), radius, vmin,
                                       num_threads=num_threads)
 
 def binned_shape(shape: Tuple[int, ...], radius: int) -> Tuple[int, ...]:
     return shape[:-2] + ((shape[-2] + radius - 1) // radius, (shape[-1] + radius - 1) // radius)
 
-def _detect_peaks_gpu(data: RealArray, labeled: CPLabelResult, radius: int, vmin: float) -> CPIntArray:
+def _detect_peaks_gpu(data: RealArray, labeled: LabelResult, radius: int, vmin: float) -> CPIntArray:
     if cuda_streak_finder is None:
         raise RuntimeError("detect_peaks is not compiled for the current platform. "
                            "Please, check if you have installed the cbclib_v2 with GPU support.")
@@ -1063,10 +1395,10 @@ def _detect_peaks_gpu(data: RealArray, labeled: CPLabelResult, radius: int, vmin
                                            vmin)
 
 @overload
-def detect_peaks(data: NDRealArray, labeled: NPLabelResult, radius: int, vmin: float) -> NDIntArray: ...
+def detect_peaks(data: NDRealArray, labeled: LabelResult, radius: int, vmin: float) -> NDIntArray: ...
 
 @overload
-def detect_peaks(data: CPRealArray, labeled: CPLabelResult, radius: int, vmin: float) -> CPIntArray: ...
+def detect_peaks(data: CPRealArray, labeled: LabelResult, radius: int, vmin: float) -> CPIntArray: ...
 
 @overload
 def detect_peaks(data: JaxRealArray, labeled: LabelResult, radius: int, vmin: float

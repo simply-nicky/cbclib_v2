@@ -1133,11 +1133,11 @@ public:
         {
             std::array<T, 4> result;
             lint_t label_id;
-            handle_cuda_error(cudaMemcpy(&label_id, labels.data() + m_start_id / 2, sizeof(lint_t), cudaMemcpyDeviceToHost));
-            if (label_id > 0) handle_cuda_error(cudaMemcpy(result.data(), linelets.data() + 2 * (2 * (label_id - 1) + m_start_id % 2), 2 * sizeof(T), cudaMemcpyDeviceToHost));
+            handle_cuda_error(cudaMemcpy(&label_id, labels.data(m_start_id / 2), sizeof(lint_t), cudaMemcpyDeviceToHost));
+            if (label_id > 0) handle_cuda_error(cudaMemcpy(result.data(), linelets.data(2 * (2 * (label_id - 1) + m_start_id % 2)), 2 * sizeof(T), cudaMemcpyDeviceToHost));
 
-            handle_cuda_error(cudaMemcpy(&label_id, labels.data() + m_end_id / 2, sizeof(lint_t), cudaMemcpyDeviceToHost));
-            if (label_id > 0) handle_cuda_error(cudaMemcpy(result.data() + 2, linelets.data() + 2 * (2 * (label_id - 1) + m_end_id % 2), 2 * sizeof(T), cudaMemcpyDeviceToHost));
+            handle_cuda_error(cudaMemcpy(&label_id, labels.data(m_end_id / 2), sizeof(lint_t), cudaMemcpyDeviceToHost));
+            if (label_id > 0) handle_cuda_error(cudaMemcpy(result.data() + 2, linelets.data(2 * (2 * (label_id - 1) + m_end_id % 2)), 2 * sizeof(T), cudaMemcpyDeviceToHost));
             return result;
         }
     protected:

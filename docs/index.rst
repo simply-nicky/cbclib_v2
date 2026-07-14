@@ -35,7 +35,7 @@ implemented in **cbclib_v2**:
 3. **Hit finding and streak detection** — identifies frames that contain
    diffraction features and detects the streaks characteristic of convergent
    beam diffraction (:class:`~cbclib_v2.StreakDetector`,
-   :doc:`usage example<streak_detection>`, and :doc:`API reference<api_streak_finder>`).
+   :doc:`usage example<streak_detection>`, and :doc:`API reference<api_image>`).
 
 4. **Preliminary indexing** — provides an initial estimate of the crystal
    orientation from the detected streaks (not documented yet).

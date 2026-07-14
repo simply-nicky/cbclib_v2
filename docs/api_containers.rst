@@ -18,7 +18,7 @@ Container hierarchy
    Container
    DataContainer
    ArrayContainer
-   IndexArray
+   IndexedContainer
    split
    to_list
 
@@ -31,6 +31,17 @@ Data processing
 
    CrystData
    CrystMetadata
+
+Streak detectors
+----------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   OnlineDetector
+   RegionDetector
+   StreakDetector
 
 Streaks
 -------

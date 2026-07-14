@@ -12,7 +12,7 @@ IS_WINDOWS = sys.platform == 'win32'
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-__version__ = '0.13.4'
+__version__ = '0.13.5'
 
 def find_conda_home() -> str:
     """Find the Conda install path."""
@@ -280,6 +280,11 @@ extensions = [
                  cxx_std=17,
                  extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
+    CPPExtension("cbclib_v2._src.src.online_detector",
+                 sources=["cbclib_v2/_src/src/online_detector.cpp"],
+                 cxx_std=17,
+                 extra_compile_args=['-fopenmp'],
+                 extra_link_args=['-lgomp']),
     CPPExtension("cbclib_v2._src.src.streak_finder",
                  sources=["cbclib_v2/_src/src/streak_finder.cpp"],
                  cxx_std=17,
@@ -311,6 +316,13 @@ if CUDA_PATHS:
                      include_dirs=[CUDA_PATHS.include],
                      library_dirs=[CUDA_PATHS.lib],
                      libraries=['cudart']),
+        CPPExtension("cbclib_v2._src.src.cuda_online_detector",
+                     sources=["cbclib_v2/_src/src/cuda_online_detector.cu",],
+                     cxx_std=17,
+                     include_dirs=[CUDA_PATHS.include],
+                     library_dirs=[CUDA_PATHS.lib],
+                     libraries=['cudart'],
+                     extra_compile_args={'nvcc': ['-arch=sm_60',]}),
         CPPExtension("cbclib_v2._src.src.cuda_streak_finder",
                      sources=["cbclib_v2/_src/src/cuda_streak_finder.cu",],
                      cxx_std=17,

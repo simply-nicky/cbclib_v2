@@ -106,6 +106,23 @@ class TestJobManager:
 
         assert manager.get_job_id(42) == [JobID(42, 0), JobID(42, 1), JobID(42, 2)]
 
+    def test_get_job_id_array_expands_sacct_ranges(self, manager: SLURMJobManager,
+                                                   monkeypatch: pytest.MonkeyPatch):
+        calls: List[List[str]] = []
+
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            calls.append(args)
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="42_0\n42_1\n42_[2-5]\n", returncode=0, stderr="")
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42_4\n", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) == [JobID(42, task_id) for task_id in range(6)]
+        assert sum(1 for args in calls if args[0] == manager.config.squeue) == 0
+
     def test_get_job_id_prefers_sacct(self, manager: SLURMJobManager,
                                       monkeypatch: pytest.MonkeyPatch):
         def mock_run(args: List[str], **kwargs) -> MockOutput:
@@ -221,6 +238,71 @@ class TestJobManager:
 
         assert sum(1 for args in calls if args[0] == manager.config.squeue) == 1
         assert sum(1 for args in calls if args[0] == manager.config.sacct) == 1
+
+    def test_get_output_uses_running_raw_job_id(self, manager: SLURMJobManager,
+                                                monkeypatch: pytest.MonkeyPatch):
+        calls: List[List[str]] = []
+
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            calls.append(args)
+            if args[0] == manager.config.squeue and args[-1] == "%T":
+                return MockOutput(stdout="RUNNING\n", returncode=0, stderr="")
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42_3|debug|job|node01|user|RUNNING|00:01|1|401\n",
+                                  returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        parameters = ScriptSpec(output="experiments/logs/slurm-%j.out",
+                                error="experiments/logs/slurm-%j.err")
+        script = SLURMScript(command="echo hello", job_name="job", parameters=parameters)
+        output = manager.get_output(script, JobID(42, 3))
+
+        assert output == JobOutput(JobID(42, 3), "experiments/logs/slurm-401.out",
+                                   "experiments/logs/slurm-401.err")
+        assert any(args[0] == manager.config.squeue and args[-1].endswith("|%A") for args in calls)
+
+    def test_get_output_uses_completed_raw_job_id(self, manager: SLURMJobManager,
+                                                  monkeypatch: pytest.MonkeyPatch):
+        calls: List[List[str]] = []
+
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            calls.append(args)
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="", returncode=0, stderr="")
+            if args[0] == manager.config.sacct and args[-1] == "--format=State":
+                return MockOutput(stdout="COMPLETED\n", returncode=0, stderr="")
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="42_3|debug|job|node01|user|COMPLETED|00:03|1|401\n",
+                                  returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        script = SLURMScript(command="echo hello", job_name="job", parameters=ScriptSpec())
+        output = manager.get_output(script, JobID(42, 3))
+
+        assert output == JobOutput(JobID(42, 3), "slurm-401.out", "slurm-401.out")
+        assert any(args[0] == manager.config.sacct and args[-1].endswith(",JobIDRaw")
+                   for args in calls)
+
+    def test_get_output_falls_back_to_patterns(self, manager: SLURMJobManager,
+                                               monkeypatch: pytest.MonkeyPatch):
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            if args[0] == manager.config.squeue and args[-1] == "%T":
+                return MockOutput(stdout="RUNNING\n", returncode=0, stderr="")
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42|debug|job|node01|user|RUNNING|00:01|1\n",
+                                  returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        script = SLURMScript(command="echo hello", job_name="job", parameters=ScriptSpec())
+        output = manager.get_output(script, JobID(42))
+
+        assert output == JobOutput(JobID(42), "slurm-42.out", "slurm-42.out")
 
     async def mock_process(self, stdout: str, returncode: int = 0) -> MockProcess:
         return MockProcess(stdout.encode(), returncode)

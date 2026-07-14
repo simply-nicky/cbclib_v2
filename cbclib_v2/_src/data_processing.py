@@ -12,7 +12,7 @@ batches.
 from __future__ import annotations
 from math import prod
 import os
-from typing import Literal, NamedTuple, Sequence, Tuple, cast
+from typing import Literal, Sequence, Tuple, cast
 from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
@@ -24,8 +24,9 @@ from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakRes
 from .streaks import StackedStreaks, Streaks
 from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
                           ROI, Shape)
-from .functions import (LabelResult, Structure, center_of_mass, covariance_matrix, ellipse_fit,
-                        label, line_fit, median, robust_mean, robust_lsq)
+from .functions import (LabelResult, RadialProfiles, Structure, center_of_mass, covariance_matrix,
+                        ellipse_fit, label, line_fit, median, radial_profiles, robust_lsq,
+                        robust_mean)
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
 MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
@@ -71,9 +72,40 @@ class CrystBase(DataContainer):
                 cropped[attr] = data[..., roi[0]:roi[1], roi[2]:roi[3]]
         return self.replace(**cropped)
 
-class PCAProjection(NamedTuple):
+@dataclass
+class PCAProjection(DataContainer):
     good_fields : Sequence[int] | IntArray
     projection  : RealArray
+
+    def apply(self, metadata: CrystMetadata) -> RealArray:
+        """Reconstruct per-frame whitefields from PCA projection coefficients.
+
+        Computes :math:`\\bar{W} + \\sum_k c_{ik} e_k` for each frame
+        :math:`i`, where :math:`c_{ik}` are the projection coefficients and
+        :math:`e_k` are the eigen fields.
+
+        Args:
+            metadata: A :class:`CrystMetadata` containing the PCA decomposition
+                to apply.
+
+        Returns:
+            Per-frame whitefield array, shape ``(N, *frame_shape)``.
+
+        Example:
+            Reconstruct per-frame backgrounds and attach them to new data:
+
+            >>> proj = metadata.project(frames, method='lsq')
+            >>> whitefields = proj.apply(metadata)
+            >>> data = metadata.to_data(frames, whitefield=whitefields)
+        """
+        xp = self.__array_namespace__()
+
+        if metadata.is_empty(metadata.eigen_field):
+            return xp.tensordot(self.projection, metadata.flatfield[None], axes=((-1,), (0,)))
+
+        fields = xp.tensordot(self.projection, metadata.eigen_field[self.good_fields],
+                              axes=((-1,), (0,)))
+        return metadata.flatfield + fields
 
 @dataclass
 class CrystMetadata(CrystBase):
@@ -83,7 +115,6 @@ class CrystMetadata(CrystBase):
     images estimated from background frames. Optionally holds a PCA decomposition
     of whitefield variability for per-frame dynamic background subtraction.
 
-    Instances are typically created via :meth:`from_data` rather than directly.
     The container can be saved to and loaded from HDF5 files using
     :func:`~cbclib_v2.write_hdf` and :func:`~cbclib_v2.read_hdf` with the
     default protocol returned by :meth:`default_protocol`.
@@ -105,11 +136,10 @@ class CrystMetadata(CrystBase):
         Merge background estimates, decompose with PCA, and apply per-frame
         dynamic background subtraction:
 
-        >>> metadata = cbc.CrystMetadata.from_data(data_a, data_b, data_c)
+        >>> metadata = cbc.CrystMetadata.stack(meta_a, meta_b, meta_c)
         >>> metadata = metadata.pca()
-        >>> proj = metadata.projection(frames, method='lsq')
-        >>> whitefields = metadata.project(proj)
-        >>> data = metadata.to_data(frames, whitefield=whitefields)
+        >>> proj = metadata.project(frames, method='lsq')
+        >>> data = metadata.to_data(frames, projection=proj)
         >>> data = data.update_snr(std_min=0.5)
     """
     eigen_field : RealArray = field(default_factory=lambda: np.array([]))
@@ -122,7 +152,7 @@ class CrystMetadata(CrystBase):
 
     protocol    : H5Protocol = field(default_factory=lambda: H5Protocol.read(METADATA_PROTOCOL))
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.is_empty(self.mask):
             if not self.is_empty(self.std):
                 self.std *= self.mask
@@ -156,17 +186,16 @@ class CrystMetadata(CrystBase):
         return H5Protocol.read(METADATA_PROTOCOL)
 
     @classmethod
-    def from_data(cls, *data_containers: 'CrystData') -> CrystMetadata:
-        """Build a :class:`CrystMetadata` from one or more :class:`CrystData` containers.
+    def stack(cls, *metadata_containers: 'CrystMetadata') -> CrystMetadata:
+        """Stack multiple :class:`CrystMetadata` objects into a single container.
 
         The mask is the element-wise AND of all individual masks. The standard
         deviation is the quadratic mean across containers. The individual
         whitefields are stacked along a new leading axis.
 
         Args:
-            *data_containers: One or more :class:`CrystData` objects that each
-                contain a ``whitefield`` and ``std``, produced by
-                :meth:`~CrystData.update_metadata`.
+            *metadata_containers: One or more :class:`CrystMetadata` objects that
+                each contain a ``flatfield`` and ``std``.
 
         Raises:
             ValueError: If no containers are supplied.
@@ -174,30 +203,24 @@ class CrystMetadata(CrystBase):
         Returns:
             A new :class:`CrystMetadata` with combined ``mask``, ``std``, and
             stacked ``whitefields``.
-
-        Example:
-            Merge three background batches into a single metadata object:
-
-            >>> metadata = cbc.CrystMetadata.from_data(data_a, data_b, data_c)
         """
-        if not data_containers:
-            raise ValueError('At least one CrystData container is required to create CrystMetadata')
-        xp = array_namespace(*data_containers)
+        if not metadata_containers:
+            raise ValueError('At least one CrystMetadata container is required to stack')
+        xp = array_namespace(*metadata_containers)
         mask, var = xp.ones(1, dtype=bool), xp.zeros(1)
         whitefields = []
 
         protocol = cls.default_protocol()
-        for data in data_containers:
-            metadata = data.metadata()
+        for metadata in metadata_containers:
             mask = mask & metadata.mask
             var = var + metadata.std ** 2
             whitefields.append(metadata.flatfield)
 
-        return cls(mask=mask, std=xp.sqrt(var / len(data_containers)),
+        return cls(mask=mask, std=xp.sqrt(var / len(metadata_containers)),
                    whitefields=xp.stack(whitefields, axis=0), protocol=protocol)
 
     def to_data(self, data: RealArray, frames: IntArray | int | None=None,
-                whitefield: RealArray=np.array([])) -> 'CrystData':
+                projection: PCAProjection | None=None) -> 'CrystData':
         """Attach this background model to a new array of detector frames.
 
         Creates a :class:`CrystData` container populated with ``mask`` and
@@ -211,22 +234,24 @@ class CrystMetadata(CrystBase):
                 ``(*batch_shape, *frame_shape)``.
             frames: Integer frame indices. Inferred from the leading dimensions
                 of ``data`` when ``None``.
-            whitefield: Per-frame whitefield array, shape ``(N, *frame_shape)``.
-                Defaults to ``flatfield`` (static subtraction) when empty.
+            projection: A :class:`PCAProjection` containing the PCA decomposition
+                to apply.
 
         Raises:
-            ValueError: If ``whitefield`` is empty and ``flatfield`` is absent.
-            ValueError: If the size of ``whitefield`` does not match ``data``.
+            ValueError: If ``projection`` is None and ``flatfield`` is absent.
+            ValueError: If ``projection`` is supplied but the resulting ``whitefield``
+                has a wrong size.
 
         Returns:
-            A new :class:`CrystData` with ``data``, ``frames``, ``mask``,
-            ``std``, and ``whitefield`` set.
+            A new :class:`CrystData` with ``data``, ``frames``, ``mask``, ``std``,
+            and ``whitefield`` set.
 
         Example:
             Apply static and dynamic background subtraction:
 
-            >>> data = metadata.to_data(frames)                          # static
-            >>> data = metadata.to_data(frames, whitefield=whitefields)  # dynamic
+            >>> data = metadata.to_data(frames)                       # static
+            >>> proj = metadata.project(frames, method='lsq')
+            >>> data = metadata.to_data(frames, projection=proj)      # dynamic
         """
         xp = self.__array_namespace__()
         if frames is None:
@@ -235,12 +260,13 @@ class CrystMetadata(CrystBase):
             frames = xp.array([frames,], dtype=int)
         data = xp.reshape(data, (frames.size,) + self.frame_shape)
 
-        if not whitefield.size:
+        if projection is None:
             if self.is_empty(self.flatfield):
                 raise ValueError('no flatfield in the container')
             return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
                              whitefield=self.flatfield)
 
+        whitefield = projection.apply(self)
         if whitefield.size != data.size:
             raise ValueError(f'whitefield size {whitefield.size} must be equal to data size '
                              f'{data.size}')
@@ -285,9 +311,9 @@ class CrystMetadata(CrystBase):
         effs = xp.tensordot(eig_vecs, fields, axes=((0,), (0,)))
         return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
-    def projection(self, data: RealArray, good_fields: Indices=slice(None),
-                   method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
-                   lm: float=9.0) -> PCAProjection:
+    def project(self, data: RealArray, good_fields: Indices=slice(None),
+                method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
+                lm: float=9.0) -> PCAProjection:
         """Project detector frames onto the PCA basis.
 
         Fits the residual :math:`D - \\bar{W}` for each frame to a linear
@@ -312,7 +338,6 @@ class CrystMetadata(CrystBase):
 
         Raises:
             ValueError: If ``flatfield`` is absent.
-            ValueError: If ``eigen_field`` is absent (call :meth:`pca` first).
 
         Returns:
             A :class:`PCAProjection` with fields ``good_fields`` (selected
@@ -322,20 +347,24 @@ class CrystMetadata(CrystBase):
         Example:
             Project frames onto the two dominant PCA components:
 
-            >>> proj = metadata.projection(frames, good_fields=[0, 1], method='lsq')
+            >>> proj = metadata.project(frames, good_fields=[0, 1], method='lsq')
             >>> whitefields = metadata.project(proj)
         """
         if self.is_empty(self.flatfield):
             raise ValueError('No flatfield in the container')
-        if self.is_empty(self.eigen_field):
-            raise ValueError('No eigen_field in the container')
-
-        good_fields = list_indices(good_fields, self.eigen_field.shape[0])
-        fields = self.eigen_field[good_fields]
-
         xp = self.__array_namespace__()
-        y: RealArray = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
-        W: RealArray = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
+
+        if self.is_empty(self.eigen_field):
+            good_fields = xp.array([], dtype=int)
+            y = xp.reshape(data, (data.size // prod(self.frame_shape), -1))
+            W = xp.reshape(self.flatfield, (1, -1))
+
+        else:
+            good_fields = list_indices(good_fields, self.eigen_field.shape[0])
+            fields = self.eigen_field[good_fields]
+
+            y = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
+            W = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
 
         if method == "robust-lsq":
             projection = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm)
@@ -345,37 +374,6 @@ class CrystMetadata(CrystBase):
             raise ValueError(f"Invalid method argument: {method}")
 
         return PCAProjection(good_fields=good_fields, projection=projection)
-
-    def project(self, projection: PCAProjection) -> RealArray:
-        """Reconstruct per-frame whitefields from PCA projection coefficients.
-
-        Computes :math:`\\bar{W} + \\sum_k c_{ik} e_k` for each frame
-        :math:`i`, where :math:`c_{ik}` are the projection coefficients and
-        :math:`e_k` are the eigen fields.
-
-        Args:
-            projection: A :class:`PCAProjection` returned by :meth:`projection`.
-
-        Raises:
-            ValueError: If ``eigen_field`` is absent.
-
-        Returns:
-            Per-frame whitefield array, shape ``(N, *frame_shape)``.
-
-        Example:
-            Reconstruct per-frame backgrounds and attach them to new data:
-
-            >>> proj = metadata.projection(frames, method='lsq')
-            >>> whitefields = metadata.project(proj)
-            >>> data = metadata.to_data(frames, whitefield=whitefields)
-        """
-        if self.is_empty(self.eigen_field):
-            raise ValueError('No eigen_field in the container')
-
-        xp = self.__array_namespace__()
-        fields = xp.tensordot(projection.projection, self.eigen_field[projection.good_fields],
-                              axes=((-1,), (0,)))
-        return self.flatfield + fields
 
 @dataclass
 class CrystData(CrystBase):
@@ -409,7 +407,7 @@ class CrystData(CrystBase):
         ...                             r0=0.5, r1=0.95, n_iter=2, lm=9.0)
         >>> data = data.update_snr(std_min=0.5)
     """
-    data        : RealArray = field(default_factory=lambda: np.array([]))
+    data        : IntArray | RealArray = field(default_factory=lambda: np.array([]))
 
     whitefield  : RealArray = field(default_factory=lambda: np.array([]))
     std         : RealArray = field(default_factory=lambda: np.array([]))
@@ -580,6 +578,37 @@ class CrystData(CrystBase):
 
         parent = cast(ReferenceType[CrystData], ref(self))
         return RegionDetector(data=self.snr, structure=structure, parent=parent)
+
+    def online_detector(self, structure: Structure, radial_index: IntArray, n_bins: int
+                        ) -> 'OnlineDetector':
+        """Return an online radial-background region detector.
+
+        The online detector estimates a compact radial background profile for
+        each frame and labels connected pixels whose residual exceeds a radial
+        SNR threshold. It is intended for fast hit finding or coarse region
+        detection directly on raw detector counts, before constructing a
+        persistent :class:`CrystMetadata` background model.
+
+        Args:
+            structure: Connectivity structure used to group signal pixels into
+                labeled regions.
+            radial_index: Integer radial-bin map with the same detector shape
+                as one frame. Usually created with
+                :meth:`~cbclib_v2.Detector.radial_index`.
+            n_bins: Number of radial bins represented in ``radial_index``.
+
+        Raises:
+            ValueError: If ``data`` is absent.
+
+        Returns:
+            An :class:`OnlineDetector` operating on the current raw frames.
+        """
+        if self.is_empty(self.data):
+            raise ValueError('no data in the container')
+
+        parent = cast(ReferenceType[CrystData], ref(self))
+        return OnlineDetector(data=self.data, structure=structure, radial_index=radial_index,
+                              n_bins=n_bins, parent=parent)
 
     def reset_mask(self) -> 'CrystData':
         """Reset bad pixel mask. Every pixel is assumed to be good by default.
@@ -908,6 +937,99 @@ class DetectorBase(DataContainer):
         """Return a new detector with SNR values clipped to ``[vmin, vmax]``."""
         xp = self.__array_namespace__()
         return self.replace(data=xp.clip(self.data, vmin, vmax))
+
+@dataclass
+class OnlineDetector(DataContainer):
+    """Radial-background detector for online hit and region detection.
+
+    Online detection is a fast, permissive save/reject step used during data
+    acquisition or early inspection, when high-rate FEL detector streams are
+    too large to keep in full. ``OnlineDetector`` estimates a compact radial
+    background from the frames being searched and labels connected pixels whose
+    residual radial SNR exceeds a threshold.
+
+    The result is suitable for hit finding and candidate-region discovery. It
+    is not a final background-subtraction method for intensity scaling, and it
+    does not enforce the streak-like morphology expected from CBC diffraction.
+
+    Attributes:
+        data: Raw detector frame stack, shape ``(n_frames, *frame_shape)`` or a
+            compatible leading batch shape.
+        structure: Connectivity structure used by :func:`~cbclib_v2.label` to
+            group signal pixels into regions.
+        radial_index: Integer radial-bin map with shape ``frame_shape``.
+            Pixels outside the detector panels may be marked ``-1`` by native
+            geometry helpers and are ignored by the radial-profile kernels.
+        n_bins: Number of radial bins in the compact profiles.
+        parent: Weak reference to the source :class:`CrystData` container.
+
+    Example:
+        Estimate radial profiles and label online signal regions:
+
+        >>> detector = read_crystfel('detector.geom')
+        >>> radial = np.empty(detector.shape[-2:], dtype=np.int32)
+        >>> detector.radial_index(radial, center=(512, 512), n_bins=1024)
+        >>> online = data.online_detector(Structure([1, 1], 1), radial, 1024)
+        >>> profiles = online.profiles(clip_snr=4.0, n_iter=5)
+        >>> regions = online.detect_regions(profiles, min_snr=5.0, npts=3)
+    """
+    data            : IntArray | RealArray
+    structure       : Structure
+    radial_index    : IntArray
+    n_bins          : int
+    parent          : ReferenceType[CrystData]
+
+    def profiles(self, interval: int=1, clip_snr: float=3.0, n_iter: int=3,
+                 std_min: float=0.0) -> RadialProfiles:
+        """Compute compact per-frame radial whitefield and noise profiles.
+
+        The profile estimator groups pixels by ``radial_index`` and computes
+        one mean and standard deviation per radial bin. The fit is repeated
+        ``n_iter`` times; after each pass, pixels above
+        ``mean + clip_snr * std`` are excluded so sparse diffraction peaks do
+        not bias the background estimate.
+
+        Args:
+            interval: Process every ``interval``-th radial bin together in the
+                native kernel. Larger values can improve throughput for many
+                narrow bins at the cost of coarser temporary grouping.
+            clip_snr: SNR threshold used to reject bright outliers during
+                iterative profile estimation.
+            n_iter: Number of outlier-rejection passes.
+            std_min: Lower bound for per-bin standard deviation.
+
+        Returns:
+            Compact :class:`~cbclib_v2.RadialProfiles` containing per-frame
+            radial ``whitefield``, ``std``, and pixel ``counts`` arrays of
+            shape ``(n_frames, n_bins)``.
+        """
+        return radial_profiles(self.data, self.radial_index, self.n_bins, interval,
+                               clip_snr=clip_snr, n_iter=n_iter, std_min=std_min)
+
+    def detect_regions(self, profiles: RadialProfiles, min_snr: float,
+                       npts: int=1, std_min: float=0.0) -> LabelResult:
+        """Label connected pixels above the radial residual-SNR threshold.
+
+        Each pixel is compared with the whitefield/std value of its radial bin:
+        ``(data - whitefield[r]) / max(std[r], std_min)``. Pixels with residual
+        SNR at least ``min_snr`` are foreground and are grouped with
+        :func:`~cbclib_v2.label` using :attr:`structure`.
+
+        Args:
+            profiles: Compact radial background model returned by
+                :meth:`profiles`.
+            min_snr: Minimum radial residual SNR for a pixel to be considered
+                signal.
+            npts: Minimum connected-region size in pixels. Smaller regions are
+                discarded.
+            std_min: Lower bound for the radial standard deviation used in the
+                SNR denominator.
+
+        Returns:
+            Labeled online signal regions as a :class:`~cbclib_v2.LabelResult`.
+        """
+        signal = profiles.is_signal(self.data, self.radial_index, min_snr, std_min)
+        return label(signal, structure=self.structure, npts=npts)
 
 @dataclass
 class StreakDetector(DetectorBase):

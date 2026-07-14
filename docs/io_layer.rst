@@ -26,20 +26,21 @@ Supported facilities
      - Config class
      - Notes
    * - European XFEL
-     - :class:`~cbclib_v2.XFELRunConfig`
+     - :class:`~cbclib_v2.XFELConfig`
      - Multi-module detectors; per-module HDF5 files matched by a
        ``(run_id, module_id)`` pattern.
    * - SwissFEL
      - :class:`~cbclib_v2.SwissFELConfig`
      - Single detector; HDF5 files matched by a run-level regex pattern.
    * - LCLS
-     - —
-     - Planned.
+     - :class:`~cbclib_v2.LCLSConfig`
+     - Single detector; HDF5 files matched by a run-level regex pattern.
+       Optional run variants disambiguate suffixed run directories.
 
 Configuration files
 -------------------
 
-Both facilities are configured through a JSON file.  The ``"facility"`` key
+Facilities are configured through a JSON file.  The ``"facility"`` key
 selects the config class; the remaining keys map to the dataclass fields.
 
 **European XFEL** (``xfel_config.json``)
@@ -109,6 +110,38 @@ selects the config class; the remaining keys map to the dataclass fields.
    * - ``geometry_file``
      - Path to the CrystFEL ``.geom`` file.
 
+**LCLS** (``lcls_config.json``)
+
+.. code-block:: json
+
+   {
+       "facility":       "LCLS",
+       "data_dir":       "/sdf/data/lcls/ds/mfx/mfx123456/scratch/run{0:04d}",
+       "hdf5_protocol":  "/path/to/lcls_protocol.json",
+       "file_pattern":   "run{0:04d}.*\\.h5",
+       "geometry_file":  "/path/to/detector.geom"
+   }
+
+.. list-table:: LCLS config fields
+   :header-rows: 1
+   :widths: 22 78
+
+   * - Field
+     - Description
+   * - ``data_dir``
+     - Directory format string; ``{0}`` is replaced by the run ID.  If several
+       directories start with the formatted name, pass ``variant=...`` to
+       :func:`~cbclib_v2.open_run` to select the directory whose name ends with
+       that suffix.
+   * - ``hdf5_protocol``
+     - Path to the :class:`~cbclib_v2.H5Protocol` JSON or INI file.
+   * - ``file_pattern``
+     - Python ``str.format`` pattern converted to a regex; ``{0}`` is filled
+       with the run ID and the result is matched against filenames in
+       ``data_dir``.  Regex special characters must be escaped (``\\.``).
+   * - ``geometry_file``
+     - Path to the CrystFEL ``.geom`` file.
+
 Opening a run
 -------------
 
@@ -117,10 +150,10 @@ Load the config with :meth:`~cbclib_v2.RunConfig.read` and pass it to
 
 .. code-block:: python
 
-   from cbclib_v2 import open_run, XFELRunConfig
+   from cbclib_v2 import open_run, XFELConfig
 
    # Load facility config
-   config = XFELRunConfig.read('xfel_config.json')
+   config = XFELConfig.read('xfel_config.json')
 
    # Open run 100
    run = open_run(100, config)
@@ -133,10 +166,19 @@ Load the config with :meth:`~cbclib_v2.RunConfig.read` and pass it to
    frames = run.data(indices[:50], geometry=True)
    print(frames.shape)   # e.g. (50, 1480, 1552) with geometry applied
 
-The same code works for SwissFEL by substituting
-:class:`~cbclib_v2.SwissFELConfig` for :class:`~cbclib_v2.XFELRunConfig` —
-the :func:`~cbclib_v2.open_run` call and the rest of the pipeline are
-identical.
+The same code works for SwissFEL or LCLS by substituting
+:class:`~cbclib_v2.SwissFELConfig` or :class:`~cbclib_v2.LCLSConfig` for
+:class:`~cbclib_v2.XFELConfig` — the :func:`~cbclib_v2.open_run` call and the
+rest of the pipeline are identical.
+
+For LCLS runs with several matching run directories, pass a variant suffix:
+
+.. code-block:: python
+
+   from cbclib_v2 import LCLSConfig, open_run
+
+   config = LCLSConfig.read('lcls_config.json')
+   run = open_run(100, config, variant='-proc')
 
 See also
 --------

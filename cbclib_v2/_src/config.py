@@ -53,18 +53,33 @@ class CPUConfig:
     def effective_num_threads(self) -> int:
         """Return the thread count that will actually be used.
 
-        Returns 1 when called from a non-main thread to prevent nested
-        parallelism.
+        Returns 1 when called from a multiprocessing pool worker or from a
+        non-main thread to prevent nested parallelism.
 
         Returns:
             Effective number of OpenMP threads.
         """
+        if in_cpu_pool_worker():
+            return 1
         if threading.current_thread() is not threading.main_thread():
             return 1
         return self.num_threads
 
 _default_num_threads = 1
 _thread_local = local()
+
+def set_cpu_pool_worker(is_pool: bool=True) -> None:
+    """Mark whether the current process is running as a pool worker.
+
+    Args:
+        is_pool: ``True`` when the current process belongs to an outer
+            multiprocessing pool.
+    """
+    _thread_local.is_pool = is_pool
+
+def in_cpu_pool_worker() -> bool:
+    """Return whether the current process belongs to an outer pool."""
+    return bool(getattr(_thread_local, "is_pool", False))
 
 def get_cpu_config() -> CPUConfig:
     """Return the active :class:`CPUConfig` for the current thread.
