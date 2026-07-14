@@ -219,6 +219,14 @@ class LaueVectors(MillerWithRLP):
                         xp.sum(kin * tau, axis=-1) + xp.sqrt(tau_mag), xp)
         return kin - s[..., None] * tau
 
+class MaskedLaueVectors(LaueVectors):
+    mask    : BoolArray
+
+    @property
+    def source_line(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.where(self.mask[..., None], super().source_line, xp.nan)
+
 class CBDPoints(LaueVectors, Points):
     pass
 
@@ -229,5 +237,5 @@ class CBData(State, ArrayContainer):
 class CBDataBest(CBData):
     mask    : BoolArray
 
-class CBDataInShell(CBData):
+class CBDataMasked(CBData):
     mask    : BoolArray

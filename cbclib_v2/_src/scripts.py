@@ -1,10 +1,11 @@
 from functools import partial
 from math import log
+import json
 import os
 import logging
 import sys
 from multiprocessing import Pool
-from typing import Any, Callable, Iterator, List, Literal, Tuple, Type, cast, overload
+from typing import Any, Callable, Iterator, List, Literal, Tuple, Type, TypeVar, cast, overload
 from dataclasses import InitVar, dataclass, field
 import h5py
 from jax import jit, value_and_grad
@@ -29,7 +30,7 @@ from ..indexer.cbc_data import CBData, MillerWithRLP, Patterns
 from ..indexer.cbc_indexing import CBDIndexer, CBDLoss, CBDModel
 from ..indexer.cbc_setup import (BaseSetup, BaseState, FixedApertureSetup, FixedApertureState,
                                  FixedPupilSetup, FixedPupilState, FixedSetup, FixedState,
-                                 TiltOverAxisState, XtalList, XtalState)
+                                 IndexingResult, ResolvedState, TiltOverAxisState, XtalState)
 
 class BaseParameters(Container):
     """Base class for JSON-serialisable parameter containers.
@@ -792,9 +793,10 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
         angles over the rotation axis.
     """
     xp = array_namespace(candidates, patterns)
+    resolved = state.resolve(xp)
     centers = patterns.sample(xp.full(patterns.shape[0], 0.5))
-    points = indexer.points_to_kout(centers, state, xp)
-    rotograms = indexer.index(candidates, patterns, points, state)
+    points = indexer.points_to_kout(centers, resolved, xp)
+    rotograms = indexer.index(candidates, patterns, points, resolved)
     rotomap = indexer.rotomap(params.shape, rotograms, patterns.reset_index().index, params.width)
     peaks = indexer.to_peaks(rotomap, params.threshold, params.n_max)
     return indexer.refine_peaks(peaks, rotomap, params.vicinity.to_structure(3),
@@ -820,12 +822,12 @@ def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState
     return indexer.xtal.hkl_range(patterns.unique_index(), hkl, xtal, xp)
 
 def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
-                 xp: AnyNamespace=NumPy) -> XtalList:
+                 xp: AnyNamespace=NumPy) -> IndexingResult:
     """Index all patterns sequentially and return a list of crystal solutions.
 
     Iterates over patterns, generates Miller-index candidates via
     :func:`indexing_candidates`, calls :func:`index_patterns` for each, and
-    collects orientation solutions into an :class:`~cbclib_v2.indexer.XtalList`.
+    collects orientation solutions into an :class:`~cbclib_v2.indexer.IndexingResult`.
 
     Args:
         patterns: Diffraction patterns container.
@@ -836,7 +838,7 @@ def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params:
         xp: Array namespace.
 
     Returns:
-        :class:`~cbclib_v2.indexer.XtalList` with one solution entry per
+        :class:`~cbclib_v2.indexer.IndexingResult` with one solution entry per
         pattern.
 
     Raises:
@@ -846,7 +848,7 @@ def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params:
     indexer = CBDIndexer()
     hkl = indexer.xtal.hkl_in_ball(params.q_max, xtals, xp)
     rlp_iterator = indexing_candidates(indexer, patterns, xtals, hkl, xp)
-    solutions: List[XtalList] = []
+    solutions: List[IndexingResult] = []
 
     if len(xtals) == 1:
         iterator = zip(patterns, rlp_iterator)
@@ -866,7 +868,7 @@ def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params:
         raise ValueError(f'Number of crystals ({len(xtals):d}) and patterns ({len(patterns):d}) '\
                          'are inconsistent')
 
-    return XtalList.concatenate(solutions)
+    return IndexingResult.concatenate(solutions)
 
 indexing_worker : 'IndexingWorker'
 
@@ -877,7 +879,7 @@ class IndexingWorker():
     xtal    : XtalState
     indexer : CBDIndexer
 
-    def __call__(self, args: Tuple[MillerWithRLP, Patterns]) -> XtalList:
+    def __call__(self, args: Tuple[MillerWithRLP, Patterns]) -> IndexingResult:
         candidates, patterns = args
         idxs, tilts = index_patterns(candidates, patterns, self.indexer, self.params, self.state)
         initial = self.xtal if len(self.xtal) == 1 else self.xtal[idxs]
@@ -891,11 +893,11 @@ class IndexingWorker():
         indexing_worker = cls(state, params, xtal, indexer)
 
     @staticmethod
-    def run(args: Tuple[MillerWithRLP, Patterns]) -> XtalList:
+    def run(args: Tuple[MillerWithRLP, Patterns]) -> IndexingResult:
         return indexing_worker(args)
 
 def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
-                  platform: Platform = 'cpu', xp: AnyNamespace=NumPy) -> XtalList:
+                  platform: Platform = 'cpu', xp: AnyNamespace=NumPy) -> IndexingResult:
     """Index all patterns in parallel using a multiprocessing pool.
 
     Distributes patterns across worker processes.  Falls back to
@@ -911,7 +913,7 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
         xp: Array namespace.
 
     Returns:
-        :class:`~cbclib_v2.indexer.XtalList` with one solution entry per
+        :class:`~cbclib_v2.indexer.IndexingResult` with one solution entry per
         pattern.
     """
     num_threads = get_cpu_config().effective_num_threads()
@@ -919,7 +921,7 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
     hkl = indexer.xtal.hkl_in_ball(params.q_max, xtals, xp)
     rlp_iterator = indexing_candidates(indexer, patterns, xtals, hkl, xp)
 
-    solutions : List[XtalList] = []
+    solutions : List[IndexingResult] = []
     if platform == 'cpu' and num_threads > 1:
         with Pool(processes=num_threads, initializer=IndexingWorker.initializer,
                   initargs=(state, params, xtals, indexer, True)) as pool:
@@ -931,21 +933,27 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
         for candidates, pattern in tqdm(zip(rlp_iterator, patterns), total=len(patterns)):
             solutions.append(worker((candidates, pattern)))
 
-    return XtalList.concatenate(solutions)
+    return IndexingResult.concatenate(solutions)
 
 @dataclass
 class ModelDataParameters(BaseParameters):
-    keep        : Literal['best', 'in-shell', 'all']
+    keep        : Literal['best', 'in-shell', 'refined', 'all']
     quantile    : float
     q_abs       : float
+    threshold   : float
     points      : List[float]
 
-    def cbd_data(self, patterns: Patterns, model: CBDModel, state: BaseState) -> CBData:
-        data = model.init_data(patterns, state, values=self.points)
+    def cbd_data(self, patterns: Patterns, model: CBDModel, loss: CBDLoss, state: BaseState
+                 ) -> CBData:
+        xp = state.__array_namespace__()
+        resolved = state.resolve(xp)
+        data = model.init_data(patterns, resolved, values=self.points)
         if self.keep == 'best':
             return model.keep_best(data, quantile=self.quantile)
         if self.keep == 'in-shell':
-            return model.keep_in_shell(data, q_abs=self.q_abs, state=state)
+            return model.keep_in_shell(data, q_abs=self.q_abs, state=resolved)
+        if self.keep == 'refined':
+            return model.keep_refined(self.threshold, loss, data, resolved)
         if self.keep == 'all':
             return data
         raise ValueError(f'Invalid keep keyword: {self.keep}')
@@ -1008,6 +1016,7 @@ class OptimiseParameters(BaseParameters):
 LossFn = Callable[[CBData, BaseState], RealArray]
 LossGradFn = Callable[[CBData, BaseState], Tuple[RealArray, BaseState]]
 ApplyUpdatesFn = Callable[[BaseState, Updates], BaseState]
+SetupT = TypeVar('SetupT', bound=BaseSetup)
 
 @dataclass
 class RefinementConfig(BaseParameters):
@@ -1015,18 +1024,37 @@ class RefinementConfig(BaseParameters):
     loss : LossParameters
     optimise : OptimiseParameters
     setup : Literal['fixed', 'fixed-aperture', 'fixed-pupil']
+    mode : Literal['shared', 'per-pattern']
     threshold : float
 
-    def initial(self, xtal: XtalState, setup_file: str) -> BaseState:
+    def import_resolved(self, resolved: ResolvedState) -> BaseState:
+        def init_setup(setup_cls: type[SetupT]) -> SetupT:
+            setup = setup_cls.from_resolved(resolved.setup)
+            if self.mode == 'shared':
+                return setup.collapse()
+            return setup
+
         if self.setup == 'fixed':
-            setup = FixedSetup.read(setup_file)
-            return FixedState(xtal=xtal, setup=setup)
+            return FixedState(xtal=resolved.xtal, setup=init_setup(FixedSetup))
         if self.setup == 'fixed-aperture':
-            setup = FixedApertureSetup.read(setup_file)
-            return FixedApertureState(xtal=xtal, setup=setup)
+            return FixedApertureState(xtal=resolved.xtal, setup=init_setup(FixedApertureSetup))
         if self.setup == 'fixed-pupil':
-            setup = FixedPupilSetup.read(setup_file)
-            return FixedPupilState(xtal=xtal, setup=setup)
+            return FixedPupilState(xtal=resolved.xtal, setup=init_setup(FixedPupilSetup))
+        raise ValueError(f'Invalid setup keyword: {self.setup}')
+
+    def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseState:
+        def init_setup(setup_cls: type[SetupT]) -> SetupT:
+            setup = setup_cls.read(setup_file)
+            if self.mode == 'per-pattern':
+                return setup.broadcast(len(xtal))
+            return setup
+
+        if self.setup == 'fixed':
+            return FixedState(xtal=xtal, setup=init_setup(FixedSetup))
+        if self.setup == 'fixed-aperture':
+            return FixedApertureState(xtal=xtal, setup=init_setup(FixedApertureSetup))
+        if self.setup == 'fixed-pupil':
+            return FixedPupilState(xtal=xtal, setup=init_setup(FixedPupilSetup))
         raise ValueError(f'Invalid setup keyword: {self.setup}')
 
 @dataclass
@@ -1070,7 +1098,7 @@ class RefinementStats(Container):
 @dataclass
 class RefineResult(Container):
     index   : IntArray
-    state   : BaseState
+    state   : ResolvedState
     loss    : RealArray
     fitness : RealArray
     stats   : RefinementStats
@@ -1081,26 +1109,29 @@ class RefineResult(Container):
         sorted_index = self.index[idxs]
         firsts = xp.searchsorted(sorted_index, xp.unique_values(sorted_index))
         champions = idxs[firsts]
-        state = self.state.replace(xtal=self.state.xtal[champions])
-        return RefineResult(self.index[champions], state, self.loss[champions],
+        return RefineResult(self.index[champions], self.state[champions], self.loss[champions],
                             self.fitness[champions], self.stats)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Return refined orientations with per-solution refinement metrics."""
-        df = self.state.xtal.to_dataframe(index=self.index)
+        df = self.state.to_dataframe(index=self.index)
         df['loss'] = asnumpy(self.loss)
         df['fitness'] = asnumpy(self.fitness)
         return df
 
-    def save(self, file: str, files: dict[str, str] | None=None) -> None:
-        """Write champion solutions, all candidates, and refinement trace to HDF5.
+    def save(self, file: str, config: RefinementConfig,
+             files: dict[str, str] | None=None) -> None:
+        """Write restartable refinement results and configuration to HDF5.
 
         The ``data`` table contains one champion solution per pattern and is
         intended as the default downstream input.  The ``candidates`` and
-        ``stats`` tables retain diagnostic information from refinement.
+        ``stats`` tables retain all refined candidates and optimisation
+        diagnostics. Both solution tables include resolved setup geometry,
+        while the root metadata stores the refinement configuration.
 
         Args:
             file: Output HDF5 file path.
+            config: Configuration used to produce the refinement result.
             files: Optional source-file paths written under the ``files`` HDF5 group.
         """
         dir_path = os.path.dirname(file)
@@ -1111,8 +1142,9 @@ class RefineResult(Container):
         self.to_dataframe().to_hdf(file, key='candidates', mode='a')
         self.stats.save(file, mode='a')
 
-        if files is not None:
-            with h5py.File(file, 'a') as output_file:
+        with h5py.File(file, 'a') as output_file:
+            output_file.attrs['refinement_config'] = json.dumps(config.to_dict())
+            if files is not None:
                 for name, path in files.items():
                     key = f'files/{name}'
                     if key in output_file:
@@ -1172,21 +1204,30 @@ def default_refinement_logger() -> logging.Logger:
     logger.addHandler(handler)
     return logger
 
-def refine_patterns(patterns: Patterns, xtal_list: XtalList, setup_file: str,
-                    params: RefinementConfig, logger: logging.Logger | None=None
-                    ) -> RefineResult:
+def refinement(index: IntArray, initial: BaseState, patterns: Patterns, params: RefinementConfig,
+               logger: logging.Logger, xp: AnyNamespace) -> RefineResult:
+    """Refine candidate orientations for a batch of diffraction patterns.
+
+    Args:
+        index: Array of indices for the patterns to refine.
+        initial: Initial crystal and detector geometry state.
+        patterns: Diffraction patterns container.
+        params: Refinement configuration.
+        logger: Optional logger for progress messages.
+        xp: Array namespace.
+
+    Returns:
+        :class:`~cbclib_v2.scripts.RefineResult` with champion solutions
+        and per-solution refinement metrics.
+    """
     model = CBDModel()
-    target = patterns.loc[xtal_list.index]
-    initial = params.initial(xtal_list.to_xtals(), setup_file)
 
     loss = params.loss.cbd_loss(model)
-    data = params.data.cbd_data(target, model, initial)
+    data = params.data.cbd_data(patterns, model, loss, initial)
     loss_grad_fn : LossGradFn = jit(value_and_grad(jit(loss), argnums=1))
 
     solver, schedule = params.optimise.optimiser()
 
-    if logger is None:
-        logger = default_refinement_logger()
     logger.info("refining %d patterns with %s/%s/%s for %d steps",
                 len(initial.xtal), params.optimise.method, params.loss.kind,
                 params.loss.projector, params.optimise.schedule.num_steps)
@@ -1196,5 +1237,38 @@ def refine_patterns(patterns: Patterns, xtal_list: XtalList, setup_file: str,
                                      params.optimise.trace_every, params.optimise.log_every,
                                      logger)
     criterion = loss.per_pattern(data, state)
-    fitness = loss.pattern_fitness(params.threshold, target, data, state)
-    return RefineResult(xtal_list.index, state, criterion, fitness, stats)
+    fitness = loss.pattern_fitness(params.threshold, data, state)
+    return RefineResult(index, state.resolve(xp), criterion, fitness, stats)
+
+def refine_xtals(patterns: Patterns, df: pd.DataFrame, setup_file: str,
+                 params: RefinementConfig, logger: logging.Logger | None=None
+                 ) -> RefineResult:
+    xp = patterns.__array_namespace__()
+
+    index = xp.asarray(df['index'].to_numpy())
+    target = patterns.loc[index]
+    initial = params.import_xtal(XtalState.import_dataframe(df, xp=xp), setup_file)
+
+    return refinement(index, initial, target, params, logger or default_refinement_logger(), xp)
+
+def refine_solutions(patterns: Patterns, df: pd.DataFrame, params: RefinementConfig,
+                     logger: logging.Logger | None=None) -> RefineResult:
+    """Refine all candidate solutions in *df* and return champion orientations.
+
+    Args:
+        patterns: Diffraction patterns container.
+        df: Candidate solutions table from :func:`run_indexing`.
+        params: Refinement configuration.
+        logger: Optional logger for progress messages.
+
+    Returns:
+        :class:`~cbclib_v2.scripts.RefineResult` with champion solutions
+        and per-solution refinement metrics.
+    """
+    xp = patterns.__array_namespace__()
+
+    index = xp.asarray(df['index'].to_numpy())
+    target = patterns.loc[index]
+    initial = params.import_resolved(ResolvedState.import_dataframe(df, xp=xp))
+
+    return refinement(index, initial, target, params, logger or default_refinement_logger(), xp)

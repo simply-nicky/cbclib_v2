@@ -9,4 +9,5 @@ from .slurm.scripts import (DetectConfig, MetadataConfig, MetaListConfig, ScanCo
 from ._src.scripts import (concentric_only, create_background, create_metadata,
                            detect_regions, detect_streaks, index_patterns,
                            indexing_candidates, optimisation_loop, pool_detection, pool_indexing,
-                           refine_patterns, run_detection, run_indexing, scale_background)
+                           refine_solutions, refine_xtals, run_detection, run_indexing,
+                           scale_background)

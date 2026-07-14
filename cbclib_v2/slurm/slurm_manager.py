@@ -348,15 +348,31 @@ class SLURMJobManager:
 
         for line in lines:
             value = line.strip()
-            if not re.fullmatch(r"\d+(?:_\d+)?", value):
-                continue
+            parsed: List[JobID] = []
+            if re.fullmatch(r"\d+(?:_\d+)?", value):
+                parsed = [JobID.from_string(value)]
+            else:
+                match = re.fullmatch(r"(\d+)_\[(.+)\]", value)
+                if match is None:
+                    continue
+                job_id = int(match.group(1))
+                for task_range in match.group(2).split(','):
+                    task_range = task_range.split('%', 1)[0]
+                    parts = task_range.split(':', 1)
+                    step = int(parts[1]) if len(parts) == 2 else 1
+                    limits = parts[0].split('-', 1)
+                    start = int(limits[0])
+                    stop = int(limits[1]) if len(limits) == 2 else start
+                    parsed.extend(JobID(job_id, task_id)
+                                  for task_id in range(start, stop + 1, step))
 
-            job_id = JobID.from_string(value)
-            if job_id not in seen:
-                job_ids.append(job_id)
-                seen.add(job_id)
+            for job_id in parsed:
+                if job_id not in seen:
+                    job_ids.append(job_id)
+                    seen.add(job_id)
 
-        return sorted(job_ids, key=lambda jid: (jid.id, -1 if jid.task_id is None else jid.task_id))
+        sorter = lambda jid: (jid.id, -1 if jid.task_id is None else jid.task_id)
+        return sorted(job_ids, key=sorter)
 
     @staticmethod
     def _parse_status_row(values: List[str]) -> JobStatus | None:

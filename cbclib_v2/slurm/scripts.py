@@ -10,7 +10,8 @@ import h5py
 from jax import config as jax_config
 import pandas as pd
 from tqdm.auto import tqdm
-from ..cuda import Allocator, set_allocator
+from .. import cuda
+from ..cuda import Allocator
 from .._src.annotations import AnyNamespace, IntArray, JaxNumPy, NumPy
 from .._src.array_api import asnumpy, default_api, default_rng, Platform
 from .._src.config import CPUConfig
@@ -21,9 +22,10 @@ from .._src.run import BaseRun, RunConfig, open_run
 from .._src.scripts import (BaseParameters, FinderConfig, IndexingConfig,
                             MetadataParameters, RefinementConfig, RegionFinderConfig,
                             StreakFinderConfig)
-from .._src.scripts import create_metadata, pool_detection, pool_indexing, refine_patterns
+from .._src.scripts import (create_metadata, pool_detection, pool_indexing, refine_solutions,
+                            refine_xtals)
 from .._src.streaks import StackedStreaks, Streaks
-from ..indexer import FixedSetup, XtalCell, XtalList, XtalState
+from ..indexer import FixedSetup, XtalCell, XtalState
 from .slurm_manager import SLURMScript, ScriptSpec
 
 @dataclass
@@ -74,7 +76,7 @@ class SystemConfig(BaseParameters):
         """
         if self.platform == 'cpu':
             return
-        set_allocator(self.cuda_allocator, strict=True)
+        cuda.set_allocator(self.cuda_allocator, strict=True)
 
     def cpu_config(self) -> CPUConfig:
         """Return a :class:`~cbclib_v2.CPUConfig` context manager for this thread count."""
@@ -455,6 +457,8 @@ class BaseScript:
         raise NotImplementedError
 
 DetectionKind = Literal['streaks', 'regions']
+IndexInputDir = Literal['streaks', 'regions']
+RefinementInputDir = Literal['xtals', 'solutions']
 
 @dataclass
 class CompileStreaks(BaseScript):
@@ -469,14 +473,20 @@ class CompileStreaks(BaseScript):
         scan_file: Path to the scan configuration JSON file.
     """
 
-    kind        : DetectionKind
-    scan_file   : str
+    kind            : DetectionKind
+    scan_file       : str
+    in_suffix    : str = str()
+    out_suffix   : str = str()
 
     @classmethod
     def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
         initial.add_argument('kind', type=str, choices=['streaks', 'regions'],
                              help='Type of detection to compile')
         initial.add_argument('scan', type=str, help='Path to a scan parameters JSON file')
+        initial.add_argument('--in-suffix', type=str, default=str(),
+                             help='Suffix of the per-chunk detection files to read')
+        initial.add_argument('--out-suffix', type=str, default=str(),
+                             help='Suffix of the merged detection file to write')
         return initial
 
     @classmethod
@@ -484,8 +494,9 @@ class CompileStreaks(BaseScript):
         return "Compile detected streaks into merged tables"
 
     @classmethod
-    def from_file(cls, kind: DetectionKind, scan_file: str) -> 'CompileStreaks':
-        return cls(kind, scan_file)
+    def from_file(cls, kind: DetectionKind, scan_file: str, in_suffix: str,
+                  out_suffix: str) -> 'CompileStreaks':
+        return cls(kind, scan_file, in_suffix, out_suffix)
 
     def run(self):
         def pandas_hdf_keys(path: str) -> List[str]:
@@ -504,11 +515,11 @@ class CompileStreaks(BaseScript):
         else:
             raise ValueError(f'Invalid detection kind: {self.kind}')
 
-        scan_dir = scan.scan_subdir(hits_dir)
+        scan_dir = scan.scan_subdir(hits_dir, self.in_suffix)
         scan_files = list(sorted(scan.list_files(scan_dir)))
 
         print(f'Found {len(scan_files)} streak files for run {scan.scan_num:d}')
-        output_path = os.path.join(hits_dir, scan.scan_file())
+        output_path = scan.scan_file(suffix=self.out_suffix, dir=hits_dir)
         print(f'Writing the detected streaks to the file: {output_path}')
 
         tables: dict[str, List[pd.DataFrame | pd.Series]] = {}
@@ -599,7 +610,7 @@ class CreateMetaList(BaseScript):
     params      : MetadataParameters
     chunk_id    : int | None
     n_chunks    : int | None
-    n_backgrounds : int | None
+    n_out       : int | None
 
     def __post_init__(self):
         if self.n_chunks is not None:
@@ -613,9 +624,9 @@ class CreateMetaList(BaseScript):
                              help='Path to a scan parameters JSON file')
         initial.add_argument('parameters', type=str,
                              help='Path to a metadata parameters JSON file')
-        initial.add_argument('--chunk_id', '-c', type=int, help='ID of the chunk to process')
+        initial.add_argument('--chunk_id', '-id', type=int, help='ID of the chunk to process')
         initial.add_argument('--n_chunks', '-n', type=int, help='Total number of chunks')
-        initial.add_argument('--n_backgrounds', '-b', type=int,
+        initial.add_argument('--n_out', '-no', type=int,
                              help='Number of background estimates to compute')
         return initial
 
@@ -625,11 +636,11 @@ class CreateMetaList(BaseScript):
 
     @classmethod
     def from_file(cls, scan_file: str, params_file: str, chunk_id: int | None, n_chunks: int | None,
-                  n_backgrounds: int | None = None
+                  n_out: int | None = None
                   ) -> 'CreateMetaList':
         scan = ScanConfig.read(scan_file)
         params = MetadataParameters.read(params_file)
-        return cls(scan, params, chunk_id, n_chunks, n_backgrounds)
+        return cls(scan, params, chunk_id, n_chunks, n_out)
 
     def run(self):
         print("Configuring the script...")
@@ -649,9 +660,9 @@ class CreateMetaList(BaseScript):
         offsets = xp.arange(0, self.scan.metalist.n_frames) - self.scan.metalist.n_frames // 2
         spacing = min(self.scan.metalist.spacing, len(indices) - len(offsets))
 
-        n_backgrounds = self.n_backgrounds or (len(indices) - len(offsets)) // spacing
+        n_out = self.n_out or (len(indices) - len(offsets)) // spacing
         centers = xp.linspace(-int(offsets[0]), len(indices) - int(offsets[-1]) - 1,
-                              n_backgrounds, dtype=int)
+                              n_out, dtype=int)
         frames = centers[:, None] + offsets
         print(f"Creating a metadata list of {frames.shape[0]:d} points...")
 
@@ -711,6 +722,7 @@ class DetectHits(BaseScript):
     chunk_id    : int | None
     n_chunks    : int | None
     frames_only : bool
+    out_suffix  : str
 
     def __post_init__(self):
         if self.n_chunks is not None:
@@ -726,10 +738,12 @@ class DetectHits(BaseScript):
                              help='Path to a scan parameters JSON file')
         initial.add_argument('parameters', type=str,
                              help='Path to a streak finder parameters JSON file')
-        initial.add_argument('--chunk_id', '-c', type=int, help='Index of the chunk to process')
+        initial.add_argument('--chunk_id', '-id', type=int, help='Index of the chunk to process')
         initial.add_argument('--n_chunks', '-n', type=int, help='Number of chunks to process')
         initial.add_argument('--frames-only', action='store_true',
                              help='Only save the list of frames with hits')
+        initial.add_argument('--out-suffix', '-os', type=str, default=str(),
+                             help='Suffix of the detection files to write')
         return initial
 
     @classmethod
@@ -738,7 +752,7 @@ class DetectHits(BaseScript):
 
     @classmethod
     def from_file(cls, kind: DetectionKind, scan_file: str, params_file: str, chunk_id: int | None,
-                  n_chunks: int | None, frames_only: bool) -> 'DetectHits':
+                  n_chunks: int | None, frames_only: bool, out_suffix: str) -> 'DetectHits':
         scan = ScanConfig.read(scan_file)
         if kind == 'streaks':
             params = StreakFinderConfig.read(params_file)
@@ -746,7 +760,7 @@ class DetectHits(BaseScript):
             params = RegionFinderConfig.read(params_file)
         else:
             raise ValueError(f"Invalid detection kind: {kind}")
-        return cls(scan, params, chunk_id, n_chunks, frames_only)
+        return cls(scan, params, chunk_id, n_chunks, frames_only, out_suffix)
 
     @property
     def kind(self) -> DetectionKind:
@@ -816,10 +830,18 @@ class DetectHits(BaseScript):
         print(f"{hit_frames.size:d} hits were found.")
 
         if len(hits) > 0:
+            if self.kind == 'streaks':
+                output_dir = self.scan.detect.streaks_dir
+            else:
+                output_dir = self.scan.detect.regions_dir
+
             if self.frames_only:
                 print("Frames only requested, skipping saving the full hits data.")
                 output_path = self.scan.scan_file(self.chunk_id, extension='.csv',
-                                                  dir=self.scan.detect.streaks_dir)
+                                                  suffix=self.out_suffix, dir=output_dir)
+                dir_path = os.path.dirname(output_path)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path)
                 pd.DataFrame({'frame': hit_frames}).to_csv(output_path, index=False)
                 print(f"The results were saved to {output_path}")
             else:
@@ -827,12 +849,8 @@ class DetectHits(BaseScript):
                 df = hits.to_dataframe()
                 metadata = self.metadata_dataframe(run, chunk, hit_frames, xp)
 
-                if self.kind == 'streaks':
-                    output_dir = self.scan.detect.streaks_dir
-                else:
-                    output_dir = self.scan.detect.regions_dir
-
-                output_path = self.scan.scan_file(self.chunk_id, dir=output_dir)
+                output_path = self.scan.scan_file(self.chunk_id, suffix=self.out_suffix,
+                                                  dir=output_dir)
                 dir_path = os.path.dirname(output_path)
                 if not os.path.exists(dir_path):
                     os.makedirs(dir_path)
@@ -854,7 +872,9 @@ class IndexingScript(BaseScript):
         params: Indexing configuration.
         xtals: Path to an HDF5 file with initial crystal orientations.
             Empty string → use the unit cell from :attr:`~ScanConfig.setup`.
-        suffix: Suffix appended to the output directory name.
+        input_dir: Logical detection directory to read from: ``'streaks'`` or ``'regions'``.
+        in_suffix: Suffix of the detection files to read.
+        out_suffix: Suffix appended to the output directory name.
         chunk_id: Zero-based chunk index (``None`` = whole scan).
         n_chunks: Total number of chunks (``None`` = whole scan).
     """
@@ -862,7 +882,9 @@ class IndexingScript(BaseScript):
     scan        : ScanConfig
     params      : IndexingConfig
     xtals       : str
-    suffix      : str
+    input_dir   : IndexInputDir
+    in_suffix   : str
+    out_suffix  : str
     chunk_id    : int | None
     n_chunks    : int | None
 
@@ -880,9 +902,14 @@ class IndexingScript(BaseScript):
                              help='Path to an indexing parameters JSON file')
         initial.add_argument('--xtals', '-x', type=str, default=str(),
                              help='Path to a crystal orientations H5 file')
-        initial.add_argument('--suffix', '-s', type=str, default=str(),
-                             help='Suffix of the folder where the indexing results are saved')
-        initial.add_argument('--chunk_id', '-c', type=int, help='ID of the chunk to process')
+        initial.add_argument('--input-dir', type=str, choices=['streaks', 'regions'],
+                             default='streaks',
+                             help='Logical detection directory to read from')
+        initial.add_argument('--in-suffix', '-is', type=str, default=str(),
+                             help='Suffix of the detection files to read')
+        initial.add_argument('--out-suffix', '-os', type=str, default=str(),
+                             help='Suffix of the indexing files to write')
+        initial.add_argument('--chunk_id', '-id', type=int, help='ID of the chunk to process')
         initial.add_argument('--n_chunks', '-n', type=int, help='Total number of chunks')
         return initial
 
@@ -891,18 +918,30 @@ class IndexingScript(BaseScript):
         return "Index detected streaks in CBD patterns"
 
     @classmethod
-    def from_file(cls, scan_file: str, params_file: str, xtals: str, suffix: str,
-                  chunk_id: int | None, n_chunks: int | None) -> 'IndexingScript':
+    def from_file(cls, scan_file: str, params_file: str, xtals: str, input_dir: IndexInputDir,
+                  in_suffix: str, out_suffix: str, chunk_id: int | None,
+                  n_chunks: int | None) -> 'IndexingScript':
         scan = ScanConfig.read(scan_file)
         params = IndexingConfig.read(params_file)
-        return cls(scan, params, xtals, suffix, chunk_id, n_chunks)
+        return cls(scan, params, xtals, input_dir, in_suffix, out_suffix,
+                   chunk_id, n_chunks)
+
+    @property
+    def hits_dir(self) -> str:
+        """Return the configured detection directory selected by :attr:`input_dir`."""
+        if self.input_dir == 'streaks':
+            return self.scan.detect.streaks_dir
+        if self.input_dir == 'regions':
+            return self.scan.detect.regions_dir
+        raise ValueError(f"Invalid input_dir: {self.input_dir}")
 
     def run(self):
         print("Configuring the script...")
         xp = self.scan.system.array_api()
 
         geometry = self.scan.data.geometry()
-        hits_file = self.scan.scan_file(self.chunk_id, dir=self.scan.detect.streaks_dir)
+        hits_file = self.scan.scan_file(self.chunk_id, suffix=self.in_suffix,
+                                        dir=self.hits_dir)
         if not os.path.isfile(hits_file):
             print(f"No streaks file found at {hits_file}")
             return
@@ -932,13 +971,13 @@ class IndexingScript(BaseScript):
                                     self.scan.system.platform, xp)
 
         output_path = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.xtals_dir,
-                                          suffix=self.suffix)
+                                          suffix=self.out_suffix)
         dir_path = os.path.dirname(output_path)
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
 
         print(f"Saving the results to {output_path}...")
-        df = indexed.to_dataframe()
+        df = indexed.xtal.to_dataframe(indexed.index)
         df.to_hdf(output_path, key='data')
         with h5py.File(output_path, 'a') as output_file:
             for key in ('files/xtal_file', 'files/hits_file', 'files/setup_file'):
@@ -960,19 +999,24 @@ class RefinementScript(BaseScript):
     against the detected streaks, and writes the refinement result to an HDF5
     file.  The output stores champion orientations under ``data``, all refined
     candidates under ``candidates``, the optimisation trace under ``stats``, and
-    input-file provenance under ``files``.
+    input-file provenance under ``files``. The refinement configuration is
+    retained in the root HDF5 metadata.
 
     Attributes:
         scan: Scan configuration.
         params: Refinement configuration.
-        suffix: Suffix appended to the indexing input and refinement output directories.
+        input_dir: Logical orientation directory to read from: ``'xtals'`` or ``'solutions'``.
+        in_suffix: Suffix of the orientation files to read.
+        out_suffix: Suffix appended to the refinement output directory.
         chunk_id: Zero-based chunk index (``None`` = whole scan).
         n_chunks: Total number of chunks (``None`` = whole scan).
     """
 
     scan        : ScanConfig
     params      : RefinementConfig
-    suffix      : str
+    input_dir   : RefinementInputDir
+    in_suffix   : str
+    out_suffix  : str
     chunk_id    : int | None
     n_chunks    : int | None
 
@@ -988,9 +1032,14 @@ class RefinementScript(BaseScript):
                              help='Path to a scan parameters JSON file')
         initial.add_argument('parameters', type=str,
                              help='Path to a refinement parameters JSON file')
-        initial.add_argument('--suffix', '-s', type=str, default=str(),
-                             help='Suffix shared by indexing input and refinement output folders')
-        initial.add_argument('--chunk_id', '-c', type=int, help='ID of the chunk to process')
+        initial.add_argument('--input-dir', type=str, choices=['xtals', 'solutions'],
+                             default='xtals',
+                             help='Logical orientation directory to read from')
+        initial.add_argument('--in-suffix', '-is', type=str, default=str(),
+                             help='Suffix of the orientation files to read')
+        initial.add_argument('--out-suffix', '-os', type=str, default=str(),
+                             help='Suffix of the refinement files to write')
+        initial.add_argument('--chunk_id', '-id', type=int, help='ID of the chunk to process')
         initial.add_argument('--n_chunks', '-n', type=int, help='Total number of chunks')
         return initial
 
@@ -999,26 +1048,45 @@ class RefinementScript(BaseScript):
         return "Refine indexed crystal orientations in CBD patterns"
 
     @classmethod
-    def from_file(cls, scan_file: str, params_file: str, suffix: str, chunk_id: int | None,
+    def from_file(cls, scan_file: str, params_file: str, input_dir: RefinementInputDir,
+                  in_suffix: str, out_suffix: str, chunk_id: int | None,
                   n_chunks: int | None) -> 'RefinementScript':
         scan = ScanConfig.read(scan_file)
         params = RefinementConfig.read(params_file)
-        return cls(scan, params, suffix, chunk_id, n_chunks)
+        return cls(scan, params, input_dir, in_suffix, out_suffix, chunk_id, n_chunks)
+
+    @property
+    def setup_file(self) -> str:
+        """Return the path to the setup file used for indexing and refinement."""
+        if self.input_dir == 'xtals':
+            return self.scan.setup.setup_file
+        if self.input_dir == 'solutions':
+            return self.scan.scan_file(self.chunk_id, dir=self.scan.setup.solutions_dir,
+                                       suffix=self.in_suffix)
+        raise ValueError(f"Invalid input_dir: {self.input_dir}")
+
+    @property
+    def xtals_dir(self) -> str:
+        """Return the configured orientation directory selected by :attr:`input_dir`."""
+        if self.input_dir == 'xtals':
+            return self.scan.setup.xtals_dir
+        if self.input_dir == 'solutions':
+            return self.scan.setup.solutions_dir
+        raise ValueError(f"Invalid input_dir: {self.input_dir}")
 
     def run(self):
         print("Configuring the script...")
         xp = self.scan.system.jax_api()
 
         geometry = self.scan.data.geometry()
-        xtals_file = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.xtals_dir,
-                                         suffix=self.suffix)
-        if not os.path.isfile(xtals_file):
-            print(f"No indexed crystal orientations file found at {xtals_file}")
+        in_file = self.scan.scan_file(self.chunk_id, dir=self.xtals_dir,
+                                         suffix=self.in_suffix)
+        if not os.path.isfile(in_file):
+            print(f"No indexed crystal orientations file found at {in_file}")
             return
 
-        print(f"Loading indexed crystal orientations from {xtals_file}...")
-        df = pd.read_hdf(xtals_file, 'data')
-        xtal_list = XtalList.import_dataframe(df, xp=xp)
+        print(f"Loading indexed crystal orientations from {in_file}...")
+        df = pd.read_hdf(in_file, 'data')
 
         hits_file = self.scan.scan_file(self.chunk_id, dir=self.scan.detect.streaks_dir)
         if not os.path.isfile(hits_file):
@@ -1035,21 +1103,27 @@ class RefinementScript(BaseScript):
         assembled = geometry.to_streaks(streaks)
         patterns = geometry.to_patterns(assembled)
 
-        print(f"Refining {len(xtal_list):d} crystal orientations...")
         with self.scan.system.cpu_config():
-            result = refine_patterns(patterns, xtal_list, self.scan.setup.setup_file,
-                                     self.params)
+            if self.input_dir == 'xtals':
+                print("Refining crystal orientations...")
+                result = refine_xtals(patterns, df, self.setup_file, self.params)
+            elif self.input_dir == 'solutions':
+                print("Refining solutions...")
+                result = refine_solutions(patterns, df, self.params)
+            else:
+                raise ValueError(f"Invalid input_dir: {self.input_dir}")
 
         output_path = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.solutions_dir,
-                                          suffix=self.suffix)
+                                          suffix=self.out_suffix)
         dir_path = os.path.dirname(output_path)
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
 
         print(f"Saving the refined crystal orientations to {output_path}...")
-        result.save(output_path, files={'xtals_file': xtals_file,
-                                        'hits_file': hits_file,
-                                        'setup_file': self.scan.setup.setup_file})
+        result.save(output_path, self.params,
+                    files={'input_file': in_file,
+                           'hits_file': hits_file,
+                           'setup_file': self.setup_file})
 
 class SBatchScripts:
     """Factory for single ``sbatch`` job scripts.
@@ -1063,25 +1137,33 @@ class SBatchScripts:
     main        : ClassVar[str] = 'cbclib_cli'
 
     @classmethod
-    def compile(cls, kind: DetectionKind, scan_file: str, script_file: str) -> SLURMScript:
+    def compile(cls, kind: DetectionKind, scan_file: str, script_file: str,
+                in_suffix: str | None=None, out_suffix: str | None=None) -> SLURMScript:
         """Build a ``cbclib_cli compile`` script.
 
         Args:
             kind: ``'streaks'`` or ``'regions'``.
             scan_file: Path to the scan configuration JSON.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
+            in_suffix: Suffix of the per-chunk detection files to read.
+            out_suffix: Suffix of the merged detection file to write.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` for the compile step.
         """
         command = f"{cls.main} compile {quote(kind)} {quote(scan_file)}"
+        if in_suffix is not None:
+            command += f" --in-suffix {quote(in_suffix)}"
+        if out_suffix is not None:
+            command += f" --out-suffix {quote(out_suffix)}"
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="compile", command=command, parameters=script_spec)
 
     @classmethod
     def index(cls, scan_file: str, params_file: str, script_file: str,
-              xtals: str | None=None, suffix: str | None=None, chunk_id: int | None=None,
-              n_chunks: int | None=None) -> SLURMScript:
+              xtals: str | None=None, input_dir: IndexInputDir | None=None,
+              in_suffix: str | None=None, out_suffix: str | None=None,
+              chunk_id: int | None=None, n_chunks: int | None=None) -> SLURMScript:
         """Build a ``cbclib_cli index`` script.
 
         Args:
@@ -1090,7 +1172,9 @@ class SBatchScripts:
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             xtals: Path to an initial crystal orientations HDF5 file
                 (empty string → use unit cell).
-            suffix: Output directory suffix.
+            input_dir: Logical detection directory to read from.
+            in_suffix: Suffix of the detection files to read.
+            out_suffix: Suffix of the indexing files to write.
             chunk_id: Optional chunk index for chunked processing.
             n_chunks: Optional total chunk count.
 
@@ -1100,8 +1184,12 @@ class SBatchScripts:
         command = f"{cls.main} index {quote(scan_file)} {quote(params_file)} "
         if xtals is not None:
             command += f"--xtals {quote(xtals)} "
-        if suffix is not None:
-            command += f"--suffix {quote(suffix)} "
+        if input_dir is not None:
+            command += f"--input-dir {quote(input_dir)} "
+        if in_suffix is not None:
+            command += f"--in-suffix {quote(in_suffix)} "
+        if out_suffix is not None:
+            command += f"--out-suffix {quote(out_suffix)} "
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
             command += f' --n_chunks {n_chunks:d}'
@@ -1131,7 +1219,7 @@ class SBatchScripts:
     @classmethod
     def metalist(cls, scan_file: str, params_file: str, script_file: str,
                  chunk_id: int | None=None, n_chunks: int | None=None,
-                 n_backgrounds: int | None=None) -> SLURMScript:
+                 n_out: int | None=None) -> SLURMScript:
         """Build a ``cbclib_cli metalist`` script.
 
         Args:
@@ -1140,7 +1228,7 @@ class SBatchScripts:
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             chunk_id: Optional chunk index.
             n_chunks: Optional total chunk count.
-            n_backgrounds: Optional number of background estimates to compute.
+            n_out: Optional number of background estimates to compute.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` for the metalist step.
@@ -1149,14 +1237,15 @@ class SBatchScripts:
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
             command += f' --n_chunks {n_chunks:d}'
-        if n_backgrounds is not None:
-            command += f' --n_backgrounds {n_backgrounds:d}'
+        if n_out is not None:
+            command += f' --n_out {n_out:d}'
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="metalist", command=command, parameters=script_spec)
 
     @classmethod
     def detect(cls, kind: DetectionKind, scan_file: str, params_file: str, script_file: str,
-               chunk_id: int | None=None, n_chunks: int | None=None, frames_only: bool=False
+               chunk_id: int | None=None, n_chunks: int | None=None, frames_only: bool=False,
+               out_suffix: str | None=None
                ) -> SLURMScript:
         """Build a ``cbclib_cli detect`` script.
 
@@ -1169,6 +1258,7 @@ class SBatchScripts:
             n_chunks: Optional total chunk count.
             frames_only: Pass ``--frames-only`` to save only hit frame
                 indices rather than the full streak table.
+            out_suffix: Suffix of the detection files to write.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` for the detection step.
@@ -1179,12 +1269,15 @@ class SBatchScripts:
             command += f' --n_chunks {n_chunks:d}'
         if frames_only:
             command += ' --frames-only'
+        if out_suffix is not None:
+            command += f" --out-suffix {quote(out_suffix)}"
         script_spec = ScriptSpec.read(script_file)
         return SLURMScript(job_name="detect", command=command, parameters=script_spec)
 
     @classmethod
     def refine(cls, scan_file: str, params_file: str, script_file: str,
-               suffix: str | None=None, chunk_id: int | None=None,
+               input_dir: RefinementInputDir | None=None, in_suffix: str | None=None,
+               out_suffix: str | None=None, chunk_id: int | None=None,
                n_chunks: int | None=None) -> SLURMScript:
         """Build a ``cbclib_cli refine`` script.
 
@@ -1192,8 +1285,9 @@ class SBatchScripts:
             scan_file: Path to the scan configuration JSON.
             params_file: Path to the refinement parameters JSON.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
-            suffix: Input/output directory suffix shared with the indexed
-                orientation file and refined solution file.
+            input_dir: Logical orientation directory to read from.
+            in_suffix: Suffix of the orientation files to read.
+            out_suffix: Suffix of the refinement files to write.
             chunk_id: Optional chunk index.
             n_chunks: Optional total chunk count.
 
@@ -1201,8 +1295,12 @@ class SBatchScripts:
             :class:`~cbclib_v2.slurm.SLURMScript` for the refinement step.
         """
         command = f"{cls.main} refine {quote(scan_file)} {quote(params_file)}"
-        if suffix is not None:
-            command += f" --suffix {quote(suffix)}"
+        if input_dir is not None:
+            command += f" --input-dir {quote(input_dir)}"
+        if in_suffix is not None:
+            command += f" --in-suffix {quote(in_suffix)}"
+        if out_suffix is not None:
+            command += f" --out-suffix {quote(out_suffix)}"
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
             command += f' --n_chunks {n_chunks:d}'
@@ -1222,14 +1320,17 @@ class SBatchArrayScripts:
 
     @classmethod
     def index(cls, scan_file: str, params_file: str, script_file: str, n_chunks: int,
-              xtals: str | None=None, suffix: str | None=None) -> SLURMScript:
+              xtals: str | None=None, input_dir: IndexInputDir | None=None,
+              in_suffix: str | None=None, out_suffix: str | None=None) -> SLURMScript:
         """Build a ``cbclib_cli index`` array script for *n_chunks* tasks.
 
         Args:
             scan_file: Path to the scan configuration JSON.
             params_file: Path to the indexing parameters JSON.
             xtals: Path to an initial crystal orientations HDF5 file.
-            suffix: Output directory suffix.
+            input_dir: Logical detection directory to read from.
+            in_suffix: Suffix of the detection files to read.
+            out_suffix: Suffix of the indexing files to write.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             n_chunks: Total number of array tasks.
 
@@ -1240,8 +1341,12 @@ class SBatchArrayScripts:
                   f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
         if xtals is not None:
             command += f" --xtals {quote(xtals)}"
-        if suffix is not None:
-            command += f" --suffix {quote(suffix)}"
+        if input_dir is not None:
+            command += f" --input-dir {quote(input_dir)}"
+        if in_suffix is not None:
+            command += f" --in-suffix {quote(in_suffix)}"
+        if out_suffix is not None:
+            command += f" --out-suffix {quote(out_suffix)}"
         script_spec = ScriptSpec.read(script_file)
         script_spec.add_define('FILE_INDEX', '${SLURM_ARRAY_TASK_ID}')
         return SLURMScript(job_name="index_array", command=command, parameters=script_spec)
@@ -1268,7 +1373,7 @@ class SBatchArrayScripts:
 
     @classmethod
     def detect(cls, kind: DetectionKind, scan_file: str, params_file: str, script_file: str,
-               n_chunks: int) -> SLURMScript:
+               n_chunks: int, out_suffix: str | None=None) -> SLURMScript:
         """Build a ``cbclib_cli detect`` array script for *n_chunks* tasks.
 
         Args:
@@ -1277,19 +1382,23 @@ class SBatchArrayScripts:
             params_file: Path to the detection parameters JSON.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             n_chunks: Total number of array tasks.
+            out_suffix: Suffix of the detection files to write.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
         """
         command = f"{cls.main} detect {quote(kind)} {quote(scan_file)} {quote(params_file)}" \
                   f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
+        if out_suffix is not None:
+            command += f" --out-suffix {quote(out_suffix)}"
         script_spec = ScriptSpec.read(script_file)
         script_spec.add_define('FILE_INDEX', '${SLURM_ARRAY_TASK_ID}')
         return SLURMScript(job_name="detect_array", command=command, parameters=script_spec)
 
     @classmethod
     def refine(cls, scan_file: str, params_file: str, script_file: str, n_chunks: int,
-               suffix: str | None=None) -> SLURMScript:
+               input_dir: RefinementInputDir | None=None, in_suffix: str | None=None,
+               out_suffix: str | None=None) -> SLURMScript:
         """Build a ``cbclib_cli refine`` array script for *n_chunks* tasks.
 
         Args:
@@ -1297,16 +1406,21 @@ class SBatchArrayScripts:
             params_file: Path to the refinement parameters JSON.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
             n_chunks: Total number of array tasks.
-            suffix: Input/output directory suffix shared with indexing results
-                and refinement solutions.
+            input_dir: Logical orientation directory to read from.
+            in_suffix: Suffix of the orientation files to read.
+            out_suffix: Suffix of the refinement files to write.
 
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` configured for array submission.
         """
         command = f"{cls.main} refine {quote(scan_file)} {quote(params_file)}" \
                   f" --chunk_id ${{FILE_INDEX}} --n_chunks {n_chunks:d}"
-        if suffix is not None:
-            command += f" --suffix {quote(suffix)}"
+        if input_dir is not None:
+            command += f" --input-dir {quote(input_dir)}"
+        if in_suffix is not None:
+            command += f" --in-suffix {quote(in_suffix)}"
+        if out_suffix is not None:
+            command += f" --out-suffix {quote(out_suffix)}"
         script_spec = ScriptSpec.read(script_file)
         script_spec.add_define('FILE_INDEX', '${SLURM_ARRAY_TASK_ID}')
         return SLURMScript(job_name="refine_array", command=command, parameters=script_spec)
@@ -1372,12 +1486,14 @@ def main():
     scan.system.apply()
 
     if args['command'] == 'compile':
-        script = CompileStreaks.from_file(args['kind'], args['scan'])
+        script = CompileStreaks.from_file(args['kind'], args['scan'],
+                                          args['in_suffix'], args['out_suffix'])
         script.run()
     elif args['command'] == 'index':
         print(f"JSON file with the indexing parameters: {args['parameters']}")
         script = IndexingScript.from_file(args['scan'], args['parameters'],
-                                          args['xtals'], args['suffix'],
+                                          args['xtals'], args['input_dir'],
+                                          args['in_suffix'], args['out_suffix'],
                                           args['chunk_id'], args['n_chunks'])
         script.run()
     elif args['command'] == 'metadata':
@@ -1388,17 +1504,19 @@ def main():
         print(f"JSON file with the metadata parameters: {args['parameters']}")
         script = CreateMetaList.from_file(args['scan'], args['parameters'],
                                           args['chunk_id'], args['n_chunks'],
-                                          args['n_backgrounds'])
+                                          args['n_out'])
         script.run()
     elif args['command'] == 'detect':
         print(f"JSON file with the streak finding parameters: {args['parameters']}")
         script = DetectHits.from_file(args['kind'], args['scan'], args['parameters'],
-                                      args['chunk_id'], args['n_chunks'], args['frames_only'])
+                                      args['chunk_id'], args['n_chunks'],
+                                      args['frames_only'], args['out_suffix'])
         script.run()
     elif args['command'] == 'refine':
         print(f"JSON file with the refinement parameters: {args['parameters']}")
         script = RefinementScript.from_file(args['scan'], args['parameters'],
-                                            args['suffix'], args['chunk_id'],
+                                            args['input_dir'], args['in_suffix'],
+                                            args['out_suffix'], args['chunk_id'],
                                             args['n_chunks'])
         script.run()
     else:

@@ -106,6 +106,23 @@ class TestJobManager:
 
         assert manager.get_job_id(42) == [JobID(42, 0), JobID(42, 1), JobID(42, 2)]
 
+    def test_get_job_id_array_expands_sacct_ranges(self, manager: SLURMJobManager,
+                                                   monkeypatch: pytest.MonkeyPatch):
+        calls: List[List[str]] = []
+
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            calls.append(args)
+            if args[0] == manager.config.sacct:
+                return MockOutput(stdout="42_0\n42_1\n42_[2-5]\n", returncode=0, stderr="")
+            if args[0] == manager.config.squeue:
+                return MockOutput(stdout="42_4\n", returncode=0, stderr="")
+            return MockOutput(stdout="", returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        assert manager.get_job_id(42) == [JobID(42, task_id) for task_id in range(6)]
+        assert sum(1 for args in calls if args[0] == manager.config.squeue) == 0
+
     def test_get_job_id_prefers_sacct(self, manager: SLURMJobManager,
                                       monkeypatch: pytest.MonkeyPatch):
         def mock_run(args: List[str], **kwargs) -> MockOutput:
