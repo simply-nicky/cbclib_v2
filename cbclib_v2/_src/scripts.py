@@ -1107,7 +1107,9 @@ class RefineResult(Container):
         xp = self.state.__array_namespace__()
         idxs = xp.lexsort((self.loss, self.index))
         sorted_index = self.index[idxs]
-        firsts = xp.searchsorted(sorted_index, xp.unique_values(sorted_index))
+        # NumPy unique_values does not guarantee sorted output.
+        unique_index = xp.sort(xp.unique_values(sorted_index))
+        firsts = xp.searchsorted(sorted_index, unique_index)
         champions = idxs[firsts]
         return RefineResult(self.index[champions], self.state[champions], self.loss[champions],
                             self.fitness[champions], self.stats)
