@@ -1,10 +1,9 @@
-from math import prod
 from typing import Tuple
 import pytest
 from cbclib_v2 import default_rng
 from cbclib_v2.annotations import (CPArray, CuPy, CuPyNamespace, Generator, NDArray, NumPy,
                                    NumPyNamespace, RealArray, Shape)
-from cbclib_v2.ndimage import median, robust_mean, robust_lsq
+from cbclib_v2.ndimage import median, robust_mean
 from cbclib_v2.test_util import check_close
 
 TestNamespace = NumPyNamespace | CuPyNamespace
@@ -161,70 +160,4 @@ class TestImageProcessing():
                          n_iter: int, lm: float, xp: TestNamespace):
         expected = self.robust_mean(dataset, axis=axis, r0=r0, r1=r1, n_iter=n_iter, lm=lm, xp=xp)
         result = robust_mean(dataset, axis=axis, r0=r0, r1=r1, n_iter=n_iter, lm=lm)
-        check_close(result, expected)
-
-    def robust_lsq(self, W: RealArray, y: RealArray, axis: int | Tuple[int, ...], r0: float,
-                   r1: float, n_iter: int, lm: float, xp: TestNamespace) -> RealArray:
-        if isinstance(axis, int):
-            axis = (axis,)
-
-        y = self.shift_axis(y, axis)
-        W = xp.reshape(W, (prod(W.shape[:-len(axis)]), -1))
-
-        fits = xp.sum(y[..., None, :] * W, axis=-1) / xp.sum(W * W, axis=-1)
-
-        shape = y.shape[:-1]
-        n_reduce = y.shape[-1]
-        j0, j1 = int(r0 * n_reduce), int(r1 * n_reduce)
-
-        for _ in range(n_iter):
-            errors = (y - xp.tensordot(fits, W, axes=(-1, 0)))**2
-            idxs = xp.argsort(errors, axis=-1)
-            YW = xp.take_along_axis(y[..., None, :] * W, idxs[..., None, j0:j1], axis=-1)
-            WW = xp.reshape(W * W, tuple([1,] * len(shape)) + W.shape)
-            WW = xp.take_along_axis(WW, idxs[..., None, j0:j1], axis=-1)
-            fits = xp.sum(YW, axis=-1) / xp.sum(WW, axis=-1)
-
-        errors = (y - xp.tensordot(fits, W, axes=(-1, 0)))**2
-        idxs = xp.argsort(errors, axis=-1)
-        errors = xp.take_along_axis(errors, idxs, axis=-1)
-
-        cumsum = xp.cumulative_sum(errors, axis=-1)
-        threshold = xp.arange(n_reduce) * errors
-
-        mask = lm * cumsum < threshold
-        cutoff = xp.where(xp.any(mask, axis=-1), xp.argmax(mask, axis=-1), n_reduce)
-        mask = xp.broadcast_to(xp.arange(n_reduce), (*shape, n_reduce)) < cutoff[..., None]
-
-        # Array API doesn't support 'where' in mean, use manual masked mean
-        counts = xp.sum(mask[..., None, :], axis=-1)
-
-        YW = xp.take_along_axis(y[..., None, :] * W, idxs[..., None, :], axis=-1)
-        YW_sum = xp.sum(xp.where(mask[..., None, :], YW, 0), axis=-1)
-        YW = xp.where(counts > 0, YW_sum / counts, 0)
-
-        WW = xp.reshape(W * W, tuple([1,] * len(shape)) + W.shape)
-        WW = xp.take_along_axis(WW, idxs[..., None, :], axis=-1)
-        WW_sum = xp.sum(xp.where(mask[..., None, :], WW, 0), axis=-1)
-        WW = xp.where(counts > 0, WW_sum / counts, 0)
-
-        fits = xp.where(WW > 0, YW / WW, 0)
-        return fits
-
-    @pytest.fixture(params=[10,])
-    def num_features(self, request: pytest.FixtureRequest) -> int:
-        return request.param
-
-    @pytest.fixture
-    def W(self, rng: TestGenerator, dataset: RealArray, axis: int | Tuple[int, ...],
-          num_features: int) -> RealArray:
-        if isinstance(axis, int):
-            axis = (axis,)
-        return rng.random((num_features,) + tuple(dataset.shape[i] for i in axis))
-
-    @pytest.mark.parametrize('axis,n_iter', [(-1, 5), ((0, 1), 0)])
-    def test_robust_lsq(self, dataset: RealArray, W: RealArray, axis: int | Tuple[int, ...],
-                        r0: float, r1: float, n_iter: int, lm: float, xp: TestNamespace):
-        expected = self.robust_lsq(W, dataset, axis=axis, r0=r0, r1=r1, n_iter=n_iter, lm=lm, xp=xp)
-        result = robust_lsq(W, dataset, axis=axis, r0=r0, r1=r1, n_iter=n_iter, lm=lm)
         check_close(result, expected)

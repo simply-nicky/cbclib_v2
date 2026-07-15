@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
 import numpy as np
-from .array_api import array_namespace
+from .array_api import array_namespace, default_rng
 from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
@@ -25,8 +25,7 @@ from .streaks import StackedStreaks, Streaks
 from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
                           ROI, Shape)
 from .functions import (LabelResult, RadialProfiles, Structure, center_of_mass, covariance_matrix,
-                        ellipse_fit, label, line_fit, median, radial_profiles, robust_lsq,
-                        robust_mean)
+                        ellipse_fit, label, line_fit, median, radial_profiles, robust_mean)
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
 MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
@@ -73,6 +72,42 @@ class CrystBase(DataContainer):
         return self.replace(**cropped)
 
 @dataclass
+class LSQData(DataContainer):
+    """Linear least-squares target and design matrix.
+
+    Attributes:
+        y: Per-frame target values, shape ``(n_frames, n_pixels)``.
+        W: Design matrix, shape ``(n_fields, n_pixels)`` before masking or
+            ``(n_frames, n_fields, n_pixels)`` after masking.
+    """
+    y : RealArray
+    W : RealArray
+
+    def apply_mask(self, mask: BoolArray) -> 'LSQData':
+        """Return least-squares data with rejected entries zeroed.
+
+        Args:
+            mask: Per-frame acceptance mask, shape ``(n_frames, n_pixels)``.
+
+        Returns:
+            Masked least-squares data with a frame-specific design matrix.
+        """
+        xp = self.__array_namespace__()
+        return self.replace(y=xp.where(mask, self.y, 0),
+                            W=xp.where(mask[:, None, :], self.W, 0))
+
+    def solve(self) -> RealArray:
+        """Solve the masked joint least-squares systems.
+
+        Returns:
+            Per-frame field coefficients, shape ``(n_frames, n_fields)``.
+        """
+        xp = self.__array_namespace__()
+        gram = xp.linalg.matmul(self.W, xp.permute_dims(self.W, (0, 2, 1)))
+        rhs = xp.sum(self.W * self.y[:, None, :], axis=-1)
+        return xp.linalg.matmul(xp.linalg.pinv(gram), rhs[..., None])[..., 0]
+
+@dataclass
 class PCAProjection(DataContainer):
     good_fields : Sequence[int] | IntArray
     projection  : RealArray
@@ -94,14 +129,15 @@ class PCAProjection(DataContainer):
         Example:
             Reconstruct per-frame backgrounds and attach them to new data:
 
-            >>> proj = metadata.project(frames, method='lsq')
+            >>> proj = metadata.project(frames, n_iter=1)
             >>> whitefields = proj.apply(metadata)
-            >>> data = metadata.to_data(frames, whitefield=whitefields)
+            >>> data = metadata.to_data(frames, projection=proj)
         """
         xp = self.__array_namespace__()
 
         if metadata.is_empty(metadata.eigen_field):
-            return xp.tensordot(self.projection, metadata.flatfield[None], axes=((-1,), (0,)))
+            return xp.tensordot(self.projection, metadata.flatfield[None],
+                                axes=((-1,), (0,)))
 
         fields = xp.tensordot(self.projection, metadata.eigen_field[self.good_fields],
                               axes=((-1,), (0,)))
@@ -138,7 +174,7 @@ class CrystMetadata(CrystBase):
 
         >>> metadata = cbc.CrystMetadata.stack(meta_a, meta_b, meta_c)
         >>> metadata = metadata.pca()
-        >>> proj = metadata.project(frames, method='lsq')
+        >>> proj = metadata.project(frames, n_iter=1)
         >>> data = metadata.to_data(frames, projection=proj)
         >>> data = data.update_snr(std_min=0.5)
     """
@@ -161,6 +197,37 @@ class CrystMetadata(CrystBase):
 
         if self.is_empty(self.flatfield) and not self.is_empty(self.whitefields):
             self.flatfield = self.whitefields.mean(axis=0)
+
+    def apply_mask(self, mask: Indices) -> 'CrystMetadata':
+        """Select flattened detector pixels from every frame-like array.
+
+        Frame attributes are flattened to ``(n_pixels,)`` and stack attributes
+        to ``(n_items, n_pixels)`` before applying the same pixel selection.
+
+        Args:
+            mask: Flat integer indices, boolean mask, or slice selecting detector
+                pixels.
+
+        Returns:
+            Metadata restricted to the selected detector pixels.
+        """
+        xp = self.__array_namespace__()
+        if isinstance(mask, Array):
+            mask = xp.reshape(mask, (-1,))
+
+        attributes = {}
+        for attr, data in self.contents().items():
+            if not isinstance(data, Array) or self.is_empty(data):
+                continue
+            kind = self.protocol.get_kind(attr)
+            if kind == Kinds.frame:
+                selected = xp.reshape(data, (-1,))[mask]
+                attributes[attr] = xp.asarray(xp.reshape(selected, (-1,)), copy=True)
+            elif kind == Kinds.stack:
+                selected = xp.reshape(data, (data.shape[0], -1))[:, mask]
+                shape = (data.shape[0], -1)
+                attributes[attr] = xp.asarray(xp.reshape(selected, shape), copy=True)
+        return self.replace(**attributes)
 
     @classmethod
     def default_protocol(cls) -> H5Protocol:
@@ -250,7 +317,7 @@ class CrystMetadata(CrystBase):
             Apply static and dynamic background subtraction:
 
             >>> data = metadata.to_data(frames)                       # static
-            >>> proj = metadata.project(frames, method='lsq')
+            >>> proj = metadata.project(frames, n_iter=1)
             >>> data = metadata.to_data(frames, projection=proj)      # dynamic
         """
         xp = self.__array_namespace__()
@@ -312,32 +379,33 @@ class CrystMetadata(CrystBase):
         return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
     def project(self, data: RealArray, good_fields: Indices=slice(None),
-                method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
-                lm: float=9.0) -> PCAProjection:
+                clip_snr: float=3.0, n_iter: int=3, std_min: float=0.0,
+                n_pixels: int | None=None) -> PCAProjection:
         """Project detector frames onto the PCA basis.
 
         Fits the residual :math:`D - \\bar{W}` for each frame to a linear
         combination of the stored eigen fields and returns the projection
-        coefficients. Pass the result to :meth:`project` to reconstruct a
-        per-frame background.
+        coefficients. Pass the result to :meth:`PCAProjection.apply` to
+        reconstruct a per-frame background.
 
         Args:
             data: Raw detector data, shape ``(N, *frame_shape)``.
             good_fields: Indices of eigen fields to include in the fit.
                 All fields are used by default.
-            method: Fitting method:
-
-                * ``'lsq'`` — ordinary least squares.
-                * ``'robust-lsq'`` — least squares with FLkOS outlier rejection.
-
-            r0: Lower bound on the expected inlier fraction (FLkOS).
-            r1: Upper bound on the expected inlier fraction (FLkOS).
-            n_iter: Number of Gaussian-fitting iterations (FLkOS).
-            lm: Outlier threshold in units of the estimated standard deviation
-                (FLkOS).
+            clip_snr: SNR threshold for rejecting bright diffraction signal.
+            n_iter: Total number of least-squares fits. A value of one performs
+                ordinary masked least squares; later fits reject signal using
+                the preceding background estimate.
+            std_min: Lower bound for the per-pixel standard deviation used in
+                signal rejection.
+            n_pixels: Number of detector pixels used for fitting. A deterministic
+                random subset is selected without replacement. By default, the
+                complete frame is used.
 
         Raises:
-            ValueError: If ``flatfield`` is absent.
+            ValueError: If ``flatfield`` is absent, ``n_iter`` is less than one,
+                ``n_pixels`` is invalid, or iterative rejection is requested
+                without ``std``.
 
         Returns:
             A :class:`PCAProjection` with fields ``good_fields`` (selected
@@ -347,33 +415,63 @@ class CrystMetadata(CrystBase):
         Example:
             Project frames onto the two dominant PCA components:
 
-            >>> proj = metadata.project(frames, good_fields=[0, 1], method='lsq')
-            >>> whitefields = metadata.project(proj)
+            >>> proj = metadata.project(frames, good_fields=[0, 1], n_iter=3)
+            >>> whitefields = proj.apply(metadata)
         """
         if self.is_empty(self.flatfield):
             raise ValueError('No flatfield in the container')
+        if n_iter < 1:
+            raise ValueError('n_iter must be at least one')
+        if n_iter > 1 and self.is_empty(self.std):
+            raise ValueError('No std in the container for iterative signal rejection')
         xp = self.__array_namespace__()
+        frame_size = prod(self.frame_shape)
+        if n_pixels is not None and (n_pixels < 1 or n_pixels > frame_size):
+            raise ValueError(f'n_pixels must be between one and the frame size {frame_size}')
 
-        if self.is_empty(self.eigen_field):
+        pixel_indices = None
+        if n_pixels is not None and n_pixels < frame_size:
+            indices = default_rng(0, xp).choice(frame_size, (n_pixels,), replace=False)
+            pixel_indices = xp.sort(indices)
+
+        n_frames = data.size // frame_size
+        frames = xp.reshape(data, (n_frames, -1))
+        if pixel_indices is not None:
+            frames = frames[:, pixel_indices]
+            metadata = self.apply_mask(pixel_indices)
+        else:
+            metadata = self
+
+        if self.is_empty(metadata.eigen_field):
             good_fields = xp.array([], dtype=int)
-            y = xp.reshape(data, (data.size // prod(self.frame_shape), -1))
-            W = xp.reshape(self.flatfield, (1, -1))
+            lsq_data = LSQData(y=frames, W=xp.reshape(metadata.flatfield, (1, -1)))
 
         else:
-            good_fields = list_indices(good_fields, self.eigen_field.shape[0])
-            fields = self.eigen_field[good_fields]
+            good_fields = xp.asarray(list_indices(good_fields, metadata.eigen_field.shape[0]),
+                                     dtype=int)
+            fields = metadata.eigen_field[good_fields]
+            y = frames - xp.reshape(metadata.flatfield, (1, -1))
+            W = xp.reshape(fields, (fields.shape[0], -1))
+            lsq_data = LSQData(y=y, W=W)
 
-            y = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
-            W = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
-
-        if method == "robust-lsq":
-            projection = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm)
-        elif method == "lsq":
-            projection = xp.mean(y[..., None, :] * W, axis=-1) / xp.mean(W * W, axis=-1)
+        if self.is_empty(metadata.mask):
+            base_mask = xp.ones(lsq_data.y.shape, dtype=bool)
         else:
-            raise ValueError(f"Invalid method argument: {method}")
+            base_mask = xp.broadcast_to(xp.reshape(metadata.mask, (1, -1)),
+                                        lsq_data.y.shape)
 
-        return PCAProjection(good_fields=good_fields, projection=projection)
+        projection = lsq_data.apply_mask(base_mask).solve()
+        result = PCAProjection(good_fields=good_fields, projection=projection)
+        if n_iter > 1:
+            std = xp.reshape(xp.clip(metadata.std, std_min, xp.inf), (1, -1))
+
+        for _ in range(1, n_iter):
+            background = xp.reshape(result.apply(metadata), (n_frames, -1))
+            fit_mask = base_mask & (frames <= background + clip_snr * std)
+            projection = lsq_data.apply_mask(fit_mask).solve()
+            result = result.replace(projection=projection)
+
+        return result
 
 @dataclass
 class CrystData(CrystBase):

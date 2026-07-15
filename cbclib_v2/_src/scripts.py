@@ -303,25 +303,25 @@ class ScalingParameters(Container):
         method: Scaling algorithm:
 
             * ``'no-scale'`` — subtract the whitefield without scaling.
-            * ``'lsq'`` — least-squares projection onto the PCA background
-              components.
-            * ``'robust-lsq'`` — robust least-squares projection (outlier
-              resistant).
+            * ``'robust-lsq'`` — iterative least-squares projection with
+              one-sided diffraction-signal rejection.
 
         good_fields: Indices of PCA eigen-fields to include in the
             background model.
-        r0: Lower quantile bound for robust projection.
-        r1: Upper quantile bound for robust projection.
-        n_iter: Number of reweighting iterations for robust projection.
-        lm: Regularisation parameter (effective number of modes).
+        clip_snr: SNR threshold for rejecting bright diffraction signal.
+        n_iter: Total number of least-squares fits. One performs ordinary
+            masked least squares.
+        std_min: Lower bound for the noise standard deviation used in rejection.
+        n_pixels: Number of detector pixels used for projection. The complete
+            frame is used by default.
     """
 
-    method      : Literal['lsq', 'no-scale', 'robust-lsq']
+    method      : Literal['no-scale', 'robust-lsq']
     good_fields : Tuple[int, ...] = (0,)
-    r0          : float = 0.5
-    r1          : float = 0.99
+    clip_snr    : float = 3.0
     n_iter      : int = 3
-    lm          : float = 9.0
+    std_min     : float = 0.0
+    n_pixels    : int | None = None
 
     def metadata(self, metapath: str, xp: AnyNamespace=NumPy) -> CrystMetadata:
         """Load a :class:`~cbclib_v2.CrystMetadata` from a metalist HDF5 file.
@@ -385,9 +385,9 @@ def scale_background(frames: IntArray | int, images: Array, metadata: CrystMetad
     if params.method == 'no-scale':
         return metadata.to_data(images, frames)
 
-    if params.method in ['robust-lsq', 'lsq']:
-        projection = metadata.project(images, params.good_fields, params.method, params.r0,
-                                         params.r1, params.n_iter, params.lm)
+    if params.method == 'robust-lsq':
+        projection = metadata.project(images, params.good_fields, params.clip_snr,
+                                      params.n_iter, params.std_min, params.n_pixels)
         return metadata.to_data(images, frames, projection)
 
     raise ValueError(f'Invalid method keyword: {params.method}')

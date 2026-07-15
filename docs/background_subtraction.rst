@@ -358,21 +358,27 @@ intensity fluctuations and slow beam-profile drift:
 
 .. code-block:: python
 
-    # Fit each frame to the PCA basis using least squares
-    projection = metadata.project(frames, method='lsq')
+    # Fit each frame while rejecting bright diffraction signal
+    projection = metadata.project(frames, clip_snr=3.0, n_iter=3, std_min=0.5)
 
     # Reconstruct the per-frame background: flatfield + linear combination of eigen_fields
     data = metadata.to_data(frames, projection=projection)
     data = data.update_snr(std_min=0.5)
 
-:meth:`~cbclib_v2.CrystMetadata.project` solves a least-squares problem to
-find the coefficients of the PCA components that best explain the residual
-:math:`D_i - \bar{W}` for each frame :math:`i`. The ``method`` argument
-accepts:
+:meth:`~cbclib_v2.CrystMetadata.project` solves a masked least-squares problem
+to find the coefficients of the PCA components that best explain the residual
+:math:`D_i - \bar{W}` for each frame :math:`i`. The first fit uses every valid
+detector pixel. Later fits reject pixels above the preceding background estimate
+by more than ``clip_snr * max(std, std_min)``. This one-sided threshold removes
+bright diffraction streaks without discarding negative background fluctuations.
+Set ``n_iter=1`` to perform ordinary masked least squares without signal
+rejection.
 
-* ``'lsq'`` — ordinary least squares.
-* ``'robust-lsq'`` — least squares with FLkOS outlier rejection, more
-  resistant to frames that contain bright diffraction streaks.
+For large detectors, ``n_pixels`` limits each fit to a deterministic random
+subset of flat detector pixels. Sampling happens before subtracting the
+floating-point flatfield, reducing both memory use and computation. The same
+subset is reused for every frame and rejection iteration. Leave ``n_pixels``
+as ``None`` to fit the complete frame.
 
 :meth:`~cbclib_v2.CrystMetadata.project` reconstructs the per-frame
 background as :math:`\bar{W} + \sum_k c_{ik}\, e_k`, where :math:`c_{ik}`
