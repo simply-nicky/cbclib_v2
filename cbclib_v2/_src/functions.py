@@ -62,6 +62,9 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
 
                     if isinstance(result, NDArray):
                         return asjax(result)
+                    if isinstance(result, tuple):
+                        return tuple(asjax(item) if isinstance(item, NDArray) else item
+                                     for item in result)
                     return result
 
                 warnings.warn(f"{func.__name__} is not implemented for JAX backend. Falling back " \
@@ -72,6 +75,9 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
 
                 if isinstance(result, CPArray):
                     return asjax(result)
+                if isinstance(result, tuple):
+                    return tuple(asjax(item) if isinstance(item, CPArray) else item
+                                 for item in result)
                 return result
 
             if xp is CuPy:
@@ -371,6 +377,93 @@ def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
     See Also:
         :func:`accumulate_lines`: Accumulate lines across multiple frames.
         :mod:`cbclib_v2.device`: Set device context for backend selection.
+    """
+    ...
+
+def _write_lines_cpu(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular'
+                     ) -> Tuple[NDIntArray, NDIntArray, NDRealArray]:
+    num_threads = get_cpu_config().effective_num_threads()
+    if isinstance(width, (int, float)):
+        width = NumPy.asarray([width,], dtype=lines.dtype)
+    lines = asnumpy(lines)
+    widths = asnumpy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
+    idxs = asnumpy(idxs) if idxs is not None else None
+    return bresenham.write_lines(lines=lines, shape=shape, widths=widths, idxs=idxs,
+                                 max_val=max_val, kernel=kernel, num_threads=num_threads)
+
+def _write_lines_gpu(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular'
+                     ) -> Tuple[CPIntArray, CPIntArray, CPRealArray]:
+    if cuda_draw_lines is None:
+        raise RuntimeError("write_lines is not compiled for the current platform. "
+                           "Please, check if you have installed cbclib_v2 with GPU support.")
+    if isinstance(width, (int, float)):
+        width = CuPy.asarray([width,], dtype=lines.dtype)
+    lines = ascupy(lines)
+    widths = ascupy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
+    idxs = ascupy(idxs) if idxs is not None else None
+    return cuda_draw_lines.write_lines(lines=lines, shape=shape, widths=widths, idxs=idxs,
+                                       max_val=max_val, kernel=kernel)
+
+@overload
+def write_lines(lines: NDRealArray, shape: Sequence[int], idxs: NDIntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular'
+                ) -> Tuple[NDIntArray, NDIntArray, NDRealArray]: ...
+
+@overload
+def write_lines(lines: CPRealArray, shape: Sequence[int], idxs: CPIntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular'
+                ) -> Tuple[CPIntArray, CPIntArray, CPRealArray]: ...
+
+@overload
+def write_lines(lines: JaxRealArray, shape: Sequence[int], idxs: JaxIntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular'
+                ) -> Tuple[JaxIntArray, JaxIntArray, JaxRealArray]: ...
+
+@overload
+def write_lines(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular') -> Tuple[IntArray, IntArray, RealArray]: ...
+
+@array_dispatch("lines", cpu_impl=_write_lines_cpu, gpu_impl=_write_lines_gpu)
+def write_lines(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular') -> Tuple[IntArray, IntArray, RealArray]:
+    """Digitize line footprints into flat sparse arrays.
+
+    Each emitted entry describes one in-bounds pixel from one line. Pixels shared by
+    overlapping lines are retained as separate entries, allowing downstream intensity
+    extraction to integrate or otherwise combine each footprint independently.
+
+    Args:
+        lines: Array of shape ``(..., 2 * ndim)`` containing segment endpoints in xyz
+            coordinate order.
+        shape: Shape of the target image stack. The final ``ndim`` axes are spatial and
+            preceding axes are flattened into frame indices.
+        idxs: Optional flattened frame index for each line. If omitted, all lines target a
+            single frame; when the number of frames equals the number of lines, lines are
+            assigned to frames one-to-one.
+        width: Footprint width in pixels. A scalar applies to all lines; arrays may provide
+            one width per line or leading line group.
+        max_val: Scale applied to every kernel weight.
+        kernel: Radial kernel used to calculate footprint weights. Supported values are
+            ``'biweight'``, ``'gaussian'``, ``'parabolic'``, ``'rectangular'``, and
+            ``'triangular'``.
+
+    Returns:
+        A tuple ``(pixel_indices, line_indices, values)``. ``pixel_indices`` contains flat
+        C-order indices into an array with ``shape``; ``line_indices`` identifies the source
+        line; and ``values`` contains scaled kernel weights. Entry order is unspecified.
     """
     ...
 

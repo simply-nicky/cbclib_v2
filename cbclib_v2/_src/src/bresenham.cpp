@@ -174,6 +174,129 @@ py::array_t<T> draw_lines(py::array_t<T> out, py::array_t<T> lines, py::array_t<
     throw std::invalid_argument("Invalid overlap keyword: " + overlap);
 }
 
+template <typename T, typename I, size_t N, kernels::type K>
+auto write_lines_nd_impl(py::array_t<T> lines, std::vector<size_t> shape,
+                         py::array_t<T> widths, std::optional<py::array_t<I>> idxs,
+                         T max_val, unsigned threads)
+{
+    constexpr size_t L = 2 * N;
+
+    if (shape.size() < N)
+        throw std::invalid_argument("shape has insufficient dimensions");
+    if (lines.ndim() < 2)
+        throw std::invalid_argument("lines must have at least two dimensions");
+
+    array<T> larr {lines.request()};
+    array<T> warr {widths.request()};
+    check_dimension("lines", larr.ndim() - 1, larr.shape().begin(), L);
+
+    auto n_lines = larr.size() / L;
+    auto line_group_size = larr.ndim() > 2 ? larr.shape(larr.ndim() - 2) : size_t(1);
+    auto n_line_groups = n_lines / line_group_size;
+    auto n_frames = std::reduce(shape.begin(), std::prev(shape.end(), N), size_t(1),
+                                std::multiplies());
+    std::vector<size_t> frame_shape {std::prev(shape.end(), N), shape.end()};
+
+    if (!idxs) fill_indices("idxs", n_frames, n_lines, idxs);
+    else check_indices("idxs", n_frames, n_lines, idxs.value());
+    array<I> iarr {idxs.value().request()};
+
+    std::vector<I> out_idxs, line_idxs;
+    std::vector<T> values;
+    thread_exception e;
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        detail::ImageBuffer<size_t, size_t, T> buffer {frame_shape};
+
+        #pragma omp for nowait
+        for (size_t i = 0; i < n_lines; i++)
+        {
+            e.run([&]()
+            {
+                auto write_pixel = [&buffer, frame = iarr[i], i, max_val]
+                                   (const PointND<long, N> & point, T error)
+                {
+                    if (error <= T(1) && buffer.is_inbound(point.rbegin(), point.rend()))
+                        buffer.emplace_back(point, static_cast<size_t>(frame), i,
+                                            max_val * kernels_t<T>::template select<K>()(
+                                                std::sqrt(error)));
+                };
+
+                auto width = width_value(warr, i, i / line_group_size, n_lines,
+                                         n_line_groups);
+                draw_line_nd(LineND<T, N>{to_point<N>(larr, L * i),
+                                          to_point<N>(larr, L * i + N)},
+                             width, write_pixel);
+            });
+        }
+
+        #pragma omp critical
+        {
+            for (const auto & [index, frame, line, value] : buffer)
+            {
+                out_idxs.push_back(static_cast<I>(index + frame * buffer.size()));
+                line_idxs.push_back(static_cast<I>(line));
+                values.push_back(value);
+            }
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+    e.rethrow();
+
+    return std::make_tuple(as_pyarray(std::move(out_idxs)),
+                           as_pyarray(std::move(line_idxs)),
+                           as_pyarray(std::move(values)));
+}
+
+template <typename T, typename I, size_t N>
+auto write_lines_nd(py::array_t<T> lines, std::vector<size_t> shape,
+                    py::array_t<T> widths, std::optional<py::array_t<I>> idxs,
+                    T max_val, std::string kernel_name, unsigned threads)
+{
+    auto kernel = kernels::get_type(kernel_name);
+    switch (kernel)
+    {
+        case kernels::biweight:
+            return write_lines_nd_impl<T, I, N, kernels::biweight>(
+                lines, shape, widths, idxs, max_val, threads);
+        case kernels::gaussian:
+            return write_lines_nd_impl<T, I, N, kernels::gaussian>(
+                lines, shape, widths, idxs, max_val, threads);
+        case kernels::parabolic:
+            return write_lines_nd_impl<T, I, N, kernels::parabolic>(
+                lines, shape, widths, idxs, max_val, threads);
+        case kernels::rectangular:
+            return write_lines_nd_impl<T, I, N, kernels::rectangular>(
+                lines, shape, widths, idxs, max_val, threads);
+        case kernels::triangular:
+            return write_lines_nd_impl<T, I, N, kernels::triangular>(
+                lines, shape, widths, idxs, max_val, threads);
+        default:
+            throw std::invalid_argument("Invalid kernel type: " + kernel_name);
+    }
+}
+
+template <typename T, typename I>
+auto write_lines(py::array_t<T> lines, std::vector<size_t> shape,
+                 py::array_t<T> widths, std::optional<py::array_t<I>> idxs,
+                 T max_val, std::string kernel_name, unsigned threads)
+{
+    auto line_size = lines.shape(lines.ndim() - 1);
+    if (shape.size() >= 2 && line_size == 4)
+        return write_lines_nd<T, I, 2>(lines, shape, widths, idxs, max_val,
+                                       kernel_name, threads);
+    if (shape.size() >= 3 && line_size == 6)
+        return write_lines_nd<T, I, 3>(lines, shape, widths, idxs, max_val,
+                                       kernel_name, threads);
+    throw std::invalid_argument("Shape dimensions (" + std::to_string(shape.size()) +
+                                ") do not match the line size (" +
+                                std::to_string(line_size) + ")");
+}
+
 template <typename T, typename I, size_t N, int Update, kernels::type K>
 py::array_t<T> accumulate_lines_nd_impl(py::array_t<T> out, py::array_t<T> lines, py::array_t<T> widths, py::array_t<I> terms, py::array_t<I> frames,
                                         T max_val, unsigned threads)
@@ -525,4 +648,11 @@ PYBIND11_MODULE(bresenham, m)
 
     m.def("draw_lines", &draw_lines<double, long>, py::arg("out"), py::arg("lines"), py::arg("widths"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
     m.def("draw_lines", &draw_lines<float, int>, py::arg("out"), py::arg("lines"), py::arg("widths"), py::arg("idxs") = nullptr, py::arg("max_val") = 1, py::arg("kernel") = "rectangular", py::arg("overlap") = "sum", py::arg("num_threads") = 1);
+
+    m.def("write_lines", &write_lines<double, long>, py::arg("lines"), py::arg("shape"),
+          py::arg("widths"), py::arg("idxs") = nullptr, py::arg("max_val") = 1,
+          py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
+    m.def("write_lines", &write_lines<float, int>, py::arg("lines"), py::arg("shape"),
+          py::arg("widths"), py::arg("idxs") = nullptr, py::arg("max_val") = 1,
+          py::arg("kernel") = "rectangular", py::arg("num_threads") = 1);
 }

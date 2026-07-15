@@ -5,7 +5,7 @@ import pytest
 from cbclib_v2 import default_rng, Lines
 from cbclib_v2.annotations import (CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
                                    NumPy, NumPyNamespace, RealArray, Shape)
-from cbclib_v2.ndimage import accumulate_lines, draw_lines
+from cbclib_v2.ndimage import accumulate_lines, draw_lines, write_lines
 from cbclib_v2.test_util import check_close
 
 TestNamespace = NumPyNamespace | CuPyNamespace
@@ -170,6 +170,56 @@ class TestDrawLine():
 
     def test_accumulate_lines(self, accumulated, image_numpy: RealArray):
         check_close(accumulated, image_numpy)
+
+@pytest.mark.parametrize("ndim,shape", [(2, (2, 9, 11)), (3, (2, 7, 9, 11))])
+class TestWriteLines:
+    @pytest.fixture(params=['cpu', 'gpu'])
+    def xp(self, request: pytest.FixtureRequest) -> TestNamespace:
+        if request.param == 'cpu':
+            return NumPy
+        if CuPy is None:
+            pytest.skip("CuPy is not available")
+        return CuPy
+
+    @pytest.fixture
+    def lines(self, ndim: int, xp: TestNamespace) -> RealArray:
+        if ndim == 2:
+            data = [[1.2, 2.1, 8.4, 6.3], [8.4, 6.3, 1.2, 2.1]]
+        else:
+            data = [[1.2, 2.1, 1.4, 8.4, 6.3, 4.8],
+                    [8.4, 6.3, 4.8, 1.2, 2.1, 1.4]]
+        return xp.asarray(data, dtype=xp.float64)
+
+    @pytest.fixture
+    def indices(self, xp: TestNamespace) -> IntArray:
+        return xp.asarray([0, 1], dtype=xp.int64)
+
+    def test_reconstructs_drawn_image(self, lines: RealArray, indices: IntArray, shape: Shape,
+                                      xp: TestNamespace):
+        pixel_indices, _, values = write_lines(lines, shape, indices, width=1.7,
+                                                kernel='triangular')
+        footprint = xp.bincount(pixel_indices, weights=values, minlength=prod(shape))
+        image = draw_lines(xp.zeros(shape), lines, indices, width=1.7,
+                           kernel='triangular')
+
+        check_close(footprint.reshape(shape), image)
+
+    def test_preserves_overlapping_pixels(self, lines: RealArray, shape: Shape,
+                                          ndim: int, xp: TestNamespace):
+        duplicate = xp.stack((lines[0], lines[0]))
+        pixel_indices, line_indices, values = write_lines(
+            duplicate, shape[-ndim:], width=1.7, kernel='rectangular')
+        first = line_indices == 0
+        second = line_indices == 1
+
+        assert xp.any(first)
+        assert xp.array_equal(pixel_indices[first], pixel_indices[second])
+        assert xp.array_equal(values[first], values[second])
+
+    def test_empty_lines(self, ndim: int, shape: Shape, xp: TestNamespace):
+        result = write_lines(xp.zeros((0, 2 * ndim)), shape[-ndim:], width=1.0)
+
+        assert all(array.size == 0 for array in result)
 
 class TestAccumulateCurves():
     @pytest.fixture(params=['cpu', 'gpu'])

@@ -409,6 +409,11 @@ protected:
     DeviceVector<csize_t> m_indices, m_terms, m_offsets;
 };
 
+template <typename T, csize_t N>
+HOST_DEVICE bool line_bounding_box(const LineND<T, N> & line, T width,
+                                   const ShapeND<N> & grid, const PointND<T, N> & bin,
+                                   PointND<csize_t, N> & origin, ShapeND<N> & shape);
+
 // DrawContext class for managing drawing parameters and line indices on device
 
 template <class Indices, typename T, csize_t N, typename IndicesView = typename Indices::const_view_type, typename IndicesRange = decltype(std::declval<IndicesView &>()[0])>
@@ -436,44 +441,17 @@ protected:
         HOST_DEVICE void apply_to_line(const PointND<T, N> & pt0, const PointND<T, N> & pt1,
                                        T width, Func func) const
         {
-            if (width <= T()) return;
-
-            T offset = math_traits<T>::ceil(width) + 1;
-
-            // Compute normalized direction vector tau
-            T length = T();
-            PointND<T, N> tau;
-            for (csize_t n = 0; n < N; n++) {tau[n] = pt1[n] - pt0[n]; length += tau[n] * tau[n];}
-            tau = tau / math_traits<T>::sqrt(length);
-
-            // coord0 and coord1 follow zyx convention
-            PointND<csize_t, N> coord0, coord1;
-            for (csize_t zyx_n = 0; zyx_n < N; zyx_n++)
-            {
-                // Compute bounding box in voxel coordinates
-                // Points are in xyz convention; grid/bin are in zyx convention
-                // Start index can be greater than end index if line is drawn backwards along this axis
-                // Start and end points can be outside of the volume
-
-                csize_t xyz_n = N - zyx_n - 1;  // Convert zyx index to xyz index
-                auto start = math_traits<T>::round(pt0[xyz_n] - math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n]);
-                auto end = math_traits<T>::round(pt1[xyz_n] + math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n]);
-                if (start > end) {auto temp = start; start = end; end = temp;}
-                start = math_traits<T>::floor(start / _M_bin[zyx_n]);
-                end = math_traits<T>::ceil(end / _M_bin[zyx_n]);
-                coord0[zyx_n] = math_traits<T>::max(T(), start);
-                coord1[zyx_n] = math_traits<T>::min(_M_grid.shape(zyx_n), end);
-            }
-
-            // Shape follows zyx convention
-            ShapeND<N> shape = coord1 - coord0;
+            PointND<csize_t, N> origin;
+            ShapeND<N> shape;
+            if (!line_bounding_box(LineND<T, N>{pt0, pt1}, width, _M_grid, _M_bin,
+                                   origin, shape)) return;
 
             // Coordinate also follows zyx convention
             PointND<csize_t, N> coord;
             for (csize_t offset = 0; offset < shape.size(); offset++)
             {
                 shape.coord_at(coord, offset);
-                coord += coord0;
+                coord += origin;
 
                 csize_t bin_idx = _M_grid.index_at(coord);
                 func(bin_idx);
@@ -540,6 +518,44 @@ template <class Indices, typename T, csize_t N>
 using DrawContextView = typename DrawContext<Indices, T, N>::const_view_type;
 using DrawIndicesView = DrawIndices::view_type;
 using AccumulateIndicesView = AccumulateIndices::view_type;
+
+template <typename T, csize_t N>
+HOST_DEVICE bool line_bounding_box(const LineND<T, N> & line, T width,
+                                   const ShapeND<N> & grid, const PointND<T, N> & bin,
+                                   PointND<csize_t, N> & origin, ShapeND<N> & shape)
+{
+    if (width <= T()) return false;
+
+    T offset = math_traits<T>::ceil(width) + 1;
+    auto tau = line.tangent();
+    tau = tau / amplitude(tau);
+
+    PointND<csize_t, N> end;
+    for (csize_t zyx_n = 0; zyx_n < N; zyx_n++)
+    {
+        csize_t xyz_n = N - zyx_n - 1;
+        auto start = math_traits<T>::round(
+            line.pt0[xyz_n] - math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n]);
+        auto stop = math_traits<T>::round(
+            line.pt1[xyz_n] + math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n]);
+        if (start > stop)
+        {
+            auto temp = start;
+            start = stop;
+            stop = temp;
+        }
+        start = math_traits<T>::floor(start / bin[zyx_n]);
+        stop = math_traits<T>::ceil(stop / bin[zyx_n]);
+        start = math_traits<T>::max(T(), start);
+        stop = math_traits<T>::min(static_cast<T>(grid.shape(zyx_n)), stop);
+        if (stop <= start) return false;
+        origin[zyx_n] = static_cast<csize_t>(start);
+        end[zyx_n] = static_cast<csize_t>(stop);
+    }
+
+    shape = ShapeND<N>(end - origin);
+    return true;
+}
 
 // CUDA kernel: point-parallel thick line drawing (2D/3D)
 template <typename T, csize_t N, int Update, typename Kernel>
@@ -1349,6 +1365,258 @@ array_t<T> draw_lines(array_t<T> out, array_t<T> lines, array_t<T> widths,
     else throw std::invalid_argument("Invalid overlap keyword: " + overlap);
 }
 
+struct FootprintCounter
+{
+    csize_t count = 0;
+
+    __device__ void operator()(csize_t, double)
+    {
+        count++;
+    }
+};
+
+template <typename T, typename I, typename Kernel>
+struct FootprintWriter
+{
+    ArrayViewND<I, 1> pixel_indices;
+    ArrayViewND<I, 1> line_indices;
+    ArrayViewND<T, 1> values;
+    csize_t position;
+    csize_t frame_offset;
+    I line_index;
+    T max_val;
+    Kernel kernel;
+
+    __device__ void operator()(csize_t pixel_index, T distance)
+    {
+        pixel_indices[position] = static_cast<I>(frame_offset + pixel_index);
+        line_indices[position] = line_index;
+        values[position] = max_val * kernel(distance);
+        position++;
+    }
+};
+
+template <typename T, csize_t N, typename Func>
+__device__ void for_each_footprint_pixel(const LineND<T, N> & line,
+                                         const LineData<T, N> & line_data,
+                                         const ShapeND<N> & frame, Func & func)
+{
+    auto width = line_data.width();
+    if (width <= T()) return;
+
+    PointND<T, N> bin;
+    for (csize_t n = 0; n < N; n++) bin[n] = T(1);
+    PointND<csize_t, N> origin;
+    ShapeND<N> box;
+    if (!line_bounding_box(line, width, frame, bin, origin, box)) return;
+
+    for (csize_t offset = 0; offset < box.size(); offset++)
+    {
+        auto coord = box.coord_at(offset) + origin;
+        PointND<T, N> point;
+        for (csize_t zyx_n = 0; zyx_n < N; zyx_n++)
+            point[N - zyx_n - 1] = static_cast<T>(coord[zyx_n]);
+
+        auto distance = line_data.distance(point);
+        if (distance <= width) func(frame.index_at(coord), distance / width);
+    }
+}
+
+template <typename T, csize_t N>
+__device__ LineND<T, N> get_line(StridedIterator<T> iter)
+{
+    PointND<T, N> point0, point1;
+    for (csize_t n = 0; n < N; n++)
+    {
+        point0[n] = iter[n];
+        point1[n] = iter[N + n];
+    }
+    return {point0, point1};
+}
+
+template <typename T, typename I, csize_t N>
+__global__ void count_footprint_pixels(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                                       csize_t group_size, csize_t n_line_groups,
+                                       ArrayViewND<I, 1> frames, csize_t n_frames,
+                                       ShapeND<N> frame, DeviceRange<csize_t> counts)
+{
+    csize_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= lines.shape(0)) return;
+
+    auto frame_index = frames.size() ? static_cast<csize_t>(frames[index]) :
+                       (n_frames == 1 ? csize_t(0) : index);
+    if (frame_index >= n_frames)
+    {
+        counts[index] = 0;
+        return;
+    }
+
+    auto width_idx = width_index(index, group_size, lines.shape(0), n_line_groups,
+                                 widths.size());
+    auto width = widths[width_idx];
+    auto iter = lines.begin_at(index * lines.strides(0), 1);
+    auto line = get_line<T, N>(iter);
+    LineData<T, N> line_data {iter, width};
+    FootprintCounter counter;
+    for_each_footprint_pixel(line, line_data, frame, counter);
+    counts[index] = counter.count;
+}
+
+template <typename T, typename I, csize_t N, typename Kernel>
+__global__ void fill_footprint_pixels(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                                      csize_t group_size, csize_t n_line_groups,
+                                      ArrayViewND<I, 1> frames, csize_t n_frames,
+                                      ShapeND<N> frame, DeviceRange<csize_t> offsets,
+                                      ArrayViewND<I, 1> pixel_indices,
+                                      ArrayViewND<I, 1> line_indices,
+                                      ArrayViewND<T, 1> values,
+                                      T max_val, Kernel kernel)
+{
+    csize_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= lines.shape(0)) return;
+
+    auto width_idx = width_index(index, group_size, lines.shape(0), n_line_groups,
+                                 widths.size());
+    auto frame_index = frames.size() ? static_cast<csize_t>(frames[index]) :
+                       (n_frames == 1 ? csize_t(0) : index);
+    if (frame_index >= n_frames) return;
+
+    auto width = widths[width_idx];
+    auto iter = lines.begin_at(index * lines.strides(0), 1);
+    auto line = get_line<T, N>(iter);
+    LineData<T, N> line_data {iter, width};
+    FootprintWriter<T, I, Kernel> writer {
+        pixel_indices, line_indices, values, offsets[index], frame_index * frame.size(),
+        static_cast<I>(index), max_val, kernel
+    };
+    for_each_footprint_pixel(line, line_data, frame, writer);
+}
+
+template <typename T>
+array_t<T> empty_cupy_array(csize_t size)
+{
+    auto cupy = py::module_::import("cupy");
+    auto out = cupy.attr("empty")(py::make_tuple(size),
+                                  py::arg("dtype") = py::dtype::of<T>());
+    return array_t<T>::ensure(out);
+}
+
+template <typename T, typename I, csize_t N, kernels::type K>
+auto write_lines_nd_impl(array_t<T> lines, std::vector<py::ssize_t> shape,
+                         array_t<T> widths, std::optional<array_t<I>> idxs, T max_val)
+{
+    constexpr csize_t L = 2 * N;
+    constexpr auto kernel = kernels_t<T, cuda::kernel_traits>::template select<K>();
+
+    if (shape.size() < N) throw std::invalid_argument("shape has insufficient dimensions");
+    if (lines.ndim() < 2 || lines.shape(lines.ndim() - 1) != L)
+        throw std::invalid_argument("Line array has incorrect shape");
+    if (widths.ndim() != 1) widths = widths.reshape({widths.size()});
+    if (idxs && idxs->ndim() != 1) *idxs = idxs->reshape({idxs->size()});
+
+    csize_t n_lines = lines.size() / L;
+    csize_t n_line_groups = lines.shape(0);
+    csize_t group_size = n_line_groups ? n_lines / n_line_groups : 0;
+    auto spatial_shape = shape.data() + shape.size() - N;
+    csize_t n_frames = std::reduce(shape.data(), spatial_shape, csize_t(1),
+                                   std::multiplies());
+
+    check_widths(widths.size(), n_lines, n_line_groups);
+    if (idxs && static_cast<csize_t>(idxs->size()) != n_lines)
+        throw std::invalid_argument("Number of frame indices does not match number of lines");
+    if (!idxs && n_frames != 1 && n_frames != n_lines)
+        throw std::invalid_argument("shape has an incompatible number of frames");
+    if (lines.ndim() != 2) lines = lines.reshape({n_lines, L});
+
+    if (n_lines == 0)
+    {
+        return std::make_tuple(empty_cupy_array<I>(0), empty_cupy_array<I>(0),
+                               empty_cupy_array<T>(0));
+    }
+
+    ShapeND<N> frame {spatial_shape};
+    auto frames = idxs ? *idxs : empty_cupy_array<I>(0);
+    DeviceVector<csize_t> counts (n_lines, 0);
+    DeviceVector<csize_t> offsets (n_lines + 1, 0);
+    csize_t block_size = BLOCK_SIZE;
+    csize_t n_blocks = (n_lines + block_size - 1) / block_size;
+
+    count_footprint_pixels<T, I, N><<<n_blocks, block_size>>>(
+        cast_to_nd<T, 2>(lines.view()), cast_to_nd<T, 1>(widths.view()), group_size,
+        n_line_groups, cast_to_nd<I, 1>(frames.view()), n_frames, frame, counts.view());
+    handle_cuda_error(cudaGetLastError());
+
+    void * temp_ptr = nullptr;
+    size_t temp_size = 0;
+    cub::DeviceScan::InclusiveSum(temp_ptr, temp_size, counts.data(), offsets.data() + 1,
+                                  n_lines);
+    DeviceVector<char> temp_storage (temp_size);
+    cub::DeviceScan::InclusiveSum(temp_storage.data(), temp_size, counts.data(),
+                                  offsets.data() + 1, n_lines);
+
+    csize_t size = 0;
+    handle_cuda_error(cudaMemcpy(&size, offsets.data(n_lines), sizeof(csize_t),
+                                 cudaMemcpyDeviceToHost));
+    auto pixel_indices = empty_cupy_array<I>(size);
+    auto line_indices = empty_cupy_array<I>(size);
+    auto values = empty_cupy_array<T>(size);
+
+    fill_footprint_pixels<T, I, N><<<n_blocks, block_size>>>(
+        cast_to_nd<T, 2>(lines.view()), cast_to_nd<T, 1>(widths.view()), group_size,
+        n_line_groups, cast_to_nd<I, 1>(frames.view()), n_frames, frame, offsets.view(),
+        cast_to_nd<I, 1>(pixel_indices.view()), cast_to_nd<I, 1>(line_indices.view()),
+        cast_to_nd<T, 1>(values.view()), max_val, kernel);
+    handle_cuda_error(cudaGetLastError());
+    handle_cuda_error(cudaDeviceSynchronize());
+
+    return std::make_tuple(std::move(pixel_indices), std::move(line_indices),
+                           std::move(values));
+}
+
+template <typename T, typename I, csize_t N>
+auto write_lines_nd(array_t<T> lines, std::vector<py::ssize_t> shape,
+                    array_t<T> widths, std::optional<array_t<I>> idxs, T max_val,
+                    std::string kernel_name)
+{
+    auto kernel = kernels::get_type(kernel_name);
+    switch (kernel)
+    {
+        case kernels::biweight:
+            return write_lines_nd_impl<T, I, N, kernels::biweight>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::gaussian:
+            return write_lines_nd_impl<T, I, N, kernels::gaussian>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::parabolic:
+            return write_lines_nd_impl<T, I, N, kernels::parabolic>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::rectangular:
+            return write_lines_nd_impl<T, I, N, kernels::rectangular>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::triangular:
+            return write_lines_nd_impl<T, I, N, kernels::triangular>(
+                lines, shape, widths, idxs, max_val);
+        default:
+            throw std::invalid_argument("Invalid kernel type: " + kernel_name);
+    }
+}
+
+template <typename T, typename I>
+auto write_lines(array_t<T> lines, std::vector<py::ssize_t> shape,
+                 array_t<T> widths, std::optional<array_t<I>> idxs, T max_val,
+                 std::string kernel_name)
+{
+    if (lines.ndim() < 2) throw std::invalid_argument("lines must have at least two dimensions");
+    auto line_size = lines.shape(lines.ndim() - 1);
+    if (shape.size() >= 2 && line_size == 4)
+        return write_lines_nd<T, I, 2>(lines, shape, widths, idxs, max_val, kernel_name);
+    if (shape.size() >= 3 && line_size == 6)
+        return write_lines_nd<T, I, 3>(lines, shape, widths, idxs, max_val, kernel_name);
+    throw std::invalid_argument("Shape dimensions (" + std::to_string(shape.size()) +
+                                ") do not match the line size (" +
+                                std::to_string(line_size) + ")");
+}
+
 template <typename T, typename I, csize_t N, int Update, kernels::type K>
 array_t<T> accumulate_lines_nd_impl(array_t<T> out, array_t<T> lines, array_t<T> widths,
                                     array_t<I> terms, array_t<I> frames, T max_val,
@@ -1669,4 +1937,19 @@ PYBIND11_MODULE(cuda_draw_lines, m)
           py::arg("kernel") = "rectangular",
           py::arg("overlap") = "sum",
           py::arg("grid") = nullptr);
+
+    m.def("write_lines", &cu::write_lines<float, int>,
+          py::arg("lines"),
+          py::arg("shape"),
+          py::arg("widths"),
+          py::arg("idxs") = nullptr,
+          py::arg("max_val") = 1.0f,
+          py::arg("kernel") = "rectangular");
+    m.def("write_lines", &cu::write_lines<double, long>,
+          py::arg("lines"),
+          py::arg("shape"),
+          py::arg("widths"),
+          py::arg("idxs") = nullptr,
+          py::arg("max_val") = 1.0,
+          py::arg("kernel") = "rectangular");
 }
