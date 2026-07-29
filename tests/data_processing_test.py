@@ -19,7 +19,7 @@ class ProjectionCase:
 class MaskCase:
     metadata: CrystMetadata
     data: RealArray
-    pixels: IntArray
+    pixels: tuple[IntArray, ...]
 
 class BackendSuite:
     @pytest.fixture(params=['cpu', 'gpu'])
@@ -107,7 +107,7 @@ class TestCrystMetadataProjection(BackendSuite):
         coefficients = xp.asarray([[2.0, -0.5]])
         data = flatfield + xp.tensordot(coefficients, fields, axes=((-1,), (0,)))
         metadata = CrystMetadata(flatfield=flatfield, eigen_field=fields)
-        pixels = xp.asarray([0, 3, 7, 11], dtype=int)
+        pixels = xp.unravel_index(xp.asarray([0, 3, 7, 11], dtype=int), flatfield.shape)
         return MaskCase(metadata, data, pixels)
 
     @pytest.fixture
@@ -135,6 +135,8 @@ class TestCrystMetadataProjection(BackendSuite):
     def test_flatfield(self, flatfield_case: ProjectionCase):
         result = flatfield_case.metadata.project(flatfield_case.data, n_iter=1)
         check_close(result.projection, flatfield_case.expected)
+        expected = flatfield_case.expected[..., None] * flatfield_case.metadata.flatfield
+        check_close(result.apply(flatfield_case.metadata), expected)
 
     def test_singular(self, singular_case: ProjectionCase):
         result = singular_case.metadata.project(singular_case.data, n_iter=1)
@@ -145,12 +147,13 @@ class TestCrystMetadataProjection(BackendSuite):
         second = sampling_case.metadata.project(sampling_case.data, n_iter=1, n_pixels=7)
         check_close(first.projection, sampling_case.expected)
         check_close(second.projection, first.projection)
+        check_close(first.apply(sampling_case.metadata), sampling_case.data)
 
     def test_apply_mask(self, mask_case: MaskCase, xp: TestNamespace):
         projection = mask_case.metadata.project(mask_case.data, n_iter=1)
         selected = projection.apply(mask_case.metadata.apply_mask(mask_case.pixels))
-        full = xp.reshape(projection.apply(mask_case.metadata), (1, -1))
-        check_close(selected, full[:, mask_case.pixels])
+        full = projection.apply(mask_case.metadata)
+        check_close(selected, full[(...,) + mask_case.pixels])
 
     def test_iterations(self, empty_metadata: CrystMetadata, empty_data: RealArray):
         with pytest.raises(ValueError, match='n_iter must be at least one'):
@@ -169,19 +172,19 @@ class TestCrystMetadataProjection(BackendSuite):
 class TestLSQData(BackendSuite):
     @pytest.fixture
     def coefficients(self, xp: TestNamespace) -> RealArray:
-        return xp.asarray([[2.0, -1.0]])
+        return xp.asarray([[2.0, -1.0], [-1.0, 3.0]])
 
     @pytest.fixture
     def W(self, xp: TestNamespace) -> RealArray:
-        return xp.asarray([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])
+        return xp.asarray([[[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]])
 
     @pytest.fixture
     def mask(self, xp: TestNamespace) -> BoolArray:
-        return xp.asarray([[True, True, False]])
+        return xp.asarray([[True, True, False], [True, True, False]])
 
     @pytest.fixture
     def data(self, coefficients: RealArray, W: RealArray, xp: TestNamespace) -> LSQData:
-        y = xp.tensordot(coefficients, W, axes=((-1,), (0,)))
+        y = xp.sum(coefficients[..., None] * W, axis=1)
         return LSQData(y=y, W=W)
 
     @pytest.fixture
@@ -189,10 +192,20 @@ class TestLSQData(BackendSuite):
         return data.apply_mask(mask)
 
     def test_mask(self, masked: LSQData, xp: TestNamespace):
-        check_close(masked.y, xp.asarray([[2.0, -1.0, 0.0]]))
+        check_close(masked.y, xp.asarray([[2.0, -1.0, 0.0], [-1.0, 3.0, 0.0]]))
 
     def test_solve(self, masked: LSQData, coefficients: RealArray):
         check_close(masked.solve(), coefficients)
+
+    def test_frame_design(self, coefficients: RealArray, xp: TestNamespace):
+        W = xp.asarray([[[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]],
+                        [[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]]])
+        y = xp.sum(coefficients[..., None] * W, axis=1)
+        check_close(LSQData(y=y, W=W).solve(), coefficients)
+
+    def test_frame_shape(self, xp: TestNamespace):
+        with pytest.raises(ValueError, match='W must have a shape'):
+            LSQData(y=xp.ones((2, 3)), W=xp.ones((3, 2, 3)))
 
 class TestScalingParameters:
     @pytest.fixture

@@ -3,7 +3,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Dict, Generic, Itera
                     Protocol, Sequence,Tuple, Type, TypeVar, Union, cast, overload,
                     runtime_checkable)
 from typing_extensions import Self
-from types import ModuleType
+from types import EllipsisType, ModuleType
 import numpy.typing as npt
 from jax import Device as JaxDevice
 import jax.numpy as jnp
@@ -78,6 +78,8 @@ class CuPyArray(Protocol):
 
     def __array__(self, dtype: Any = None) -> 'NDArray': ...
 
+    def all(self, axis: 'ShapeLike | None' = None, keepdims: bool = False) -> 'CuPyArray': ...
+    def any(self, axis: 'ShapeLike | None' = None, keepdims: bool = False) -> 'CuPyArray': ...
     def astype(self, dtype: Any, order: str | None = 'K', casting: str = 'unsafe',
                subok: bool = True, copy: bool = True) -> 'CuPyArray': ...
     def copy(self, order: str | None = None) -> 'CuPyArray': ...
@@ -194,7 +196,7 @@ ComplexArray = JaxComplexArray | NDComplexArray | CPComplexArray
 IntArray = JaxIntArray | NDIntArray | CPIntArray
 RealArray = JaxRealArray | NDRealArray | CPRealArray
 
-Indices = int | slice | IntArray | Sequence[int]
+Indices = int | slice | IntArray | Sequence[int] | EllipsisType
 MultiIndices = Indices | Tuple[Indices, ...]
 
 IntSequence = int | Sequence[int] | IntArray
@@ -662,7 +664,7 @@ class ArrayNamespace(Generic[T_Array]):
 
     def concat(self, xs: Sequence[ArrayLike], /, axis: int | None = 0) -> T_Array: ...
 
-    def expand_dims(self, x: ArrayLike, /, axis: int = 0) -> T_Array: ...
+    def expand_dims(self, x: ArrayLike, /, axis: int | Sequence[int] = 0) -> T_Array: ...
 
     def flip(self, m: ArrayLike, /, axis: ShapeLike | None = None) -> T_Array: ...
 

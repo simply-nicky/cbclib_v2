@@ -291,6 +291,17 @@ class DataContainer(Container):
                 data[f.name] = val
         return data
 
+    def copy(self: Self) -> Self:
+        xp = self.__array_namespace__()
+        data = {}
+        for f in fields(self):
+            val = getattr(self, f.name)
+            if isinstance(val, Array):
+                data[f.name] = xp.copy(val)
+            elif isinstance(val, DataContainer):
+                data[f.name] = val.copy()
+        return self.replace(**data)
+
     def to_cupy(self: Self) -> Self:
         """Return a copy with all NumPy arrays converted to CuPy.
 
@@ -351,6 +362,7 @@ class ArrayContainer(DataContainer):
     @classmethod
     def is_empty(cls, data: Any) -> bool:
         """Return ``True`` when *data* is **not** an array (non-array fields are excluded)."""
+        # Since ArrayContainer has a consistent leading shape, we can't treat empty arrays as empty containers.
         return not isinstance(data, Array)
 
     @classmethod

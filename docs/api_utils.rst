@@ -23,7 +23,6 @@ backends that are not part of the `Python Array API standard`_.
    ascupy
    add_at
    set_at
-   min_at
    default_rng
 
 .. currentmodule:: cbclib_v2.cuda

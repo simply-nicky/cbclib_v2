@@ -1,9 +1,9 @@
 import pytest
 from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, RealArray, NDArray, NumPy, NumPyNamespace
-from cbclib_v2.indexer import (CBData, CBDIndexer, CBDLoss, CBDModel, CircleState, FixedState,
-                               MillerWithRLP, Patterns, PointsWithK, ResolvedState,
-                               TiltOverAxisState, UCA, project_to_rect)
+from cbclib_v2.indexer import (CBDIndexer, CircleState, FixedSetup, MillerWithRLP, Patterns,
+                               RefinerData, RefinerLoss, RefinerModel, ResolvedSetup,
+                               TiltOverAxisState, UCA)
 from cbclib_v2.test_util import TestSetup, check_close
 
 class TestCBDIndexer():
@@ -18,12 +18,12 @@ class TestCBDIndexer():
         return default_rng(42, xp)
 
     @pytest.fixture
-    def state(self, xp: NumPyNamespace) -> FixedState:
-        return FixedState(TestSetup.xtal(xp), TestSetup.fixed_setup())
+    def initial(self, xp: NumPyNamespace) -> FixedSetup:
+        return FixedSetup(TestSetup.xtal(xp), TestSetup.fixed_geometry())
 
     @pytest.fixture
-    def resolved(self, state: FixedState, xp: NumPyNamespace) -> ResolvedState:
-        return state.resolve(xp)
+    def resolved(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
+        return initial.resolve(xp)
 
     @pytest.fixture(params=[10,])
     def num_lines(self, request: pytest.FixtureRequest) -> int:
@@ -38,9 +38,9 @@ class TestCBDIndexer():
         return request.param
 
     @pytest.fixture
-    def patterns(self, rng: Generator[NDArray], indexer: CBDIndexer, resolved: ResolvedState,
+    def patterns(self, rng: Generator[NDArray], indexer: CBDIndexer, resolved: ResolvedSetup,
                  num_lines: int, xp: NumPyNamespace) -> Patterns:
-        center = indexer.lens.zero_order(resolved.setup.lens, xp)
+        center = indexer.lens.zero_order(resolved.geometry.lens, xp)
 
         length = rng.uniform(1.5e-3, 1.5e-2, (num_lines,))
         x = rng.uniform(TestSetup.roi[2] * TestSetup.x_pixel_size,
@@ -57,22 +57,22 @@ class TestCBDIndexer():
         return Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def points(self, indexer: CBDIndexer, patterns: Patterns, resolved: ResolvedState,
-               xp: NumPyNamespace) -> PointsWithK:
+    def kout(self, indexer: CBDIndexer, patterns: Patterns, resolved: ResolvedSetup,
+             xp: NumPyNamespace) -> RealArray:
         return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)),
-                                      resolved.setup, xp)
+                                      resolved.geometry, xp)
 
     @pytest.fixture
-    def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, state: FixedState,
+    def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, initial: FixedSetup,
                 xp: NumPyNamespace) -> MillerWithRLP:
-        hkl = indexer.xtal.hkl_in_ball(q_abs, state.xtal, xp)
-        iterator = indexer.xtal.hkl_range(patterns.unique_index(), hkl, state.xtal, xp)
+        hkl = indexer.xtal.hkl_in_ball(q_abs, initial.xtal, xp)
+        iterator = indexer.xtal.hkl_range(patterns.unique_index(), hkl, initial.xtal, xp)
         return MillerWithRLP.concatenate(list(iterator))
 
     @pytest.fixture
-    def patterns_uca(self, indexer: CBDIndexer, patterns: Patterns, points: PointsWithK,
-                     resolved: ResolvedState, xp: NumPyNamespace) -> UCA:
-        return indexer.patterns_to_uca(patterns, points, resolved.setup, xp)
+    def patterns_uca(self, indexer: CBDIndexer, patterns: Patterns, kout: RealArray,
+                     resolved: ResolvedSetup, xp: NumPyNamespace) -> UCA:
+        return indexer.patterns_to_uca(patterns, kout, resolved.geometry, xp)
 
     @pytest.fixture
     def candidates(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA,
@@ -85,28 +85,28 @@ class TestCBDIndexer():
         return indexer.candidates(all_rlp, patterns_uca, xp)[1]
 
     @pytest.fixture
-    def data(self, rng: Generator[NDArray], patterns: Patterns, model: CBDModel,
-             resolved: ResolvedState, num_points: int) -> CBData:
+    def data(self, rng: Generator[NDArray], patterns: Patterns, model: RefinerModel,
+             resolved: ResolvedSetup, num_points: int) -> RefinerData:
         return model.init_data_random(rng, patterns, num_points, resolved)
 
     @pytest.fixture
-    def pupil_loss(self, model: CBDModel, xp: NumPyNamespace) -> CBDLoss:
+    def pupil_loss(self, model: RefinerModel, xp: NumPyNamespace) -> RefinerLoss:
         return model.pupil_loss(xp=xp)
 
     @pytest.fixture
-    def solution(self, model: CBDModel, pupil_loss: CBDLoss, data: CBData, state: FixedState,
-                 xp: NumPyNamespace) -> MillerWithRLP:
-        miller = pupil_loss.index(data, state)
-        return model.xtal.hkl_to_q(miller, state.xtal, xp)
+    def solution(self, model: RefinerModel, pupil_loss: RefinerLoss, data: RefinerData,
+                 resolved: ResolvedSetup, xp: NumPyNamespace) -> MillerWithRLP:
+        miller = pupil_loss.index(data, resolved)
+        return model.xtal.hkl_to_q(miller, resolved.xtal, xp)
 
     # Check that the candidate RLPs lie within the resolution shell
-    def test_candidates(self, patterns_uca: UCA, solution: MillerWithRLP, points: PointsWithK,
+    def test_candidates(self, patterns_uca: UCA, solution: MillerWithRLP, kout: RealArray,
                         candidates: MillerWithRLP, uca: UCA, xp: NumPyNamespace):
         resolution = xp.sum(solution.q**2, axis=-1)
         idxs = xp.where((patterns_uca.min_resolution < resolution) &
                         (resolution < patterns_uca.max_resolution))[0]
         idxs2, uca_idxs = xp.where(xp.all((solution.hkl[..., None, :] == candidates.hkl) &
-                                          (points.kout[..., None, :] == uca.kout), axis=-1))
+                                          (kout[..., None, :] == uca.kout), axis=-1))
         assert xp.all(idxs == idxs2)
         assert all(xp.all(lhs == rhs) for lhs, rhs in zip(patterns_uca[idxs].to_dict().values(),
                                                           uca[uca_idxs].to_dict().values()))
@@ -138,8 +138,7 @@ class TestCBDIndexer():
         check_close(xp.sum(pts**2, axis=-1),
                     xp.broadcast_to(xp.sum(candidates.q**2, axis=-1), pts.shape[:-1]))
         check_close(xp.sum((pts - uca.kout)**2, axis=-1), xp.ones(pts.shape[:-1]))
-        proj = project_to_rect(pts[..., :2], uca.q_min[None, ..., :2],
-                               uca.q_max[None, ..., :2], xp)
+        proj = xp.clip(pts[..., :2], uca.q_min[None, ..., :2], uca.q_max[None, ..., :2])
         check_close(pts[..., :2], proj)
 
     @pytest.fixture

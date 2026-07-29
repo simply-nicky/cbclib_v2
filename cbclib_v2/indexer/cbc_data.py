@@ -1,15 +1,24 @@
-from typing import Union
+from dataclasses import dataclass
+from typing import Protocol
+from .cbc_pupil import EdgePoints
 from .cbc_setup import TiltOverAxisState
-from .geometry import safe_divide, kxy_to_k
-from .._src.annotations import AnyNamespace, BoolArray, IntArray, RealArray
-from .._src.array_api import array_namespace
+from .._src.annotations import AnyNamespace, BoolArray, IntArray, RealArray, Shape
+from .._src.array_api import array_namespace, broadcast_to, kxy_to_k, safe_divide, safe_sqrt
 from .._src.data_container import ArrayContainer, IndexedContainer
 from .._src.state import State
-from .._src.streaks import BaseLines
+from .._src.streaks import BaseLines, project_to_streak
 
-AnyPoints = Union['Points', 'PointsWithK', 'CBDPoints']
+class AnyPoints(Protocol):
+    index   : IntArray
+    points  : RealArray
 
-class Patterns(State, IndexedContainer, BaseLines):
+    @property
+    def shape(self) -> Shape: ...
+
+    def __array_namespace__(self) -> AnyNamespace: ...
+
+@dataclass
+class Patterns(IndexedContainer, BaseLines):
     """Detector streak lines container. Provides an interface to draw a pattern for a set of
     lines.
 
@@ -29,10 +38,12 @@ class Patterns(State, IndexedContainer, BaseLines):
 
     @classmethod
     def from_points(cls, points: AnyPoints) -> 'Patterns':
-        xp = array_namespace(points)
-        lines = xp.reshape(points.points, points.shape + (4,))
-        index = xp.reshape(points.index, lines.shape[:-1])
-        return cls(index=index, lines=lines)
+        if points.points.shape[-2:] != (2, 2):
+            raise ValueError(f"Expected points of shape (..., 2, 2), got {points.points.shape}")
+
+        xp = points.__array_namespace__()
+        lines = xp.reshape(points.points, points.points.shape[:-2] + (4,))
+        return cls(index=points.index[..., 0], lines=lines)
 
     @classmethod
     def import_xy(cls, index: IntArray, x: RealArray, y: RealArray) -> 'Patterns':
@@ -74,10 +85,8 @@ class Points(State, ArrayContainer):
     def y(self) -> RealArray:
         return self.points[..., 1]
 
-class PointsWithK(Points):
-    kout    : RealArray
-
-class UCA(State, ArrayContainer):
+@dataclass
+class UCA(ArrayContainer):
     """Uncertainty Cap Area (UCA) is a region of all possible q vectors that might have
     given rise to the given point on the detector defined by the point's kout. The UCA
     extent is limited by the length of the streak line associated with the point.
@@ -115,7 +124,8 @@ class UCA(State, ArrayContainer):
         kxy = xp.concat((kxy, xp.stack((kxy[..., 0], kxy[::-1, ..., 1]), axis=-1)))
         return self.kout - kxy_to_k(kxy, xp)
 
-class CircleState(State, ArrayContainer):
+@dataclass
+class CircleState(ArrayContainer):
     index   : IntArray
     center  : RealArray
     axis1   : RealArray
@@ -127,7 +137,8 @@ class CircleState(State, ArrayContainer):
         return (self.radius * xp.cos(theta))[..., None] * self.axis1 \
              + (self.radius * xp.sin(theta))[..., None] * self.axis2 + self.center
 
-class Rotograms(State, IndexedContainer):
+@dataclass
+class Rotograms(IndexedContainer):
     index       : IntArray
     streak_id   : IntArray
     points      : RealArray
@@ -141,11 +152,12 @@ class Rotograms(State, IndexedContainer):
     @property
     def angles(self) -> RealArray:
         xp = self.__array_namespace__()
-        return xp.sqrt(xp.sum(self.points**2, axis=-1))
+        return safe_sqrt(xp.sum(self.points**2, axis=-1), xp)
 
     @property
     def axis(self) -> RealArray:
-        return self.points / self.angles[..., None]
+        xp = self.__array_namespace__()
+        return safe_divide(self.points, self.angles[..., None], xp)
 
     @property
     def lines(self) -> RealArray:
@@ -187,18 +199,33 @@ class Miller(State, ArrayContainer):
         hkl = xp.reshape(xp.reshape(hkl, (-1, 3))[..., None, :] + offsets, shape)
         return self.replace(hkl=hkl, index=self.index[..., None])
 
+    def finite_only(self) -> 'Miller':
+        xp = self.__array_namespace__()
+        index = xp.reshape(xp.broadcast_to(self.index, self.hkl.shape[:-1]), (-1,))
+        hkl = xp.reshape(self.hkl, (-1, 3))
+        mask = xp.isfinite(hkl).all(axis=-1)
+        return self.replace(hkl=hkl[mask], index=index[mask])
+
+    def unique(self) -> 'Miller':
+        xp = self.__array_namespace__()
+        index = xp.reshape(xp.broadcast_to(self.index, self.hkl.shape[:-1]), (-1,))
+        hkl = xp.reshape(self.hkl, (-1, 3))
+        hkl, is_unique = xp.unique(hkl, return_index=True, axis=0)
+        indices = xp.argsort(is_unique)
+        return self.replace(hkl=hkl[indices], index=index[is_unique[indices]])
+
 class RLP(State, ArrayContainer):
     index   : IntArray
     q       : RealArray
 
-    @property
-    def source_points(self) -> RealArray:
+    def origin_points(self) -> Points:
         xp = self.__array_namespace__()
-        rec_abs = xp.sqrt(xp.sum(self.q**2, axis=-1))
+        rec_abs = safe_sqrt(xp.sum(self.q**2, axis=-1), xp)
         theta = xp.acos(0.5 * rec_abs) - xp.acos(safe_divide(-self.q[..., 2], rec_abs, xp))
         phi = xp.atan2(self.q[..., 1], self.q[..., 0])
-        return xp.stack((xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi),
-                         xp.cos(theta)), axis=-1)
+        pts = xp.stack((xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi),
+                        xp.cos(theta)), axis=-1)
+        return Points(points=pts, index=self.index)
 
 class MillerWithRLP(Miller, RLP):
     pass
@@ -207,8 +234,7 @@ class LaueVectors(MillerWithRLP):
     kin     : RealArray
     kout    : RealArray
 
-    @property
-    def source_line(self) -> RealArray:
+    def source_points(self) -> Points:
         xp = self.__array_namespace__()
         q_mag = xp.sum(self.q**2, axis=-1)
         t = safe_divide(xp.sum(self.kin * self.q, axis=-1), q_mag, xp) + 0.5
@@ -216,26 +242,39 @@ class LaueVectors(MillerWithRLP):
         tau = kin + 0.5 * self.q
         tau_mag = xp.sum(tau**2, axis=-1)
         s = safe_divide(xp.sum(kin**2, axis=-1) - 1.0,
-                        xp.sum(kin * tau, axis=-1) + xp.sqrt(tau_mag), xp)
-        return kin - s[..., None] * tau
+                        xp.sum(kin * tau, axis=-1) + safe_sqrt(tau_mag, xp), xp)
+        pts = kin - s[..., None] * tau
+        return Points(points=pts, index=self.index)
 
-class MaskedLaueVectors(LaueVectors):
-    mask    : BoolArray
+class SimulatedVectors(MillerWithRLP):
+    kin     : RealArray
+    kout    : RealArray
+    distance: RealArray  # (..., 2) endpoint distances to the pupil support
 
-    @property
-    def source_line(self) -> RealArray:
+    def project(self, index: IntArray, kout: RealArray, xp: AnyNamespace) -> EdgePoints:
+        bounds = broadcast_to(self.kout[..., :2], index, (2, 2), xp)
+        projection = project_to_streak(kout[..., :2], bounds[..., 0, :], bounds[..., 1, :], xp)
+        return EdgePoints(tau=projection.tau, origin=projection.center, t=projection.t)
+
+    def distance_to(self, index: IntArray, kout: RealArray, xp: AnyNamespace) -> RealArray:
+        projection = self.project(index, kout, xp)
+        return xp.sqrt(xp.sum((projection.points - kout)**2, axis=-1))
+
+    def distance_at(self, index: IntArray) -> RealArray:
+        """Return the mean endpoint support distance for indexed streak points."""
         xp = self.__array_namespace__()
-        return xp.where(self.mask[..., None], super().source_line, xp.nan)
+        distance = xp.mean(self.distance, axis=-1)
+        return broadcast_to(distance, index, (), xp)
 
 class CBDPoints(LaueVectors, Points):
     pass
 
-class CBData(State, ArrayContainer):
+class RefinerData(State, ArrayContainer):
     miller  : Miller
     points  : Points
 
-class CBDataBest(CBData):
+class RefinerDataBest(RefinerData):
     mask    : BoolArray
 
-class CBDataMasked(CBData):
+class RefinerDataMasked(RefinerData):
     mask    : BoolArray

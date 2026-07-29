@@ -1,12 +1,13 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from math import prod
 from typing import Tuple
 from typing_extensions import Self
 import pandas as pd
 from .annotations import AnyNamespace, BoolArray, IntArray, NumPy, RealArray
-from .array_api import array_namespace, asnumpy
+from .array_api import array_namespace, asnumpy, project_to_streak, safe_divide
 from .data_container import ArrayContainer, IndexedContainer
-from .functions import draw_lines
+from .functions import draw_lines, write_lines
 
 class BaseLines(ArrayContainer):
     """Base class for line-segment containers.
@@ -72,13 +73,16 @@ class BaseLines(ArrayContainer):
         Returns:
             Array of shape ``(..., ndim)`` with the intersection coordinates.
         """
+        xp = self.__array_namespace__()
+
         def vector_dot(a: RealArray, b: RealArray) -> RealArray:
             return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
 
         tau = self.pt1 - self.pt0
         other_tau = other.pt1 - other.pt0
 
-        t = vector_dot(other.pt0 - self.pt0, other_tau) / vector_dot(tau, other_tau)
+        t = safe_divide(vector_dot(other.pt0 - self.pt0, other_tau),
+                        vector_dot(tau, other_tau), xp)
         return self.pt0 + t[..., None] * tau
 
     def project(self, point: RealArray) -> RealArray:
@@ -96,14 +100,8 @@ class BaseLines(ArrayContainer):
             coordinates.
         """
         xp = self.__array_namespace__()
-        tau = self.pt1 - self.pt0
-        center = 0.5 * (self.pt0 + self.pt1)
-        r = point - center
-        tau_mag = xp.sum(tau**2, axis=-1)
-        tau_mag_safe = xp.where(tau_mag != 0, tau_mag, 1)
-        r_tau = xp.where(tau_mag != 0, xp.sum(tau * r, axis=-1) / tau_mag_safe, 0)
-        r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
-        return tau * r_tau + center
+        projection = project_to_streak(point, self.pt0, self.pt1, xp)
+        return projection.center + projection.t[..., None] * projection.tau
 
     def distance(self, point: RealArray) -> RealArray:
         """Euclidean distance from *point* to the nearest location on each segment.
@@ -119,6 +117,15 @@ class BaseLines(ArrayContainer):
         """
         xp = self.__array_namespace__()
         return xp.sqrt(xp.sum((self.project(point) - point)**2, axis=-1))
+
+    def ravel_lines(self) -> RealArray:
+        """Flatten the line endpoints to a 1-D array.
+
+        Returns:
+            Array of shape ``(..., 2 * ndim)`` with the endpoint coordinates
+            ``(x0, y0, ..., x1, y1, ...)``.
+        """
+        return self.lines.reshape((-1, 2 * self.ndim))
 
 @dataclass
 class Lines(BaseLines):
@@ -215,9 +222,18 @@ class BaseStreaks(IndexedContainer, BaseLines):
         Returns:
             *out* with streaks drawn in-place.
         """
-        xp = self.__array_namespace__()
-        return draw_lines(out=out, lines=self.lines, idxs=xp.asarray(self.flat_index),
+        return draw_lines(out=out, lines=self.lines, idxs=self.flat_index,
                           width=width, kernel=kernel)
+
+    def pattern_dataframe(self, shape: Tuple[int, int], width: float, kernel: str='gaussian'
+                          ) -> pd.DataFrame:
+        xp = self.__array_namespace__()
+        indices, streak_id, values = write_lines(self.lines, (len(self),) + shape, self.index,
+                                                 width=width, kernel=kernel)
+        index, pixel_id = indices // prod(shape), indices % prod(shape)
+        y, x = xp.unravel_index(pixel_id, shape)
+        return pd.DataFrame({'index': asnumpy(index), 'y': asnumpy(y), 'x': asnumpy(x),
+                             'streak_id': asnumpy(streak_id), 'value': asnumpy(values)})
 
     def to_dataframe(self) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.
@@ -279,7 +295,7 @@ class Streaks(BaseStreaks):
         return cls(index=index, lines=lines)
 
     def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float=0.33) -> BoolArray:
-        """Return a boolean mask selecting streaks tangential to circles centred at *(x_ctr, y_ctr)*.
+        """Return a mask selecting streaks tangential to circles centred at *(x_ctr, y_ctr)*.
 
         A streak is considered concentric when its line direction aligns with
         the tangential direction at its midpoint — equivalently, the component

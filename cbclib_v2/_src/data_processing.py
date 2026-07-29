@@ -18,12 +18,13 @@ from weakref import ref
 from typing_extensions import Self
 import numpy as np
 from .array_api import array_namespace, default_rng
+from .crystfel import Assembler
 from .cxi_protocol import H5Protocol, Kinds
 from .data_container import DataContainer, list_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
 from .streaks import StackedStreaks, Streaks
-from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
-                          ROI, Shape)
+from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, MultiIndices, NumPy,
+                          RealArray, ReferenceType, ROI, Shape)
 from .functions import (LabelResult, RadialProfiles, Structure, center_of_mass, covariance_matrix,
                         ellipse_fit, label, line_fit, median, radial_profiles, robust_mean)
 
@@ -64,6 +65,23 @@ class CrystBase(DataContainer):
     def num_modules(self) -> int:
         return prod(self.frame_shape) // prod(self.frame_shape[-2:])
 
+    def assemble(self: Self, assembler: Assembler) -> Self:
+        """Assemble the detector modules data onto a single lab-frame images.
+
+        Args:
+            assembler: A :class:`~cbclib_v2.Assembler` object that knows how to
+                assemble the stacked module data onto a single lab-frame image.
+
+        Returns:
+            A new container with all frame-like arrays assembled into a single
+            frame.
+        """
+        assembled = {}
+        for attr, data in self.contents().items():
+            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
+                assembled[attr] = assembler(data)
+        return self.replace(**assembled)
+
     def crop(self: Self, roi: ROI) -> Self:
         cropped = {}
         for attr, data in self.contents().items():
@@ -76,23 +94,34 @@ class LSQData(DataContainer):
     """Linear least-squares target and design matrix.
 
     Attributes:
-        y: Per-frame target values, shape ``(n_frames, n_pixels)``.
-        W: Design matrix, shape ``(n_fields, n_pixels)`` before masking or
-            ``(n_frames, n_fields, n_pixels)`` after masking.
+        y: Per-frame target values, shape ``(n_frames, *frame_shape)``.
+        W: Design matrix, shape ``(n_frames or 1, n_fields, *frame_shape)``.
     """
     y : RealArray
     W : RealArray
+
+    def __post_init__(self):
+
+        if (self.W.ndim != self.y.ndim + 1 or
+            self.W.shape[0] not in (1, self.y.shape[0]) or
+            self.W.shape[2:] != self.y.shape[1:]):
+            raise ValueError('W must have a shape (n_frames or 1, n_fields, *frame_shape)')
+
+        xp = self.__array_namespace__()
+        self.y = xp.reshape(self.y, (self.y.shape[0], -1))
+        self.W = xp.reshape(self.W, self.W.shape[:2] + (-1,))
 
     def apply_mask(self, mask: BoolArray) -> 'LSQData':
         """Return least-squares data with rejected entries zeroed.
 
         Args:
-            mask: Per-frame acceptance mask, shape ``(n_frames, n_pixels)``.
+            mask: Per-frame acceptance mask, shape ``(n_frames, *frame_shape)``.
 
         Returns:
             Masked least-squares data with a frame-specific design matrix.
         """
         xp = self.__array_namespace__()
+        mask = xp.reshape(mask, (mask.shape[0], -1))
         return self.replace(y=xp.where(mask, self.y, 0),
                             W=xp.where(mask[:, None, :], self.W, 0))
 
@@ -198,35 +227,29 @@ class CrystMetadata(CrystBase):
         if self.is_empty(self.flatfield) and not self.is_empty(self.whitefields):
             self.flatfield = self.whitefields.mean(axis=0)
 
-    def apply_mask(self, mask: Indices) -> 'CrystMetadata':
-        """Select flattened detector pixels from every frame-like array.
-
-        Frame attributes are flattened to ``(n_pixels,)`` and stack attributes
-        to ``(n_items, n_pixels)`` before applying the same pixel selection.
+    def apply_mask(self, indices: MultiIndices) -> 'CrystMetadata':
+        """Select detector pixels from every frame-like array.
 
         Args:
-            mask: Flat integer indices, boolean mask, or slice selecting detector
+            indices: Integer indices, boolean mask, or slice selecting detector
                 pixels.
 
         Returns:
             Metadata restricted to the selected detector pixels.
         """
-        xp = self.__array_namespace__()
-        if isinstance(mask, Array):
-            mask = xp.reshape(mask, (-1,))
-
         attributes = {}
         for attr, data in self.contents().items():
             if not isinstance(data, Array) or self.is_empty(data):
                 continue
+
             kind = self.protocol.get_kind(attr)
             if kind == Kinds.frame:
-                selected = xp.reshape(data, (-1,))[mask]
-                attributes[attr] = xp.asarray(xp.reshape(selected, (-1,)), copy=True)
+                attributes[attr] = data[indices]
             elif kind == Kinds.stack:
-                selected = xp.reshape(data, (data.shape[0], -1))[:, mask]
-                shape = (data.shape[0], -1)
-                attributes[attr] = xp.asarray(xp.reshape(selected, shape), copy=True)
+                if isinstance(indices, tuple):
+                    attributes[attr] = data[(...,) + indices]
+                else:
+                    attributes[attr] = data[..., indices]
         return self.replace(**attributes)
 
     @classmethod
@@ -340,8 +363,10 @@ class CrystMetadata(CrystBase):
 
         protocol = CrystData.default_protocol()
         protocol.kinds['whitefield'] = 'stack'
-        return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
-                         whitefield=xp.reshape(whitefield, data.shape), protocol=protocol)
+        result = CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
+                           whitefield=xp.reshape(whitefield, data.shape), protocol=protocol)
+        result.mask &= xp.all(result.whitefield >= 0, axis=0)
+        return result.apply_mask()
 
     def pca(self) -> 'CrystMetadata':
         """Decompose whitefield variability into principal components.
@@ -424,51 +449,51 @@ class CrystMetadata(CrystBase):
             raise ValueError('n_iter must be at least one')
         if n_iter > 1 and self.is_empty(self.std):
             raise ValueError('No std in the container for iterative signal rejection')
+
         xp = self.__array_namespace__()
         frame_size = prod(self.frame_shape)
         if n_pixels is not None and (n_pixels < 1 or n_pixels > frame_size):
             raise ValueError(f'n_pixels must be between one and the frame size {frame_size}')
 
-        pixel_indices = None
+        indices = None
         if n_pixels is not None and n_pixels < frame_size:
-            indices = default_rng(0, xp).choice(frame_size, (n_pixels,), replace=False)
-            pixel_indices = xp.sort(indices)
+            indices = default_rng(0, NumPy).choice(frame_size, (n_pixels,), replace=False)
+            indices = xp.asarray(indices)
+            indices = xp.unravel_index(indices, self.frame_shape)
 
-        n_frames = data.size // frame_size
-        frames = xp.reshape(data, (n_frames, -1))
-        if pixel_indices is not None:
-            frames = frames[:, pixel_indices]
-            metadata = self.apply_mask(pixel_indices)
+        if indices is not None:
+            data = xp.reshape(data[(...,) + indices], (-1, n_pixels))
+            metadata = self.apply_mask(indices)
         else:
+            data = xp.reshape(data, (-1,) + self.frame_shape)
             metadata = self
 
         if self.is_empty(metadata.eigen_field):
             good_fields = xp.array([], dtype=int)
-            lsq_data = LSQData(y=frames, W=xp.reshape(metadata.flatfield, (1, -1)))
+            lsq_data = LSQData(y=data, W=metadata.flatfield[None, None, ...])
 
         else:
-            good_fields = xp.asarray(list_indices(good_fields, metadata.eigen_field.shape[0]),
-                                     dtype=int)
+            good_fields = list_indices(good_fields, metadata.eigen_field.shape[0])
+            good_fields = xp.asarray(good_fields, dtype=int)
             fields = metadata.eigen_field[good_fields]
-            y = frames - xp.reshape(metadata.flatfield, (1, -1))
-            W = xp.reshape(fields, (fields.shape[0], -1))
-            lsq_data = LSQData(y=y, W=W)
+            lsq_data = LSQData(y=data - metadata.flatfield, W=fields[None, ...])
 
         if self.is_empty(metadata.mask):
-            base_mask = xp.ones(lsq_data.y.shape, dtype=bool)
+            mask = xp.ones(data.shape, dtype=bool)
         else:
-            base_mask = xp.broadcast_to(xp.reshape(metadata.mask, (1, -1)),
-                                        lsq_data.y.shape)
+            mask = xp.broadcast_to(metadata.mask, data.shape)
 
-        projection = lsq_data.apply_mask(base_mask).solve()
+        projection = lsq_data.apply_mask(mask).solve()
         result = PCAProjection(good_fields=good_fields, projection=projection)
-        if n_iter > 1:
-            std = xp.reshape(xp.clip(metadata.std, std_min, xp.inf), (1, -1))
 
+        if n_iter == 1:
+            return result
+
+        std = xp.clip(metadata.std, std_min, xp.inf)
         for _ in range(1, n_iter):
-            background = xp.reshape(result.apply(metadata), (n_frames, -1))
-            fit_mask = base_mask & (frames <= background + clip_snr * std)
-            projection = lsq_data.apply_mask(fit_mask).solve()
+            background = result.apply(metadata)
+            n_mask = mask & (data <= background + clip_snr * std)
+            projection = lsq_data.apply_mask(n_mask).solve()
             result = result.replace(projection=projection)
 
         return result

@@ -1,11 +1,14 @@
-from typing import TYPE_CHECKING, Any, Literal, Tuple, Set, overload, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Tuple, Set, TypeVar, overload, cast
 from jax import devices, device_put, dlpack as jdl, random
 import numpy as np
 from array_api_compat import array_namespace as get_array_namespace, device
 from .annotations import (AnyFloat, Array, ArrayLike, AnyNamespace, ArrayNamespace, CPArray,
                           CPIntArray, CuPy, DTypeLike, Generator, IntArray, IntSequence, JaxArray,
-                          JaxDevice, JaxNumPy, NDArray, NumPy, RealArray, RealSequence, Scalar,
-                          Shape, ShapeLike, SupportsNamespace)
+                          JaxDevice, JaxNumPy, MultiIndices, NDArray, NumPy, RealArray, RealSequence,
+                          Scalar, Shape, ShapeLike, SupportsNamespace)
+
+if TYPE_CHECKING:
+    from .data_container import ArrayContainer
 
 if CuPy is not None or TYPE_CHECKING:
     import cupy as cp
@@ -223,16 +226,16 @@ class JaxGenerator:
                               maxval=xp.asarray(high))
 
 @overload
-def add_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
+def add_at(a: NDArray, indices: MultiIndices, b: Array | Scalar) -> NDArray: ...
 
 @overload
-def add_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
+def add_at(a: JaxArray, indices: MultiIndices, b: Array | Scalar
            ) -> JaxArray: ...
 
 @overload
-def add_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
+def add_at(a: CPArray, indices: MultiIndices, b: Array | Scalar) -> CPArray: ...
 
-def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
+def add_at(a: Array, indices: MultiIndices, b: Array | Scalar) -> Array:
     """Perform unbuffered in-place addition of `b` to `a` at the specified `indices`. This
     function works with all supported array APIs (NumPy, JAX, CuPy).
 
@@ -260,70 +263,16 @@ def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
     raise ValueError(f"Unsupported array namespace: {xp}")
 
 @overload
-def argmin_at(a: NDArray, indices: IntArray, xp: ArrayNamespace[NDArray] = ...) -> NDArray: ...
+def set_at(a: NDArray, indices: MultiIndices, b: Array | Scalar) -> NDArray: ...
 
 @overload
-def argmin_at(a: JaxArray, indices: IntArray, xp: ArrayNamespace[JaxArray] = ...) -> JaxArray: ...
-
-@overload
-def argmin_at(a: CPArray, indices: IntArray, xp: ArrayNamespace[CPArray] = ...) -> CPArray: ...
-
-def argmin_at(a: Array, indices: IntArray, xp: ArrayNamespace = JaxNumPy) -> Array:
-    xp = array_namespace(a)
-
-    sort_idxs = xp.argsort(a)
-    idxs = set_at(xp.zeros(a.size, dtype=int), sort_idxs, xp.arange(a.size))
-    result = xp.full(xp.unique_values(indices).size, a.size + 1, dtype=int)
-    return sort_idxs[min_at(result, indices, idxs)]
-
-@overload
-def min_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
-
-@overload
-def min_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
+def set_at(a: JaxArray, indices: MultiIndices, b: Array | Scalar
            ) -> JaxArray: ...
 
 @overload
-def min_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
+def set_at(a: CPArray, indices: MultiIndices, b: Array | Scalar) -> CPArray: ...
 
-def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
-    """Perform unbuffered in-place minimum of `b` and `a` at the specified `indices`. This
-    function works with all supported array APIs (NumPy, JAX, CuPy).
-
-    Args:
-        a: The input array to which values will be compared.
-        indices: The indices at which to compare the values from `b`. This can be a single array
-            of indices or a tuple of arrays for multi-dimensional indexing.
-        b: The values to compare with `a` at the specified indices. This can be a scalar or an array
-            of values to compare.
-
-    Returns:
-        An array with the same shape and type as `a`, where the minimum values between `a` and `b`
-        have been set at the specified `indices`.
-    """
-    xp = array_namespace(a)
-
-    if xp is JaxNumPy:
-        return JaxNumPy.asarray(a).at[indices].min(b)
-    if xp is NumPy:
-        np.minimum.at(np.asarray(a), indices, b)
-        return a
-    if CuPy is not None and xp is CuPy:
-        cp.minimum.at(cp.asarray(a), indices, b)
-        return a
-    raise ValueError(f"Unsupported array namespace: {xp}")
-
-@overload
-def set_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
-
-@overload
-def set_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
-           ) -> JaxArray: ...
-
-@overload
-def set_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
-
-def set_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
+def set_at(a: Array, indices: MultiIndices, b: Array | Scalar) -> Array:
     """Perform unbuffered in-place assignment of `b` to `a` at the specified `indices`. This
     function works with all supported array APIs (NumPy, JAX, CuPy).
 
@@ -508,3 +457,206 @@ def default_api(platform: Platform) -> AnyNamespace:
             raise ValueError("CuPy is not available, cannot use GPU platform")
         return CuPy
     raise ValueError(f"Unsupported platform: {platform}")
+
+def safe_divide(x: Array, y: Array, xp: AnyNamespace) -> Array:
+    _y = xp.where(y == 0.0, 1.0, y)
+    return xp.where(y == 0.0, 0.0, x / _y)
+
+def safe_log(x: Array, xp: AnyNamespace) -> Array:
+    _x = xp.where(x <= 0.0, 1.0, x)
+    return xp.where(x <= 0.0, 0.0, xp.log(_x))
+
+def safe_sqrt(x: Array, xp: AnyNamespace) -> Array:
+    _x = xp.where(x <= 0.0, 0.0, x)
+    return xp.where(x <= 0.0, 0.0, xp.sqrt(_x))
+
+def kxy_to_k(kxy: RealArray, xp: AnyNamespace) -> RealArray:
+    kz = safe_sqrt(1 - xp.sum(kxy[..., :2]**2, axis=-1), xp)
+    return xp.stack((kxy[..., 0], kxy[..., 1], kz), axis=-1)
+
+ArrCon_T = TypeVar('ArrCon_T', bound='ArrayContainer')
+
+@overload
+def broadcast_to(array: Array, idxs: IntArray, suffix: Shape, xp: AnyNamespace) -> Array: ...
+
+@overload
+def broadcast_to(array: ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespace
+                 ) -> ArrCon_T: ...
+
+def broadcast_to(array: Array | ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespace
+                 ) -> Array | ArrCon_T:
+    array = array.reshape((-1,) + suffix)
+    if array.shape[0] == 1:
+        return array[0]
+    return array[xp.reshape(idxs, -1)].reshape(idxs.shape + suffix)
+
+def euler_angles(rmats: RealArray, xp: AnyNamespace) -> RealArray:
+    r"""Calculate Euler angles with Bunge convention [EUL]_.
+
+    Args:
+        rmats : A set of rotation matrices.
+
+    Returns:
+        A set of Euler angles with Bunge convention :math:`\phi_1, \Phi, \phi_2`.
+
+    References:
+        .. [EUL] Depriester, Dorian. (2018), "Computing Euler angles with Bunge convention from
+                rotation matrix", 10.13140/RG.2.2.34498.48321/5.
+    """
+    beta = xp.acos(rmats[..., 2, 2])
+    is_zero = xp.isclose(beta, 0)
+    is_pi = xp.isclose(beta, xp.pi)
+    alpha = xp.where(is_zero, xp.atan2(-rmats[..., 1, 0], rmats[..., 0, 0]), 0.0)
+    alpha = xp.where(is_pi, xp.atan2(rmats[..., 1, 0], rmats[..., 0, 0]), alpha)
+    alpha = xp.where(xp.invert(is_zero) & xp.invert(is_pi),
+                     xp.atan2(rmats[..., 2, 0], -rmats[..., 2, 1]), alpha)
+    gamma = xp.where(xp.invert(is_zero) & xp.invert(is_pi),
+                     xp.atan2(rmats[..., 0, 2], rmats[..., 1, 2]), 0.0)
+    alpha = xp.where(alpha < 0.0, alpha + 2 * xp.pi, alpha)
+    gamma = xp.where(gamma < 0.0, gamma + 2 * xp.pi, gamma)
+    return xp.stack((alpha, beta, gamma), axis=-1)
+
+def euler_matrix(angles: RealArray, xp: AnyNamespace) -> RealArray:
+    r"""Calculate rotation matrices from Euler angles with Bunge convention [EUL]_.
+
+    Args:
+        angles : Euler angles :math:`\phi_1, \Phi, \phi_2`.
+        num_threads : Number of threads used in the calculations.
+
+    Returns:
+        A set of rotation matrices.
+    """
+    cos = xp.cos(angles)
+    sin = xp.sin(angles)
+    row0 = xp.stack([ cos[..., 0] * cos[..., 2] - sin[..., 0] * sin[..., 2] * cos[..., 1],
+                      sin[..., 0] * cos[..., 2] + cos[..., 0] * sin[..., 2] * cos[..., 1],
+                      sin[..., 2] * sin[..., 1]], axis=-1)
+    row1 = xp.stack([-cos[..., 0] * sin[..., 2] - sin[..., 0] * cos[..., 2] * cos[..., 1],
+                     -sin[..., 0] * sin[..., 2] + cos[..., 0] * cos[..., 2] * cos[..., 1],
+                      cos[..., 2] * sin[..., 1]], axis=-1)
+    row2 = xp.stack([ sin[..., 0] * sin[..., 1],
+                     -cos[..., 0] * sin[..., 1],
+                      cos[..., 1]], axis=-1)
+    return xp.stack((row0, row1, row2), axis=-2)
+
+def tilt_angles(rmats: RealArray, xp: AnyNamespace) -> RealArray:
+    r"""Calculate an axis of rotation and a rotation angle for a rotation matrix.
+
+    Args:
+        rmats : A set of rotation matrices.
+
+    Returns:
+        A set of three angles :math:`\theta, \alpha, \beta`, a rotation angle :math:`\theta`, an
+        angle between the axis of rotation and OZ axis :math:`\alpha`, and a polar angle of the
+        axis of rotation :math:`\beta`.
+    """
+    # This transformation is accurate for proper rotations ONLY => det(rmats) == 1
+    # from http://scipp.ucsc.edu/~haber/ph116A/rotation_11.pdf
+    vec = xp.stack([rmats[..., 2, 1] - rmats[..., 1, 2],
+                    rmats[..., 0, 2] - rmats[..., 2, 0],
+                    rmats[..., 1, 0] - rmats[..., 0, 1]], axis=-1)
+    rabs = safe_sqrt(xp.sum(vec**2, axis=-1), xp)
+    return xp.stack([xp.atan2(rabs, xp.linalg.trace(rmats) - 1),
+                     xp.acos(safe_divide(vec[..., 2], rabs, xp)),
+                     xp.atan2(vec[..., 1], vec[..., 0])], axis=-1)
+
+def tilt_matrix(angles: RealArray, xp: AnyNamespace) -> RealArray:
+    r"""Calculate a rotation matrix for a set of three angles set of three angles :math:`\theta,
+    \alpha, \beta`, a rotation angle :math:`\theta`, an angle between the axis of rotation and
+    OZ axis :math:`\alpha`, and a polar angle of the axis of rotation :math:`\beta`.
+
+    Args:
+        angles : A set of angles :math:`\theta, \alpha, \beta`.
+
+    Returns:
+        A set of rotation matrices.
+    """
+    vec = xp.stack([ xp.cos(0.5 * angles[..., 0]),
+                    -xp.sin(0.5 * angles[..., 0]) * xp.sin(angles[..., 1]) * xp.cos(angles[..., 2]),
+                    -xp.sin(0.5 * angles[..., 0]) * xp.sin(angles[..., 1]) * xp.sin(angles[..., 2]),
+                    -xp.sin(0.5 * angles[..., 0]) * xp.cos(angles[..., 1])], axis=-1)
+    row0 = xp.stack([vec[..., 0]**2 + vec[..., 1]**2 - vec[..., 2]**2 - vec[..., 3]**2,
+                     2 * (vec[..., 1] * vec[..., 2] + vec[..., 0] * vec[..., 3]),
+                     2 * (vec[..., 1] * vec[..., 3] - vec[..., 0] * vec[..., 2])], axis=-1)
+    row1 = xp.stack([2 * (vec[..., 1] * vec[..., 2] - vec[..., 0] * vec[..., 3]),
+                     vec[..., 0]**2 + vec[..., 2]**2 - vec[..., 1]**2 - vec[..., 3]**2,
+                     2 * (vec[..., 2] * vec[..., 3] + vec[..., 0] * vec[..., 1])], axis=-1)
+    row2 = xp.stack([2 * (vec[..., 1] * vec[..., 3] + vec[..., 0] * vec[..., 2]),
+                     2 * (vec[..., 2] * vec[..., 3] - vec[..., 0] * vec[..., 1]),
+                     vec[..., 0]**2 + vec[..., 3]**2 - vec[..., 1]**2 - vec[..., 2]**2], axis=-1)
+    return xp.stack((row0, row1, row2), axis=-2)
+
+def det_to_k(pts: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
+    """Convert coordinates on the detector ``x`, ``y`` to wave-vectors originating from
+    the source points ``src``.
+
+    Args:
+        x : x coordinates in pixels.
+        y : y coordinates in pixels.
+        src : Source points in meters (relative to the detector).
+
+    Returns:
+        A set of wave-vectors.
+    """
+    src = xp.expand_dims(src, axis=tuple(range(src.ndim - 1, pts.ndim - 1)))
+    xy = pts - src[..., :2]
+    norm = safe_sqrt(xp.sum(xy**2, axis=-1) + src[..., 2]**2, xp)
+    vec = xp.concat((xy, xp.broadcast_to(-src[..., 2], pts.shape[:-1])[..., None]), axis=-1)
+    return safe_divide(vec, norm[..., None], xp)
+
+def k_to_det(k: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
+    """Convert wave-vectors originating from the source points ``src`` to coordinates on the
+    detector.
+
+    Args:
+        k : An array of wave-vectors.
+        src : Source points in meters (relative to the detector).
+        idxs : Source point indices.
+
+    Returns:
+        A tuple of x and y coordinates in meters.
+    """
+    slope = safe_divide(k[..., :2], k[..., 2, None], xp)
+    pos = xp.where((k[..., 2] == 0)[..., None], 0.0, src[..., :2] - slope * src[..., 2, None])
+    return pos
+
+def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
+    """Convert wave-vectors originating from the source point ``src`` to sample
+    planes at the z coordinate ``z``.
+
+    Args:
+        k : An array of wave-vectors.
+        src : Source point in meters (relative to the detector).
+        z : Plane z coordinates in meters (relative to the detector).
+        idxs : Plane indices.
+
+    Returns:
+        An array of points belonging to the ``z`` planes.
+    """
+    theta = safe_divide(k[..., :2], k[..., 2, None], xp)
+    xy = src[..., :2] + theta * (z - src[..., 2])[..., None]
+    return xp.stack((xy[..., 0], xy[..., 1], xp.broadcast_to(z, xy.shape[:-1])), axis=-1)
+
+def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray,
+                    xp: AnyNamespace) -> RealArray:
+    vmin = xp.expand_dims(vmin, axis=tuple(range(vmin.ndim - 1, point.ndim - 1)))
+    vmax = xp.expand_dims(vmax, axis=tuple(range(vmax.ndim - 1, point.ndim - 1)))
+    return xp.clip(point, vmin, vmax)
+
+class Projection(NamedTuple):
+    center  : RealArray
+    tau     : RealArray
+    t       : RealArray
+
+def project_to_streak(points: RealArray, pt0: RealArray, pt1: RealArray, xp: AnyNamespace) -> Projection:
+    tau = pt1 - pt0
+    center = 0.5 * (pt0 + pt1)
+    r = points - center
+    tau_mag = xp.sum(tau**2, axis=-1)
+    r_tau = safe_divide(xp.sum(tau * r, axis=-1), tau_mag, xp)
+    r_tau = xp.clip(r_tau, -0.5, 0.5)
+    return Projection(center, tau, r_tau)
+
+def circle(r: RealArray, center: RealArray, vec1: RealArray, vec2: RealArray, theta: RealArray,
+           xp: AnyNamespace) -> RealArray:
+    return (r * xp.cos(theta))[..., None] * vec1 + (r * xp.sin(theta))[..., None] * vec2 + center

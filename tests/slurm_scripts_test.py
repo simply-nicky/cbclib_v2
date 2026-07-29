@@ -9,7 +9,7 @@ import pytest
 import cbclib_v2.cuda as cuda
 import cbclib_v2.slurm as slurm
 from cbclib_v2.annotations import JaxNumPy, NumPy, NumPyNamespace
-from cbclib_v2.indexer import ResolvedLens, ResolvedSetup, ResolvedState, XtalState
+from cbclib_v2.indexer import ResolvedLens, ResolvedGeometry, ResolvedSetup, XtalState
 from cbclib_v2.scripts import (LossParameters, ModelDataParameters, OptimiseParameters,
                                RefineResult, RefinementConfig, RefinementStats,
                                ScheduleParameters)
@@ -382,9 +382,10 @@ class TestRefineResult:
                                   [0.17, 0.19, 0.14, 0.18]])
             z = xp.array([-0.39, -0.38, -0.37])
 
-        state = ResolvedState(XtalState(basis), ResolvedSetup(ResolvedLens(foc_pos, pupil_roi), z))
+        geometry = ResolvedGeometry(ResolvedLens(foc_pos, pupil_roi), z)
+        setup = ResolvedSetup(XtalState(basis), geometry)
         stats = RefinementStats([0], [1.0], [1.0e-3], [0.5], [0.1])
-        return RefineResult(xp.array([7, 7, 9]), state, xp.array([2.0, 1.0, 3.0]),
+        return RefineResult(xp.array([7, 7, 9]), setup, xp.array([2.0, 1.0, 3.0]),
                             xp.array([0.5, 0.8, 0.6]), stats)
 
     def test_save_restart(self, tmp_path: Path, config: RefinementConfig,
@@ -395,17 +396,17 @@ class TestRefineResult:
 
         candidates = pd.read_hdf(output, 'candidates')
         champions = pd.read_hdf(output, 'data')
-        restored = config.import_resolved(ResolvedState.import_dataframe(candidates, xp=xp))
+        restored = config.import_resolved(ResolvedSetup.import_dataframe(candidates, xp=xp))
         if config.mode == 'per-pattern':
-            expected = result.state.setup
+            expected = result.setup.geometry
         else:
-            expected = result.state.setup.collapse()
+            expected = result.setup.geometry.collapse()
 
         assert champions['index'].tolist() == [7, 9]
         check_close(champions['foc_x'].to_numpy(), candidates['foc_x'].to_numpy()[[1, 2]])
-        check_close(restored.resolve(xp).setup.lens.foc_pos, expected.lens.foc_pos)
-        check_close(restored.resolve(xp).setup.lens.pupil_roi, expected.lens.pupil_roi)
-        check_close(restored.resolve(xp).setup.z, expected.z)
+        check_close(restored.resolve(xp).geometry.lens.foc_pos, expected.lens.foc_pos)
+        check_close(restored.resolve(xp).geometry.lens.pupil_roi, expected.lens.pupil_roi)
+        check_close(restored.resolve(xp).geometry.z, expected.z)
 
         with h5py.File(output, 'r') as h5_file:
             values = json.loads(h5_file.attrs['refinement_config'])

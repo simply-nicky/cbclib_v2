@@ -25,7 +25,7 @@ from .._src.scripts import (BaseParameters, FinderConfig, IndexingConfig,
 from .._src.scripts import (create_metadata, pool_detection, pool_indexing, refine_solutions,
                             refine_xtals)
 from .._src.streaks import StackedStreaks, Streaks
-from ..indexer import FixedSetup, XtalCell, XtalState
+from ..indexer import FixedGeometry, XtalCell, XtalState
 from .slurm_manager import SLURMScript, ScriptSpec
 
 @dataclass
@@ -165,7 +165,7 @@ class SetupConfig(BaseParameters):
 
     Attributes:
         setup_file: Path to the detector geometry JSON file (read by
-            :class:`~cbclib_v2.indexer.FixedSetup`).
+            :class:`~cbclib_v2.indexer.FixedGeometry`).
         unit_file: Path to the crystal unit-cell JSON file (read by
             :class:`~cbclib_v2.indexer.XtalCell`).
         xtals_dir: Directory where per-chunk indexing results are written.
@@ -204,18 +204,18 @@ class SetupConfig(BaseParameters):
         """
         return self.unit_cell(xp).to_basis()
 
-    def setup(self) -> FixedSetup:
+    def geometry(self) -> FixedGeometry:
         """Load the fixed detector geometry from :attr:`setup_file`.
 
         Returns:
-            :class:`~cbclib_v2.indexer.FixedSetup` instance.
+            :class:`~cbclib_v2.indexer.FixedGeometry` instance.
 
         Raises:
             ValueError: If :attr:`setup_file` is empty.
         """
         if self.setup_file == str():
             raise ValueError("No setup file provided")
-        return FixedSetup.read(self.setup_file)
+        return FixedGeometry.read(self.setup_file)
 
 @dataclass
 class ScanFiles(BaseParameters):
@@ -954,7 +954,7 @@ class IndexingScript(BaseScript):
         else:
             streaks = Streaks.import_dataframe(dataframe, xp=xp)
         assembled = geometry.to_streaks(streaks)
-        patterns = geometry.to_patterns(assembled)
+        patterns = geometry.to_meters(assembled)
 
         if self.xtals:
             print(f"Loading crystal orientations from {self.xtals}...")
@@ -963,11 +963,11 @@ class IndexingScript(BaseScript):
         else:
             print("No crystal orientations provided, using the unit cell information")
             xtals = self.scan.setup.xtal(xp=xp)
-        setup = self.scan.setup.setup()
+        geometry = self.scan.setup.geometry()
 
         print(f"Indexing {len(patterns):d} patterns...")
         with self.scan.system.cpu_config():
-            indexed = pool_indexing(patterns, xtals, setup, self.params,
+            indexed = pool_indexing(patterns, xtals, geometry, self.params,
                                     self.scan.system.platform, xp)
 
         output_path = self.scan.scan_file(self.chunk_id, dir=self.scan.setup.xtals_dir,
@@ -1101,7 +1101,7 @@ class RefinementScript(BaseScript):
         else:
             streaks = Streaks.import_dataframe(dataframe, xp=xp)
         assembled = geometry.to_streaks(streaks)
-        patterns = geometry.to_patterns(assembled)
+        patterns = geometry.to_meters(assembled)
 
         with self.scan.system.cpu_config():
             if self.input_dir == 'xtals':

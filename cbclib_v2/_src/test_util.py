@@ -1,7 +1,7 @@
 from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax.test_util import check_grads
-from ..indexer import FixedLens, FixedPupilLens, FixedPupilSetup, FixedSetup, XtalState
+from ..indexer import FixedLens, FixedPupilLens, FixedPupilGeometry, FixedGeometry, XtalState
 from .annotations import Array, ArrayLike, AnyNamespace, ComplexArray, RealArray
 from .array_api import array_namespace
 
@@ -32,12 +32,12 @@ class TestSetup():
         return FixedPupilLens(xp.asarray(cls.foc_pos)[:2], float(cls.foc_pos[2]), cls.pupil_roi)
 
     @classmethod
-    def fixed_setup(cls, size: int=1) -> FixedSetup:
-        return FixedSetup(cls.fixed_lens(), cls.z(size=size))
+    def fixed_geometry(cls, size: int=1) -> FixedGeometry:
+        return FixedGeometry(cls.fixed_lens(), cls.z(size=size))
 
     @classmethod
-    def fixed_pupil_setup(cls, xp: AnyNamespace, size: int=1) -> FixedPupilSetup:
-        return FixedPupilSetup(cls.fixed_pupil_lens(xp), cls.z(xp, size))
+    def fixed_pupil_geometry(cls, xp: AnyNamespace, size: int=1) -> FixedPupilGeometry:
+        return FixedPupilGeometry(cls.fixed_pupil_lens(xp), cls.z(xp, size))
 
     @overload
     @classmethod

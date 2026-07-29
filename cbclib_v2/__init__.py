@@ -8,9 +8,9 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from . import annotations, cuda, indexer, label, ndimage, scripts, slurm, streak_finder
+    from . import annotations, cuda, indexer, label, ndimage, scaler, scripts, slurm, streak_finder
     from ._src.array_api import (add_at, array_namespace, ascupy, asjax, asnumpy, default_api,
-                                 default_rng, min_at, set_at)
+                                 default_rng, set_at)
     from ._src.config import (CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config,
                               set_cpu_pool_worker)
     from ._src.crystfel import Detector, Panel, read_crystfel
@@ -33,7 +33,6 @@ _EXPORTS = {
     "asnumpy": ("._src.array_api", "asnumpy"),
     "default_api": ("._src.array_api", "default_api"),
     "default_rng": ("._src.array_api", "default_rng"),
-    "min_at": ("._src.array_api", "min_at"),
     "set_at": ("._src.array_api", "set_at"),
     "CPUConfig": ("._src.config", "CPUConfig"),
     "get_cpu_config": ("._src.config", "get_cpu_config"),
@@ -88,6 +87,7 @@ _SUBMODULES = {
     "indexer",
     "label",
     "ndimage",
+    "scaler",
     "scripts",
     "slurm",
     "streak_finder",

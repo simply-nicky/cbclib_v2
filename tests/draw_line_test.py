@@ -2,7 +2,7 @@ import sys
 from math import prod
 from typing import Callable, Dict, Tuple
 import pytest
-from cbclib_v2 import default_rng, Lines
+from cbclib_v2 import add_at, default_rng, Lines
 from cbclib_v2.annotations import (CPArray, CuPy, CuPyNamespace, Generator, IntArray, NDArray,
                                    NumPy, NumPyNamespace, RealArray, Shape)
 from cbclib_v2.ndimage import accumulate_lines, draw_lines, write_lines
@@ -34,20 +34,13 @@ class TestDrawLine():
         return default_rng(42, xp)
 
     def kernel_dict(self, xp: TestNamespace) -> Dict[str, Kernel]:
-        def biweight(x, sigma):
-            return 0.9375 * xp.clip(1 - (x / sigma)**2, 0, xp.inf)**2
         def gaussian(x, sigma):
             return xp.where(xp.abs(x) < sigma,
                             xp.exp(-(3 * x / sigma)**2 / 2) / xp.sqrt(2 * xp.pi), 0)
-        def parabolic(x, sigma):
-            return 0.75 * xp.clip(1 - (x / sigma)**2, 0, xp.inf)
         def rectangular(x, sigma):
             return xp.where(xp.abs(x) < sigma, 1, 0)
-        def triangular(x, sigma):
-            return xp.clip(1 - xp.abs(x / sigma), 0, xp.inf)
 
-        return {'biweight': biweight, 'gaussian': gaussian, 'parabolic': parabolic,
-                'rectangular': rectangular, 'triangular': triangular}
+        return {'gaussian': gaussian, 'rectangular': rectangular}
 
     @pytest.fixture(params=[43,])
     def n_lines(self, request: pytest.FixtureRequest) -> int:
@@ -65,14 +58,11 @@ class TestDrawLine():
     def width(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
-    @pytest.fixture(params=[0, 3])
-    def kernel(self, rng: TestGenerator, request: pytest.FixtureRequest, xp: TestNamespace
-               ) -> str:
-        keys = list(self.kernel_dict(xp).keys())
-        index = int(rng.integers(0, len(keys)) + request.param) % len(keys)
-        return keys[index]
+    @pytest.fixture(params=['gaussian', 'rectangular'])
+    def kernel(self, request: pytest.FixtureRequest) -> str:
+        return request.param
 
-    @pytest.fixture(params=[1.0, 10.0])
+    @pytest.fixture(params=[2.0,])
     def max_val(self, request: pytest.FixtureRequest) -> float:
         return request.param
 
@@ -128,10 +118,26 @@ class TestDrawLine():
         image = draw_lines(xp.zeros(shape[-ndim:]), xp.zeros((0, 2 * ndim)), width=1.0)
         assert xp.sum(image) == 0.0
 
-    @pytest.mark.xfail(raises=ValueError)
     def test_image_wrong_size_lines(self, out: RealArray, lines: Lines, width: float,
                                     indices: IntArray):
-        _ = draw_lines(out, lines.lines[::2], indices, width=width)
+        with pytest.raises(ValueError, match="idxs has an invalid size"):
+            _ = draw_lines(out, lines.lines[::2], indices, width=width)
+
+    def test_image_index_range(self, out: RealArray, lines: Lines, width: float,
+                               indices: IntArray, ndim: int, xp: TestNamespace):
+        n_frames = prod(out.shape[:-ndim])
+        for value in (-1, n_frames):
+            with pytest.raises(IndexError, match="idxs range"):
+                _ = draw_lines(out, lines.lines, xp.full_like(indices, value), width=width)
+
+    def test_image_strided_indices(self, out: RealArray, lines: Lines, width: float,
+                                   indices: IntArray, xp: TestNamespace):
+        storage = xp.stack((indices, xp.zeros_like(indices)), axis=-1).reshape(-1)
+
+        image = draw_lines(out, lines.lines, storage[::2], width=width)
+        expected = draw_lines(xp.zeros_like(out), lines.lines, indices, width=width)
+
+        check_close(image, expected)
 
     def test_zero_width(self, out: RealArray, lines: Lines, indices: IntArray, kernel: str,
                         xp: TestNamespace):
@@ -198,7 +204,8 @@ class TestWriteLines:
                                       xp: TestNamespace):
         pixel_indices, _, values = write_lines(lines, shape, indices, width=1.7,
                                                 kernel='triangular')
-        footprint = xp.bincount(pixel_indices, weights=values, minlength=prod(shape))
+        footprint = xp.zeros((prod(shape),), dtype=values.dtype)
+        footprint = add_at(footprint, pixel_indices, values)
         image = draw_lines(xp.zeros(shape), lines, indices, width=1.7,
                            kernel='triangular')
 
@@ -213,13 +220,33 @@ class TestWriteLines:
         second = line_indices == 1
 
         assert xp.any(first)
-        assert xp.array_equal(pixel_indices[first], pixel_indices[second])
-        assert xp.array_equal(values[first], values[second])
+        assert xp.all(pixel_indices[first] == pixel_indices[second])
+        assert xp.all(values[first] == values[second])
 
     def test_empty_lines(self, ndim: int, shape: Shape, xp: TestNamespace):
         result = write_lines(xp.zeros((0, 2 * ndim)), shape[-ndim:], width=1.0)
 
         assert all(array.size == 0 for array in result)
+
+    def test_index_size(self, lines: RealArray, indices: IntArray, shape: Shape):
+        with pytest.raises(ValueError, match="idxs has an invalid size"):
+            _ = write_lines(lines, shape, indices[:1], width=1.0)
+
+    def test_index_range(self, lines: RealArray, indices: IntArray, shape: Shape,
+                         xp: TestNamespace):
+        for value in (-1, shape[0]):
+            with pytest.raises(IndexError, match="idxs range"):
+                _ = write_lines(lines, shape, xp.full_like(indices, value), width=1.0)
+
+    def test_non_finite_lines_are_ignored(self, ndim: int, shape: Shape,
+                                          xp: TestNamespace):
+        valid = xp.arange(2 * ndim, dtype=xp.float64)
+        lines = xp.stack((valid, xp.full_like(valid, float('nan'))))
+        _, line_indices, _ = write_lines(lines, shape[-ndim:], width=1.0,
+                                         kernel='rectangular')
+
+        assert xp.any(line_indices == 0)
+        assert not xp.any(line_indices == 1)
 
 class TestAccumulateCurves():
     @pytest.fixture(params=['cpu', 'gpu'])

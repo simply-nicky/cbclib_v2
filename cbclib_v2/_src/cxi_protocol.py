@@ -554,7 +554,7 @@ class H5Reader():
 
         if processes > 1:
             with Pool(processes=processes, initializer=H5ReadWorker.initializer,
-                    initargs=(indices.data_path, ss_idxs, fs_idxs)) as pool:
+                      initargs=(indices.data_path, ss_idxs, fs_idxs)) as pool:
                 for frame in tqdm(pool.imap(H5ReadWorker.run, iter(indices)), total=len(indices),
                                   disable=not verbose, desc=f'Loading {indices.attr:s}'):
                     stack.append(frame)

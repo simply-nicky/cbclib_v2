@@ -26,11 +26,11 @@ from .data_processing import CrystData, CrystMetadata
 from .functions import Structure
 from .parser import from_container, from_file
 from .streaks import StackedStreaks, Streaks
-from ..indexer.cbc_data import CBData, MillerWithRLP, Patterns
-from ..indexer.cbc_indexing import CBDIndexer, CBDLoss, CBDModel
-from ..indexer.cbc_setup import (BaseSetup, BaseState, FixedApertureSetup, FixedApertureState,
-                                 FixedPupilSetup, FixedPupilState, FixedSetup, FixedState,
-                                 IndexingResult, ResolvedState, TiltOverAxisState, XtalState)
+from ..indexer.cbc_data import RefinerData, MillerWithRLP, Patterns
+from ..indexer.cbc_indexing import CBDIndexer, RefinerLoss, RefinerModel
+from ..indexer.cbc_setup import (BaseGeometry, BaseSetup, FixedApertureGeometry, FixedApertureSetup,
+                                 FixedPupilGeometry, FixedPupilSetup, FixedGeometry, FixedSetup,
+                                 IndexingResult, ResolvedSetup, TiltOverAxisState, XtalState)
 
 class BaseParameters(Container):
     """Base class for JSON-serialisable parameter containers.
@@ -770,7 +770,7 @@ class IndexingConfig(BaseParameters):
             self.shape = (self.shape[0], self.shape[1], self.shape[2])
 
 def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIndexer,
-                   params: IndexingConfig, state: BaseSetup
+                   params: IndexingConfig, geometry: BaseGeometry
                    ) -> Tuple[IntArray, TiltOverAxisState]:
     """Index a single diffraction pattern and return orientation candidates.
 
@@ -785,7 +785,7 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
         patterns: Diffraction patterns container (single pattern or batch).
         indexer: Convergent-beam diffraction indexer.
         params: Indexing pipeline configuration.
-        state: Current crystal and detector geometry state.
+        geometry: Current detector geometry.
 
     Returns:
         Tuple ``(peak_indices, tilt_states)`` where *peak_indices* selects
@@ -793,10 +793,10 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
         angles over the rotation axis.
     """
     xp = array_namespace(candidates, patterns)
-    resolved = state.resolve(xp)
+    resolved_geometry = geometry.resolve(xp)
     centers = patterns.sample(xp.full(patterns.shape[0], 0.5))
-    points = indexer.points_to_kout(centers, resolved, xp)
-    rotograms = indexer.index(candidates, patterns, points, resolved)
+    points = indexer.points_to_kout(centers, resolved_geometry, xp)
+    rotograms = indexer.index(candidates, patterns, points, resolved_geometry)
     rotomap = indexer.rotomap(params.shape, rotograms, patterns.reset_index().index, params.width)
     peaks = indexer.to_peaks(rotomap, params.threshold, params.n_max)
     return indexer.refine_peaks(peaks, rotomap, params.vicinity.to_structure(3),
@@ -821,8 +821,8 @@ def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState
     """
     return indexer.xtal.hkl_range(patterns.unique_index(), hkl, xtal, xp)
 
-def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
-                 xp: AnyNamespace=NumPy) -> IndexingResult:
+def run_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
+                 params: IndexingConfig, xp: AnyNamespace=NumPy) -> IndexingResult:
     """Index all patterns sequentially and return a list of crystal solutions.
 
     Iterates over patterns, generates Miller-index candidates via
@@ -833,7 +833,7 @@ def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params:
         patterns: Diffraction patterns container.
         xtals: Crystal state — either a single crystal (broadcast to all
             patterns) or one state per pattern.
-        state: Detector geometry state.
+        geometry: Detector geometry.
         params: Indexing configuration.
         xp: Array namespace.
 
@@ -854,14 +854,14 @@ def run_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params:
         iterator = zip(patterns, rlp_iterator)
 
         for pattern, candidates in tqdm(iterator, total=len(patterns)):
-            idxs, tilts = index_patterns(candidates, pattern, indexer, params, state)
+            idxs, tilts = index_patterns(candidates, pattern, indexer, params, geometry)
             solution = indexer.solutions(xtals, idxs, tilts, pattern)
             solutions.append(solution)
     elif len(xtals) == len(patterns):
         iterator = zip(patterns, rlp_iterator, xtals)
 
         for pattern, candidates, xtal in tqdm(iterator, total=len(patterns)):
-            idxs, tilts = index_patterns(candidates, pattern, indexer, params, state)
+            idxs, tilts = index_patterns(candidates, pattern, indexer, params, geometry)
             solution = indexer.solutions(xtal, idxs, tilts, pattern)
             solutions.append(solution)
     else:
@@ -874,30 +874,32 @@ indexing_worker : 'IndexingWorker'
 
 @dataclass
 class IndexingWorker():
-    state   : BaseSetup
+    geometry: BaseGeometry
     params  : IndexingConfig
     xtal    : XtalState
     indexer : CBDIndexer
 
     def __call__(self, args: Tuple[MillerWithRLP, Patterns]) -> IndexingResult:
         candidates, patterns = args
-        idxs, tilts = index_patterns(candidates, patterns, self.indexer, self.params, self.state)
+        idxs, tilts = index_patterns(candidates, patterns, self.indexer, self.params,
+                                     self.geometry)
         initial = self.xtal if len(self.xtal) == 1 else self.xtal[idxs]
         return self.indexer.solutions(initial, idxs, tilts, patterns)
 
     @classmethod
-    def initializer(cls, state: BaseSetup, params: IndexingConfig, xtal: XtalState,
+    def initializer(cls, geometry: BaseGeometry, params: IndexingConfig, xtal: XtalState,
                     indexer: CBDIndexer, is_pool: bool=False) -> None:
         set_cpu_pool_worker(is_pool)
         global indexing_worker
-        indexing_worker = cls(state, params, xtal, indexer)
+        indexing_worker = cls(geometry, params, xtal, indexer)
 
     @staticmethod
     def run(args: Tuple[MillerWithRLP, Patterns]) -> IndexingResult:
         return indexing_worker(args)
 
-def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params: IndexingConfig,
-                  platform: Platform = 'cpu', xp: AnyNamespace=NumPy) -> IndexingResult:
+def pool_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
+                  params: IndexingConfig, platform: Platform = 'cpu',
+                  xp: AnyNamespace=NumPy) -> IndexingResult:
     """Index all patterns in parallel using a multiprocessing pool.
 
     Distributes patterns across worker processes.  Falls back to
@@ -907,7 +909,7 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
     Args:
         patterns: Diffraction patterns container.
         xtals: Crystal state — single crystal or one per pattern.
-        state: Detector geometry state.
+        geometry: Detector geometry.
         params: Indexing configuration.
         platform: Compute backend — ``'cpu'`` or ``'gpu'``.
         xp: Array namespace.
@@ -924,12 +926,12 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, state: BaseSetup, params
     solutions : List[IndexingResult] = []
     if platform == 'cpu' and num_threads > 1:
         with Pool(processes=num_threads, initializer=IndexingWorker.initializer,
-                  initargs=(state, params, xtals, indexer, True)) as pool:
+                  initargs=(geometry, params, xtals, indexer, True)) as pool:
             iterator = zip(rlp_iterator, patterns)
             for solution in tqdm(pool.imap(IndexingWorker.run, iterator), total=len(patterns)):
                 solutions.append(solution)
     else:
-        worker = IndexingWorker(state, params, xtals, indexer)
+        worker = IndexingWorker(geometry, params, xtals, indexer)
         for candidates, pattern in tqdm(zip(rlp_iterator, patterns), total=len(patterns)):
             solutions.append(worker((candidates, pattern)))
 
@@ -943,17 +945,17 @@ class ModelDataParameters(BaseParameters):
     threshold   : float
     points      : List[float]
 
-    def cbd_data(self, patterns: Patterns, model: CBDModel, loss: CBDLoss, state: BaseState
-                 ) -> CBData:
-        xp = state.__array_namespace__()
-        resolved = state.resolve(xp)
-        data = model.init_data(patterns, resolved, values=self.points)
+    def refiner_data(self, patterns: Patterns, model: RefinerModel, loss: RefinerLoss,
+                     setup: BaseSetup) -> RefinerData:
+        xp = setup.__array_namespace__()
+        resolved_setup = setup.resolve(xp)
+        data = model.init_data(patterns, resolved_setup, values=self.points)
         if self.keep == 'best':
             return model.keep_best(data, quantile=self.quantile)
         if self.keep == 'in-shell':
-            return model.keep_in_shell(data, q_abs=self.q_abs, state=resolved)
+            return model.keep_in_shell(data, q_abs=self.q_abs, setup=resolved_setup)
         if self.keep == 'refined':
-            return model.keep_refined(self.threshold, loss, data, resolved)
+            return model.keep_refined(self.threshold, loss, data, resolved_setup)
         if self.keep == 'all':
             return data
         raise ValueError(f'Invalid keep keyword: {self.keep}')
@@ -963,7 +965,7 @@ class LossParameters(BaseParameters):
     kind        : Literal['l1', 'l2', 'log_cosh']
     projector   : Literal['line', 'pupil']
 
-    def cbd_loss(self, model: CBDModel) -> CBDLoss:
+    def refiner_loss(self, model: RefinerModel) -> RefinerLoss:
         if self.projector == 'line':
             return model.line_loss(loss=self.kind)
         if self.projector == 'pupil':
@@ -1013,10 +1015,10 @@ class OptimiseParameters(BaseParameters):
             return sgd(schedule), schedule
         raise ValueError(f'Invalid optimiser method: {self.method}')
 
-LossFn = Callable[[CBData, BaseState], RealArray]
-LossGradFn = Callable[[CBData, BaseState], Tuple[RealArray, BaseState]]
-ApplyUpdatesFn = Callable[[BaseState, Updates], BaseState]
-SetupT = TypeVar('SetupT', bound=BaseSetup)
+LossFn = Callable[[RefinerData, BaseSetup], RealArray]
+LossGradFn = Callable[[RefinerData, BaseSetup], Tuple[RealArray, BaseSetup]]
+ApplyUpdatesFn = Callable[[BaseSetup, Updates], BaseSetup]
+GeometryT = TypeVar('GeometryT', bound=BaseGeometry)
 
 @dataclass
 class RefinementConfig(BaseParameters):
@@ -1027,34 +1029,38 @@ class RefinementConfig(BaseParameters):
     mode : Literal['shared', 'per-pattern']
     threshold : float
 
-    def import_resolved(self, resolved: ResolvedState) -> BaseState:
-        def init_setup(setup_cls: type[SetupT]) -> SetupT:
-            setup = setup_cls.from_resolved(resolved.setup)
+    def import_resolved(self, setup: ResolvedSetup) -> BaseSetup:
+        def init_geometry(geometry_cls: type[GeometryT]) -> GeometryT:
+            geometry = geometry_cls.from_resolved(setup.geometry)
             if self.mode == 'shared':
-                return setup.collapse()
-            return setup
+                return geometry.collapse()
+            return geometry
 
         if self.setup == 'fixed':
-            return FixedState(xtal=resolved.xtal, setup=init_setup(FixedSetup))
+            return FixedSetup(xtal=setup.xtal, geometry=init_geometry(FixedGeometry))
         if self.setup == 'fixed-aperture':
-            return FixedApertureState(xtal=resolved.xtal, setup=init_setup(FixedApertureSetup))
+            return FixedApertureSetup(xtal=setup.xtal,
+                                      geometry=init_geometry(FixedApertureGeometry))
         if self.setup == 'fixed-pupil':
-            return FixedPupilState(xtal=resolved.xtal, setup=init_setup(FixedPupilSetup))
+            return FixedPupilSetup(xtal=setup.xtal,
+                                   geometry=init_geometry(FixedPupilGeometry))
         raise ValueError(f'Invalid setup keyword: {self.setup}')
 
-    def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseState:
-        def init_setup(setup_cls: type[SetupT]) -> SetupT:
-            setup = setup_cls.read(setup_file)
+    def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseSetup:
+        def init_geometry(geometry_cls: type[GeometryT]) -> GeometryT:
+            geometry = geometry_cls.read(setup_file)
             if self.mode == 'per-pattern':
-                return setup.broadcast(len(xtal))
-            return setup
+                return geometry.broadcast(len(xtal))
+            return geometry
 
         if self.setup == 'fixed':
-            return FixedState(xtal=xtal, setup=init_setup(FixedSetup))
+            return FixedSetup(xtal=xtal, geometry=init_geometry(FixedGeometry))
         if self.setup == 'fixed-aperture':
-            return FixedApertureState(xtal=xtal, setup=init_setup(FixedApertureSetup))
+            return FixedApertureSetup(xtal=xtal,
+                                      geometry=init_geometry(FixedApertureGeometry))
         if self.setup == 'fixed-pupil':
-            return FixedPupilState(xtal=xtal, setup=init_setup(FixedPupilSetup))
+            return FixedPupilSetup(xtal=xtal,
+                                   geometry=init_geometry(FixedPupilGeometry))
         raise ValueError(f'Invalid setup keyword: {self.setup}')
 
 @dataclass
@@ -1074,7 +1080,7 @@ class RefinementStats(Container):
         return float(global_norm(updates))
 
     def append(self, step: int, loss: float, learning_rate: float,
-               grad: BaseState, updates: Updates | None):
+               grad: BaseSetup, updates: Updates | None):
         self.step.append(step)
         self.loss.append(loss)
         self.learning_rate.append(learning_rate)
@@ -1098,25 +1104,25 @@ class RefinementStats(Container):
 @dataclass
 class RefineResult(Container):
     index   : IntArray
-    state   : ResolvedState
+    setup   : ResolvedSetup
     loss    : RealArray
     fitness : RealArray
     stats   : RefinementStats
 
     def champions_only(self) -> 'RefineResult':
-        xp = self.state.__array_namespace__()
+        xp = self.setup.__array_namespace__()
         idxs = xp.lexsort((self.loss, self.index))
         sorted_index = self.index[idxs]
         # NumPy unique_values does not guarantee sorted output.
         unique_index = xp.sort(xp.unique_values(sorted_index))
         firsts = xp.searchsorted(sorted_index, unique_index)
         champions = idxs[firsts]
-        return RefineResult(self.index[champions], self.state[champions], self.loss[champions],
+        return RefineResult(self.index[champions], self.setup[champions], self.loss[champions],
                             self.fitness[champions], self.stats)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Return refined orientations with per-solution refinement metrics."""
-        df = self.state.to_dataframe(index=self.index)
+        df = self.setup.to_dataframe(index=self.index)
         df['loss'] = asnumpy(self.loss)
         df['fitness'] = asnumpy(self.fitness)
         return df
@@ -1153,11 +1159,11 @@ class RefineResult(Container):
                         del output_file[key]
                     output_file[key] = path
 
-def optimisation_loop(data: CBData, initial: BaseState, optimiser: GradientTransformation,
+def optimisation_loop(data: RefinerData, initial: BaseSetup, optimiser: GradientTransformation,
                       schedule: Schedule, loss_grad_fn: LossGradFn,
                       num_steps: int, trace_every: int=1, log_every: int=0,
                       logger: logging.Logger | None=None
-                      ) -> Tuple[BaseState, RefinementStats]:
+                      ) -> Tuple[BaseSetup, RefinementStats]:
     stats = RefinementStats()
 
     state = initial
@@ -1206,7 +1212,7 @@ def default_refinement_logger() -> logging.Logger:
     logger.addHandler(handler)
     return logger
 
-def refinement(index: IntArray, initial: BaseState, patterns: Patterns, params: RefinementConfig,
+def refinement(index: IntArray, initial: BaseSetup, patterns: Patterns, params: RefinementConfig,
                logger: logging.Logger, xp: AnyNamespace) -> RefineResult:
     """Refine candidate orientations for a batch of diffraction patterns.
 
@@ -1222,10 +1228,10 @@ def refinement(index: IntArray, initial: BaseState, patterns: Patterns, params: 
         :class:`~cbclib_v2.scripts.RefineResult` with champion solutions
         and per-solution refinement metrics.
     """
-    model = CBDModel()
+    model = RefinerModel()
 
-    loss = params.loss.cbd_loss(model)
-    data = params.data.cbd_data(patterns, model, loss, initial)
+    loss = params.loss.refiner_loss(model)
+    data = params.data.refiner_data(patterns, model, loss, initial)
     loss_grad_fn : LossGradFn = jit(value_and_grad(jit(loss), argnums=1))
 
     solver, schedule = params.optimise.optimiser()
@@ -1271,6 +1277,6 @@ def refine_solutions(patterns: Patterns, df: pd.DataFrame, params: RefinementCon
 
     index = xp.asarray(df['index'].to_numpy())
     target = patterns.loc[index]
-    initial = params.import_resolved(ResolvedState.import_dataframe(df, xp=xp))
+    initial = params.import_resolved(ResolvedSetup.import_dataframe(df, xp=xp))
 
     return refinement(index, initial, target, params, logger or default_refinement_logger(), xp)

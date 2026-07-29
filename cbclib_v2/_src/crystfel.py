@@ -837,12 +837,12 @@ class Assembler():
 
         n_frames = frames.size // self.ss.size
         if n_frames > 1:
-            result = xp.zeros((n_frames,) + self.shape)
+            result = xp.zeros((n_frames,) + self.shape, dtype=frames.dtype)
         else:
-            result = xp.zeros(self.shape)
+            result = xp.zeros(self.shape, dtype=frames.dtype)
+            frames = xp.squeeze(frames, axis=0)
 
-        result[..., self.ss, self.fs] = frames
-        return result
+        return set_at(result, (..., self.ss, self.fs), frames)
 
 @dataclass
 class Detector():
@@ -898,6 +898,12 @@ class Detector():
             for index, roi in enumerate(panel.roi()):
                 shape[index].append(roi.stop)
         return tuple(max(shape[index]) for index in range(len(shape)))
+
+    @property
+    def assembled_shape(self) -> Tuple[int, int]:
+        """Shape of the assembled lab-frame image, inferred from panel bounds."""
+        x_min, y_min, x_max, y_max = self.bounds
+        return (int(y_max - y_min) + 1, int(x_max - x_min) + 1)
 
     @property
     def num_modules(self) -> int:
@@ -1207,7 +1213,7 @@ class Detector():
         y = xp.take_along_axis(xp.stack((y0, y1), axis=-1), indices, axis=-1)
         return Streaks.import_xy(streaks.index, x, y)
 
-    def to_patterns(self, streaks: Streaks) -> Patterns:
+    def to_meters(self, streaks: Streaks) -> Patterns:
         """Convert lab-frame streaks to diffraction patterns in metres.
 
         Scales streak line coordinates by :attr:`pixel_size` to produce
@@ -1224,9 +1230,29 @@ class Detector():
         Example:
             Convert lab-frame pixel coordinates to metres for indexing:
 
-            >>> patterns = detector.to_patterns(detector.to_streaks(pixel_streaks))
+            >>> patterns = detector.to_meters(detector.to_streaks(pixel_streaks))
         """
         return Patterns(streaks.index, streaks.lines * self.pixel_size)
+
+    def to_pixels(self, patterns: Patterns) -> Streaks:
+        """Convert diffraction patterns in metres to lab-frame streaks in pixels.
+
+        Scales pattern line coordinates by :attr:`pixel_size` to produce
+        :class:`~cbclib_v2.Streaks` in pixel units suitable for visualization.
+
+        Args:
+            patterns: Diffraction patterns in metres (e.g. from
+                :meth:`to_meters`).
+
+        Returns:
+            :class:`~cbclib_v2.Streaks` with coordinates in pixels.
+
+        Example:
+            Convert diffraction patterns in metres back to lab-frame pixel coordinates:
+
+            >>> streaks = detector.to_pixels(detector.to_meters(lab_streaks))
+        """
+        return Streaks(patterns.index, patterns.lines / self.pixel_size)
 
 def read_crystfel(file: str) -> Detector:
     """Parse a CrystFEL ``.geom`` file and return a :class:`Detector`.

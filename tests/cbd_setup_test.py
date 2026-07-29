@@ -1,9 +1,10 @@
 import pytest
 from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, NDArray, NumPyNamespace, NumPy, RealArray
-from cbclib_v2.indexer import (CBDModel, CBDPoints, MaskedLaueVectors, Miller, MillerWithRLP,
-                               FixedApertureState, FixedPupilState, FixedState, RotationState,
-                               ResolvedState, XtalCell, XtalState)
+from cbclib_v2.indexer import (CBDPoints, ConvexPolygon, FixedApertureSetup, FixedPupilSetup,
+                               FixedSetup, Miller, MillerWithRLP, PupilIntersection, Rectangle,
+                               RefinerModel, ResolvedSetup, RotationState, SimulatedVectors,
+                               SourcePlane, XtalCell, XtalState)
 from cbclib_v2.test_util import TestSetup, check_close
 
 class TestCBDSetup():
@@ -16,12 +17,12 @@ class TestCBDSetup():
         return default_rng(42, xp)
 
     @pytest.fixture
-    def state(self, xp: NumPyNamespace) -> FixedState:
-        return FixedState(TestSetup.xtal(xp), TestSetup.fixed_setup())
+    def initial(self, xp: NumPyNamespace) -> FixedSetup:
+        return FixedSetup(TestSetup.xtal(xp), TestSetup.fixed_geometry())
 
     @pytest.fixture
-    def resolved(self, state: FixedState, xp: NumPyNamespace) -> ResolvedState:
-        return state.resolve(xp)
+    def setup(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
+        return initial.resolve(xp)
 
     def skew_symmetric(self, vec: RealArray, xp: NumPyNamespace) -> RealArray:
         return xp.linalg.cross(xp.eye(vec.shape[-1]), vec[..., None, :])
@@ -37,8 +38,8 @@ class TestCBDSetup():
         return I + S * skew + (1.0 - C) * (skew @ skew)
 
     @pytest.fixture
-    def xtal(self, state: FixedState) -> XtalState:
-        return state.xtal
+    def xtal(self, initial: FixedSetup) -> XtalState:
+        return initial.xtal
 
     @pytest.fixture
     def ormatrix(self, xtal: XtalState) -> RotationState:
@@ -57,26 +58,27 @@ class TestCBDSetup():
         return request.param
 
     @pytest.fixture
-    def miller(self, rng: Generator[NDArray], q_abs: float, num_points: int, model: CBDModel,
-               resolved: ResolvedState, xp: NumPyNamespace) -> Miller:
-        miller = model.hkl_in_aperture(q_abs, resolved, xp)
+    def miller(self, rng: Generator[NDArray], q_abs: float, num_points: int, model: RefinerModel,
+               setup: ResolvedSetup, xp: NumPyNamespace) -> Miller:
+        miller = model.hkl_in_aperture(q_abs, setup, xp)
         idxs = rng.choice(miller.hkl.shape[0], size=(num_points,))
         return miller[idxs]
 
     @pytest.fixture
-    def rlp(self, miller: Miller, model: CBDModel,
-            state: FixedState, xp: NumPyNamespace) -> MillerWithRLP:
-        return model.xtal.hkl_to_q(miller, state.xtal, xp)
+    def rlp(self, miller: Miller, model: RefinerModel,
+            initial: FixedSetup, xp: NumPyNamespace) -> MillerWithRLP:
+        return model.xtal.hkl_to_q(miller, initial.xtal, xp)
 
     @pytest.fixture
-    def laue(self, rlp: MillerWithRLP, model: CBDModel, resolved: ResolvedState,
-             xp: NumPyNamespace) -> MaskedLaueVectors:
-        return model.lens.source_lines(rlp, resolved.setup.lens, xp)
+    def laue(self, rlp: MillerWithRLP, model: RefinerModel, setup: ResolvedSetup,
+             xp: NumPyNamespace) -> SimulatedVectors:
+        pupil = model.lens.pupil(setup.geometry.lens, xp)
+        return model.lens.source_lines(rlp, pupil, xp)
 
     @pytest.fixture
-    def points(self, laue: MaskedLaueVectors, model: CBDModel, resolved: ResolvedState,
+    def points(self, laue: SimulatedVectors, model: RefinerModel, setup: ResolvedSetup,
                xp: NumPyNamespace) -> CBDPoints:
-        return model.kout_to_points(laue, resolved.setup, xp)
+        return model.kout_to_points(laue, setup.geometry, xp)
 
     def text_xtal_to_cell(self, xtal: XtalState, ormatrix: RotationState,
                           cell: XtalCell, xp: NumPyNamespace):
@@ -98,22 +100,26 @@ class TestCBDSetup():
         check_close(cell.lengths, new_cell.lengths)
 
     def test_hkl_and_q(self, miller: Miller, rlp: MillerWithRLP,
-                       model: CBDModel, state: FixedState, xp: NumPyNamespace):
-        rlp = model.xtal.q_to_hkl(rlp, state.xtal, xp)
+                       model: RefinerModel, initial: FixedSetup, xp: NumPyNamespace):
+        rlp = model.xtal.q_to_hkl(rlp, initial.xtal, xp)
         assert xp.all(rlp.hkl_indices == miller.hkl_indices)
 
-    def test_laue(self, laue: MaskedLaueVectors, model: CBDModel,
-                  resolved: ResolvedState, xp: NumPyNamespace):
+    def test_laue(self, laue: SimulatedVectors, model: RefinerModel,
+                  setup: ResolvedSetup, xp: NumPyNamespace):
         check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
-        valid = xp.broadcast_to(laue.mask, laue.kin.shape[:-1])
-        kin = model.lens.project_to_pupil(laue.kin, laue.index, resolved.setup.lens, xp)
-        check_close(laue.kin[valid], kin[valid])
+        valid = laue.distance == 0.0
+        kin = model.lens.project_to_pupil(laue.kin, laue.index, setup.geometry.lens, xp)
+        check_close(laue.kin, kin)
+        q = xp.broadcast_to(laue.q, laue.kin.shape)
+        check_close(xp.sum(laue.kin[valid] * q[valid], axis=-1),
+                    -0.5 * xp.sum(q[valid]**2, axis=-1))
 
-    def test_points_and_kout(self, laue: MaskedLaueVectors, points: CBDPoints,
-                             model: CBDModel, resolved: ResolvedState, xp: NumPyNamespace):
-        valid = xp.broadcast_to(laue.mask, laue.kout.shape[:-1])
-        kout = model.points_to_kout(points, resolved.setup, xp).kout
+    def test_points_and_kout(self, laue: SimulatedVectors, points: CBDPoints,
+                             model: RefinerModel, setup: ResolvedSetup, xp: NumPyNamespace):
+        valid = laue.distance == 0.0
+        kout = model.points_to_kout(points, setup.geometry, xp)
         check_close(kout[valid], laue.kout[valid])
+        assert xp.all(xp.isnan(points.points[~valid]))
 
     def test_rotation_to_tilt(self, ormatrix: RotationState, xp: NumPyNamespace):
         tilt = ormatrix.to_tilt()
@@ -124,20 +130,129 @@ class TestCBDSetup():
         tilt_over_axis = ormatrix.to_tilt().to_tilt_over_axis()
         check_close(ormatrix.matrix, tilt_over_axis.to_tilt().to_rotation().matrix)
 
-    def test_fixed_pupil_state_from_resolved(self, resolved: ResolvedState, xp: NumPyNamespace):
-        restored = FixedPupilState.from_resolved(resolved)
+    def test_fixed_pupil_state_from_resolved(self, setup: ResolvedSetup, xp: NumPyNamespace):
+        restored = FixedPupilSetup.from_resolved(setup)
         converted = restored.resolve(xp)
 
-        check_close(converted.xtal.basis, resolved.xtal.basis)
-        check_close(converted.setup.lens.foc_pos, resolved.setup.lens.foc_pos)
-        check_close(converted.setup.lens.pupil_roi, resolved.setup.lens.pupil_roi)
-        check_close(converted.setup.z, resolved.setup.z)
+        check_close(converted.xtal.basis, setup.xtal.basis)
+        check_close(converted.geometry.lens.foc_pos, setup.geometry.lens.foc_pos)
+        check_close(converted.geometry.lens.pupil_roi, setup.geometry.lens.pupil_roi)
+        check_close(converted.geometry.z, setup.geometry.z)
 
-    def test_fixed_aperture_state_from_resolved(self, resolved: ResolvedState, xp: NumPyNamespace):
-        restored = FixedApertureState.from_resolved(resolved)
+    def test_fixed_aperture_state_from_resolved(self, setup: ResolvedSetup, xp: NumPyNamespace):
+        restored = FixedApertureSetup.from_resolved(setup)
         converted = restored.resolve(xp)
 
-        check_close(converted.xtal.basis, resolved.xtal.basis)
-        check_close(converted.setup.lens.foc_pos, resolved.setup.lens.foc_pos)
-        check_close(converted.setup.lens.pupil_roi, resolved.setup.lens.pupil_roi)
-        check_close(converted.setup.z, resolved.setup.z)
+        check_close(converted.xtal.basis, setup.xtal.basis)
+        check_close(converted.geometry.lens.foc_pos, setup.geometry.lens.foc_pos)
+        check_close(converted.geometry.lens.pupil_roi, setup.geometry.lens.pupil_roi)
+        check_close(converted.geometry.z, setup.geometry.z)
+
+class TestPupilProjection:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    def test_rectangle_distance(self, xp: NumPyNamespace) -> None:
+        pupil = Rectangle(roi=xp.asarray([0.0, 2.0, 0.0, 4.0]))
+        points = pupil.edges.to_points(xp.broadcast_to(xp.asarray([-0.5, 0.5, 1.5]),
+                                                       (4, 3)))
+
+        projected = points.project()
+
+        check_close(projected.t, xp.broadcast_to(xp.asarray([0.0, 0.5, 1.0]), (4, 3)))
+        check_close(points.distance(),
+                    xp.asarray([[1.0, 0.0, 1.0], [2.0, 0.0, 2.0],
+                                [1.0, 0.0, 1.0], [2.0, 0.0, 2.0]]))
+
+    def test_polygon_projection(self, xp: NumPyNamespace) -> None:
+        pupil = ConvexPolygon(center=xp.zeros(2), lengths=xp.ones(4))
+        points = pupil.edges.to_points(xp.broadcast_to(xp.asarray([-0.5, 0.5, 1.5]),
+                                                       (4, 3)))
+
+        projected = points.project()
+
+        check_close(projected.t, xp.broadcast_to(xp.asarray([0.0, 0.5, 1.0]), (4, 3)))
+        check_close(points.distance(),
+                    xp.broadcast_to(xp.asarray([1.0, 0.0, 1.0]), (4, 3)))
+
+    def test_spherical_projection(self, xp: NumPyNamespace) -> None:
+        pupil = Rectangle(roi=xp.asarray([-0.2, 0.2, -0.1, 0.1]))
+        kin = xp.asarray([[0.0, 0.0, 1.0], [0.2, 0.0, xp.sqrt(0.96)]])
+
+        projected = pupil.project(kin)
+
+        check_close(projected[0], kin[0])
+        check_close(projected[1], xp.asarray([0.1, 0.0, xp.sqrt(0.99)]))
+        check_close(pupil.distance(kin), xp.sqrt(xp.sum((kin - projected)**2, axis=-1)))
+
+class TestSourcePlane:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    def test_normalised_distance(self, xp: NumPyNamespace) -> None:
+        source = SourcePlane.from_q(q=xp.asarray([0.2, 0.0, 0.0]))
+        kin = xp.asarray([0.0, 0.0, 1.0])
+
+        check_close(source.distance(kin), xp.asarray(0.1))
+        check_close(source.project(kin), xp.asarray([-0.1, 0.0, 1.0]))
+
+    def test_zero_q(self, xp: NumPyNamespace) -> None:
+        source = SourcePlane.from_q(q=xp.zeros(3))
+        kin = xp.asarray([0.0, 0.0, 1.0])
+
+        check_close(source.distance(kin), xp.asarray(0.0))
+        check_close(source.project(kin), kin)
+
+    def test_expand_dims(self, xp: NumPyNamespace) -> None:
+        source = SourcePlane.from_q(q=xp.asarray([[0.2, 0.0, 0.0], [0.0, 0.2, 0.0]]))
+        kin = xp.zeros((2, 3, 3))
+
+        with pytest.raises(ValueError):
+            source.distance(kin)
+
+        expanded = source.expand_dims(axis=1)
+
+        assert expanded.q.shape == (2, 1, 3)
+        assert expanded.q_mag.shape == (2, 1)
+        assert expanded.distance(kin).shape == (2, 3)
+
+class TestPupilIntersection:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    def test_outside_score(self, xp: NumPyNamespace) -> None:
+        pupil = Rectangle(roi=xp.asarray([-0.2, 0.2, 0.0, 0.2]))
+        intersection = PupilIntersection.from_edge(q=xp.asarray([0.2, 0.0, 0.0]),
+                                                   edges=pupil.edges)
+        parameters = xp.asarray([[0.5, 0.25], [1.5, 0.5],
+                                 [0.5, 0.25], [-0.5, 0.5]])
+
+        kin, score = intersection.select(pupil.edges.to_points(parameters))
+
+        check_close(score, xp.asarray([[0.1, 0.1]]))
+        assert xp.all(kin[..., :2] >= pupil.min)
+        assert xp.all(kin[..., :2] <= pupil.max)
+        assert xp.all(intersection.source.distance(kin) > 0.0)
+
+    def test_parallel_plane(self, xp: NumPyNamespace) -> None:
+        pupil = Rectangle(roi=xp.asarray([-0.1, 0.1, -0.2, 0.2]))
+        q = xp.asarray([[0.0, 0.1, 0.0],
+                        [0.0, 0.2, 0.0],
+                        [0.0, 0.22, 0.0]])
+        edges = pupil.edges.replace(
+            tau=xp.broadcast_to(pupil.edges.tau, (3, 4, 2)),
+            origin=xp.broadcast_to(pupil.edges.origin, (3, 4, 2)),
+        )
+        intersection = PupilIntersection.from_edge(q=q, edges=edges)
+
+        kin, score = intersection.select(intersection.solutions())
+
+        check_close(xp.sort(kin[..., 0], axis=-1),
+                    xp.broadcast_to(xp.asarray([-0.2, 0.2]), (3, 2)))
+        check_close(kin[..., 1], xp.asarray([[-0.05, -0.05],
+                                             [-0.1, -0.1],
+                                             [-0.1, -0.1]]))
+        check_close(score, xp.asarray([[0.0, 0.0], [0.0, 0.0], [0.01, 0.01]]))

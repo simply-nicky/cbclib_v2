@@ -1,12 +1,11 @@
 from typing import (Callable, Generic, Iterator, Sequence, Tuple, Type, TypeVar, get_type_hints,
                     overload)
 from typing_extensions import Self
-import h5py
 import pandas as pd
-from .geometry import euler_angles, euler_matrix, tilt_angles, tilt_matrix
 from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, IntArray, JaxNumPy,
                                 RealArray, RealSequence, Shape)
-from .._src.array_api import array_namespace, asnumpy
+from .._src.array_api import (array_namespace, asnumpy, euler_angles, euler_matrix, safe_divide,
+                              safe_sqrt, tilt_angles, tilt_matrix)
 from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer
 from .._src.parser import JSONParser, INIParser, Parser, get_extension
 from .._src.state import State, dynamic_fields, field, static_fields
@@ -97,12 +96,13 @@ class BaseCell(Generic[AnyAngles, AnyLengths]):
         gamma = xp.asarray(self.angles)[..., 2]
         cos = xp.cos(xp.asarray(self.angles))
         sin = xp.sin(gamma)
-        v_ratio = xp.sqrt(xp.ones(cos.shape[:-1]) - xp.sum(cos**2, axis=-1) + \
-                          2 * xp.prod(cos, axis=-1))
+        v_ratio = safe_sqrt(xp.ones(cos.shape[:-1]) - xp.sum(cos**2, axis=-1)
+                            + 2 * xp.prod(cos, axis=-1), xp)
         a_vec = xp.broadcast_to(xp.array([1.0, 0.0, 0.0]), cos.shape)
         b_vec = xp.stack((cos[..., 2], sin, xp.zeros(cos.shape[:-1])), axis=-1)
-        c_vec = xp.stack((cos[..., 1], (cos[..., 0] - cos[..., 1] * cos[..., 2]) / sin,
-                         v_ratio / sin), axis=-1)
+        c_vec = xp.stack((cos[..., 1],
+                          safe_divide(cos[..., 0] - cos[..., 1] * cos[..., 2], sin, xp),
+                          safe_divide(v_ratio, sin, xp)), axis=-1)
         vectors = xp.stack((a_vec, b_vec, c_vec), axis=-2)
         return XtalState(xp.asarray(xp.asarray(self.lengths)[..., None] * vectors, dtype=float))
 
@@ -182,7 +182,8 @@ class XtalState(ArrayContainer, State):
         return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series,
+                         xp: AnyNamespace=JaxNumPy) -> 'XtalState':
         a = xp.stack((xp.asarray(df['a_x']), xp.asarray(df['a_y']), xp.asarray(df['a_z'])), axis=-1)
         b = xp.stack((xp.asarray(df['b_x']), xp.asarray(df['b_y']), xp.asarray(df['b_z'])), axis=-1)
         c = xp.stack((xp.asarray(df['c_x']), xp.asarray(df['c_y']), xp.asarray(df['c_z'])), axis=-1)
@@ -231,9 +232,11 @@ class XtalState(ArrayContainer, State):
             The basis of the reciprocal lattice.
         """
         xp = self.__array_namespace__()
-        a_rec = xp.linalg.cross(self.b, self.c) / xp.sum(xp.linalg.cross(self.b, self.c) * self.a, axis=-1)
-        b_rec = xp.linalg.cross(self.c, self.a) / xp.sum(xp.linalg.cross(self.c, self.a) * self.b, axis=-1)
-        c_rec = xp.linalg.cross(self.a, self.b) / xp.sum(xp.linalg.cross(self.a, self.b) * self.c, axis=-1)
+        bc, ca, ab = (xp.linalg.cross(self.b, self.c), xp.linalg.cross(self.c, self.a),
+                      xp.linalg.cross(self.a, self.b))
+        a_rec = bc / xp.sum(bc * self.a, axis=-1)
+        b_rec = ca / xp.sum(ca * self.b, axis=-1)
+        c_rec = ab / xp.sum(ab * self.c, axis=-1)
         return XtalState(xp.stack((a_rec, b_rec, c_rec), axis=-2))
 
     def to_dataframe(self, index: IntArray | None=None) -> pd.DataFrame:
@@ -328,8 +331,8 @@ class ResolvedLens(State, ArrayContainer):
 
     def collapse(self) -> 'ResolvedLens':
         xp = self.__array_namespace__()
-        foc_pos = xp.mean(self.foc_pos, axis=0)
-        pupil_roi = xp.mean(self.pupil_roi, axis=0)
+        foc_pos = xp.mean(self.foc_pos, axis=0, keepdims=True)
+        pupil_roi = xp.mean(self.pupil_roi, axis=0, keepdims=True)
         return ResolvedLens(foc_pos, pupil_roi)
 
     def to_dataframe(self, index: IntArray) -> pd.DataFrame:
@@ -443,7 +446,7 @@ class FixedPupilLens(BaseLens, DataContainer, State):
 
     def collapse(self) -> 'FixedPupilLens':
         xp = self.__array_namespace__()
-        foc_xy = xp.mean(xp.reshape(self.foc_xy, (-1, 2)), axis=0)
+        foc_xy = xp.mean(xp.reshape(self.foc_xy, (-1, 2)), axis=0, keepdims=True)
         return FixedPupilLens(foc_xy, self.foc_z, self.pupil_roi)
 
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
@@ -513,8 +516,8 @@ class FixedApertureLens(BaseLens, DataContainer, State):
 
     def collapse(self) -> 'FixedApertureLens':
         xp = self.__array_namespace__()
-        foc_xy = xp.mean(xp.reshape(self.foc_xy, (-1, 2)), axis=0)
-        pupil_center = xp.mean(xp.reshape(self.pupil_center, (-1, 2)), axis=0)
+        foc_xy = xp.mean(xp.reshape(self.foc_xy, (-1, 2)), axis=0, keepdims=True)
+        pupil_center = xp.mean(xp.reshape(self.pupil_center, (-1, 2)), axis=0, keepdims=True)
         return FixedApertureLens(foc_xy, self.foc_z, pupil_center, self.aperture)
 
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
@@ -610,7 +613,8 @@ class RotationState(ArrayContainer, State):
             of the axis of rotation :math:`\beta`.
         """
         xp = self.__array_namespace__()
-        if xp.allclose(self.matrix, xp.permute_dims(self.matrix, (*range(self.matrix.ndim - 2), -1, -2))):
+        transposed = xp.permute_dims(self.matrix, (*range(self.matrix.ndim - 2), -1, -2))
+        if xp.allclose(self.matrix, transposed):
             eigw, eigv = xp.linalg.eigh(self.matrix)
             axis = eigv[xp.isclose(eigw, 1.0)]
             theta = xp.acos(0.5 * (xp.trace(self.matrix) - 1.0))
@@ -693,8 +697,9 @@ class TiltOverAxisState(ArrayContainer, State):
 
     def alpha(self) -> RealArray:
         xp = self.__array_namespace__()
-        r = xp.sqrt(xp.sum(self.axis**2, axis=-1))
-        return xp.broadcast_to(xp.acos(self.axis[..., 2] / r), self.angles.shape)
+        r = safe_sqrt(xp.sum(self.axis**2, axis=-1), xp)
+        return xp.broadcast_to(xp.acos(safe_divide(self.axis[..., 2], r, xp)),
+                               self.angles.shape)
 
     def beta(self) -> RealArray:
         xp = self.__array_namespace__()
@@ -712,7 +717,7 @@ StaticZ = Tuple[float, ...]
 AnyLens = TypeVar('AnyLens', bound=BaseLens)
 AnyZ = TypeVar('AnyZ', bound=StaticZ | RealArray)
 
-class ResolvedSetup(State, ArrayContainer):
+class ResolvedGeometry(State, ArrayContainer):
     lens    : ResolvedLens
     z       : RealArray
 
@@ -721,24 +726,24 @@ class ResolvedSetup(State, ArrayContainer):
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
-                         ) -> 'ResolvedSetup':
+                         ) -> 'ResolvedGeometry':
         return cls(ResolvedLens.import_dataframe(df, xp), xp.asarray(df['z']))
 
-    def broadcast(self, size: int) -> 'ResolvedSetup':
+    def broadcast(self, size: int) -> 'ResolvedGeometry':
         xp = self.__array_namespace__()
-        return ResolvedSetup(self.lens.broadcast(size), xp.broadcast_to(self.z, (size,)))
+        return ResolvedGeometry(self.lens.broadcast(size), xp.broadcast_to(self.z, (size,)))
 
-    def collapse(self) -> 'ResolvedSetup':
+    def collapse(self) -> 'ResolvedGeometry':
         xp = self.__array_namespace__()
-        z = xp.mean(self.z, axis=0)
-        return ResolvedSetup(self.lens.collapse(), z)
+        z = xp.mean(self.z, axis=0, keepdims=True)
+        return ResolvedGeometry(self.lens.collapse(), z)
 
     def to_dataframe(self, index: IntArray) -> pd.DataFrame:
         df = self.lens.to_dataframe(index=index)
         df['z'] = asnumpy(self.z)
         return df
 
-class BaseSetup(Generic[AnyLens, AnyZ]):
+class BaseGeometry(Generic[AnyLens, AnyZ]):
     lens    : AnyLens
     z       : AnyZ
 
@@ -763,8 +768,8 @@ class BaseSetup(Generic[AnyLens, AnyZ]):
         raise ValueError(f"Invalid format: {ext}")
 
     @classmethod
-    def from_geometry(cls: Type[Self], foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                      z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> Self:
+    def from_parameters(cls: Type[Self], foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> Self:
         """Construct an experimental setup from effective geometry values.
 
         Args:
@@ -779,14 +784,14 @@ class BaseSetup(Generic[AnyLens, AnyZ]):
         raise NotImplementedError
 
     @classmethod
-    def from_resolved(cls: Type[Self], resolved: ResolvedSetup) -> Self:
+    def from_resolved(cls: Type[Self], geometry: ResolvedGeometry) -> Self:
         raise NotImplementedError
 
     @classmethod
     def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
         """Read setup geometry from a JSON or INI file."""
         data = cls.parser(file).read(file)
-        return cls.from_geometry(data['foc_pos'], data['pupil_roi'], data['z'], xp)
+        return cls.from_parameters(data['foc_pos'], data['pupil_roi'], data['z'], xp)
 
     def broadcast(self: Self, size: int) -> Self:
         """Return a setup whose dynamic arrays have one row per pattern.
@@ -804,24 +809,24 @@ class BaseSetup(Generic[AnyLens, AnyZ]):
         """
         raise NotImplementedError
 
-    def resolve(self, xp: AnyNamespace) -> ResolvedSetup:
+    def resolve(self, xp: AnyNamespace) -> ResolvedGeometry:
         """Return the resolved setup geometry.
 
         Args:
             xp: Array namespace for dynamic setup fields.
 
         Returns:
-            A :class:`ResolvedSetup` object.
+            A :class:`ResolvedGeometry` object.
         """
-        return ResolvedSetup(self.lens.resolve(xp), xp.asarray(self.z))
+        return ResolvedGeometry(self.lens.resolve(xp), xp.asarray(self.z))
 
-class FixedPupilSetup(BaseSetup[FixedPupilLens, RealArray], DataContainer, State):
+class FixedPupilGeometry(BaseGeometry[FixedPupilLens, RealArray], DataContainer, State):
     lens    : FixedPupilLens
     z       : RealArray
 
     @classmethod
-    def from_geometry(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                      z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedPupilSetup':
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedPupilGeometry':
         foc_xy = xp.asarray(foc_pos[:2])
         foc_z = float(foc_pos[2])
         pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
@@ -829,26 +834,26 @@ class FixedPupilSetup(BaseSetup[FixedPupilLens, RealArray], DataContainer, State
         return cls(FixedPupilLens(foc_xy, foc_z, pupil_roi), xp.asarray(z))
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedSetup) -> 'FixedPupilSetup':
-        return cls(FixedPupilLens.from_resolved(resolved.lens), resolved.z)
+    def from_resolved(cls, geometry: ResolvedGeometry) -> 'FixedPupilGeometry':
+        return cls(FixedPupilLens.from_resolved(geometry.lens), geometry.z)
 
-    def broadcast(self, size: int) -> 'FixedPupilSetup':
+    def broadcast(self, size: int) -> 'FixedPupilGeometry':
         xp = self.__array_namespace__()
         z = xp.broadcast_to(self.z, (size,))
         return self.replace(lens=self.lens.broadcast(size), z=z)
 
-    def collapse(self) -> 'FixedPupilSetup':
+    def collapse(self) -> 'FixedPupilGeometry':
         xp = self.__array_namespace__()
-        z = xp.mean(xp.reshape(self.z, (-1,)), axis=0)
+        z = xp.mean(xp.reshape(self.z, (-1,)), axis=0, keepdims=True)
         return self.replace(lens=self.lens.collapse(), z=z)
 
-class FixedApertureSetup(BaseSetup[FixedApertureLens, RealArray], DataContainer, State):
+class FixedApertureGeometry(BaseGeometry[FixedApertureLens, RealArray], DataContainer, State):
     lens    : FixedApertureLens
     z       : RealArray
 
     @classmethod
-    def from_geometry(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                      z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedApertureSetup':
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedApertureGeometry':
         foc_pos = (float(foc_pos[0]), float(foc_pos[1]), float(foc_pos[2]))
         pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
                      float(pupil_roi[2]), float(pupil_roi[3]))
@@ -856,26 +861,26 @@ class FixedApertureSetup(BaseSetup[FixedApertureLens, RealArray], DataContainer,
         return cls(FixedApertureLens.from_roi(lens, xp), xp.asarray(z))
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedSetup) -> 'FixedApertureSetup':
-        return cls(FixedApertureLens.from_resolved(resolved.lens), resolved.z)
+    def from_resolved(cls, geometry: ResolvedGeometry) -> 'FixedApertureGeometry':
+        return cls(FixedApertureLens.from_resolved(geometry.lens), geometry.z)
 
-    def broadcast(self, size: int) -> 'FixedApertureSetup':
+    def broadcast(self, size: int) -> 'FixedApertureGeometry':
         xp = self.__array_namespace__()
         z = xp.broadcast_to(self.z, (size,))
         return self.replace(lens=self.lens.broadcast(size), z=z)
 
-    def collapse(self) -> 'FixedApertureSetup':
+    def collapse(self) -> 'FixedApertureGeometry':
         xp = self.__array_namespace__()
-        z = xp.mean(xp.reshape(self.z, (-1,)), axis=0)
+        z = xp.mean(xp.reshape(self.z, (-1,)), axis=0, keepdims=True)
         return self.replace(lens=self.lens.collapse(), z=z)
 
-class FixedSetup(BaseSetup[FixedLens, StaticZ], State, eq=True, unsafe_hash=True):
+class FixedGeometry(BaseGeometry[FixedLens, StaticZ], State, eq=True, unsafe_hash=True):
     lens    : FixedLens = field(static=True)
     z       : StaticZ = field(static=True)
 
     @classmethod
-    def from_geometry(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                      z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedSetup':
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedGeometry':
         foc_pos = (float(foc_pos[0]), float(foc_pos[1]), float(foc_pos[2]))
         pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
                      float(pupil_roi[2]), float(pupil_roi[3]))
@@ -883,32 +888,33 @@ class FixedSetup(BaseSetup[FixedLens, StaticZ], State, eq=True, unsafe_hash=True
         return cls(lens, tuple(float(val) for val in z))
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedSetup) -> 'FixedSetup':
-        collapsed = resolved.collapse()
-        return cls(FixedLens.from_resolved(collapsed.lens), tuple(float(val) for val in collapsed.z))
+    def from_resolved(cls, geometry: ResolvedGeometry) -> 'FixedGeometry':
+        collapsed = geometry.collapse()
+        z = tuple(float(val) for val in collapsed.z)
+        return cls(FixedLens.from_resolved(collapsed.lens), z)
 
-    def broadcast(self, size: int) -> 'FixedSetup':
+    def broadcast(self, size: int) -> 'FixedGeometry':
         return self
 
-    def collapse(self) -> 'FixedSetup':
+    def collapse(self) -> 'FixedGeometry':
         return self
 
 AnyXtal = TypeVar('AnyXtal', bound=XtalState)
-AnySetup = TypeVar('AnySetup', bound=BaseSetup)
+AnyGeometry = TypeVar('AnyGeometry', bound=BaseGeometry)
 
-class ResolvedState(State, DataContainer):
+class ResolvedSetup(State, DataContainer):
     xtal    : XtalState
-    setup   : ResolvedSetup
+    geometry: ResolvedGeometry
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
-                         ) -> 'ResolvedState':
-        return cls(XtalState.import_dataframe(df, xp), ResolvedSetup.import_dataframe(df, xp))
+                         ) -> 'ResolvedSetup':
+        return cls(XtalState.import_dataframe(df, xp), ResolvedGeometry.import_dataframe(df, xp))
 
-    def __getitem__(self, indices: Indices | BoolArray) -> 'ResolvedState':
-        if len(self.xtal) == self.setup.size:
-            return ResolvedState(self.xtal[indices], self.setup[indices])
-        return ResolvedState(self.xtal[indices], self.setup)
+    def __getitem__(self, indices: Indices | BoolArray) -> 'ResolvedSetup':
+        if len(self.xtal) == self.geometry.size:
+            return ResolvedSetup(self.xtal[indices], self.geometry[indices])
+        return ResolvedSetup(self.xtal[indices], self.geometry)
 
     def to_dataframe(self, index: IntArray | None=None) -> pd.DataFrame:
         if index is None:
@@ -916,99 +922,99 @@ class ResolvedState(State, DataContainer):
             index = xp.arange(len(self.xtal))
 
         df = self.xtal.to_dataframe(index=index)
-        if self.setup.size != len(self.xtal):
-            setup = self.setup.broadcast(len(self.xtal))
+        if self.geometry.size != len(self.xtal):
+            geometry = self.geometry.broadcast(len(self.xtal))
         else:
-            setup = self.setup
+            geometry = self.geometry
 
-        return df.assign(**setup.to_dataframe(index=index))
+        return df.assign(**geometry.to_dataframe(index=index))
 
-class BaseState(DataContainer, BaseSetup, Generic[AnyXtal, AnySetup]):
+class BaseSetup(DataContainer, BaseGeometry, Generic[AnyXtal, AnyGeometry]):
     xtal    : AnyXtal
-    setup   : AnySetup
+    geometry: AnyGeometry
 
     @property
     def lens(self) -> BaseLens:
-        return self.setup.lens
+        return self.geometry.lens
 
     @property
     def z(self) -> StaticZ | RealArray:
-        return self.setup.z
+        return self.geometry.z
 
-    def resolve(self, xp: AnyNamespace) -> ResolvedState:
-        return ResolvedState(self.xtal, self.setup.resolve(xp))
+    def resolve(self, xp: AnyNamespace) -> ResolvedSetup:
+        return ResolvedSetup(self.xtal, self.geometry.resolve(xp))
 
     @classmethod
-    def from_resolved(cls: Type[Self], resolved: ResolvedState) -> Self:
+    def from_resolved(cls: Type[Self], setup: ResolvedSetup) -> Self:
         raise NotImplementedError
 
 # Some predefined experimental setups
 
-class FixedState(BaseState[XtalState, FixedSetup], State):
+class FixedSetup(BaseSetup[XtalState, FixedGeometry], State):
     xtal     : XtalState
-    setup    : FixedSetup
+    geometry : FixedGeometry
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedState) -> 'FixedState':
-        return cls(resolved.xtal, FixedSetup.from_resolved(resolved.setup))
+    def from_resolved(cls, setup: ResolvedSetup) -> 'FixedSetup':
+        return cls(setup.xtal, FixedGeometry.from_resolved(setup.geometry))
 
-class SerialFixedState(BaseState, State):
+class SerialFixedSetup(BaseSetup, State):
     cell     : XtalCell
     rotation : RotationState
-    setup    : FixedSetup
+    geometry : FixedGeometry
 
     @property
     def xtal(self) -> XtalState:
         return self.cell.to_basis() @ self.rotation
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedState) -> 'SerialFixedState':
-        return cls(resolved.xtal.unit_cell, resolved.xtal.orientation_matrix,
-                   FixedSetup.from_resolved(resolved.setup))
+    def from_resolved(cls, setup: ResolvedSetup) -> 'SerialFixedSetup':
+        return cls(setup.xtal.unit_cell, setup.xtal.orientation_matrix,
+                   FixedGeometry.from_resolved(setup.geometry))
 
-class FixedPupilState(BaseState[XtalState, FixedPupilSetup], State):
+class FixedPupilSetup(BaseSetup[XtalState, FixedPupilGeometry], State):
     xtal     : XtalState
-    setup    : FixedPupilSetup
+    geometry : FixedPupilGeometry
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedState) -> 'FixedPupilState':
-        return cls(resolved.xtal, FixedPupilSetup.from_resolved(resolved.setup))
+    def from_resolved(cls, setup: ResolvedSetup) -> 'FixedPupilSetup':
+        return cls(setup.xtal, FixedPupilGeometry.from_resolved(setup.geometry))
 
-class SerialFixedPupilState(BaseState, State):
+class SerialFixedPupilSetup(BaseSetup, State):
     cell     : XtalCell
     rotation : RotationState
-    setup    : FixedPupilSetup
+    geometry : FixedPupilGeometry
 
     @property
     def xtal(self) -> XtalState:
         return self.cell.to_basis() @ self.rotation
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedState) -> 'SerialFixedPupilState':
-        return cls(resolved.xtal.unit_cell, resolved.xtal.orientation_matrix,
-                   FixedPupilSetup.from_resolved(resolved.setup))
+    def from_resolved(cls, setup: ResolvedSetup) -> 'SerialFixedPupilSetup':
+        return cls(setup.xtal.unit_cell, setup.xtal.orientation_matrix,
+                   FixedPupilGeometry.from_resolved(setup.geometry))
 
-class FixedApertureState(BaseState[XtalState, FixedApertureSetup], State):
+class FixedApertureSetup(BaseSetup[XtalState, FixedApertureGeometry], State):
     xtal     : XtalState
-    setup    : FixedApertureSetup
+    geometry : FixedApertureGeometry
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedState) -> 'FixedApertureState':
-        return cls(resolved.xtal, FixedApertureSetup.from_resolved(resolved.setup))
+    def from_resolved(cls, setup: ResolvedSetup) -> 'FixedApertureSetup':
+        return cls(setup.xtal, FixedApertureGeometry.from_resolved(setup.geometry))
 
-class SerialFixedApertureState(BaseState, State):
+class SerialFixedApertureSetup(BaseSetup, State):
     cell     : XtalCell
     rotation : RotationState
-    setup    : FixedApertureSetup
+    geometry : FixedApertureGeometry
 
     @property
     def xtal(self) -> XtalState:
         return self.cell.to_basis() @ self.rotation
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedState) -> 'SerialFixedApertureState':
-        return cls(resolved.xtal.unit_cell, resolved.xtal.orientation_matrix,
-                   FixedApertureSetup.from_resolved(resolved.setup))
+    def from_resolved(cls, setup: ResolvedSetup) -> 'SerialFixedApertureSetup':
+        return cls(setup.xtal.unit_cell, setup.xtal.orientation_matrix,
+                   FixedApertureGeometry.from_resolved(setup.geometry))
 
 class IndexingResult(State, IndexedContainer):
     index : IntArray
