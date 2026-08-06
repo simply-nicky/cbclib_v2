@@ -620,22 +620,27 @@ def k_to_det(k: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
     pos = xp.where((k[..., 2] == 0)[..., None], 0.0, src[..., :2] - slope * src[..., 2, None])
     return pos
 
-def k_to_smp(k: RealArray, z: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
+def k_to_smp(k: RealArray, defocus: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
     """Convert wave-vectors originating from the source point ``src`` to sample
-    planes at the z coordinate ``z``.
+    planes at the ``defocus`` distance along z-axis.
 
     Args:
         k : An array of wave-vectors.
         src : Source point in meters (relative to the detector).
-        z : Plane z coordinates in meters (relative to the detector).
+        defocus : Defocus distance along z-axis in meters (relative to the detector).
         idxs : Plane indices.
 
     Returns:
-        An array of points belonging to the ``z`` planes.
+        An array of points belonging to the ``defocus`` planes.
     """
+    src_xy = xp.expand_dims(src[..., :2], axis=tuple(range(src.ndim - 1, k.ndim - 1)))
+    src_z = xp.expand_dims(src[..., 2], axis=tuple(range(src.ndim - 1, k.ndim - 1)))
+    defocus = xp.expand_dims(defocus, axis=tuple(range(defocus.ndim, k.ndim - 1)))
+
     theta = safe_divide(k[..., :2], k[..., 2, None], xp)
-    xy = src[..., :2] + theta * (z - src[..., 2])[..., None]
-    return xp.stack((xy[..., 0], xy[..., 1], xp.broadcast_to(z, xy.shape[:-1])), axis=-1)
+    xy = src_xy + theta * defocus[..., None]
+    z = xp.broadcast_to(src_z + defocus, xy.shape[:-1])
+    return xp.stack((xy[..., 0], xy[..., 1], z), axis=-1)
 
 def project_to_rect(point: RealArray, vmin: RealArray, vmax: RealArray,
                     xp: AnyNamespace) -> RealArray:

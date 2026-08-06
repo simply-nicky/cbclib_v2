@@ -1,5 +1,4 @@
-from typing import (Callable, Generic, Iterator, Sequence, Tuple, Type, TypeVar, get_type_hints,
-                    overload)
+from typing import Callable, Generic, Iterator, Sequence, Tuple, Type, TypeVar, overload
 from typing_extensions import Self
 import pandas as pd
 from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, IntArray, JaxNumPy,
@@ -7,7 +6,8 @@ from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, 
 from .._src.array_api import (array_namespace, asnumpy, euler_angles, euler_matrix, safe_divide,
                               safe_sqrt, tilt_angles, tilt_matrix)
 from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer
-from .._src.parser import JSONParser, INIParser, Parser, get_extension
+from .._src.parser import (FieldInfo, FieldLocator, JSONParser, INIParser, Parser, get_extension,
+                           get_type_hints)
 from .._src.state import State, dynamic_fields, field, static_fields
 
 def random_array(array: RealArray, span: RealSequence) -> Callable[[AnyGenerator], RealArray]:
@@ -85,7 +85,8 @@ class BaseCell(Generic[AnyAngles, AnyLengths]):
     @classmethod
     def parser(cls, file_or_extension: str='ini') -> Parser:
         ext = get_extension(file_or_extension)
-        field_info = {'unit_cell': {'angles': 'angles', 'lengths': 'lengths'}}
+        field_info: FieldInfo = {'unit_cell': {'angles': FieldLocator('angles'),
+                                               'lengths': FieldLocator('lengths')}}
         if ext == 'ini':
             return INIParser(field_info, get_type_hints(cls))
         if ext == 'json':
@@ -139,6 +140,17 @@ class XtalCell(BaseCell[RealArray, RealArray], ArrayContainer, State):
     def to_basis(self) -> 'XtalState':
         return super().to_basis(self.__array_namespace__())
 
+def xtal_parser(file_or_extension: str='ini') -> Parser:
+    ext = get_extension(file_or_extension)
+    field_info: FieldInfo = {'basis': {'a': FieldLocator('a'), 'b': FieldLocator('b'),
+                                       'c': FieldLocator('c')}}
+    if ext == 'ini':
+        return INIParser(field_info, {'a': RealArray, 'b': RealArray, 'c': RealArray})
+    if ext == 'json':
+        return JSONParser(field_info)
+
+    raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
+
 class XtalState(ArrayContainer, State):
     basis : RealArray
 
@@ -166,19 +178,8 @@ class XtalState(ArrayContainer, State):
             yield XtalState(basis[None])
 
     @classmethod
-    def parser(cls, file: str='ini') -> Parser:
-        ext = get_extension(file)
-        field_info = {'basis': {'a': 'a', 'b': 'b', 'c': 'c'}}
-        if ext == 'ini':
-            return INIParser(field_info, {'a': RealArray, 'b': RealArray, 'c': RealArray})
-        if ext == 'json':
-            return JSONParser(field_info)
-
-        raise ValueError(f"Unsupported file or extension format: {file}")
-
-    @classmethod
-    def read(cls, file: str, xp: AnyNamespace = JaxNumPy) -> 'XtalState':
-        data = cls.parser(file).read(file)
+    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
+        data = xtal_parser(file).read(file)
         return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @classmethod
@@ -191,7 +192,7 @@ class XtalState(ArrayContainer, State):
 
     @classmethod
     def import_spherical(cls, r: RealArray, theta: RealArray, phi: RealArray,
-                         xp: AnyNamespace = JaxNumPy) -> 'XtalState':
+                         xp: AnyNamespace=JaxNumPy) -> 'XtalState':
         """Return a new :class:`XtalState` object, initialised by a stacked matrix of three basis
         vectors written in spherical coordinate system.
 
@@ -264,6 +265,9 @@ class XtalState(ArrayContainer, State):
         lengths = xp.sqrt(xp.sum(self.basis**2, axis=-1))
         return (lengths, xp.acos(self.basis[..., 2] / lengths),
                 xp.atan2(self.basis[..., 1], self.basis[..., 0]))
+
+    def write(self, file: str):
+        xtal_parser(file).write(file, self)
 
 Float = float | RealArray
 StaticFoc = Tuple[float, float, float]
@@ -345,6 +349,16 @@ class ResolvedLens(State, ArrayContainer):
                              'pupil_x0': asnumpy(self.pupil_x0),
                              'pupil_x1': asnumpy(self.pupil_x1)})
 
+def lens_parser(cls: 'Type[BaseLens]', file_or_extension: str='ini') -> Parser:
+    ext = get_extension(file_or_extension)
+    field_info: FieldInfo = {'geometry': {'foc_pos': FieldLocator('foc_pos'),
+                                          'pupil_roi': FieldLocator('pupil_roi')}}
+    if ext == 'ini':
+        return INIParser(field_info, get_type_hints(cls))
+    if ext == 'json':
+        return JSONParser(field_info)
+    raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
+
 class BaseLens(Generic[AnyFoc, AnyPupil]):
     foc_pos     : AnyFoc
     pupil_roi   : AnyPupil
@@ -357,21 +371,17 @@ class BaseLens(Generic[AnyFoc, AnyPupil]):
         return self.foc_pos.size // 3
 
     @classmethod
-    def parser(cls, file_or_extension: str='ini') -> Parser:
-        ext = get_extension(file_or_extension)
-        field_info = {'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}}
-        if ext == 'ini':
-            return INIParser(field_info, get_type_hints(cls))
-        if ext == 'json':
-            return JSONParser(field_info)
-        raise ValueError(f"Unsupported file or extension format: {file_or_extension}")
-
-    @classmethod
-    def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
+    def from_parameters(cls: Type[Self], foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        xp: AnyNamespace) -> Self:
         raise NotImplementedError
 
     @classmethod
-    def from_resolved(cls: Type[Self], resolved: ResolvedLens) -> Self:
+    def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
+        data = lens_parser(cls, file).read(file)
+        return cls.from_parameters(data['foc_pos'], data['pupil_roi'], xp)
+
+    @classmethod
+    def from_resolved(cls: Type[Self], resolved: 'ResolvedLens | ResolvedGeometry') -> Self:
         raise NotImplementedError
 
     def broadcast(self, size: int) -> Self:
@@ -383,24 +393,31 @@ class BaseLens(Generic[AnyFoc, AnyPupil]):
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
         raise NotImplementedError
 
+    def write(self, file: str) -> None:
+        lens_parser(type(self), file).write(file, self.collapse())
+
 class FixedLens(BaseLens[StaticFoc, StaticPupil], State, eq=True, unsafe_hash=True):
     foc_pos     : StaticFoc = field(static=True)
     pupil_roi   : StaticPupil = field(static=True)
 
     @classmethod
-    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedLens':
-        data = cls.parser(file).read(file)
-        return cls(tuple(data['foc_pos']), tuple(data['pupil_roi']))
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        xp: AnyNamespace) -> 'FixedLens':
+        foc_pos = (float(foc_pos[0]), float(foc_pos[1]), float(foc_pos[2]))
+        pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
+                     float(pupil_roi[2]), float(pupil_roi[3]))
+        return cls(foc_pos, pupil_roi)
 
     @classmethod
-    def from_resolved(cls, resolved: ResolvedLens) -> 'FixedLens':
-        collapsed = resolved.collapse()
+    def from_resolved(cls, resolved: 'ResolvedLens | ResolvedGeometry') -> 'FixedLens':
+        if resolved.size != 1:
+            resolved = resolved.collapse()
 
-        foc_pos = (float(collapsed.foc_pos[0, 0]),
-                   float(collapsed.foc_pos[0, 1]),
-                   float(collapsed.foc_pos[0, 2]))
-        pupil_roi = (float(collapsed.pupil_roi[0, 0]), float(collapsed.pupil_roi[0, 1]),
-                     float(collapsed.pupil_roi[0, 2]), float(collapsed.pupil_roi[0, 3]))
+        foc_pos = (float(resolved.foc_pos[0, 0]),
+                   float(resolved.foc_pos[0, 1]),
+                   float(resolved.foc_pos[0, 2]))
+        pupil_roi = (float(resolved.pupil_roi[0, 0]), float(resolved.pupil_roi[0, 1]),
+                     float(resolved.pupil_roi[0, 2]), float(resolved.pupil_roi[0, 3]))
         return cls(foc_pos, pupil_roi)
 
     def broadcast(self, size: int) -> 'FixedLens':
@@ -412,57 +429,48 @@ class FixedLens(BaseLens[StaticFoc, StaticPupil], State, eq=True, unsafe_hash=Tr
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
         return ResolvedLens(xp.asarray(self.foc_pos), xp.asarray(self.pupil_roi))
 
-class FixedPupilLens(BaseLens, DataContainer, State):
-    foc_xy      : RealArray
-    foc_z       : float = field(static=True)
+class FixedPupilLens(BaseLens[RealArray, StaticPupil], DataContainer, State):
+    foc_pos     : RealArray
     pupil_roi   : StaticPupil = field(static=True)
 
-    @property
-    def foc_pos(self) -> RealArray:
-        xp = self.__array_namespace__()
-        foc_z = xp.full(self.foc_xy.shape[:-1] + (1,), self.foc_z)
-        return xp.concat((self.foc_xy, foc_z), axis=-1)
+    @classmethod
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        xp: AnyNamespace) -> 'FixedPupilLens':
+        pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
+                     float(pupil_roi[2]), float(pupil_roi[3]))
+        return cls(xp.array([foc_pos[0], foc_pos[1], foc_pos[2]]), pupil_roi)
 
     @classmethod
-    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedPupilLens':
-        data = cls.parser(file).read(file)
-        return cls(xp.asarray(data['foc_pos'][:2]), float(data['foc_pos'][2]),
-                   tuple(data['pupil_roi']))
+    def from_resolved(cls, resolved: 'ResolvedLens | ResolvedGeometry') -> 'FixedPupilLens':
+        if resolved.size != 1:
+            collapsed = resolved.collapse()
+            foc_pos = resolved.foc_pos
+        else:
+            collapsed = resolved
+            foc_pos = collapsed.foc_pos[0]
 
-    @classmethod
-    def from_resolved(cls, resolved: ResolvedLens) -> 'FixedPupilLens':
-        collapsed = resolved.collapse()
-
-        foc_z = float(collapsed.foc_pos[0, 2])
         pupil_roi = (float(collapsed.pupil_roi[0, 0]), float(collapsed.pupil_roi[0, 1]),
                      float(collapsed.pupil_roi[0, 2]), float(collapsed.pupil_roi[0, 3]))
-        return cls(resolved.foc_pos[..., :2], foc_z, pupil_roi)
+        return cls(foc_pos, pupil_roi)
 
     def broadcast(self, size: int) -> 'FixedPupilLens':
         if len(self) != 1:
             raise ValueError("Cannot resize a lens with multiple focal positions or pupil ROIs.")
         xp = self.__array_namespace__()
-        return FixedPupilLens(xp.broadcast_to(self.foc_xy, (size, 2)), self.foc_z, self.pupil_roi)
+        return FixedPupilLens(xp.broadcast_to(self.foc_pos, (size, 3)), self.pupil_roi)
 
     def collapse(self) -> 'FixedPupilLens':
         xp = self.__array_namespace__()
-        foc_xy = xp.mean(xp.reshape(self.foc_xy, (-1, 2)), axis=0, keepdims=True)
-        return FixedPupilLens(foc_xy, self.foc_z, self.pupil_roi)
+        foc_pos = xp.mean(xp.reshape(self.foc_pos, (-1, 3)), axis=0)
+        return FixedPupilLens(foc_pos, self.pupil_roi)
 
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
         return ResolvedLens(xp.asarray(self.foc_pos), xp.asarray(self.pupil_roi))
 
 class FixedApertureLens(BaseLens, DataContainer, State):
-    foc_xy          : RealArray
-    foc_z           : float = field(static=True)
+    foc_pos         : RealArray
     pupil_center    : RealArray
     aperture        : Tuple[float, float] = field(static=True)
-
-    @property
-    def foc_pos(self) -> RealArray:
-        xp = self.__array_namespace__()
-        foc_z = xp.full(self.foc_xy.shape[:-1] + (1,), self.foc_z)
-        return xp.concat((self.foc_xy, foc_z), axis=-1)
 
     @property
     def pupil_roi(self) -> RealArray:
@@ -473,52 +481,45 @@ class FixedApertureLens(BaseLens, DataContainer, State):
                          x - 0.5 * ap_x, x + 0.5 * ap_x), axis=-1)
 
     @classmethod
-    def from_roi(cls, obj: FixedLens | FixedPupilLens, xp: AnyNamespace=JaxNumPy
-                 ) -> 'FixedApertureLens':
-        resolved = obj.resolve(xp)
-        collapsed = resolved.collapse()
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        xp: AnyNamespace) -> 'FixedApertureLens':
+        return cls.from_fixed(FixedLens.from_parameters(foc_pos, pupil_roi, xp), xp)
 
-        foc_z = float(collapsed.foc_pos[0, 2])
+    @classmethod
+    def from_fixed(cls, fixed: FixedLens, xp: AnyNamespace) -> 'FixedApertureLens':
+        aperture = (fixed.pupil_roi[3] - fixed.pupil_roi[2],
+                    fixed.pupil_roi[1] - fixed.pupil_roi[0])
+        pupil_center = (0.5 * (fixed.pupil_roi[2] + fixed.pupil_roi[3]),
+                        0.5 * (fixed.pupil_roi[0] + fixed.pupil_roi[1]))
+        return cls(xp.asarray(fixed.foc_pos), xp.asarray(pupil_center), aperture)
+
+    @classmethod
+    def from_resolved(cls, resolved: 'ResolvedLens | ResolvedGeometry') -> 'FixedApertureLens':
+        if resolved.size != 1:
+            collapsed = resolved.collapse()
+            foc_pos = resolved.foc_pos
+            center = resolved.pupil_center
+        else:
+            collapsed = resolved
+            foc_pos = collapsed.foc_pos[0]
+            center = collapsed.pupil_center[0]
+
         aperture = (float(collapsed.pupil_roi[0, 3] - collapsed.pupil_roi[0, 2]),
                     float(collapsed.pupil_roi[0, 1] - collapsed.pupil_roi[0, 0]))
-        return cls(resolved.foc_pos[..., :2], foc_z, resolved.pupil_center, aperture)
-
-    @classmethod
-    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'FixedApertureLens':
-        return cls.from_roi(FixedLens.read(file), xp)
-
-    @classmethod
-    def from_resolved(cls, resolved: ResolvedLens) -> 'FixedApertureLens':
-        collapsed = resolved.collapse()
-
-        foc_z = float(collapsed.foc_pos[0, 2])
-        aperture = (float(collapsed.pupil_roi[0, 3] - collapsed.pupil_roi[0, 2]),
-                    float(collapsed.pupil_roi[0, 1] - collapsed.pupil_roi[0, 0]))
-        return cls(resolved.foc_pos[..., :2], foc_z, resolved.pupil_center, aperture)
-
-    @classmethod
-    def parser(cls, file: str) -> Parser:
-        ext = get_extension(file)
-        field_info = {'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi'}}
-        if ext == 'ini':
-            return INIParser(field_info, {'foc_pos': RealArray, 'pupil_roi': RealArray})
-        if ext == 'json':
-            return JSONParser(field_info)
-
-        raise ValueError(f"Unsupported file or extension format: {file}")
+        return cls(foc_pos, center, aperture)
 
     def broadcast(self, size: int) -> 'FixedApertureLens':
         if len(self) != 1:
             raise ValueError("Cannot resize a lens with multiple focal positions or pupil ROIs.")
         xp = self.__array_namespace__()
-        return FixedApertureLens(xp.broadcast_to(self.foc_xy, (size, 2)), self.foc_z,
+        return FixedApertureLens(xp.broadcast_to(self.foc_pos, (size, 3)),
                                  xp.broadcast_to(self.pupil_center, (size, 2)), self.aperture)
 
     def collapse(self) -> 'FixedApertureLens':
         xp = self.__array_namespace__()
-        foc_xy = xp.mean(xp.reshape(self.foc_xy, (-1, 2)), axis=0, keepdims=True)
-        pupil_center = xp.mean(xp.reshape(self.pupil_center, (-1, 2)), axis=0, keepdims=True)
-        return FixedApertureLens(foc_xy, self.foc_z, pupil_center, self.aperture)
+        foc_pos = xp.mean(xp.reshape(self.foc_pos, (-1, 3)), axis=0)
+        pupil_center = xp.mean(xp.reshape(self.pupil_center, (-1, 2)), axis=0)
+        return FixedApertureLens(foc_pos, pupil_center, self.aperture)
 
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
         return ResolvedLens(xp.asarray(self.foc_pos), xp.asarray(self.pupil_roi))
@@ -713,69 +714,69 @@ class TiltOverAxisState(ArrayContainer, State):
         xp = self.__array_namespace__()
         return TiltState(xp.stack((self.angles, self.alpha(), self.beta()), axis=-1))
 
-StaticZ = Tuple[float, ...]
-AnyLens = TypeVar('AnyLens', bound=BaseLens)
-AnyZ = TypeVar('AnyZ', bound=StaticZ | RealArray)
-
-class ResolvedGeometry(State, ArrayContainer):
-    lens    : ResolvedLens
-    z       : RealArray
+class ResolvedGeometry(ResolvedLens):
+    defocus : RealArray
 
     def __post_init__(self):
-        self.z = self.z.reshape((-1,))
+        super().__post_init__()
+        self.defocus = self.defocus.reshape((-1,))
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
                          ) -> 'ResolvedGeometry':
-        return cls(ResolvedLens.import_dataframe(df, xp), xp.asarray(df['z']))
+        lens = ResolvedLens.import_dataframe(df, xp)
+        return cls(lens.foc_pos, lens.pupil_roi, xp.asarray(df['defocus']))
 
     def broadcast(self, size: int) -> 'ResolvedGeometry':
         xp = self.__array_namespace__()
-        return ResolvedGeometry(self.lens.broadcast(size), xp.broadcast_to(self.z, (size,)))
+        lens = super().broadcast(size)
+        return ResolvedGeometry(lens.foc_pos, lens.pupil_roi,
+                                xp.broadcast_to(self.defocus, (size,)))
 
     def collapse(self) -> 'ResolvedGeometry':
         xp = self.__array_namespace__()
-        z = xp.mean(self.z, axis=0, keepdims=True)
-        return ResolvedGeometry(self.lens.collapse(), z)
+        lens = super().collapse()
+        defocus = xp.mean(self.defocus, axis=0, keepdims=True)
+        return ResolvedGeometry(lens.foc_pos, lens.pupil_roi, defocus)
 
     def to_dataframe(self, index: IntArray) -> pd.DataFrame:
-        df = self.lens.to_dataframe(index=index)
-        df['z'] = asnumpy(self.z)
+        df = super().to_dataframe(index=index)
+        df['defocus'] = asnumpy(self.defocus)
         return df
 
-class BaseGeometry(Generic[AnyLens, AnyZ]):
-    lens    : AnyLens
-    z       : AnyZ
+def geometry_parser(cls: 'Type[BaseGeometry]', file: str) -> Parser:
+    ext = get_extension(file)
+    field_info: FieldInfo = {'geometry': {'foc_pos': FieldLocator('foc_pos'),
+                                          'pupil_roi': FieldLocator('pupil_roi'),
+                                          'defocus': FieldLocator('defocus')}}
+    if ext == 'ini':
+        return INIParser(field_info, get_type_hints(cls))
+    if ext == 'json':
+        return JSONParser(field_info)
 
-    def __init__(self, lens: AnyLens, z: AnyZ): ...
+    raise ValueError(f"Invalid format: {ext}")
+
+AnyDF = TypeVar('AnyDF', bound=Tuple[float, ...] | RealArray)
+
+class BaseGeometry(BaseLens, Generic[AnyFoc, AnyPupil, AnyDF]):
+    defocus : AnyDF
 
     def __len__(self) -> int:
-        if len(self.lens) == 1:
-            if isinstance(self.z, tuple):
+        if super().__len__() == 1:
+            if isinstance(self.defocus, tuple):
                 return 1
-            return self.z.size
-        return len(self.lens)
-
-    @classmethod
-    def parser(cls, file: str) -> Parser:
-        ext = get_extension(file)
-        field_info = {'geometry': {'foc_pos': 'foc_pos', 'pupil_roi': 'pupil_roi', 'z': 'z'}}
-        if ext == 'ini':
-            return INIParser(field_info, get_type_hints(cls))
-        if ext == 'json':
-            return JSONParser(field_info)
-
-        raise ValueError(f"Invalid format: {ext}")
+            return self.defocus.size
+        return super().__len__()
 
     @classmethod
     def from_parameters(cls: Type[Self], foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> Self:
+                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy) -> Self:
         """Construct an experimental setup from effective geometry values.
 
         Args:
             foc_pos: Focal position ``(x, y, z)``.
             pupil_roi: Pupil bounds ``(y_min, y_max, x_min, x_max)``.
-            z: Sample-plane coordinates.
+            defocus: Defocus distance along z-axis.
             xp: Array namespace for dynamic setup fields.
 
         Returns:
@@ -784,14 +785,15 @@ class BaseGeometry(Generic[AnyLens, AnyZ]):
         raise NotImplementedError
 
     @classmethod
-    def from_resolved(cls: Type[Self], geometry: ResolvedGeometry) -> Self:
+    def from_resolved(cls: Type[Self], resolved: ResolvedLens | ResolvedGeometry) -> Self:
         raise NotImplementedError
 
     @classmethod
     def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
         """Read setup geometry from a JSON or INI file."""
-        data = cls.parser(file).read(file)
-        return cls.from_parameters(data['foc_pos'], data['pupil_roi'], data['z'], xp)
+        data = geometry_parser(cls, file).read(file)
+        return cls.from_parameters(data['foc_pos'], data['pupil_roi'],
+                                   data['defocus'], xp)
 
     def broadcast(self: Self, size: int) -> Self:
         """Return a setup whose dynamic arrays have one row per pattern.
@@ -818,80 +820,34 @@ class BaseGeometry(Generic[AnyLens, AnyZ]):
         Returns:
             A :class:`ResolvedGeometry` object.
         """
-        return ResolvedGeometry(self.lens.resolve(xp), xp.asarray(self.z))
+        resolved = super().resolve(xp)
+        return ResolvedGeometry(resolved.foc_pos, resolved.pupil_roi,
+                                xp.asarray(self.defocus))
 
-class FixedPupilGeometry(BaseGeometry[FixedPupilLens, RealArray], DataContainer, State):
-    lens    : FixedPupilLens
-    z       : RealArray
+    def write(self, file: str) -> None:
+        """Write setup geometry to a JSON or INI file."""
+        geometry_parser(type(self), file).write(file, self.collapse())
 
-    @classmethod
-    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedPupilGeometry':
-        foc_xy = xp.asarray(foc_pos[:2])
-        foc_z = float(foc_pos[2])
-        pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
-                     float(pupil_roi[2]), float(pupil_roi[3]))
-        return cls(FixedPupilLens(foc_xy, foc_z, pupil_roi), xp.asarray(z))
-
-    @classmethod
-    def from_resolved(cls, geometry: ResolvedGeometry) -> 'FixedPupilGeometry':
-        return cls(FixedPupilLens.from_resolved(geometry.lens), geometry.z)
-
-    def broadcast(self, size: int) -> 'FixedPupilGeometry':
-        xp = self.__array_namespace__()
-        z = xp.broadcast_to(self.z, (size,))
-        return self.replace(lens=self.lens.broadcast(size), z=z)
-
-    def collapse(self) -> 'FixedPupilGeometry':
-        xp = self.__array_namespace__()
-        z = xp.mean(xp.reshape(self.z, (-1,)), axis=0, keepdims=True)
-        return self.replace(lens=self.lens.collapse(), z=z)
-
-class FixedApertureGeometry(BaseGeometry[FixedApertureLens, RealArray], DataContainer, State):
-    lens    : FixedApertureLens
-    z       : RealArray
+class FixedGeometry(BaseGeometry[StaticFoc, StaticPupil, Tuple[float, ...]], FixedLens):
+    defocus : Tuple[float, ...] = field(static=True)
 
     @classmethod
     def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedApertureGeometry':
-        foc_pos = (float(foc_pos[0]), float(foc_pos[1]), float(foc_pos[2]))
-        pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
-                     float(pupil_roi[2]), float(pupil_roi[3]))
-        lens = FixedLens(foc_pos, pupil_roi)
-        return cls(FixedApertureLens.from_roi(lens, xp), xp.asarray(z))
+                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedGeometry':
+        lens = FixedLens.from_parameters(foc_pos, pupil_roi, xp)
+        return cls(lens.foc_pos, lens.pupil_roi, tuple(float(val) for val in defocus))
 
     @classmethod
-    def from_resolved(cls, geometry: ResolvedGeometry) -> 'FixedApertureGeometry':
-        return cls(FixedApertureLens.from_resolved(geometry.lens), geometry.z)
+    def from_resolved(cls, resolved: ResolvedLens | ResolvedGeometry) -> 'FixedGeometry':
+        if resolved.size != 1:
+            resolved = resolved.collapse()
 
-    def broadcast(self, size: int) -> 'FixedApertureGeometry':
-        xp = self.__array_namespace__()
-        z = xp.broadcast_to(self.z, (size,))
-        return self.replace(lens=self.lens.broadcast(size), z=z)
-
-    def collapse(self) -> 'FixedApertureGeometry':
-        xp = self.__array_namespace__()
-        z = xp.mean(xp.reshape(self.z, (-1,)), axis=0, keepdims=True)
-        return self.replace(lens=self.lens.collapse(), z=z)
-
-class FixedGeometry(BaseGeometry[FixedLens, StaticZ], State, eq=True, unsafe_hash=True):
-    lens    : FixedLens = field(static=True)
-    z       : StaticZ = field(static=True)
-
-    @classmethod
-    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        z: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedGeometry':
-        foc_pos = (float(foc_pos[0]), float(foc_pos[1]), float(foc_pos[2]))
-        pupil_roi = (float(pupil_roi[0]), float(pupil_roi[1]),
-                     float(pupil_roi[2]), float(pupil_roi[3]))
-        lens = FixedLens(foc_pos, pupil_roi)
-        return cls(lens, tuple(float(val) for val in z))
-
-    @classmethod
-    def from_resolved(cls, geometry: ResolvedGeometry) -> 'FixedGeometry':
-        collapsed = geometry.collapse()
-        z = tuple(float(val) for val in collapsed.z)
-        return cls(FixedLens.from_resolved(collapsed.lens), z)
+        lens = FixedLens.from_resolved(resolved)
+        if isinstance(resolved, ResolvedGeometry):
+            defocus = tuple(float(val) for val in resolved.defocus)
+        else:
+            defocus = tuple(0.0 for _ in range(resolved.size))
+        return cls(lens.foc_pos, lens.pupil_roi, defocus)
 
     def broadcast(self, size: int) -> 'FixedGeometry':
         return self
@@ -899,17 +855,86 @@ class FixedGeometry(BaseGeometry[FixedLens, StaticZ], State, eq=True, unsafe_has
     def collapse(self) -> 'FixedGeometry':
         return self
 
-AnyXtal = TypeVar('AnyXtal', bound=XtalState)
-AnyGeometry = TypeVar('AnyGeometry', bound=BaseGeometry)
+class FixedPupilGeometry(BaseGeometry[RealArray, StaticPupil, RealArray], FixedPupilLens):
+    defocus : RealArray
+
+    @classmethod
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy
+                        ) -> 'FixedPupilGeometry':
+        lens = FixedPupilLens.from_parameters(foc_pos, pupil_roi, xp)
+        return cls(lens.foc_pos, lens.pupil_roi, xp.asarray(defocus))
+
+    @classmethod
+    def from_resolved(cls, resolved: ResolvedLens | ResolvedGeometry) -> 'FixedPupilGeometry':
+        lens = FixedPupilLens.from_resolved(resolved)
+        if isinstance(resolved, ResolvedGeometry):
+            defocus = resolved.defocus
+        else:
+            xp = resolved.__array_namespace__()
+            defocus = xp.zeros(resolved.size, dtype=resolved.foc_pos.dtype)
+        return cls(lens.foc_pos, lens.pupil_roi, defocus)
+
+    def broadcast(self, size: int) -> 'FixedPupilGeometry':
+        xp = self.__array_namespace__()
+
+        lens = FixedPupilLens.broadcast(self, size)
+        defocus = xp.broadcast_to(self.defocus, (size,))
+        return self.replace(foc_pos=lens.foc_pos, pupil_roi=lens.pupil_roi, defocus=defocus)
+
+    def collapse(self) -> 'FixedPupilGeometry':
+        xp = self.__array_namespace__()
+
+        lens = FixedPupilLens.collapse(self)
+        defocus = xp.mean(xp.reshape(self.defocus, (-1,)), axis=0, keepdims=True)
+        return self.replace(foc_pos=lens.foc_pos, pupil_roi=lens.pupil_roi, defocus=defocus)
+
+class FixedApertureGeometry(BaseGeometry[RealArray, RealArray, RealArray], FixedApertureLens):
+    defocus : RealArray
+
+    @classmethod
+    def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
+                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy
+                        ) -> 'FixedApertureGeometry':
+        lens = FixedApertureLens.from_parameters(foc_pos, pupil_roi, xp)
+        return cls(lens.foc_pos, lens.pupil_center, lens.aperture, xp.asarray(defocus))
+
+    @classmethod
+    def from_resolved(cls, resolved: ResolvedLens | ResolvedGeometry) -> 'FixedApertureGeometry':
+        lens = FixedApertureLens.from_resolved(resolved)
+        if isinstance(resolved, ResolvedGeometry):
+            defocus = resolved.defocus
+        else:
+            xp = resolved.__array_namespace__()
+            defocus = xp.zeros(resolved.size, dtype=resolved.foc_pos.dtype)
+        return cls(lens.foc_pos, lens.pupil_center, lens.aperture, defocus)
+
+    def broadcast(self, size: int) -> 'FixedApertureGeometry':
+        xp = self.__array_namespace__()
+
+        lens = FixedApertureLens.broadcast(self, size)
+        defocus = xp.broadcast_to(self.defocus, (size,))
+        return self.replace(foc_pos=lens.foc_pos, pupil_center=lens.pupil_center, defocus=defocus)
+
+    def collapse(self) -> 'FixedApertureGeometry':
+        xp = self.__array_namespace__()
+
+        lens = FixedApertureLens.collapse(self)
+        defocus = xp.mean(xp.reshape(self.defocus, (-1,)), axis=0, keepdims=True)
+        return self.replace(foc_pos=lens.foc_pos, pupil_center=lens.pupil_center, defocus=defocus)
 
 class ResolvedSetup(State, DataContainer):
     xtal    : XtalState
-    geometry: ResolvedGeometry
+    geometry: ResolvedLens | ResolvedGeometry
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
                          ) -> 'ResolvedSetup':
-        return cls(XtalState.import_dataframe(df, xp), ResolvedGeometry.import_dataframe(df, xp))
+        if 'defocus' in df:
+            geometry = ResolvedGeometry.import_dataframe(df, xp)
+        else:
+            geometry = ResolvedLens.import_dataframe(df, xp)
+        return cls(XtalState.import_dataframe(df, xp), geometry)
 
     def __getitem__(self, indices: Indices | BoolArray) -> 'ResolvedSetup':
         if len(self.xtal) == self.geometry.size:
@@ -929,92 +954,109 @@ class ResolvedSetup(State, DataContainer):
 
         return df.assign(**geometry.to_dataframe(index=index))
 
-class BaseSetup(DataContainer, BaseGeometry, Generic[AnyXtal, AnyGeometry]):
-    xtal    : AnyXtal
-    geometry: AnyGeometry
+AnyXtal = TypeVar('AnyXtal', bound=XtalState)
+AnyGeometry = TypeVar('AnyGeometry', bound=BaseLens | BaseGeometry)
 
-    @property
-    def lens(self) -> BaseLens:
-        return self.geometry.lens
-
-    @property
-    def z(self) -> StaticZ | RealArray:
-        return self.geometry.z
+class BaseSetup(DataContainer, Generic[AnyXtal, AnyGeometry]):
+    xtal        : AnyXtal
+    geometry    : AnyGeometry
 
     def resolve(self, xp: AnyNamespace) -> ResolvedSetup:
         return ResolvedSetup(self.xtal, self.geometry.resolve(xp))
 
     @classmethod
-    def from_resolved(cls: Type[Self], setup: ResolvedSetup) -> Self:
+    def from_resolved(cls: Type[Self], resolved: ResolvedSetup) -> Self:
         raise NotImplementedError
 
 # Some predefined experimental setups
 
-class FixedSetup(BaseSetup[XtalState, FixedGeometry], State):
+class FixedSetup(BaseSetup[XtalState, FixedLens | FixedGeometry], State):
     xtal     : XtalState
-    geometry : FixedGeometry
+    geometry : FixedLens | FixedGeometry
 
     @classmethod
-    def from_resolved(cls, setup: ResolvedSetup) -> 'FixedSetup':
-        return cls(setup.xtal, FixedGeometry.from_resolved(setup.geometry))
+    def from_resolved(cls, resolved: ResolvedSetup) -> 'FixedSetup':
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            geometry = FixedGeometry.from_resolved(resolved.geometry)
+        else:
+            geometry = FixedLens.from_resolved(resolved.geometry)
+        return cls(resolved.xtal, geometry)
 
 class SerialFixedSetup(BaseSetup, State):
     cell     : XtalCell
     rotation : RotationState
-    geometry : FixedGeometry
+    geometry : FixedLens | FixedGeometry
 
     @property
     def xtal(self) -> XtalState:
         return self.cell.to_basis() @ self.rotation
 
     @classmethod
-    def from_resolved(cls, setup: ResolvedSetup) -> 'SerialFixedSetup':
-        return cls(setup.xtal.unit_cell, setup.xtal.orientation_matrix,
-                   FixedGeometry.from_resolved(setup.geometry))
+    def from_resolved(cls, resolved: ResolvedSetup) -> 'SerialFixedSetup':
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            geometry = FixedGeometry.from_resolved(resolved.geometry)
+        else:
+            geometry = FixedLens.from_resolved(resolved.geometry)
+        return cls(resolved.xtal.unit_cell, resolved.xtal.orientation_matrix,
+                   geometry)
 
-class FixedPupilSetup(BaseSetup[XtalState, FixedPupilGeometry], State):
+class FixedPupilSetup(BaseSetup[XtalState, FixedPupilLens | FixedPupilGeometry], State):
     xtal     : XtalState
-    geometry : FixedPupilGeometry
+    geometry : FixedPupilLens | FixedPupilGeometry
 
     @classmethod
-    def from_resolved(cls, setup: ResolvedSetup) -> 'FixedPupilSetup':
-        return cls(setup.xtal, FixedPupilGeometry.from_resolved(setup.geometry))
+    def from_resolved(cls, resolved: ResolvedSetup) -> 'FixedPupilSetup':
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            geometry = FixedPupilGeometry.from_resolved(resolved.geometry)
+        else:
+            geometry = FixedPupilLens.from_resolved(resolved.geometry)
+        return cls(resolved.xtal, geometry)
 
 class SerialFixedPupilSetup(BaseSetup, State):
     cell     : XtalCell
     rotation : RotationState
-    geometry : FixedPupilGeometry
+    geometry : FixedPupilLens | FixedPupilGeometry
 
     @property
     def xtal(self) -> XtalState:
         return self.cell.to_basis() @ self.rotation
 
     @classmethod
-    def from_resolved(cls, setup: ResolvedSetup) -> 'SerialFixedPupilSetup':
-        return cls(setup.xtal.unit_cell, setup.xtal.orientation_matrix,
-                   FixedPupilGeometry.from_resolved(setup.geometry))
+    def from_resolved(cls, resolved: ResolvedSetup) -> 'SerialFixedPupilSetup':
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            geometry = FixedPupilGeometry.from_resolved(resolved.geometry)
+        else:
+            geometry = FixedPupilLens.from_resolved(resolved.geometry)
+        return cls(resolved.xtal.unit_cell, resolved.xtal.orientation_matrix, geometry)
 
-class FixedApertureSetup(BaseSetup[XtalState, FixedApertureGeometry], State):
+class FixedApertureSetup(BaseSetup[XtalState, FixedApertureLens | FixedApertureGeometry], State):
     xtal     : XtalState
-    geometry : FixedApertureGeometry
+    geometry : FixedApertureLens | FixedApertureGeometry
 
     @classmethod
-    def from_resolved(cls, setup: ResolvedSetup) -> 'FixedApertureSetup':
-        return cls(setup.xtal, FixedApertureGeometry.from_resolved(setup.geometry))
+    def from_resolved(cls, resolved: ResolvedSetup) -> 'FixedApertureSetup':
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            geometry = FixedApertureGeometry.from_resolved(resolved.geometry)
+        else:
+            geometry = FixedApertureLens.from_resolved(resolved.geometry)
+        return cls(resolved.xtal, geometry)
 
 class SerialFixedApertureSetup(BaseSetup, State):
     cell     : XtalCell
     rotation : RotationState
-    geometry : FixedApertureGeometry
+    geometry : FixedApertureLens | FixedApertureGeometry
 
     @property
     def xtal(self) -> XtalState:
         return self.cell.to_basis() @ self.rotation
 
     @classmethod
-    def from_resolved(cls, setup: ResolvedSetup) -> 'SerialFixedApertureSetup':
-        return cls(setup.xtal.unit_cell, setup.xtal.orientation_matrix,
-                   FixedApertureGeometry.from_resolved(setup.geometry))
+    def from_resolved(cls, resolved: ResolvedSetup) -> 'SerialFixedApertureSetup':
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            geometry = FixedApertureGeometry.from_resolved(resolved.geometry)
+        else:
+            geometry = FixedApertureLens.from_resolved(resolved.geometry)
+        return cls(resolved.xtal.unit_cell, resolved.xtal.orientation_matrix, geometry)
 
 class IndexingResult(State, IndexedContainer):
     index : IntArray

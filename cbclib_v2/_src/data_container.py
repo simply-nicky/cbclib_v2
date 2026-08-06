@@ -7,7 +7,7 @@ Defines a four-level class hierarchy for holding typed, array-backed data:
 * :class:`DataContainer` — adds array-namespace awareness and
   ``to_numpy`` / ``to_jax`` / ``to_cupy`` conversions.
 * :class:`ArrayContainer` — uniform-shape arrays; supports
-  ``concatenate``, ``stack``, ``__getitem__``, and ``reshape``.
+  ``concat``, ``stack``, ``__getitem__``, and ``reshape``.
 * :class:`IndexedContainer` — extends :class:`ArrayContainer` with an
   integer ``index`` field that groups rows into labelled frames; supports
   ``take``, ``loc``, and ``iloc`` accessors.
@@ -353,7 +353,7 @@ class DataContainer(Container):
 class ArrayContainer(DataContainer):
     """Container for dataclasses whose array fields share a common leading shape.
 
-    Extends :class:`DataContainer` with field-wise ``concatenate``,
+    Extends :class:`DataContainer` with field-wise ``concat``,
     ``stack``, integer/boolean ``__getitem__``, and ``reshape``.  The
     :attr:`shape` property returns the leading dimensions that are identical
     across all array fields.
@@ -362,11 +362,12 @@ class ArrayContainer(DataContainer):
     @classmethod
     def is_empty(cls, data: Any) -> bool:
         """Return ``True`` when *data* is **not** an array (non-array fields are excluded)."""
-        # Since ArrayContainer has a consistent leading shape, we can't treat empty arrays as empty containers.
+        # Since ArrayContainer has a consistent leading shape
+        # we can't treat empty arrays as empty containers.
         return not isinstance(data, Array)
 
     @classmethod
-    def concatenate(cls: Type[Self], containers: Iterable[Self]) -> Self:
+    def concat(cls: Type[Self], containers: Iterable[Self]) -> Self:
         """Concatenate a sequence of containers field-wise along axis 0.
 
         Args:
@@ -390,7 +391,13 @@ class ArrayContainer(DataContainer):
         for container in containers:
             for key, val in container.contents().items():
                 concatenated[key].append(val)
-        result = {key: xp.concat(val) for key, val in concatenated.items()}
+
+        result = {}
+        for key, vals in concatenated.items():
+            if isinstance(vals[0], Array):
+                result[key] = xp.concat(vals)
+            if isinstance(vals[0], ArrayContainer):
+                result[key] = type(vals[0]).concat(vals)
         return cls(**(defaults | result))
 
     @classmethod
@@ -419,7 +426,13 @@ class ArrayContainer(DataContainer):
         for container in containers:
             for key, val in container.contents().items():
                 stacked[key].append(val)
-        result = {key: xp.stack(val, axis=axis) for key, val in stacked.items()}
+
+        result = {}
+        for key, vals in stacked.items():
+            if isinstance(vals[0], Array):
+                result[key] = xp.stack(vals, axis=axis)
+            if isinstance(vals[0], ArrayContainer):
+                result[key] = type(vals[0]).stack(vals, axis=axis)
         return cls(**(defaults | result))
 
     @property
@@ -467,8 +480,13 @@ class ArrayContainer(DataContainer):
         Returns:
             New container instance with the indexed array fields.
         """
-        data = {attr: val[indices] for attr, val in self.contents().items()
-                if isinstance(val, (Array, ArrayContainer))}
+        xp = self.__array_namespace__()
+        data = {}
+        for attr, val in self.contents().items():
+            if isinstance(val, Array):
+                data[attr] = xp.asarray(val[indices])
+            if isinstance(val, ArrayContainer):
+                data[attr] = val[indices]
         return self.replace(**data)
 
     def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:
@@ -513,7 +531,7 @@ def split(containers: IC | Array | Sequence[IC | A | Array | Any], n_chunks: int
 
     If the elements are :class:`ArrayContainer` subclasses the chunks are
     reassembled into container instances via
-    :meth:`ArrayContainer.concatenate`.  For plain arrays a stacked array
+    :meth:`ArrayContainer.concat`.  For plain arrays a stacked array
     is yielded.  Otherwise a plain Python list is yielded per chunk.
 
     Args:
@@ -654,7 +672,7 @@ class Indexed(Protocol):
 
     def take(self: I, indices: IntSequence, reset_index: bool = False) -> I: ...
 
-    def unique_index(self: I) -> NDIntArray: ...
+    def unique_index(self: I) -> IntArray: ...
 
 @dataclass
 class GenericIndexer(Generic[I]):
@@ -717,7 +735,7 @@ def concatenate_index(arrays: Iterable[IntArray], xp: AnyNamespace=NumPy) -> Int
     When the first element of a subsequent array is less than the last
     element of the previous one, the subsequent array is shifted upward so
     that the combined sequence remains non-decreasing.  This is used by
-    :meth:`IndexedContainer.concatenate` to merge frame indices from
+    :meth:`IndexedContainer.concat` to merge frame indices from
     multiple chunks without collisions.
 
     Args:
@@ -745,7 +763,7 @@ class IndexedContainer(ArrayContainer):
 
     Extends :class:`ArrayContainer` by treating the ``index`` field
     specially: it is excluded from :meth:`contents` (so it is not touched
-    by field-wise operations) and handled explicitly by :meth:`concatenate`,
+    by field-wise operations) and handled explicitly by :meth:`concat`,
     :meth:`__getitem__`, :meth:`__iter__`, and :meth:`take`.
 
     Row order is always maintained sorted by ``index``; if the constructor
@@ -769,7 +787,7 @@ class IndexedContainer(ArrayContainer):
             self._index = IndexArray(self.index)
 
     @classmethod
-    def concatenate(cls: Type[Self], containers: Iterable[Self]) -> Self:
+    def concat(cls: Type[Self], containers: Iterable[Self]) -> Self:
         """Concatenate indexed containers while keeping indices unique.
 
         Data fields are concatenated field-wise; the combined ``index`` is
@@ -784,10 +802,10 @@ class IndexedContainer(ArrayContainer):
             New container instance with concatenated data and adjusted
             index.
         """
-        obj = super(IndexedContainer, cls).concatenate(containers)
+        obj = super(IndexedContainer, cls).concat(containers)
         xp = obj.__array_namespace__()
         index = concatenate_index((container.index for container in containers), xp)
-        return cls(**(obj.to_dict() | {'index': index}))
+        return cls(**(obj.contents() | {'index': index}))
 
     @classmethod
     def stack(cls: Type[Self], containers: Iterable[Self], axis: int=0) -> Self:
@@ -809,7 +827,7 @@ class IndexedContainer(ArrayContainer):
         """
         obj = super(IndexedContainer, cls).stack(containers, axis)
         for container in containers:
-            return cls(**(obj.to_dict() | {'index': container.index}))
+            return cls(**(obj.contents() | {'index': container.index}))
 
         raise ValueError("containers must not be empty")
 
@@ -823,16 +841,17 @@ class IndexedContainer(ArrayContainer):
             New container with the selected data rows and matching index
             entries.
         """
+        xp = self.__array_namespace__()
         obj = super().__getitem__(indices)
+
         if isinstance(indices, tuple):
             index = self.index[indices[0]]
         elif isinstance(indices, Array) and indices.dtype == bool:
-            xp = self.__array_namespace__()
             index = xp.reshape(self.index, (self.index.size,) + (1,) * (indices.ndim - 1))
             index = xp.broadcast_to(index, indices.shape)[indices]
         else:
             index = self.index[indices]
-        return type(self)(**(obj.to_dict() | {'index': index}))
+        return type(self)(**(obj.contents() | {'index': xp.asarray(index)}))
 
     def __iter__(self: Self) -> Iterator[Self]:
         """Iterate over groups, yielding one container per unique index value.
@@ -915,7 +934,7 @@ class IndexedContainer(ArrayContainer):
         expanded_index = xp.reshape(new_index, expanded_shape)
         if not xp.all(old_index == expanded_index):
             raise ValueError("Cannot reshape IndexedContainer: inconsistent index grouping")
-        return type(self)(**(obj.to_dict() | {'index': new_index}))
+        return type(self)(**(obj.contents() | {'index': new_index}))
 
     def take(self: Self, indices: IntSequence, reset_index: bool = False) -> Self:
         """Select groups by index value and return the corresponding slice.

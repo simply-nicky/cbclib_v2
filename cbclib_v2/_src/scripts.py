@@ -5,7 +5,7 @@ import os
 import logging
 import sys
 from multiprocessing import Pool
-from typing import Any, Callable, Iterator, List, Literal, Tuple, Type, TypeVar, cast, overload
+from typing import Any, Callable, Dict, Iterator, List, Literal, Tuple, Type, TypeVar, cast, overload
 from dataclasses import InitVar, dataclass, field
 import h5py
 from jax import jit, value_and_grad
@@ -28,8 +28,9 @@ from .parser import from_container, from_file
 from .streaks import StackedStreaks, Streaks
 from ..indexer.cbc_data import RefinerData, MillerWithRLP, Patterns
 from ..indexer.cbc_indexing import CBDIndexer, RefinerLoss, RefinerModel
-from ..indexer.cbc_setup import (BaseGeometry, BaseSetup, FixedApertureGeometry, FixedApertureSetup,
-                                 FixedPupilGeometry, FixedPupilSetup, FixedGeometry, FixedSetup,
+from ..indexer.cbc_setup import (BaseGeometry, BaseLens, BaseSetup, FixedApertureGeometry,
+                                 FixedApertureLens, FixedApertureSetup, FixedLens, FixedPupilGeometry,
+                                 FixedPupilLens, FixedPupilSetup, FixedGeometry, FixedSetup,
                                  IndexingResult, ResolvedSetup, TiltOverAxisState, XtalState)
 
 class BaseParameters(Container):
@@ -660,8 +661,8 @@ def run_detection(loader: LoadWorker[NDArray], indices: TrainIndices, metapath: 
         streaks.append(pattern)
 
     if streaks and isinstance(streaks[0], StackedStreaks):
-        return StackedStreaks.concatenate(streaks)
-    return Streaks.concatenate(streaks)
+        return StackedStreaks.concat(streaks)
+    return Streaks.concat(streaks)
 
 streaks_worker : 'StreaksWorker'
 
@@ -736,8 +737,8 @@ def pool_detection(loader: LoadWorker[NDArray], indices: TrainIndices, metapath:
             streaks.append(worker((frame, index)))
 
     if streaks and isinstance(streaks[0], StackedStreaks):
-        return StackedStreaks.concatenate(streaks)
-    return Streaks.concatenate(streaks)
+        return StackedStreaks.concat(streaks)
+    return Streaks.concat(streaks)
 
 @dataclass
 class IndexingConfig(BaseParameters):
@@ -868,7 +869,7 @@ def run_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
         raise ValueError(f'Number of crystals ({len(xtals):d}) and patterns ({len(patterns):d}) '\
                          'are inconsistent')
 
-    return IndexingResult.concatenate(solutions)
+    return IndexingResult.concat(solutions)
 
 indexing_worker : 'IndexingWorker'
 
@@ -935,7 +936,7 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
         for candidates, pattern in tqdm(zip(rlp_iterator, patterns), total=len(patterns)):
             solutions.append(worker((candidates, pattern)))
 
-    return IndexingResult.concatenate(solutions)
+    return IndexingResult.concat(solutions)
 
 @dataclass
 class ModelDataParameters(BaseParameters):
@@ -1018,16 +1019,41 @@ class OptimiseParameters(BaseParameters):
 LossFn = Callable[[RefinerData, BaseSetup], RealArray]
 LossGradFn = Callable[[RefinerData, BaseSetup], Tuple[RealArray, BaseSetup]]
 ApplyUpdatesFn = Callable[[BaseSetup, Updates], BaseSetup]
-GeometryT = TypeVar('GeometryT', bound=BaseGeometry)
+GeometryT = TypeVar('GeometryT', bound=BaseLens | BaseGeometry)
+
+GeometryType = Literal['in-focus', 'out-of-focus']
+SetupType = Literal['fixed', 'fixed-aperture', 'fixed-pupil']
 
 @dataclass
 class RefinementConfig(BaseParameters):
     data : ModelDataParameters
     loss : LossParameters
     optimise : OptimiseParameters
-    setup : Literal['fixed', 'fixed-aperture', 'fixed-pupil']
+    geometry : GeometryType
+    setup : SetupType
     mode : Literal['shared', 'per-pattern']
     threshold : float
+
+    def fixed_geometry(self) -> type[FixedLens | FixedGeometry]:
+        if self.geometry == 'in-focus':
+            return FixedLens
+        if self.geometry == 'out-of-focus':
+            return FixedGeometry
+        raise ValueError(f'Invalid geometry keyword: {self.geometry}')
+
+    def fixed_aperture_geometry(self) -> type[FixedApertureLens | FixedApertureGeometry]:
+        if self.geometry == 'in-focus':
+            return FixedApertureLens
+        if self.geometry == 'out-of-focus':
+            return FixedApertureGeometry
+        raise ValueError(f'Invalid geometry keyword: {self.geometry}')
+
+    def fixed_pupil_geometry(self) -> type[FixedPupilLens | FixedPupilGeometry]:
+        if self.geometry == 'in-focus':
+            return FixedPupilLens
+        if self.geometry == 'out-of-focus':
+            return FixedPupilGeometry
+        raise ValueError(f'Invalid geometry keyword: {self.geometry}')
 
     def import_resolved(self, setup: ResolvedSetup) -> BaseSetup:
         def init_geometry(geometry_cls: type[GeometryT]) -> GeometryT:
@@ -1037,13 +1063,13 @@ class RefinementConfig(BaseParameters):
             return geometry
 
         if self.setup == 'fixed':
-            return FixedSetup(xtal=setup.xtal, geometry=init_geometry(FixedGeometry))
+            return FixedSetup(xtal=setup.xtal, geometry=init_geometry(self.fixed_geometry()))
         if self.setup == 'fixed-aperture':
             return FixedApertureSetup(xtal=setup.xtal,
-                                      geometry=init_geometry(FixedApertureGeometry))
+                                      geometry=init_geometry(self.fixed_aperture_geometry()))
         if self.setup == 'fixed-pupil':
             return FixedPupilSetup(xtal=setup.xtal,
-                                   geometry=init_geometry(FixedPupilGeometry))
+                                   geometry=init_geometry(self.fixed_pupil_geometry()))
         raise ValueError(f'Invalid setup keyword: {self.setup}')
 
     def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseSetup:
@@ -1054,13 +1080,13 @@ class RefinementConfig(BaseParameters):
             return geometry
 
         if self.setup == 'fixed':
-            return FixedSetup(xtal=xtal, geometry=init_geometry(FixedGeometry))
+            return FixedSetup(xtal=xtal, geometry=init_geometry(self.fixed_geometry()))
         if self.setup == 'fixed-aperture':
             return FixedApertureSetup(xtal=xtal,
-                                      geometry=init_geometry(FixedApertureGeometry))
+                                      geometry=init_geometry(self.fixed_aperture_geometry()))
         if self.setup == 'fixed-pupil':
             return FixedPupilSetup(xtal=xtal,
-                                   geometry=init_geometry(FixedPupilGeometry))
+                                   geometry=init_geometry(self.fixed_pupil_geometry()))
         raise ValueError(f'Invalid setup keyword: {self.setup}')
 
 @dataclass
@@ -1236,6 +1262,8 @@ def refinement(index: IntArray, initial: BaseSetup, patterns: Patterns, params: 
 
     solver, schedule = params.optimise.optimiser()
 
+    logger.info("refining with %s setup and with %s geometry in %s mode",
+                params.setup, params.geometry, params.mode)
     logger.info("refining %d patterns with %s/%s/%s for %d steps",
                 len(initial.xtal), params.optimise.method, params.loss.kind,
                 params.loss.projector, params.optimise.schedule.num_steps)

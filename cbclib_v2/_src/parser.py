@@ -4,7 +4,8 @@ import dataclasses
 import json
 import os
 import re
-from typing import Any, Callable, ClassVar, Dict, List, Tuple, Type, get_args, get_origin, overload
+from typing import (Any, Callable, ClassVar, Dict, List, Tuple, Type, get_args, get_origin,
+                    get_type_hints as typing_get_type_hints, overload)
 import numpy as np
 from .data_container import Container, resolved_type
 from .annotations import AnyType, Array, AnyNamespace, ExpandedType, NDArray, NumPy, UnionType
@@ -189,82 +190,193 @@ class StringFormatting:
         return str(node)
 
 ContainerType = type[Container]
-FieldValues = str | Dict[str, Any] | Tuple[str, Dict[str, 'FieldValues']]
+
+@dataclasses.dataclass(frozen=True)
+class FieldLocator:
+    """Locate one parameter in a nested object.
+
+    Args:
+        field_name: Dot-separated attribute path relative to the root object.
+    """
+    field_name: str
+
+    def __post_init__(self) -> None:
+        if not self.field_name or any(not name for name in self.path):
+            raise ValueError(f"Invalid field name: '{self.field_name}'")
+
+    @property
+    def path(self) -> Tuple[str, ...]:
+        """Return the individual attribute names in the locator."""
+        return tuple(self.field_name.split('.'))
+
+    def getattr(self, obj: Any) -> Any:
+        """Extract the located parameter from an object."""
+        value = obj
+        for field_name in self.path:
+            value = getattr(value, field_name)
+        return value
+
+FieldValues = FieldLocator | Dict[str, 'FieldValues']
+FieldInfo = Dict[str, FieldValues]
 TypeValues = AnyType | Dict[str, AnyType]
 
 def fields(cls: ContainerType, data: Dict[str, Any],
-           default: str | None) -> Dict[str, FieldValues]:
-    result = {}
+           default: str | None) -> FieldInfo:
+    """Create the file-to-object field mapping for a container type.
 
+    File parameter names remain dictionary keys. Leaf values are
+    :class:`FieldLocator` objects containing the complete attribute path from
+    the root container. Nested container fields retain their own file
+    dictionaries, while non-container fields are grouped under ``default``
+    when one is provided.
+
+    Args:
+        cls: Container type represented by the mapping.
+        data: Serialized object dictionary. It is used to resolve polymorphic
+            container member types.
+        default: Optional file section for non-container fields. If omitted,
+            those fields remain at the current file-dictionary level.
+
+    Returns:
+        Recursive field mapping preserving the generated file layout.
+    """
+    def find_fields(cls: ContainerType, data: Dict[str, Any], default: str | None,
+                parent: Tuple[str, ...]) -> FieldInfo:
+        result: FieldInfo = {}
+
+        for field in dataclasses.fields(cls):
+            origin = field.type
+            if isinstance(field.type, UnionType):
+                origin = get_args(origin)[0]
+
+            while get_origin(origin) is not None:
+                origin = get_origin(origin)
+
+            if isinstance(origin, type) and issubclass(origin, Container):
+                origin = resolved_type(origin, field.name, data)
+                result[field.name] = find_fields(origin, data[field.name], None,
+                                                 parent + (field.name,))
+            elif isinstance(origin, type) and issubclass(origin, dict):
+                result[field.name] = FieldLocator('.'.join(parent + (field.name,)))
+            elif default is not None:
+                if default not in result:
+                    result[default] = {}
+                default_fields = result[default]
+                if not isinstance(default_fields, dict):
+                    raise ValueError(f"Default value '{default}' is already used, please change it")
+                default_fields[field.name] = FieldLocator('.'.join(parent + (field.name,)))
+            else:
+                result[field.name] = FieldLocator('.'.join(parent + (field.name,)))
+
+        return result
+
+    return find_fields(cls, data, default, ())
+
+def get_type_hints(cls: Type[Any],
+                   data: Dict[str, Any] | None=None) -> Dict[str, TypeValues]:
+    """Return type hints with nested container members expanded recursively.
+
+    Args:
+        cls: Container type whose fields are inspected.
+        data: Optional object dictionary used to resolve polymorphic container fields.
+
+    Returns:
+        Type hints arranged like the dictionary used to construct ``cls``.
+    """
+    result: Dict[str, TypeValues] = {}
+    hints = typing_get_type_hints(cls)
     for field in dataclasses.fields(cls):
-        origin = field.type
-        if isinstance(field.type, UnionType):
+        field_type = hints[field.name]
+        origin = field_type
+        if isinstance(field_type, UnionType):
             origin = get_args(origin)[0]
 
         while get_origin(origin) is not None:
             origin = get_origin(origin)
 
         if isinstance(origin, type) and issubclass(origin, Container):
-            origin = resolved_type(origin, field.name, data)
-            result[field.name] = (field.name, fields(origin, data[field.name], None))
-        elif isinstance(origin, type) and issubclass(origin, dict):
-            result[field.name] = field.name
-        elif default is not None:
-            if default not in result:
-                result[default] = {}
-            if not isinstance(result[default], dict):
-                raise ValueError(f"Default value '{default}' is already used, please change it")
-            result[default][field.name] = field.name
+            child_data = None
+            if data is not None:
+                origin = resolved_type(origin, field.name, data)
+                child_data = data[field.name]
+            result[field.name] = get_type_hints(origin, child_data)
         else:
-            result[field.name] = field.name
-
+            result[field.name] = field_type
     return result
 
-def type_hints(cls: ContainerType, data: Dict[str, Any]) -> Dict[str, TypeValues]:
-    result = {}
-    for field in dataclasses.fields(cls):
-        origin = field.type
-        if isinstance(origin, type) and issubclass(origin, Container):
-            origin = resolved_type(origin, field.name, data)
-            result[field.name] = type_hints(origin, data[field.name])
-        else:
-            result[field.name] = field.type
+def read_fields(field_info: FieldInfo, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Select file fields and reconstruct their object dictionary.
+
+    Dictionaries in ``field_info`` describe paths through the file data and
+    are traversed without being copied into the result. This flattens a
+    default file section as in the original parser protocol. At each leaf,
+    the corresponding :class:`FieldLocator` supplies the destination path in
+    the object dictionary, recreating nested container members. All leaves
+    write into one shared result so separate file sections can contribute to
+    the same nested object.
+
+    Args:
+        field_info: Recursive mapping from file names to object field locators.
+        data: Nested dictionary read from the file.
+
+    Returns:
+        Constructor-shaped dictionary containing the selected object fields.
+
+    Raises:
+        ValueError: If a mapped file name is missing or locator paths conflict.
+        TypeError: If a mapping value is neither a locator nor a dictionary.
+    """
+    result: Dict[str, Any] = {}
+
+    def set_value(locator: FieldLocator, value: Any) -> None:
+        node = result
+        for field_name in locator.path[:-1]:
+            child = node.setdefault(field_name, {})
+            if not isinstance(child, dict):
+                raise ValueError(f"Field locator '{locator.field_name}' conflicts with another "
+                                 "field locator")
+            node = child
+        node[locator.path[-1]] = value
+
+    def read_node(node_info: FieldInfo, node_data: Dict[str, Any]) -> None:
+        for parameter, attrs in node_info.items():
+            if parameter not in node_data:
+                raise ValueError(f"Section '{parameter}' not found in the file")
+            if isinstance(attrs, FieldLocator):
+                set_value(attrs, node_data[parameter])
+            elif isinstance(attrs, dict):
+                read_node(attrs, node_data[parameter])
+            else:
+                raise TypeError(f"Invalid 'fields' values: {attrs}")
+
+    read_node(field_info, data)
     return result
 
-def read_fields(field_info: Dict[str, FieldValues], data: Dict[str, Any]) -> Dict:
+def extract_fields(field_info: FieldInfo, obj: Any) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     for section, attrs in field_info.items():
-        if section not in data:
-            raise ValueError(f"Section '{section}' not found in the file")
-
-        if isinstance(attrs, str):
-            result[attrs] = data[section]
+        if isinstance(attrs, FieldLocator):
+            result[section] = attrs.getattr(obj)
         elif isinstance(attrs, dict):
-            # 'default' section with a dictionary of attributes
-            result.update(**read_fields(attrs, data[section]))
-        elif isinstance(attrs, tuple):
-            # 'container' contains another container at 'container.attr'
-            attr, attr_fields = attrs
-            result[attr] = read_fields(attr_fields, data[section])
+            result[section] = extract_fields(attrs, obj)
         else:
             raise TypeError(f"Invalid 'fields' values: {attrs}")
     return result
 
-def extract_fields(field_info: Dict[str, FieldValues], obj: Any) -> Dict:
-    result: Dict[str, Any] = {}
-    for section, attrs in field_info.items():
-        if isinstance(attrs, str):
-            result[section] = getattr(obj, attrs)
-        if isinstance(attrs, dict):
-            result[section] = extract_fields(attrs, obj)
-        if isinstance(attrs, tuple):
-            attr, attr_fields = attrs
-            result[section] = extract_fields(attr_fields, getattr(obj, attr))
-    return result
-
 @dataclasses.dataclass
 class Parser():
-    field_info      : Dict[str, Any]
+    """Read and write selected object fields using a file mapping.
+
+    Attributes:
+        field_info: Recursive file-to-object mapping. Every key is a parameter
+            or section name in the file dictionary. A :class:`FieldLocator`
+            value maps that file parameter to one complete object attribute
+            path, such as ``FieldLocator('lens.foc_pos')``. A dictionary value
+            describes another level of the file dictionary and recursively
+            contains the same two value variants. Thus file nesting is
+            represented by dictionaries and object nesting by locators.
+    """
+    field_info      : FieldInfo
 
     @classmethod
     def from_container(cls, container: Container, default: str | None=None) -> 'Parser':
@@ -307,7 +419,7 @@ class INIParser(Parser, Container):
     def from_container(cls, container: Container, default: str | None=None) -> 'INIParser':
         data = container.to_dict()
         field_info = fields(type(container), data, default)
-        type_info = type_hints(type(container), data)
+        type_info = get_type_hints(type(container), data)
         return cls(field_info, type_info)
 
     @classmethod
@@ -315,7 +427,7 @@ class INIParser(Parser, Container):
                   ) -> 'INIParser':
         data = cls.read_all(file)
         field_info = fields(container_type, data, default)
-        type_info = type_hints(container_type, data)
+        type_info = get_type_hints(container_type, data)
         return cls(field_info, type_info)
 
     @classmethod

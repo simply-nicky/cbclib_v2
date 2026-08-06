@@ -959,7 +959,7 @@ class IndexingScript(BaseScript):
         if self.xtals:
             print(f"Loading crystal orientations from {self.xtals}...")
             df = pd.read_hdf(self.xtals, 'data')
-            xtals = XtalList.import_dataframe(df, xp=xp).to_xtals()
+            xtals = XtalState.import_dataframe(df, xp=xp)
         else:
             print("No crystal orientations provided, using the unit cell information")
             xtals = self.scan.setup.xtal(xp=xp)

@@ -40,7 +40,7 @@ class TestCBDIndexer():
     @pytest.fixture
     def patterns(self, rng: Generator[NDArray], indexer: CBDIndexer, resolved: ResolvedSetup,
                  num_lines: int, xp: NumPyNamespace) -> Patterns:
-        center = indexer.lens.zero_order(resolved.geometry.lens, xp)
+        center = indexer.lens.zero_order(resolved.geometry, xp)
 
         length = rng.uniform(1.5e-3, 1.5e-2, (num_lines,))
         x = rng.uniform(TestSetup.roi[2] * TestSetup.x_pixel_size,
@@ -59,15 +59,16 @@ class TestCBDIndexer():
     @pytest.fixture
     def kout(self, indexer: CBDIndexer, patterns: Patterns, resolved: ResolvedSetup,
              xp: NumPyNamespace) -> RealArray:
+        smp_pos = indexer.smp_center(patterns.index, resolved.geometry, xp)
         return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)),
-                                      resolved.geometry, xp)
+                                      smp_pos, xp)
 
     @pytest.fixture
     def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, initial: FixedSetup,
                 xp: NumPyNamespace) -> MillerWithRLP:
         hkl = indexer.xtal.hkl_in_ball(q_abs, initial.xtal, xp)
         iterator = indexer.xtal.hkl_range(patterns.unique_index(), hkl, initial.xtal, xp)
-        return MillerWithRLP.concatenate(list(iterator))
+        return MillerWithRLP.concat(list(iterator))
 
     @pytest.fixture
     def patterns_uca(self, indexer: CBDIndexer, patterns: Patterns, kout: RealArray,

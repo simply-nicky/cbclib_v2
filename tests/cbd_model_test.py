@@ -6,8 +6,8 @@ from cbclib_v2.annotations import (AnyGenerator, AnyNamespace, Generator, JaxArr
                                    JaxNumPy, NDArray, NumPy, NumPyNamespace, RealArray)
 from cbclib_v2.indexer import (BaseSetup, CBDPoints, FixedPupilGeometry, FixedSetup,
                                MillerWithRLP, Patterns, RefinerData, RefinerDataBest, RefinerLoss,
-                               RefinerModel, ResolvedSetup, SimulatedVectors, XtalState,
-                               random_state)
+                               RefinerModel, ResolvedGeometry, ResolvedSetup, SimulatedVectors,
+                               XtalState, random_state)
 from cbclib_v2.test_util import check_close, TestSetup
 
 Criterion = Callable[[RefinerData, BaseSetup,], RealArray]
@@ -42,13 +42,13 @@ class TestRefinerModel():
         return FullSetup(TestSetup.xtal(xp), TestSetup.fixed_pupil_geometry(xp))
 
     @pytest.fixture
-    def setup(self, initial: FullSetup, xp: JaxNamespace) -> ResolvedSetup:
+    def resolved(self, initial: FullSetup, xp: JaxNamespace) -> ResolvedSetup:
         return initial.resolve(xp)
 
     @pytest.fixture
-    def patterns(self, rng: Generator[JaxArray], model: RefinerModel, setup: ResolvedSetup,
+    def patterns(self, rng: Generator[JaxArray], model: RefinerModel, resolved: ResolvedSetup,
                  num_lines: int, xp: JaxNamespace) -> Patterns:
-        center = model.lens.zero_order(setup.geometry.lens, xp)
+        center = model.lens.zero_order(resolved.geometry, xp)
 
         length = rng.uniform(1.5e-3, 1.5e-2, (num_lines,))
         x = rng.uniform(TestSetup.roi[2] * TestSetup.x_pixel_size,
@@ -66,8 +66,8 @@ class TestRefinerModel():
 
     @pytest.fixture
     def data(self, rng: Generator[JaxArray], patterns: Patterns, model: RefinerModel,
-             setup: ResolvedSetup, num_points: int) -> RefinerData:
-        return model.init_data_random(rng, patterns, num_points, setup)
+             resolved: ResolvedSetup, num_points: int) -> RefinerData:
+        return model.init_data_random(rng, patterns, num_points, resolved)
 
     @pytest.fixture
     def pupil_loss(self, model: RefinerModel, xp: JaxNamespace) -> Criterion:
@@ -78,7 +78,7 @@ class TestRefinerModel():
         return jit(model.line_loss(xp=xp))
 
     def check_loss(self, f: Criterion, data: RefinerData, initial: FullSetup,
-                   xp: JaxNamespace) -> None:
+                   xp: JaxNamespace):
         def loss(initial):
             return f(data, initial)
 
@@ -93,7 +93,7 @@ class TestRefinerModel():
     @pytest.mark.parametrize('num_lines,num_points', [(10, 4)])
     def test_gradients(self, rng: Generator[JaxArray], data: RefinerData,
                        pupil_loss: Criterion, line_loss: Criterion,
-                       xp: JaxNamespace) -> None:
+                       xp: JaxNamespace):
         initial = FullSetup.random(rng)
         self.check_loss(line_loss, data, initial, xp)
         self.check_loss(pupil_loss, data, initial, xp)
@@ -108,7 +108,7 @@ class TestSimulationWorkflow:
         return FixedSetup(TestSetup.xtal(xp), TestSetup.fixed_geometry())
 
     @pytest.fixture
-    def setup(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
+    def resolved(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
         return initial.resolve(xp)
 
     @pytest.fixture
@@ -116,28 +116,29 @@ class TestSimulationWorkflow:
         return 0.08
 
     @pytest.fixture
-    def aperture_rlp(self, model: RefinerModel, q_abs: float, setup: ResolvedSetup,
+    def aperture_rlp(self, model: RefinerModel, q_abs: float, resolved: ResolvedSetup,
                         xp: NumPyNamespace) -> MillerWithRLP:
-        return model.hkl_in_aperture(q_abs, setup, xp)
+        return model.hkl_in_aperture(q_abs, resolved, xp)
 
     @pytest.fixture
     def final_setup(self, initial: FixedSetup) -> FixedSetup:
         return initial
 
     @pytest.fixture
-    def laue(self, model: RefinerModel, aperture_rlp: MillerWithRLP, setup: ResolvedSetup,
+    def laue(self, model: RefinerModel, aperture_rlp: MillerWithRLP, resolved: ResolvedSetup,
              xp: NumPyNamespace) -> SimulatedVectors:
-        pupil = model.lens.pupil(setup.geometry.lens, xp)
+        pupil = model.lens.pupil(resolved.geometry, xp)
         return model.lens.source_lines(aperture_rlp, pupil, xp)
 
-    def test_resolved(self, setup: ResolvedSetup) -> None:
-        assert setup.xtal.basis.shape[-2:] == (3, 3)
-        assert setup.geometry.lens.foc_pos.shape[-1:] == (3,)
-        assert setup.geometry.lens.pupil_roi.shape[-1:] == (4,)
-        assert setup.geometry.z.shape == (1,)
+    def test_resolved(self, resolved: ResolvedSetup):
+        assert resolved.xtal.basis.shape[-2:] == (3, 3)
+        assert resolved.geometry.foc_pos.shape[-1:] == (3,)
+        assert resolved.geometry.pupil_roi.shape[-1:] == (4,)
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            assert resolved.geometry.defocus.shape == (1,)
 
     def test_aperture_rlp(self, aperture_rlp: MillerWithRLP, initial: FixedSetup,
-                          q_abs: float, xp: NumPyNamespace) -> None:
+                          q_abs: float, xp: NumPyNamespace):
         assert aperture_rlp.hkl.shape[0] > 0
         assert aperture_rlp.hkl.shape[-1] == 3
         assert xp.all(aperture_rlp.index >= 0)
@@ -146,14 +147,14 @@ class TestSimulationWorkflow:
         origins = aperture_rlp.origin_points()
         assert xp.all(xp.abs(xp.acos(origins.points[..., 2])) < q_abs)
 
-    def test_source_lines(self, model: RefinerModel, laue: SimulatedVectors, setup: ResolvedSetup,
-                          xp: NumPyNamespace) -> None:
+    def test_source_lines(self, model: RefinerModel, laue: SimulatedVectors,
+                          resolved: ResolvedSetup, xp: NumPyNamespace):
         valid = laue.distance == 0.0
         q = xp.broadcast_to(laue.q, laue.kout.shape)
         q_abs = xp.sum(q[valid]**2, axis=-1)
         kdotq = xp.sum(laue.kin[valid] * q[valid], axis=-1)
-        kmin = model.lens.kin_min(setup.geometry.lens, xp)[..., :2]
-        kmax = model.lens.kin_max(setup.geometry.lens, xp)[..., :2]
+        kmin = model.lens.kin_min(resolved.geometry, xp)[..., :2]
+        kmax = model.lens.kin_max(resolved.geometry, xp)[..., :2]
 
         assert xp.any(valid)
         check_close(xp.sum(laue.kin[valid]**2, axis=-1), xp.ones(valid.sum()))
@@ -176,12 +177,12 @@ class TestLossWorkflow:
         return FixedSetup(TestSetup.xtal(xp), TestSetup.fixed_geometry())
 
     @pytest.fixture
-    def setup(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
+    def resolved(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
         return initial.resolve(xp)
 
-    def make_patterns(self, rng: Generator[NDArray], model: RefinerModel, setup: ResolvedSetup,
+    def make_patterns(self, rng: Generator[NDArray], model: RefinerModel, resolved: ResolvedSetup,
                       xp: NumPyNamespace, num_lines: int) -> Patterns:
-        center = model.lens.zero_order(setup.geometry.lens, xp)
+        center = model.lens.zero_order(resolved.geometry, xp)
         length = rng.uniform(1.5e-3, 1.5e-2, (num_lines,))
         x = rng.uniform(TestSetup.roi[2] * TestSetup.x_pixel_size,
                         TestSetup.roi[3] * TestSetup.x_pixel_size, (num_lines,))
@@ -198,14 +199,14 @@ class TestLossWorkflow:
         return Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def patterns(self, rng: Generator[NDArray], model: RefinerModel, setup: ResolvedSetup,
+    def patterns(self, rng: Generator[NDArray], model: RefinerModel, resolved: ResolvedSetup,
                  xp: NumPyNamespace) -> Patterns:
-        return self.make_patterns(rng, model, setup, xp, num_lines=8)
+        return self.make_patterns(rng, model, resolved, xp, num_lines=8)
 
     @pytest.fixture
     def initialized_data(self, model: RefinerModel, patterns: Patterns,
-                         setup: ResolvedSetup) -> RefinerData:
-        return model.init_data(patterns, setup)
+                         resolved: ResolvedSetup) -> RefinerData:
+        return model.init_data(patterns, resolved)
 
     @pytest.fixture
     def best_data(self, model: RefinerModel, initialized_data: RefinerData) -> RefinerDataBest:
@@ -217,14 +218,14 @@ class TestLossWorkflow:
 
     @pytest.fixture
     def projected_points(self, line_loss: RefinerLoss, best_data: RefinerDataBest,
-                         setup: ResolvedSetup, xp: NumPyNamespace) -> CBDPoints:
-        return line_loss.project_data(best_data, setup, xp)
+                         resolved: ResolvedSetup, xp: NumPyNamespace) -> CBDPoints:
+        return line_loss.project_data(best_data, resolved, xp)
 
     def test_init_data(self, initialized_data: RefinerData, patterns: Patterns,
-                       model: RefinerModel, setup: ResolvedSetup, xp: NumPyNamespace) -> None:
-        q1, q2 = model.patterns_to_q(patterns, setup.geometry, xp)
-        hkl1 = model.xtal.q_to_hkl(q1, setup.xtal, xp)
-        hkl2 = model.xtal.q_to_hkl(q2, setup.xtal, xp)
+                       model: RefinerModel, resolved: ResolvedSetup, xp: NumPyNamespace):
+        q1, q2 = model.patterns_to_q(patterns, resolved.geometry, xp)
+        hkl1 = model.xtal.q_to_hkl(q1, resolved.xtal, xp)
+        hkl2 = model.xtal.q_to_hkl(q2, resolved.xtal, xp)
         closest = xp.asarray(xp.round(xp.stack((hkl1.hkl, hkl2.hkl), axis=1)), dtype=int)
         matches = xp.all(initialized_data.miller.hkl[:, None] == closest[:, :, None], axis=-1)
 
@@ -234,7 +235,7 @@ class TestLossWorkflow:
         assert xp.all(xp.any(matches, axis=-1))
 
     def test_keep_best(self, best_data: RefinerDataBest, initialized_data: RefinerData,
-                       xp: NumPyNamespace) -> None:
+                       xp: NumPyNamespace):
         assert best_data.mask.shape == initialized_data.points.index.shape
         assert best_data.mask.dtype == xp.dtype(bool)
         assert xp.any(best_data.mask)
@@ -242,7 +243,7 @@ class TestLossWorkflow:
         assert xp.all(best_data.points.points == initialized_data.points.points)
 
     def test_project_data(self, projected_points: CBDPoints, initialized_data: RefinerData,
-                          xp: NumPyNamespace) -> None:
+                          xp: NumPyNamespace):
         assert projected_points.kin.shape == initialized_data.miller.hkl.shape[:-1] + (2, 3)
         assert projected_points.kout.shape == initialized_data.points.points.shape[:-1] + (3,)
         assert xp.all(xp.isfinite(projected_points.kin))
@@ -254,12 +255,12 @@ class TestLossWorkflow:
 
     def test_loss_value(self, line_loss: RefinerLoss, initialized_data: RefinerData,
                         best_data: RefinerDataBest, initial: FixedSetup,
-                        setup: ResolvedSetup, xp: NumPyNamespace) -> None:
-        points = line_loss.project_data(initialized_data, setup, xp)
-        distances = xp.min(line_loss.distance_matrix(points, setup, xp), axis=-1)
+                        resolved: ResolvedSetup, xp: NumPyNamespace):
+        points = line_loss.project_data(initialized_data, resolved, xp)
+        distances = xp.min(line_loss.distance_matrix(points, resolved, xp), axis=-1)
         indices = xp.lexsort((distances, initialized_data.points.index), axis=0)
         sorted_distances = distances[indices]
-        actual = line_loss.distances(best_data, points, setup, xp)
+        actual = line_loss.distances(best_data, points, resolved, xp)
         values, counts = xp.unique(initialized_data.points.index, return_counts=True)
 
         expected_mask = xp.concat([xp.arange(size) < 0.5 * size for size in counts])
@@ -283,7 +284,7 @@ class TestLossWorkflow:
         check_close(value, expected.mean())
 
     def test_per_pattern(self, line_loss: RefinerLoss, best_data: RefinerDataBest,
-                         initial: FixedSetup, xp: NumPyNamespace) -> None:
+                         initial: FixedSetup, xp: NumPyNamespace):
         values = line_loss.per_pattern(best_data, initial)
         counts = xp.asarray([xp.sum(best_data.points.index == index)
                              for index in range(initial.xtal.basis.shape[0])])

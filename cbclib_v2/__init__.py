@@ -20,6 +20,7 @@ if TYPE_CHECKING:
                                       split, to_list)
     from ._src.data_processing import (CrystData, CrystMetadata, LSQData, RegionDetector,
                                        StreakDetector)
+    from ._src.parser import FieldLocator
     from ._src.run import (BaseRun, RunConfig, RunLocator, LCLSConfig, LCLSRun, SwissFELConfig,
                            SwissFELRun, XFELRun, XFELConfig, open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
@@ -61,6 +62,7 @@ _EXPORTS = {
     "OnlineDetector": ("._src.data_processing", "OnlineDetector"),
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),
+    "FieldLocator": ("._src.parser", "FieldLocator"),
     "RunConfig": ("._src.run", "RunConfig"),
     "RunLocator": ("._src.run", "RunLocator"),
     "BaseRun": ("._src.run", "BaseRun"),

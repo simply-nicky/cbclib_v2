@@ -138,6 +138,10 @@ class RunConfig(BaseParameters):
     """
     facility : Facility = field(kw_only=True)
 
+    def num_files(self, key: int | RunLocator) -> int:
+        """Return the number of HDF5 files in the run."""
+        raise NotImplementedError
+
     def filenames(self, locator: int | RunLocator) -> List[str]:
         """This method should return a list of all HDF5 file paths for the given run ID."""
         raise NotImplementedError
@@ -414,6 +418,11 @@ class XFELConfig(RunConfig):
     num_modules     : int = 1
     starts_at       : int = 0
     facility        : Facility = field(default='XFEL', kw_only=True)
+
+    def num_files(self, locator: int | RunLocator) -> int:
+        for files in self.module_files(locator):
+            return len(files)
+        return 0
 
     def scan_dir(self, locator: int | RunLocator) -> str:
         """Return the directory path to scan for HDF5 files for the given run ID.
@@ -804,6 +813,17 @@ class SwissFELConfig(RunConfig):
     geometry_file   : str
     facility        : Facility = field(default='SwissFEL', kw_only=True)
 
+    def num_files(self, locator: int | RunLocator) -> int:
+        """Return the number of HDF5 files in the run.
+
+        Args:
+            locator: The run locator or run ID to locate files for.
+
+        Returns:
+            The number of HDF5 files as an integer.
+        """
+        return len(self.filenames(locator))
+
     def scan_dir(self, locator: int | RunLocator) -> str:
         """Return the directory path to scan for HDF5 files for the given run ID.
 
@@ -1130,6 +1150,17 @@ class LCLSConfig(RunConfig):
     file_pattern    : str
     geometry_file   : str
     facility        : Facility = field(default='LCLS', kw_only=True)
+
+    def num_files(self, locator: int | RunLocator) -> int:
+        """Return the number of HDF5 files in the run.
+
+        Args:
+            locator: The run locator or run ID to locate files for.
+
+        Returns:
+            The number of HDF5 files as an integer.
+        """
+        return len(self.filenames(locator))
 
     def scan_dir(self, locator: int | RunLocator) -> str:
         """Return the directory path to scan for HDF5 files for the given run ID.

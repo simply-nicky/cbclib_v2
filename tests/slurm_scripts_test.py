@@ -364,7 +364,7 @@ class TestRefineResult:
         optimise = OptimiseParameters(schedule, 'adam')
         data = ModelDataParameters('all', 0.5, 1.0, 0.1, [0.25, 0.75])
         return RefinementConfig(data, LossParameters('l1', 'line'), optimise,
-                                'fixed-aperture', mode, 0.2)
+                                'out-of-focus', 'fixed-aperture', mode, 0.2)
 
     @pytest.fixture
     def result(self, mode: RefinementMode, xp: NumPyNamespace) -> RefineResult:
@@ -372,7 +372,7 @@ class TestRefineResult:
         if mode == 'shared':
             foc_pos = xp.array([[0.10, 0.20, -0.40]])
             pupil_roi = xp.array([[0.15, 0.17, 0.12, 0.16]])
-            z = xp.array([-0.39])
+            defocus = xp.array([0.01])
         else:
             foc_pos = xp.array([[0.10, 0.20, -0.40],
                                 [0.11, 0.21, -0.40],
@@ -380,9 +380,9 @@ class TestRefineResult:
             pupil_roi = xp.array([[0.15, 0.17, 0.12, 0.16],
                                   [0.16, 0.18, 0.13, 0.17],
                                   [0.17, 0.19, 0.14, 0.18]])
-            z = xp.array([-0.39, -0.38, -0.37])
+            defocus = xp.array([0.01, 0.02, 0.03])
 
-        geometry = ResolvedGeometry(ResolvedLens(foc_pos, pupil_roi), z)
+        geometry = ResolvedGeometry(foc_pos, pupil_roi, defocus)
         setup = ResolvedSetup(XtalState(basis), geometry)
         stats = RefinementStats([0], [1.0], [1.0e-3], [0.5], [0.1])
         return RefineResult(xp.array([7, 7, 9]), setup, xp.array([2.0, 1.0, 3.0]),
@@ -404,9 +404,12 @@ class TestRefineResult:
 
         assert champions['index'].tolist() == [7, 9]
         check_close(champions['foc_x'].to_numpy(), candidates['foc_x'].to_numpy()[[1, 2]])
-        check_close(restored.resolve(xp).geometry.lens.foc_pos, expected.lens.foc_pos)
-        check_close(restored.resolve(xp).geometry.lens.pupil_roi, expected.lens.pupil_roi)
-        check_close(restored.resolve(xp).geometry.z, expected.z)
+
+        resolved = restored.resolve(xp)
+        check_close(resolved.geometry.foc_pos, expected.foc_pos)
+        check_close(resolved.geometry.pupil_roi, expected.pupil_roi)
+        if isinstance(resolved.geometry, ResolvedGeometry) and isinstance(expected, ResolvedGeometry):
+            check_close(resolved.geometry.defocus, expected.defocus)
 
         with h5py.File(output, 'r') as h5_file:
             values = json.loads(h5_file.attrs['refinement_config'])
