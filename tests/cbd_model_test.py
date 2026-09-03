@@ -4,7 +4,7 @@ from jax import jit, tree, value_and_grad
 from cbclib_v2 import default_rng, field, State
 from cbclib_v2.annotations import (AnyGenerator, AnyNamespace, Generator, JaxArray, JaxNamespace,
                                    JaxNumPy, NDArray, NumPy, NumPyNamespace, RealArray)
-from cbclib_v2.indexer import (BaseSetup, CBDPoints, FixedPupilGeometry, FixedSetup,
+from cbclib_v2.indexer import (BaseSetup, FixedPupilGeometry, FixedSetup, LaueVectors, LinePoints,
                                MillerWithRLP, Patterns, RefinerData, RefinerDataBest, RefinerLoss,
                                RefinerModel, ResolvedGeometry, ResolvedSetup, SimulatedVectors,
                                XtalState, random_state)
@@ -65,9 +65,12 @@ class TestRefinerModel():
         return Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def data(self, rng: Generator[JaxArray], patterns: Patterns, model: RefinerModel,
-             resolved: ResolvedSetup, num_points: int) -> RefinerData:
-        return model.init_data_random(rng, patterns, num_points, resolved)
+    def points(self, patterns: Patterns) -> LinePoints:
+        return patterns.to_points()
+
+    @pytest.fixture
+    def data(self, points: LinePoints, model: RefinerModel, resolved: ResolvedSetup) -> RefinerData:
+        return model.init_data(points, resolved)
 
     @pytest.fixture
     def pupil_loss(self, model: RefinerModel, xp: JaxNamespace) -> Criterion:
@@ -90,10 +93,9 @@ class TestRefinerModel():
         assert all(xp.all(xp.isfinite(leaf)) for leaf in leaves)
         assert any(xp.any(leaf != 0.0) for leaf in leaves)
 
-    @pytest.mark.parametrize('num_lines,num_points', [(10, 4)])
-    def test_gradients(self, rng: Generator[JaxArray], data: RefinerData,
-                       pupil_loss: Criterion, line_loss: Criterion,
-                       xp: JaxNamespace):
+    @pytest.mark.parametrize('num_lines', [10,])
+    def test_gradients(self, rng: Generator[JaxArray], data: RefinerData, pupil_loss: Criterion,
+                       line_loss: Criterion, xp: JaxNamespace):
         initial = FullSetup.random(rng)
         self.check_loss(line_loss, data, initial, xp)
         self.check_loss(pupil_loss, data, initial, xp)
@@ -144,13 +146,13 @@ class TestSimulationWorkflow:
         assert xp.all(aperture_rlp.index >= 0)
         assert xp.all(aperture_rlp.index < initial.xtal.basis.shape[0])
 
-        origins = aperture_rlp.origin_points()
-        assert xp.all(xp.abs(xp.acos(origins.points[..., 2])) < q_abs)
+        origins = aperture_rlp.origin_points
+        assert xp.all(xp.abs(xp.acos(origins[..., 2])) < q_abs)
 
     def test_source_lines(self, model: RefinerModel, laue: SimulatedVectors,
                           resolved: ResolvedSetup, xp: NumPyNamespace):
         valid = laue.distance == 0.0
-        q = xp.broadcast_to(laue.q, laue.kout.shape)
+        q = xp.broadcast_to(laue.q[..., None, :], laue.kout.shape)
         q_abs = xp.sum(q[valid]**2, axis=-1)
         kdotq = xp.sum(laue.kin[valid] * q[valid], axis=-1)
         kmin = model.lens.kin_min(resolved.geometry, xp)[..., :2]
@@ -204,67 +206,75 @@ class TestLossWorkflow:
         return self.make_patterns(rng, model, resolved, xp, num_lines=8)
 
     @pytest.fixture
-    def initialized_data(self, model: RefinerModel, patterns: Patterns,
-                         resolved: ResolvedSetup) -> RefinerData:
-        return model.init_data(patterns, resolved)
+    def points(self, patterns: Patterns) -> LinePoints:
+        return patterns.to_points()
 
     @pytest.fixture
-    def best_data(self, model: RefinerModel, initialized_data: RefinerData) -> RefinerDataBest:
-        return model.keep_best(initialized_data, 0.5)
+    def data(self, model: RefinerModel, points: LinePoints, resolved: ResolvedSetup
+             ) -> RefinerData:
+        return model.init_data(points, resolved)
+
+    @pytest.fixture
+    def quantile(self) -> float:
+        return 0.5
+
+    @pytest.fixture
+    def best_data(self, model: RefinerModel, data: RefinerData, quantile: float) -> RefinerDataBest:
+        return model.keep_best(data, quantile)
 
     @pytest.fixture
     def line_loss(self, model: RefinerModel, xp: NumPyNamespace) -> RefinerLoss:
         return model.line_loss(loss='l1', xp=xp)
 
     @pytest.fixture
-    def projected_points(self, line_loss: RefinerLoss, best_data: RefinerDataBest,
-                         resolved: ResolvedSetup, xp: NumPyNamespace) -> CBDPoints:
-        return line_loss.project_data(best_data, resolved, xp)
+    def projected(self, model: RefinerModel, best_data: RefinerDataBest,
+                  resolved: ResolvedSetup, xp: NumPyNamespace) -> LaueVectors:
+        return model.project_data(best_data, resolved, xp)
 
-    def test_init_data(self, initialized_data: RefinerData, patterns: Patterns,
+    def test_init_data(self, data: RefinerData, points: LinePoints,
                        model: RefinerModel, resolved: ResolvedSetup, xp: NumPyNamespace):
-        q1, q2 = model.patterns_to_q(patterns, resolved.geometry, xp)
+        q1, q2 = model.patterns_to_q(points, resolved.geometry, xp)
         hkl1 = model.xtal.q_to_hkl(q1, resolved.xtal, xp)
         hkl2 = model.xtal.q_to_hkl(q2, resolved.xtal, xp)
-        closest = xp.asarray(xp.round(xp.stack((hkl1.hkl, hkl2.hkl), axis=1)), dtype=int)
-        matches = xp.all(initialized_data.miller.hkl[:, None] == closest[:, :, None], axis=-1)
+        hkl_bounds = xp.concat((hkl1.hkl_indices, hkl2.hkl_indices))
+        matches = xp.all(data.miller.hkl[..., None, :] == hkl_bounds, axis=-1)
 
-        assert initialized_data.miller.hkl.shape[:-1] == initialized_data.points.points.shape[:-2]
-        assert initialized_data.points.points.shape[-2:] == (2, 2)
-        assert initialized_data.points.index.shape == patterns.index.shape
-        assert xp.all(xp.any(matches, axis=-1))
+        assert xp.all(data.miller.index == data.points[data.miller.streak_id].index)
+        assert xp.all(data.points.index == points.index)
+        assert xp.all(xp.any(matches, axis=0))
 
-    def test_keep_best(self, best_data: RefinerDataBest, initialized_data: RefinerData,
+    def test_keep_best(self, quantile: float, best_data: RefinerDataBest,
+                       data: RefinerData, xp: NumPyNamespace):
+        for index in data.points.unique_index():
+            mask = best_data.mask[data.points.index == index]
+            split = int(quantile * mask.size)
+            assert xp.all(mask[:split])
+            assert xp.all(~mask[split:])
+
+    def test_projected(self, projected: LaueVectors, data: RefinerData,
                        xp: NumPyNamespace):
-        assert best_data.mask.shape == initialized_data.points.index.shape
-        assert best_data.mask.dtype == xp.dtype(bool)
-        assert xp.any(best_data.mask)
-        assert xp.all(best_data.miller.hkl == initialized_data.miller.hkl)
-        assert xp.all(best_data.points.points == initialized_data.points.points)
+        assert projected.kin.shape == data.miller.hkl.shape[:-1] + (2, 3)
+        assert projected.kout.shape == data.miller.hkl.shape[:-1] + (2, 3)
+        assert xp.all(xp.isfinite(projected.kin))
+        assert xp.all(xp.isfinite(projected.kout))
+        assert xp.all(xp.isfinite(projected.q))
+        check_close(xp.sum(projected.kout**2, axis=-1),
+                    xp.ones(projected.kout.shape[:-1]))
+        check_close(projected.q, projected.kout - projected.kin)
 
-    def test_project_data(self, projected_points: CBDPoints, initialized_data: RefinerData,
-                          xp: NumPyNamespace):
-        assert projected_points.kin.shape == initialized_data.miller.hkl.shape[:-1] + (2, 3)
-        assert projected_points.kout.shape == initialized_data.points.points.shape[:-1] + (3,)
-        assert xp.all(xp.isfinite(projected_points.kin))
-        assert xp.all(xp.isfinite(projected_points.kout))
-        assert xp.all(xp.isfinite(projected_points.q))
-        check_close(xp.sum(projected_points.kout**2, axis=-1),
-                    xp.ones(projected_points.kout.shape[:-1]))
-        check_close(projected_points.q, projected_points.kout - projected_points.kin)
-
-    def test_loss_value(self, line_loss: RefinerLoss, initialized_data: RefinerData,
+    def test_loss_value(self, line_loss: RefinerLoss, data: RefinerData,
                         best_data: RefinerDataBest, initial: FixedSetup,
                         resolved: ResolvedSetup, xp: NumPyNamespace):
-        points = line_loss.project_data(initialized_data, resolved, xp)
-        distances = xp.min(line_loss.distance_matrix(points, resolved, xp), axis=-1)
-        indices = xp.lexsort((distances, initialized_data.points.index), axis=0)
-        sorted_distances = distances[indices]
+        points = line_loss.model.project_data(data, resolved, xp)
+        dist = line_loss.best_distances(data, points, resolved, xp)
+        indices = xp.lexsort((dist, data.points.index), axis=0)
+        sorted_dist = dist[indices]
+
         actual = line_loss.distances(best_data, points, resolved, xp)
-        values, counts = xp.unique(initialized_data.points.index, return_counts=True)
+        values, counts = xp.unique(data.points.index, return_counts=True)
 
         expected_mask = xp.concat([xp.arange(size) < 0.5 * size for size in counts])
-        expected = sorted_distances * expected_mask
+        expected = sorted_dist * expected_mask
 
         assert xp.all(values == xp.arange(initial.xtal.basis.shape[0]))
         assert xp.all(best_data.mask == expected_mask)
@@ -273,8 +283,8 @@ class TestLossWorkflow:
         start = 0
         for size in counts:
             stop = start + int(size)
-            kept = sorted_distances[start:start + int(size) // 2]
-            discarded = sorted_distances[start + int(size) // 2:stop]
+            kept = sorted_dist[start:start + int(size) // 2]
+            discarded = sorted_dist[start + int(size) // 2:stop]
             assert xp.all(kept <= discarded[0])
             start = stop
 
@@ -284,12 +294,12 @@ class TestLossWorkflow:
         check_close(value, expected.mean())
 
     def test_per_pattern(self, line_loss: RefinerLoss, best_data: RefinerDataBest,
-                         initial: FixedSetup, xp: NumPyNamespace):
-        values = line_loss.per_pattern(best_data, initial)
+                         initial: FixedSetup, resolved: ResolvedSetup, xp: NumPyNamespace):
+        values = line_loss.per_pattern(best_data, resolved)
         counts = xp.asarray([xp.sum(best_data.points.index == index)
-                             for index in range(initial.xtal.basis.shape[0])])
+                             for index in range(resolved.xtal.basis.shape[0])])
         value = line_loss(best_data, initial)
 
-        assert values.shape == (initial.xtal.basis.shape[0],)
+        assert values.shape == (resolved.xtal.basis.shape[0],)
         assert xp.all(xp.isfinite(values))
         check_close(value, xp.sum(values * counts) / xp.sum(counts))

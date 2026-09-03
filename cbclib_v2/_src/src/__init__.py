@@ -1,4 +1,4 @@
-from . import bresenham, index, label, median, online_detector, streak_finder, test
+from . import bresenham, label, median, online_detector, streak_finder, test
 
 try:
     from . import cuda_draw_lines, cuda_label, cuda_median, cuda_online_detector, cuda_streak_finder

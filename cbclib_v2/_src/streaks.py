@@ -13,19 +13,23 @@ class BaseLines(ArrayContainer):
     """Base class for line-segment containers.
 
     A line segment is parameterised by two endpoints stored in a flat array
-    of shape ``(..., 2 * ndim)`` in the order ``(x0, y0, ..., x1, y1, ...)``.
+    of shape ``(..., 2 * ptdim)`` in the order ``(x0, y0, ..., x1, y1, ...)``.
     Subclasses inherit geometry methods for intersection, projection, and
     distance computation.
 
     Attributes:
-        lines: Float array of shape ``(..., 2 * ndim)`` with the endpoint
+        lines: Float array of shape ``(..., 2 * ptdim)`` with the endpoint
             coordinates of each line segment.
     """
-
     lines       : RealArray
 
     @property
-    def ndim(self) -> int:
+    def shape(self) -> Tuple[int, ...]:
+        """Shape of the line array, excluding the last axis."""
+        return self.lines.shape[:-1]
+
+    @property
+    def ptdim(self) -> int:
         """Number of spatial dimensions (half the size of the last axis)."""
         return self.lines.shape[-1] // 2
 
@@ -37,33 +41,33 @@ class BaseLines(ArrayContainer):
 
     @property
     def points(self) -> RealArray:
-        """Endpoints reshaped to ``(..., 2, ndim)``."""
-        return self.lines.reshape(self.lines.shape[:-1] + (2, self.ndim))
+        """Endpoints reshaped to ``(..., 2, ptdim)``."""
+        return self.lines.reshape(self.lines.shape[:-1] + (2, self.ptdim))
 
     @property
     def pt0(self) -> RealArray:
-        """First endpoint, shape ``(..., ndim)``."""
-        return self.lines[..., :self.ndim]
+        """First endpoint, shape ``(..., ptdim)``."""
+        return self.lines[..., :self.ptdim]
 
     @property
     def pt1(self) -> RealArray:
-        """Second endpoint, shape ``(..., ndim)``."""
-        return self.lines[..., self.ndim:]
+        """Second endpoint, shape ``(..., ptdim)``."""
+        return self.lines[..., self.ptdim:]
 
     @property
     def x(self) -> RealArray:
         """x-coordinates of both endpoints, shape ``(..., 2)``."""
-        return self.lines[..., ::self.ndim]
+        return self.lines[..., ::self.ptdim]
 
     @property
     def y(self) -> RealArray:
         """y-coordinates of both endpoints, shape ``(..., 2)``."""
-        return self.lines[..., 1::self.ndim]
+        return self.lines[..., 1::self.ptdim]
 
     def intersection(self: Self, other: Self) -> RealArray:
         """Compute the intersection point of each line pair ``(self[i], other[i])``.
 
-        Uses the cross-product formula for line–line intersection in 2-D.
+        Uses the cross-product formula for line-line intersection in 2-D.
         The result lies on the infinite extension of *self*; no clamping to
         the segment endpoints is performed.
 
@@ -71,7 +75,7 @@ class BaseLines(ArrayContainer):
             other: Another :class:`BaseLines` container broadcastable with *self*.
 
         Returns:
-            Array of shape ``(..., ndim)`` with the intersection coordinates.
+            Array of shape ``(..., ptdim)`` with the intersection coordinates.
         """
         xp = self.__array_namespace__()
 
@@ -93,10 +97,10 @@ class BaseLines(ArrayContainer):
         the segment midpoint and *tau* is its direction vector.
 
         Args:
-            point: Array broadcastable to ``(..., ndim)``.
+            point: Array broadcastable to ``(..., ptdim)``.
 
         Returns:
-            Array of shape ``(..., ndim)`` with the clamped projection
+            Array of shape ``(..., ptdim)`` with the clamped projection
             coordinates.
         """
         xp = self.__array_namespace__()
@@ -110,7 +114,7 @@ class BaseLines(ArrayContainer):
         and its projection.
 
         Args:
-            point: Array broadcastable to ``(..., ndim)``.
+            point: Array broadcastable to ``(..., ptdim)``.
 
         Returns:
             Array of distances, shape ``(...,)``.
@@ -122,10 +126,10 @@ class BaseLines(ArrayContainer):
         """Flatten the line endpoints to a 1-D array.
 
         Returns:
-            Array of shape ``(..., 2 * ndim)`` with the endpoint coordinates
+            Array of shape ``(..., 2 * ptdim)`` with the endpoint coordinates
             ``(x0, y0, ..., x1, y1, ...)``.
         """
-        return self.lines.reshape((-1, 2 * self.ndim))
+        return self.lines.reshape((-1, 2 * self.ptdim))
 
 @dataclass
 class Lines(BaseLines):
@@ -136,10 +140,9 @@ class Lines(BaseLines):
     not need to be grouped by frame.
 
     Attributes:
-        lines: Float array of shape ``(N, 2 * ndim)`` with the endpoint
+        lines: Float array of shape ``(N, 2 * ptdim)`` with the endpoint
             coordinates ``(x0, y0, ..., x1, y1, ...)``.
     """
-
     lines       : RealArray
 
 class BaseStreaks(IndexedContainer, BaseLines):
@@ -155,7 +158,6 @@ class BaseStreaks(IndexedContainer, BaseLines):
         lines: Float array of shape ``(N, 4)`` with the endpoint
             coordinates ``(x0, y0, x1, y1)``.
     """
-
     index       : IntArray
     lines       : RealArray
 
@@ -235,14 +237,17 @@ class BaseStreaks(IndexedContainer, BaseLines):
         return pd.DataFrame({'index': asnumpy(index), 'y': asnumpy(y), 'x': asnumpy(x),
                              'streak_id': asnumpy(streak_id), 'value': asnumpy(values)})
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.
+
+        Args:
+            frames: Integer array of frame indices.
 
         Returns:
             DataFrame with columns ``'index'``, ``'x_0'``, ``'y_0'``,
             ``'x_1'``, ``'y_1'``.
         """
-        return pd.DataFrame({'index': asnumpy(self.index),
+        return pd.DataFrame({'index': asnumpy(frames[self.index]),
                              'x_0': asnumpy(self.x[:, 0]), 'y_0': asnumpy(self.y[:, 0]),
                              'x_1': asnumpy(self.x[:, 1]), 'y_1': asnumpy(self.y[:, 1])})
 
@@ -390,7 +395,7 @@ class StackedStreaks(BaseStreaks):
         """Flat frame address computed as ``num_modules * index + module_id``."""
         return self.num_modules * self.index + self.module_id
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.
 
         Returns:
@@ -398,7 +403,7 @@ class StackedStreaks(BaseStreaks):
             ``'x_1'``, ``'y_1'``, and ``'module_id'`` when
             :attr:`num_modules` > 1.
         """
-        dataframe = super().to_dataframe()
+        dataframe = super().to_dataframe(frames)
         if self.num_modules > 1:
             dataframe['module_id'] = asnumpy(self.module_id)
         return dataframe

@@ -12,7 +12,7 @@ from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, L
 from .annotations import (Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy,
                           RealArray, Shape)
 from .array_api import array_namespace, set_at
-from .data_container import Container
+from .data_container import ArrayContainer, Container
 from .functions import pixel_map, radius, radial_index
 from .streaks import StackedStreaks, Streaks
 from ..indexer import Patterns
@@ -817,13 +817,22 @@ class Panel(Container):
         return x, y, z
 
 @dataclass
-class Assembler():
+class Assembler(ArrayContainer):
     ss              : IntArray
     fs              : IntArray
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> Shape:
+        return self.ss.shape
+
+    @property
+    def assembled_shape(self) -> Tuple[int, int]:
         return (int(self.ss.max()) + 1, int(self.fs.max()) + 1)
+
+    @property
+    def mask(self) -> IntArray:
+        xp = self.__array_namespace__()
+        return self(xp.ones_like(self.ss))
 
     @overload
     def __call__(self, frames: NDArray) -> NDArray: ...
@@ -832,14 +841,17 @@ class Assembler():
     def __call__(self, frames: Array) -> Array: ...
 
     def __call__(self, frames: Array) -> Array:
-        xp = array_namespace(frames)
-        frames = xp.reshape(frames, (-1,) + self.ss.shape)
+        xp = self.__array_namespace__()
+        if array_namespace(frames) != xp:
+            raise ValueError(f"frames array namespace ({array_namespace(frames)}) "
+                             f"does not match assembler namespace ({xp})")
+        frames = xp.reshape(frames, (-1,) + self.shape)
 
-        n_frames = frames.size // self.ss.size
+        n_frames = frames.size // self.size
         if n_frames > 1:
-            result = xp.zeros((n_frames,) + self.shape, dtype=frames.dtype)
+            result = xp.zeros((n_frames,) + self.assembled_shape, dtype=frames.dtype)
         else:
-            result = xp.zeros(self.shape, dtype=frames.dtype)
+            result = xp.zeros(self.assembled_shape, dtype=frames.dtype)
             frames = xp.squeeze(frames, axis=0)
 
         return set_at(result, (..., self.ss, self.fs), frames)
@@ -878,6 +890,9 @@ class Detector():
     bad_regions     : OrderedDictType[str, Region] = field(default_factory=OrderedDict)
     groups          : Dict[str, List[str]] = field(default_factory=dict)
 
+    def __post_init__(self):
+        self._assembler = None
+
     @property
     def bounds(self) -> Tuple[float, float, float, float]:
         """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame
@@ -888,6 +903,13 @@ class Detector():
             x.extend([x0, x1])
             y.extend([y0, y1])
         return (min(x), min(y), max(x), max(y))
+
+    @property
+    def corners(self) -> List[Tuple[float, float]]:
+        min_pt = (0, 0)
+        max_pt = ((self.assembled_shape[1] - 1) * self.pixel_size,
+                  (self.assembled_shape[0] - 1) * self.pixel_size)
+        return [min_pt, (min_pt[0], max_pt[1]), (max_pt[0], min_pt[1]), max_pt]
 
     @property
     def shape(self) -> Shape:
@@ -958,11 +980,17 @@ class Detector():
             >>> assembler = detector.assembler()
             >>> assembled = assembler(frames)
         """
-        out = xp.empty((3,) + self.shape, dtype=xp.float64)
-        pix_x, pix_y, _ = self.pixel_map(out)
-        pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
-        pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
-        return Assembler(pix_y, pix_x)
+        if self._assembler is None:
+            out = xp.empty((3,) + self.shape, dtype=xp.float64)
+            pix_x, pix_y, _ = self.pixel_map(out)
+            pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
+            pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
+            self._assembler = Assembler(pix_y, pix_x)
+
+        if self._assembler.__array_namespace__() != xp:
+            self._assembler = self._assembler.to_xp(xp)
+
+        return self._assembler
 
     def panel(self, module_id: int) -> Panel:
         """Return the panel for a given zero-based module index.

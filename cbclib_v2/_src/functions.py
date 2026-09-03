@@ -9,7 +9,6 @@ See Also:
 from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
-from math import prod
 from typing import (TYPE_CHECKING, Callable, NamedTuple, Optional, Protocol, Sequence, Tuple,
                     cast, overload)
 import warnings

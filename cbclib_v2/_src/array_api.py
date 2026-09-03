@@ -4,8 +4,8 @@ import numpy as np
 from array_api_compat import array_namespace as get_array_namespace, device
 from .annotations import (AnyFloat, Array, ArrayLike, AnyNamespace, ArrayNamespace, CPArray,
                           CPIntArray, CuPy, DTypeLike, Generator, IntArray, IntSequence, JaxArray,
-                          JaxDevice, JaxNumPy, MultiIndices, NDArray, NumPy, RealArray, RealSequence,
-                          Scalar, Shape, ShapeLike, SupportsNamespace)
+                          JaxDevice, JaxIntArray, JaxNumPy, MultiIndices, NDArray, NDIntArray, NumPy,
+                          RealArray, RealSequence, Scalar, Shape, ShapeLike, SupportsNamespace)
 
 if TYPE_CHECKING:
     from .data_container import ArrayContainer
@@ -226,16 +226,16 @@ class JaxGenerator:
                               maxval=xp.asarray(high))
 
 @overload
-def add_at(a: NDArray, indices: MultiIndices, b: Array | Scalar) -> NDArray: ...
+def add_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> NDArray: ...
 
 @overload
-def add_at(a: JaxArray, indices: MultiIndices, b: Array | Scalar
+def add_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar
            ) -> JaxArray: ...
 
 @overload
-def add_at(a: CPArray, indices: MultiIndices, b: Array | Scalar) -> CPArray: ...
+def add_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> CPArray: ...
 
-def add_at(a: Array, indices: MultiIndices, b: Array | Scalar) -> Array:
+def add_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array | Scalar) -> Array:
     """Perform unbuffered in-place addition of `b` to `a` at the specified `indices`. This
     function works with all supported array APIs (NumPy, JAX, CuPy).
 
@@ -261,6 +261,91 @@ def add_at(a: Array, indices: MultiIndices, b: Array | Scalar) -> Array:
         a[indices] += b
         return a
     raise ValueError(f"Unsupported array namespace: {xp}")
+
+@overload
+def argmin_at(indices: IntArray, values: NDArray, size: int) -> NDIntArray: ...
+
+@overload
+def argmin_at(indices: IntArray, values: JaxArray, size: int) -> JaxIntArray: ...
+
+@overload
+def argmin_at(indices: IntArray, values: CPArray, size: int) -> CPIntArray: ...
+
+def argmin_at(indices: IntArray, values: RealArray, size: int) -> IntArray:
+    """Return packed indices of the minimum value in each indexed group.
+
+    Args:
+        indices: Group index for every value, with shape ``(N,)``.
+        values: Values to minimize, with shape ``(N,)``.
+        size: Number of groups in the output.
+
+    Returns:
+        Absolute indices into ``values``, with shape ``(size,)``. Ties select
+        the first occurrence.
+
+    Raises:
+        ValueError: If any group has no values.
+    """
+    xp = array_namespace(values)
+    candidate_id = xp.arange(values.size)
+    sentinel = values.size
+
+    minima = min_at(
+        xp.full((size,), xp.inf, dtype=values.dtype),
+        indices,
+        values,
+    )
+    matching_id = xp.where(
+        values == minima[indices],
+        candidate_id,
+        sentinel,
+    )
+    result = min_at(
+        xp.full((size,), sentinel, dtype=int),
+        indices,
+        matching_id,
+    )
+
+    if xp.any(result == sentinel):
+        raise ValueError('Cannot calculate argmin for an empty group')
+
+    return result
+
+@overload
+def min_at(a: NDArray, indices: IntArray | Tuple[IntArray, ...], b: Array) -> NDArray: ...
+
+@overload
+def min_at(a: JaxArray, indices: IntArray | Tuple[IntArray, ...], b: Array) -> JaxArray: ...
+
+@overload
+def min_at(a: CPArray, indices: IntArray | Tuple[IntArray, ...], b: Array) -> CPArray: ...
+
+def min_at(a: Array, indices: IntArray | Tuple[IntArray, ...], b: Array) -> Array:
+    """Perform unbuffered in-place minimum of `b` and `a` at the specified `indices`. This
+    function works with all supported array APIs (NumPy, JAX, CuPy).
+
+    Args:
+        a: The input array to which values will be compared.
+        indices: The indices at which to compare the values from `b`. This can be a single array
+            of indices or a tuple of arrays for multi-dimensional indexing.
+        b: The values to compare with `a` at the specified indices. This can be a scalar or an array
+            of values to compare.
+
+    Returns:
+        An array with the same shape and type as `a`, where the minimum values between `a` and `b`
+        have been set at the specified `indices`.
+    """
+    xp = array_namespace(a)
+
+    if xp is JaxNumPy:
+        return JaxNumPy.asarray(a).at[indices].min(b)
+    if xp is NumPy:
+        np.minimum.at(np.asarray(a), indices, b)
+        return a
+    if CuPy is not None and xp is CuPy:
+        cp.minimum.at(cp.asarray(a), indices, b)
+        return a
+    raise ValueError(f'Unsupported array namespace: {xp}')
 
 @overload
 def set_at(a: NDArray, indices: MultiIndices, b: Array | Scalar) -> NDArray: ...
@@ -616,6 +701,7 @@ def k_to_det(k: RealArray, src: RealArray, xp: AnyNamespace) -> RealArray:
     Returns:
         A tuple of x and y coordinates in meters.
     """
+    src = xp.expand_dims(src, axis=tuple(range(src.ndim - 1, k.ndim - 1)))
     slope = safe_divide(k[..., :2], k[..., 2, None], xp)
     pos = xp.where((k[..., 2] == 0)[..., None], 0.0, src[..., :2] - slope * src[..., 2, None])
     return pos

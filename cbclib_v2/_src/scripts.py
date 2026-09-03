@@ -1,11 +1,10 @@
 from functools import partial
 from math import log
 import json
-import os
 import logging
 import sys
 from multiprocessing import Pool
-from typing import Any, Callable, Dict, Iterator, List, Literal, Tuple, Type, TypeVar, cast, overload
+from typing import Any, Callable, List, Literal, Tuple, Type, TypeVar, cast, overload
 from dataclasses import InitVar, dataclass, field
 import h5py
 from jax import jit, value_and_grad
@@ -17,7 +16,7 @@ import pandas as pd
 from typing_extensions import Self
 from tqdm.auto import tqdm
 from .annotations import Array, AnyNamespace, IntArray, NDArray, NumPy, RealArray, ROI
-from .array_api import asnumpy, default_api, Platform
+from .array_api import default_api, default_rng, get_platform, Platform
 from .config import get_cpu_config, set_cpu_pool_worker
 from .crystfel import Detector
 from .cxi_protocol import H5Handler, LoadWorker, TrainIndices
@@ -25,13 +24,19 @@ from .data_container import Container, array_namespace, list_indices
 from .data_processing import CrystData, CrystMetadata
 from .functions import Structure
 from .parser import from_container, from_file
+from .state import State
 from .streaks import StackedStreaks, Streaks
-from ..indexer.cbc_data import RefinerData, MillerWithRLP, Patterns
+from ..indexer.cbc_data import LinePoints, Miller, MillerWithRLP, RefinerData
 from ..indexer.cbc_indexing import CBDIndexer, RefinerLoss, RefinerModel
 from ..indexer.cbc_setup import (BaseGeometry, BaseLens, BaseSetup, FixedApertureGeometry,
-                                 FixedApertureLens, FixedApertureSetup, FixedLens, FixedPupilGeometry,
-                                 FixedPupilLens, FixedPupilSetup, FixedGeometry, FixedSetup,
-                                 IndexingResult, ResolvedSetup, TiltOverAxisState, XtalState)
+                                 FixedApertureLens, FixedApertureSetup, FixedLens,
+                                 FixedPupilGeometry, FixedPupilLens, FixedPupilSetup,
+                                 FixedGeometry, FixedSetup, Geometry, Lens, IndexingResult,
+                                 RefineResult, ResolvedSetup, Setup, TiltOverAxisState,
+                                 XtalState)
+from ..scaler.cbc_data import FullState, ScalerData, ScalerState, StreakIndices, ReflectionList
+from ..scaler.cbc_symmetry import PointGroup
+from ..scaler.cbc_scaling import FullLoss, ScalerLoss, ScalerModel
 
 class BaseParameters(Container):
     """Base class for JSON-serialisable parameter containers.
@@ -47,7 +52,6 @@ class BaseParameters(Container):
            params = StreakFinderConfig.read('detect_streaks.json')
            params.write('detect_streaks_updated.json')
     """
-
     @classmethod
     def read(cls: Type[Self], file: str, section: str='parameters') -> Self:
         """Load parameters from a JSON / INI file.
@@ -63,7 +67,7 @@ class BaseParameters(Container):
         parser = from_file(file, cls, section)
         return cls.from_dict(**parser.read(file))
 
-    def write(self, file: str) -> None:
+    def write(self, file: str):
         """Write parameters to a JSON / INI file.
 
         Args:
@@ -72,6 +76,26 @@ class BaseParameters(Container):
         """
         parser = from_container(file, self, 'parameters')
         parser.write(file, self)
+
+    def save(self, file: str, mode: Literal['a', 'w', 'r+']='a',
+             extra: dict[str, Any] | None=None):
+        """Write configuration to an HDF5 file. The configuration is stored as a
+        JSON string in the HDF5 file attributes under the key ``config``. Optional
+        metadata can be written under the ``extra`` HDF5 group.
+
+        Args:
+            file: Output HDF5 file path.
+            mode: Pandas HDF5 open mode.
+            extra: Optional extra metadata written as attributes.
+        """
+        with h5py.File(file, mode) as output_file:
+            output_file.attrs['config'] = json.dumps(self.to_dict())
+            if extra is not None:
+                for name, path in extra.items():
+                    key = f'extra/{name}'
+                    if key in output_file:
+                        del output_file[key]
+                    output_file[key] = path
 
 @dataclass
 class ROIParameters(BaseParameters):
@@ -86,7 +110,6 @@ class ROIParameters(BaseParameters):
         ymin: Top row of the ROI (inclusive).
         ymax: Bottom row of the ROI (exclusive); ``0`` = full height.
     """
-
     xmin    : int = 0
     xmax    : int = 0
     ymin    : int = 0
@@ -113,7 +136,6 @@ class StructureParameters(BaseParameters):
         connectivity: Maximum squared distance from the centre for a pixel
             to be considered a neighbour.
     """
-
     radius          : int
     connectivity    : int
 
@@ -154,7 +176,6 @@ class MaskParameters(BaseParameters):
         std_min: Standard-deviation lower bound for ``'std'`` masking
             (``0.0`` = no lower bound).
     """
-
     method  : Literal['all-bad', 'no-bad', 'range', 'snr', 'std']
     vmin    : int = 0
     vmax    : int = 65535
@@ -184,7 +205,6 @@ class BackgroundParameters(BaseParameters):
         lm: Regularisation parameter (effective number of modes) for robust
             methods.
     """
-
     method  : Literal['mean-poisson', 'median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
     r0      : float = 0.0
     r1      : float = 0.5
@@ -316,7 +336,6 @@ class ScalingParameters(Container):
         n_pixels: Number of detector pixels used for projection. The complete
             frame is used by default.
     """
-
     method      : Literal['no-scale', 'robust-lsq']
     good_fields : Tuple[int, ...] = (0,)
     clip_snr    : float = 3.0
@@ -387,8 +406,22 @@ def scale_background(frames: IntArray | int, images: Array, metadata: CrystMetad
         return metadata.to_data(images, frames)
 
     if params.method == 'robust-lsq':
-        projection = metadata.project(images, params.good_fields, params.clip_snr,
-                                      params.n_iter, params.std_min, params.n_pixels)
+        if params.n_pixels is not None:
+            if params.n_pixels < 1 or params.n_pixels >= metadata.frame_size:
+                raise ValueError(
+                    f"Invalid n_pixels: {params.n_pixels} must be in [1, {metadata.frame_size})"
+                )
+            # Using NumPy or CuPy here since JAX implementation of random.choice is extremely slow
+            xp = array_namespace(images)
+            platform = get_platform(images)
+            rng = default_rng(0, default_api(platform))
+            indices = xp.asarray(rng.choice(metadata.frame_size, params.n_pixels, replace=False))
+            indices = xp.unravel_index(indices, metadata.frame_shape)
+            projection = metadata[indices].project(images[(...,) + indices], params.good_fields,
+                                                   params.clip_snr, params.n_iter, params.std_min)
+        else:
+            projection = metadata.project(images, params.good_fields, params.clip_snr,
+                                          params.n_iter, params.std_min)
         return metadata.to_data(images, frames, projection)
 
     raise ValueError(f'Invalid method keyword: {params.method}')
@@ -424,7 +457,6 @@ class RegionFinderConfig(BaseParameters):
         std_min: Minimum per-pixel standard deviation; pixels below this
             threshold are masked before SNR computation.
     """
-
     regions     : RegionParameters
     scaling     : ScalingParameters
     center      : Tuple[float, float] | None = None
@@ -438,7 +470,7 @@ def detect_regions(frames: IntArray | int, images: Array, metadata: CrystMetadat
     """Run the region-detection pipeline on a batch of frames.
 
     Subtracts the background, computes SNR, runs the connected-region finder,
-    and returns detected streaks with global frame indices.
+    and returns detected streaks with positional indices.
 
     Args:
         frames: Scalar frame index or array of frame indices.
@@ -448,7 +480,7 @@ def detect_regions(frames: IntArray | int, images: Array, metadata: CrystMetadat
 
     Returns:
         Detected streaks as :class:`~cbclib_v2.Streaks` or
-        :class:`~cbclib_v2.StackedStreaks` with global frame indices.
+        :class:`~cbclib_v2.StackedStreaks` with positional indices.
     """
     data = scale_background(frames, images, metadata, params.scaling)
 
@@ -521,7 +553,6 @@ class PeakParameters(BaseParameters):
         npts: Minimum region size in pixels; smaller blobs are discarded.
         structure: Connectivity kernel used for region labeling.
     """
-
     npts        : int
     structure   : StructureParameters = field(
         default_factory=lambda: StructureParameters(radius=1, connectivity=1)
@@ -543,7 +574,6 @@ class StreakParameters(Container):
         nfa: Maximum number of false-alarm linelet endpoints tolerated per
             streak (see :meth:`~cbclib_v2.streak_finder.PatternStreakFinder.detect_streaks`).
     """
-
     structure   : StructureParameters
     xtol        : float
     vmin        : float
@@ -566,7 +596,6 @@ class StreakFinderConfig(BaseParameters):
         std_min: Minimum per-pixel standard deviation; pixels below this
             threshold are masked before SNR computation.
     """
-
     peaks       : PeakParameters
     streaks     : StreakParameters
     scaling     : ScalingParameters
@@ -580,7 +609,7 @@ def detect_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadat
     Subtracts the background, computes SNR, runs the six-stage streak finder
     (region detection → peak detection → linelet fitting → streak growing →
     ranking → line fitting), filters by minimal support, and returns detected
-    streaks with global frame indices.
+    streaks with positional indices.
 
     Args:
         frames: Scalar frame index or array of frame indices.
@@ -590,7 +619,7 @@ def detect_streaks(frames: IntArray | int, images: Array, metadata: CrystMetadat
 
     Returns:
         Detected streaks as :class:`~cbclib_v2.Streaks` or
-        :class:`~cbclib_v2.StackedStreaks` with global frame indices.
+        :class:`~cbclib_v2.StackedStreaks` with positional indices.
     """
     data = scale_background(frames, images, metadata, params.scaling)
 
@@ -652,7 +681,7 @@ def run_detection(loader: LoadWorker[NDArray], indices: TrainIndices, metapath: 
     detect = detect_patterns(params)
 
     streaks = []
-    for frame, index in tqdm(zip(indices.index(), indices), total=len(indices),
+    for frame, index in tqdm(enumerate(indices), total=len(indices),
                              desc='Detecting patterns'):
         data = xp.asarray(loader(index))
         pattern = detect(frame, data, metadata)
@@ -688,8 +717,8 @@ class StreaksWorker(LoadWorker[AllStreaks]):
         return pattern
 
     @classmethod
-    def initializer(cls, loader: LoadWorker[NDArray], metapath: str, params: StreakFinderConfig,
-                    platform: Platform, detector: Detector | None, is_pool: bool=False) -> None:
+    def initializer(cls, loader: LoadWorker[NDArray], metapath: str, params: FinderConfig,
+                    platform: Platform, detector: Detector | None, is_pool: bool=False):
         set_cpu_pool_worker(is_pool)
         global streaks_worker
         streaks_worker = cls(loader, metapath, params, platform, detector)
@@ -728,12 +757,12 @@ def pool_detection(loader: LoadWorker[NDArray], indices: TrainIndices, metapath:
     if platform == 'cpu' and num_threads > 1:
         with Pool(processes=num_threads, initializer=StreaksWorker.initializer,
                   initargs=(*initargs, True)) as pool:
-            for pattern in tqdm(pool.imap(StreaksWorker.run, zip(indices.index(), indices)),
+            for pattern in tqdm(pool.imap(StreaksWorker.run, enumerate(indices)),
                                 total=len(indices)):
                 streaks.append(pattern)
     else:
         worker = StreaksWorker(*initargs)
-        for frame, index in tqdm(zip(indices.index(), indices), total=len(indices)):
+        for frame, index in tqdm(enumerate(indices), total=len(indices)):
             streaks.append(worker((frame, index)))
 
     if streaks and isinstance(streaks[0], StackedStreaks):
@@ -757,7 +786,6 @@ class IndexingConfig(BaseParameters):
         connectivity: Structuring element controlling peak connectivity
             during refinement (3-D).
     """
-
     shape           : Tuple[int, int, int]
     q_max           : float
     width           : float
@@ -770,8 +798,8 @@ class IndexingConfig(BaseParameters):
         if not isinstance(self.shape, tuple):
             self.shape = (self.shape[0], self.shape[1], self.shape[2])
 
-def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIndexer,
-                   params: IndexingConfig, geometry: BaseGeometry
+def index_patterns(candidates: MillerWithRLP, points: LinePoints, indexer: CBDIndexer,
+                   params: IndexingConfig, geometry: BaseLens | BaseGeometry
                    ) -> Tuple[IntArray, TiltOverAxisState]:
     """Index a single diffraction pattern and return orientation candidates.
 
@@ -783,7 +811,7 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
     Args:
         candidates: Miller indices with reciprocal-lattice points for this
             pattern.
-        patterns: Diffraction patterns container (single pattern or batch).
+        points: Line points for this pattern.
         indexer: Convergent-beam diffraction indexer.
         params: Indexing pipeline configuration.
         geometry: Current detector geometry.
@@ -793,36 +821,17 @@ def index_patterns(candidates: MillerWithRLP, patterns: Patterns, indexer: CBDIn
         the orientation peaks and *tilt_states* encodes the candidate tilt
         angles over the rotation axis.
     """
-    xp = array_namespace(candidates, patterns)
-    resolved_geometry = geometry.resolve(xp)
-    centers = patterns.sample(xp.full(patterns.shape[0], 0.5))
-    points = indexer.points_to_kout(centers, resolved_geometry, xp)
-    rotograms = indexer.index(candidates, patterns, points, resolved_geometry)
-    rotomap = indexer.rotomap(params.shape, rotograms, patterns.reset_index().index, params.width)
+    xp = array_namespace(candidates, points)
+    resolved = geometry.resolve(xp)
+    centers = points.sample(xp.full(points.shape[0], 0.5))
+    kout = indexer.points_to_kout(centers, resolved, xp)
+    rotograms = indexer.index(candidates, points, kout, resolved)
+    rotomap = indexer.rotomap(params.shape, rotograms, points.reset_index(), params.width)
     peaks = indexer.to_peaks(rotomap, params.threshold, params.n_max)
     return indexer.refine_peaks(peaks, rotomap, params.vicinity.to_structure(3),
                                 params.connectivity.to_structure(3))
 
-def indexing_candidates(indexer: CBDIndexer, patterns: Patterns, xtal: XtalState, hkl: IntArray,
-                        xp: AnyNamespace=NumPy) -> Iterator[MillerWithRLP]:
-    """Generate Miller-index candidates for each pattern in *patterns*.
-
-    Yields a generator of :class:`~cbclib_v2.indexer.MillerWithRLP` per pattern
-    from the given crystal state and Miller indices.
-
-    Args:
-        indexer: CBC indexer instance.
-        patterns: Diffraction patterns container.
-        xtal: Crystal state (unit cell and orientation).
-        hkl: Miller indices to consider for indexing.
-        xp: Array namespace.
-
-    Yields:
-        :class:`~cbclib_v2.indexer.MillerWithRLP` for each pattern.
-    """
-    return indexer.xtal.hkl_range(patterns.unique_index(), hkl, xtal, xp)
-
-def run_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
+def run_indexing(points: LinePoints, xtals: XtalState, geometry: BaseLens | BaseGeometry,
                  params: IndexingConfig, xp: AnyNamespace=NumPy) -> IndexingResult:
     """Index all patterns sequentially and return a list of crystal solutions.
 
@@ -831,7 +840,7 @@ def run_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
     collects orientation solutions into an :class:`~cbclib_v2.indexer.IndexingResult`.
 
     Args:
-        patterns: Diffraction patterns container.
+        points: Line points for each pattern.
         xtals: Crystal state — either a single crystal (broadcast to all
             patterns) or one state per pattern.
         geometry: Detector geometry.
@@ -848,25 +857,25 @@ def run_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
     """
     indexer = CBDIndexer()
     hkl = indexer.xtal.hkl_in_ball(params.q_max, xtals, xp)
-    rlp_iterator = indexing_candidates(indexer, patterns, xtals, hkl, xp)
+    rlp_iterator = indexer.xtal.hkl_range(points.unique_index(), hkl, xtals, xp)
     solutions: List[IndexingResult] = []
 
     if len(xtals) == 1:
-        iterator = zip(patterns, rlp_iterator)
+        iterator = zip(points, rlp_iterator)
 
-        for pattern, candidates in tqdm(iterator, total=len(patterns)):
+        for pattern, candidates in tqdm(iterator, total=len(points)):
             idxs, tilts = index_patterns(candidates, pattern, indexer, params, geometry)
             solution = indexer.solutions(xtals, idxs, tilts, pattern)
             solutions.append(solution)
-    elif len(xtals) == len(patterns):
-        iterator = zip(patterns, rlp_iterator, xtals)
+    elif len(xtals) == len(points):
+        iterator = zip(points, rlp_iterator, xtals)
 
-        for pattern, candidates, xtal in tqdm(iterator, total=len(patterns)):
+        for pattern, candidates, xtal in tqdm(iterator, total=len(points)):
             idxs, tilts = index_patterns(candidates, pattern, indexer, params, geometry)
             solution = indexer.solutions(xtal, idxs, tilts, pattern)
             solutions.append(solution)
     else:
-        raise ValueError(f'Number of crystals ({len(xtals):d}) and patterns ({len(patterns):d}) '\
+        raise ValueError(f'Number of crystals ({len(xtals):d}) and patterns ({len(points):d}) '\
                          'are inconsistent')
 
     return IndexingResult.concat(solutions)
@@ -875,30 +884,30 @@ indexing_worker : 'IndexingWorker'
 
 @dataclass
 class IndexingWorker():
-    geometry: BaseGeometry
+    geometry: BaseLens | BaseGeometry
     params  : IndexingConfig
     xtal    : XtalState
     indexer : CBDIndexer
 
-    def __call__(self, args: Tuple[MillerWithRLP, Patterns]) -> IndexingResult:
-        candidates, patterns = args
-        idxs, tilts = index_patterns(candidates, patterns, self.indexer, self.params,
+    def __call__(self, args: Tuple[MillerWithRLP, LinePoints]) -> IndexingResult:
+        candidates, points = args
+        idxs, tilts = index_patterns(candidates, points, self.indexer, self.params,
                                      self.geometry)
         initial = self.xtal if len(self.xtal) == 1 else self.xtal[idxs]
-        return self.indexer.solutions(initial, idxs, tilts, patterns)
+        return self.indexer.solutions(initial, idxs, tilts, points)
 
     @classmethod
-    def initializer(cls, geometry: BaseGeometry, params: IndexingConfig, xtal: XtalState,
-                    indexer: CBDIndexer, is_pool: bool=False) -> None:
+    def initializer(cls, geometry: BaseLens | BaseGeometry, params: IndexingConfig, xtal: XtalState,
+                    indexer: CBDIndexer, is_pool: bool=False):
         set_cpu_pool_worker(is_pool)
         global indexing_worker
         indexing_worker = cls(geometry, params, xtal, indexer)
 
     @staticmethod
-    def run(args: Tuple[MillerWithRLP, Patterns]) -> IndexingResult:
+    def run(args: Tuple[MillerWithRLP, LinePoints]) -> IndexingResult:
         return indexing_worker(args)
 
-def pool_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
+def pool_indexing(points: LinePoints, xtals: XtalState, geometry: BaseLens | BaseGeometry,
                   params: IndexingConfig, platform: Platform = 'cpu',
                   xp: AnyNamespace=NumPy) -> IndexingResult:
     """Index all patterns in parallel using a multiprocessing pool.
@@ -922,41 +931,38 @@ def pool_indexing(patterns: Patterns, xtals: XtalState, geometry: BaseGeometry,
     num_threads = get_cpu_config().effective_num_threads()
     indexer = CBDIndexer()
     hkl = indexer.xtal.hkl_in_ball(params.q_max, xtals, xp)
-    rlp_iterator = indexing_candidates(indexer, patterns, xtals, hkl, xp)
+    rlp_iterator = indexer.xtal.hkl_range(points.unique_index(), hkl, xtals, xp)
 
     solutions : List[IndexingResult] = []
     if platform == 'cpu' and num_threads > 1:
         with Pool(processes=num_threads, initializer=IndexingWorker.initializer,
                   initargs=(geometry, params, xtals, indexer, True)) as pool:
-            iterator = zip(rlp_iterator, patterns)
-            for solution in tqdm(pool.imap(IndexingWorker.run, iterator), total=len(patterns)):
+            iterator = zip(rlp_iterator, points)
+            for solution in tqdm(pool.imap(IndexingWorker.run, iterator), total=len(points)):
                 solutions.append(solution)
     else:
         worker = IndexingWorker(geometry, params, xtals, indexer)
-        for candidates, pattern in tqdm(zip(rlp_iterator, patterns), total=len(patterns)):
+        for candidates, pattern in tqdm(zip(rlp_iterator, points), total=len(points)):
             solutions.append(worker((candidates, pattern)))
 
     return IndexingResult.concat(solutions)
 
 @dataclass
-class ModelDataParameters(BaseParameters):
+class RefineDataParameters(BaseParameters):
     keep        : Literal['best', 'in-shell', 'refined', 'all']
     quantile    : float
     q_abs       : float
     threshold   : float
-    points      : List[float]
 
-    def refiner_data(self, patterns: Patterns, model: RefinerModel, loss: RefinerLoss,
-                     setup: BaseSetup) -> RefinerData:
-        xp = setup.__array_namespace__()
-        resolved_setup = setup.resolve(xp)
-        data = model.init_data(patterns, resolved_setup, values=self.points)
+    def refiner_data(self, refiner: RefinerModel, points: LinePoints, loss: RefinerLoss,
+                     resolved: ResolvedSetup) -> RefinerData:
+        data = refiner.init_data(points, resolved)
         if self.keep == 'best':
-            return model.keep_best(data, quantile=self.quantile)
+            return refiner.keep_best(data, self.quantile)
         if self.keep == 'in-shell':
-            return model.keep_in_shell(data, q_abs=self.q_abs, setup=resolved_setup)
+            return refiner.keep_in_shell(data, self.q_abs, resolved)
         if self.keep == 'refined':
-            return model.keep_refined(self.threshold, loss, data, resolved_setup)
+            return refiner.keep_refined(self.threshold, loss, data, resolved)
         if self.keep == 'all':
             return data
         raise ValueError(f'Invalid keep keyword: {self.keep}')
@@ -966,11 +972,11 @@ class LossParameters(BaseParameters):
     kind        : Literal['l1', 'l2', 'log_cosh']
     projector   : Literal['line', 'pupil']
 
-    def refiner_loss(self, model: RefinerModel) -> RefinerLoss:
+    def refiner_loss(self, refiner: RefinerModel) -> RefinerLoss:
         if self.projector == 'line':
-            return model.line_loss(loss=self.kind)
+            return refiner.line_loss(loss=self.kind)
         if self.projector == 'pupil':
-            return model.pupil_loss(loss=self.kind)
+            return refiner.pupil_loss(loss=self.kind)
         raise ValueError(f'Invalid projector keyword: {self.projector}')
 
 @dataclass
@@ -979,6 +985,9 @@ class ScheduleParameters(BaseParameters):
     learning_rate   : float
     min_lr          : float
     num_steps       : int
+
+    def __bool__(self) -> bool:
+        return self.num_steps > 0
 
     def scheduler(self) -> Schedule:
         if self.kind == 'constant':
@@ -1006,6 +1015,9 @@ class OptimiseParameters(BaseParameters):
     log_every       : int = 0
     trace_every     : int = 1
 
+    def __bool__(self) -> bool:
+        return bool(self.schedule)
+
     def optimiser(self) -> Tuple[GradientTransformation, Schedule]:
         schedule = self.schedule.scheduler()
         if self.method == 'adadelta':
@@ -1016,81 +1028,128 @@ class OptimiseParameters(BaseParameters):
             return sgd(schedule), schedule
         raise ValueError(f'Invalid optimiser method: {self.method}')
 
-LossFn = Callable[[RefinerData, BaseSetup], RealArray]
-LossGradFn = Callable[[RefinerData, BaseSetup], Tuple[RealArray, BaseSetup]]
-ApplyUpdatesFn = Callable[[BaseSetup, Updates], BaseSetup]
 GeometryT = TypeVar('GeometryT', bound=BaseLens | BaseGeometry)
 
-GeometryType = Literal['in-focus', 'out-of-focus']
-SetupType = Literal['fixed', 'fixed-aperture', 'fixed-pupil']
+FocusType = Literal['dynamic', 'fixed-distance']
+SampleType = Literal['in-focus', 'out-of-focus']
+GeometryType = Literal['dynamic', 'fixed', 'fixed-aperture', 'fixed-pupil']
 
 @dataclass
-class RefinementConfig(BaseParameters):
-    data : ModelDataParameters
-    loss : LossParameters
-    optimise : OptimiseParameters
-    geometry : GeometryType
-    setup : SetupType
+class SetupParameters(BaseParameters):
+    focus : FocusType
+    sample : SampleType
     mode : Literal['shared', 'per-pattern']
-    threshold : float
+
+    def dynamic_geometry(self) -> type[Lens | Geometry]:
+        if self.sample == 'in-focus':
+            return Lens
+        if self.sample == 'out-of-focus':
+            return Geometry
+        raise ValueError(f'Invalid sample keyword: {self.sample}')
 
     def fixed_geometry(self) -> type[FixedLens | FixedGeometry]:
-        if self.geometry == 'in-focus':
+        if self.sample == 'in-focus':
             return FixedLens
-        if self.geometry == 'out-of-focus':
+        if self.sample == 'out-of-focus':
             return FixedGeometry
-        raise ValueError(f'Invalid geometry keyword: {self.geometry}')
+        raise ValueError(f'Invalid sample keyword: {self.sample}')
 
     def fixed_aperture_geometry(self) -> type[FixedApertureLens | FixedApertureGeometry]:
-        if self.geometry == 'in-focus':
+        if self.sample == 'in-focus':
             return FixedApertureLens
-        if self.geometry == 'out-of-focus':
+        if self.sample == 'out-of-focus':
             return FixedApertureGeometry
-        raise ValueError(f'Invalid geometry keyword: {self.geometry}')
+        raise ValueError(f'Invalid sample keyword: {self.sample}')
 
     def fixed_pupil_geometry(self) -> type[FixedPupilLens | FixedPupilGeometry]:
-        if self.geometry == 'in-focus':
+        if self.sample == 'in-focus':
             return FixedPupilLens
-        if self.geometry == 'out-of-focus':
+        if self.sample == 'out-of-focus':
             return FixedPupilGeometry
-        raise ValueError(f'Invalid geometry keyword: {self.geometry}')
+        raise ValueError(f'Invalid sample keyword: {self.sample}')
 
-    def import_resolved(self, setup: ResolvedSetup) -> BaseSetup:
+    def import_resolved(self, setup: ResolvedSetup, geometry_type: GeometryType
+                        ) -> BaseSetup:
         def init_geometry(geometry_cls: type[GeometryT]) -> GeometryT:
             geometry = geometry_cls.from_resolved(setup.geometry)
             if self.mode == 'shared':
                 return geometry.collapse()
             return geometry
 
-        if self.setup == 'fixed':
-            return FixedSetup(xtal=setup.xtal, geometry=init_geometry(self.fixed_geometry()))
-        if self.setup == 'fixed-aperture':
-            return FixedApertureSetup(xtal=setup.xtal,
-                                      geometry=init_geometry(self.fixed_aperture_geometry()))
-        if self.setup == 'fixed-pupil':
-            return FixedPupilSetup(xtal=setup.xtal,
-                                   geometry=init_geometry(self.fixed_pupil_geometry()))
-        raise ValueError(f'Invalid setup keyword: {self.setup}')
+        if geometry_type == 'dynamic':
+            geometry = init_geometry(self.dynamic_geometry())
+            if self.focus == 'fixed-distance':
+                geometry = geometry.fix_distance()
+            return Setup(xtal=setup.xtal, geometry=geometry)
+        if geometry_type == 'fixed':
+            geometry = init_geometry(self.fixed_geometry())
+            return FixedSetup(xtal=setup.xtal, geometry=geometry)
+        if geometry_type == 'fixed-aperture':
+            geometry = init_geometry(self.fixed_aperture_geometry())
+            if self.focus == 'fixed-distance':
+                geometry = geometry.fix_distance()
+            return FixedApertureSetup(xtal=setup.xtal, geometry=geometry)
+        if geometry_type == 'fixed-pupil':
+            geometry = init_geometry(self.fixed_pupil_geometry())
+            if self.focus == 'fixed-distance':
+                geometry = geometry.fix_distance()
+            return FixedPupilSetup(xtal=setup.xtal, geometry=geometry)
+        raise ValueError(f'Invalid geometry keyword: {geometry_type}')
 
-    def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseSetup:
+    def import_xtal(self, xtal: XtalState, setup_file: str, geometry_type: GeometryType
+                    ) -> BaseSetup:
         def init_geometry(geometry_cls: type[GeometryT]) -> GeometryT:
             geometry = geometry_cls.read(setup_file)
             if self.mode == 'per-pattern':
                 return geometry.broadcast(len(xtal))
             return geometry
 
-        if self.setup == 'fixed':
-            return FixedSetup(xtal=xtal, geometry=init_geometry(self.fixed_geometry()))
-        if self.setup == 'fixed-aperture':
-            return FixedApertureSetup(xtal=xtal,
-                                      geometry=init_geometry(self.fixed_aperture_geometry()))
-        if self.setup == 'fixed-pupil':
-            return FixedPupilSetup(xtal=xtal,
-                                   geometry=init_geometry(self.fixed_pupil_geometry()))
-        raise ValueError(f'Invalid setup keyword: {self.setup}')
+        if geometry_type == 'dynamic':
+            geometry = init_geometry(self.dynamic_geometry())
+            if self.focus == 'fixed-distance':
+                geometry = geometry.fix_distance()
+            return Setup(xtal=xtal, geometry=geometry)
+        if geometry_type == 'fixed':
+            geometry = init_geometry(self.fixed_geometry())
+            return FixedSetup(xtal=xtal, geometry=geometry)
+        if geometry_type == 'fixed-aperture':
+            geometry = init_geometry(self.fixed_aperture_geometry())
+            if self.focus == 'fixed-distance':
+                geometry = geometry.fix_distance()
+            return FixedApertureSetup(xtal=xtal, geometry=geometry)
+        if geometry_type == 'fixed-pupil':
+            geometry = init_geometry(self.fixed_pupil_geometry())
+            if self.focus == 'fixed-distance':
+                geometry = geometry.fix_distance()
+            return FixedPupilSetup(xtal=xtal, geometry=geometry)
+        raise ValueError(f'Invalid geometry keyword: {geometry_type}')
 
 @dataclass
-class RefinementStats(Container):
+class RefineSetupParameters(SetupParameters):
+    geometry : Literal['fixed', 'fixed-aperture', 'fixed-pupil']
+
+    def import_resolved(self, setup: ResolvedSetup) -> BaseSetup:
+        return super().import_resolved(setup, self.geometry)
+
+    def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseSetup:
+        return super().import_xtal(xtal, setup_file, self.geometry)
+
+@dataclass
+class RefineConfig(BaseParameters):
+    data : RefineDataParameters
+    loss : LossParameters
+    optimise : OptimiseParameters
+    setup : RefineSetupParameters
+    indexed_thr : float = 0.0
+
+    def init_context(self, points: LinePoints, resolved: ResolvedSetup) -> 'RefineContext':
+        refiner = RefinerModel()
+        loss = self.loss.refiner_loss(refiner)
+        data = self.data.refiner_data(refiner, points, loss, resolved)
+        return RefineContext(refiner=refiner, loss=loss, data=data)
+
+@dataclass
+class RefineStats(Container):
     step            : List[int] = field(default_factory=list)
     loss            : List[float] = field(default_factory=list)
     learning_rate   : List[float] = field(default_factory=list)
@@ -1117,80 +1176,15 @@ class RefinementStats(Container):
         """Return the optimisation trace as a tabular record."""
         return pd.DataFrame(self.to_dict())
 
-    def save(self, file: str, key: str='stats', mode: str='a') -> None:
-        """Write the optimisation trace to an HDF5 table.
+StateT = TypeVar('StateT', bound=State | BaseSetup)
+LossGradFn = Callable[[StateT], Tuple[RealArray, StateT]]
+ApplyUpdatesFn = Callable[[StateT, Updates], StateT]
 
-        Args:
-            file: Output HDF5 file path.
-            key: HDF5 table key used for the trace.
-            mode: Pandas HDF5 open mode.
-        """
-        self.to_dataframe().to_hdf(file, key=key, mode=mode)
-
-@dataclass
-class RefineResult(Container):
-    index   : IntArray
-    setup   : ResolvedSetup
-    loss    : RealArray
-    fitness : RealArray
-    stats   : RefinementStats
-
-    def champions_only(self) -> 'RefineResult':
-        xp = self.setup.__array_namespace__()
-        idxs = xp.lexsort((self.loss, self.index))
-        sorted_index = self.index[idxs]
-        # NumPy unique_values does not guarantee sorted output.
-        unique_index = xp.sort(xp.unique_values(sorted_index))
-        firsts = xp.searchsorted(sorted_index, unique_index)
-        champions = idxs[firsts]
-        return RefineResult(self.index[champions], self.setup[champions], self.loss[champions],
-                            self.fitness[champions], self.stats)
-
-    def to_dataframe(self) -> pd.DataFrame:
-        """Return refined orientations with per-solution refinement metrics."""
-        df = self.setup.to_dataframe(index=self.index)
-        df['loss'] = asnumpy(self.loss)
-        df['fitness'] = asnumpy(self.fitness)
-        return df
-
-    def save(self, file: str, config: RefinementConfig,
-             files: dict[str, str] | None=None) -> None:
-        """Write restartable refinement results and configuration to HDF5.
-
-        The ``data`` table contains one champion solution per pattern and is
-        intended as the default downstream input.  The ``candidates`` and
-        ``stats`` tables retain all refined candidates and optimisation
-        diagnostics. Both solution tables include resolved setup geometry,
-        while the root metadata stores the refinement configuration.
-
-        Args:
-            file: Output HDF5 file path.
-            config: Configuration used to produce the refinement result.
-            files: Optional source-file paths written under the ``files`` HDF5 group.
-        """
-        dir_path = os.path.dirname(file)
-        if dir_path and not os.path.exists(dir_path):
-            os.makedirs(dir_path)
-
-        self.champions_only().to_dataframe().to_hdf(file, key='data', mode='w')
-        self.to_dataframe().to_hdf(file, key='candidates', mode='a')
-        self.stats.save(file, mode='a')
-
-        with h5py.File(file, 'a') as output_file:
-            output_file.attrs['refinement_config'] = json.dumps(config.to_dict())
-            if files is not None:
-                for name, path in files.items():
-                    key = f'files/{name}'
-                    if key in output_file:
-                        del output_file[key]
-                    output_file[key] = path
-
-def optimisation_loop(data: RefinerData, initial: BaseSetup, optimiser: GradientTransformation,
-                      schedule: Schedule, loss_grad_fn: LossGradFn,
+def optimisation_loop(gradient: LossGradFn, initial: StateT,
+                      optimiser: GradientTransformation, schedule: Schedule,
                       num_steps: int, trace_every: int=1, log_every: int=0,
-                      logger: logging.Logger | None=None
-                      ) -> Tuple[BaseSetup, RefinementStats]:
-    stats = RefinementStats()
+                      logger: logging.Logger | None=None) -> Tuple[StateT, RefineStats]:
+    stats = RefineStats()
 
     state = initial
     apply_updates_fn : ApplyUpdatesFn = cast(ApplyUpdatesFn, apply_updates)
@@ -1199,7 +1193,7 @@ def optimisation_loop(data: RefinerData, initial: BaseSetup, optimiser: Gradient
 
     opt_state = optimiser.init(cast(Params, state))
 
-    loss, grad = loss_grad_fn(data, state)
+    loss, grad = gradient(state)
     stats.append(0, float(loss), float(schedule(0)), grad, None)
     if logger is not None:
         logger.info("step=%d loss=%.6e lr=%.6e grad_norm=%.6e update_norm=%.6e",
@@ -1210,7 +1204,7 @@ def optimisation_loop(data: RefinerData, initial: BaseSetup, optimiser: Gradient
         updates, opt_state = optimiser.update(cast(Updates, grad), opt_state)
         update_norm = global_norm(updates)
         state = apply_updates_fn(state, updates)
-        loss, grad = loss_grad_fn(data, state)
+        loss, grad = gradient(state)
 
         if step % trace_every == 0 or step == num_steps:
             stats.append(step, float(loss), float(schedule(step - 1)), grad, update_norm)
@@ -1222,9 +1216,9 @@ def optimisation_loop(data: RefinerData, initial: BaseSetup, optimiser: Gradient
 
     return state, stats
 
-def default_refinement_logger() -> logging.Logger:
+def default_logger(script: str) -> logging.Logger:
     """Return the default refinement logger writing progress messages to stdout."""
-    logger = logging.getLogger(f'{__name__}.refinement')
+    logger = logging.getLogger(f'{__name__}.{script}')
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
@@ -1238,73 +1232,175 @@ def default_refinement_logger() -> logging.Logger:
     logger.addHandler(handler)
     return logger
 
-def refinement(index: IntArray, initial: BaseSetup, patterns: Patterns, params: RefinementConfig,
-               logger: logging.Logger, xp: AnyNamespace) -> RefineResult:
-    """Refine candidate orientations for a batch of diffraction patterns.
+@dataclass
+class RefineContext(Container):
+    refiner : RefinerModel
+    loss    : RefinerLoss
+    data    : RefinerData
+    logger  : logging.Logger = field(default=default_logger('refinement'))
 
-    Args:
-        index: Array of indices for the patterns to refine.
-        initial: Initial crystal and detector geometry state.
-        patterns: Diffraction patterns container.
-        params: Refinement configuration.
-        logger: Optional logger for progress messages.
-        xp: Array namespace.
+    def pattern_fitness(self, threshold: float, resolved: ResolvedSetup) -> RealArray:
+        return self.loss.pattern_fitness(threshold, self.data, resolved)
 
-    Returns:
-        :class:`~cbclib_v2.scripts.RefineResult` with champion solutions
-        and per-solution refinement metrics.
-    """
-    model = RefinerModel()
+    def miller(self, resolved: ResolvedSetup) -> Miller:
+        return self.loss.index(self.data, resolved).finite_only().unique()
 
-    loss = params.loss.refiner_loss(model)
-    data = params.data.refiner_data(patterns, model, loss, initial)
-    loss_grad_fn : LossGradFn = jit(value_and_grad(jit(loss), argnums=1))
+    def refine(self, frames: IntArray, initial: BaseSetup, params: RefineConfig
+               ) -> Tuple[RefineResult, RefineStats]:
+        """Refine candidate orientations for a batch of diffraction patterns.
 
-    solver, schedule = params.optimise.optimiser()
+        Args:
+            index: Array of indices for the patterns to refine.
+            initial: Initial crystal and detector geometry state.
+            params: Refinement configuration.
 
-    logger.info("refining with %s setup and with %s geometry in %s mode",
-                params.setup, params.geometry, params.mode)
-    logger.info("refining %d patterns with %s/%s/%s for %d steps",
-                len(initial.xtal), params.optimise.method, params.loss.kind,
-                params.loss.projector, params.optimise.schedule.num_steps)
+        Returns:
+            :class:`~cbclib_v2.scripts.RefineResult` with champion solutions
+            and per-solution refinement metrics.
+        """
+        xp = self.data.__array_namespace__()
+        loss_grad_fn = jit(value_and_grad(self.loss, argnums=1))
 
-    state, stats = optimisation_loop(data, initial, solver, schedule, loss_grad_fn,
-                                     params.optimise.schedule.num_steps,
-                                     params.optimise.trace_every, params.optimise.log_every,
-                                     logger)
-    criterion = loss.per_pattern(data, state)
-    fitness = loss.pattern_fitness(params.threshold, data, state)
-    return RefineResult(index, state.resolve(xp), criterion, fitness, stats)
+        def gradient(state: BaseSetup) -> Tuple[RealArray, BaseSetup]:
+            return loss_grad_fn(self.data, state)
 
-def refine_xtals(patterns: Patterns, df: pd.DataFrame, setup_file: str,
-                 params: RefinementConfig, logger: logging.Logger | None=None
-                 ) -> RefineResult:
-    xp = patterns.__array_namespace__()
+        solver, schedule = params.optimise.optimiser()
 
-    index = xp.asarray(df['index'].to_numpy())
-    target = patterns.loc[index]
-    initial = params.import_xtal(XtalState.import_dataframe(df, xp=xp), setup_file)
+        self.logger.info("refining with %s sample and with %s geometry and %s focus in %s mode",
+                         params.setup.sample, params.setup.geometry, params.setup.focus,
+                         params.setup.mode)
+        self.logger.info("refining %d patterns with %s/%s/%s for %d steps",
+                         len(initial.xtal), params.optimise.method, params.loss.kind,
+                         params.loss.projector, params.optimise.schedule.num_steps)
 
-    return refinement(index, initial, target, params, logger or default_refinement_logger(), xp)
+        state, stats = optimisation_loop(gradient, initial, solver, schedule,
+                                         params.optimise.schedule.num_steps,
+                                         params.optimise.trace_every,
+                                         params.optimise.log_every, self.logger)
 
-def refine_solutions(patterns: Patterns, df: pd.DataFrame, params: RefinementConfig,
-                     logger: logging.Logger | None=None) -> RefineResult:
-    """Refine all candidate solutions in *df* and return champion orientations.
+        resolved = state.resolve(xp)
+        criterion = self.loss.per_pattern(self.data, resolved)
+        return RefineResult(frames, resolved, criterion), stats
 
-    Args:
-        patterns: Diffraction patterns container.
-        df: Candidate solutions table from :func:`run_indexing`.
-        params: Refinement configuration.
-        logger: Optional logger for progress messages.
+@dataclass
+class PostRefineSetupParameters(SetupParameters):
+    def import_resolved(self, setup: ResolvedSetup) -> BaseSetup:
+        return super().import_resolved(setup, 'dynamic')
 
-    Returns:
-        :class:`~cbclib_v2.scripts.RefineResult` with champion solutions
-        and per-solution refinement metrics.
-    """
-    xp = patterns.__array_namespace__()
+    def import_xtal(self, xtal: XtalState, setup_file: str) -> BaseSetup:
+        return super().import_xtal(xtal, setup_file, 'dynamic')
 
-    index = xp.asarray(df['index'].to_numpy())
-    target = patterns.loc[index]
-    initial = params.import_resolved(ResolvedSetup.import_dataframe(df, xp=xp))
+@dataclass
+class PostRefineOptimiseParameters(BaseParameters):
+    intensities : OptimiseParameters
+    setup       : OptimiseParameters
 
-    return refinement(index, initial, target, params, logger or default_refinement_logger(), xp)
+@dataclass
+class PostRefineConfig(BaseParameters):
+    scaling         : ScalingParameters
+    optimise        : PostRefineOptimiseParameters
+    setup           : PostRefineSetupParameters
+    miller          : Literal['indexed', 'all']
+    point_group     : str
+    sigma           : float
+    width           : int
+
+    def cryst_data(self, frames: IntArray, images: Array, metadata: CrystMetadata) -> CrystData:
+        return scale_background(frames, images, metadata, self.scaling)
+
+    def all_hkl(self, q_abs: RealArray | float, scaler: ScalerModel, resolved: ResolvedSetup,
+                detector: Detector, xp: AnyNamespace) -> MillerWithRLP:
+        hkl = scaler.xtal.hkl_in_ball(q_abs, resolved.xtal, xp)
+        miller = Miller.tile(hkl, xp.arange(len(resolved.xtal)), xp)
+
+        miller = scaler.xtal.hkl_to_q(miller, resolved.xtal, xp)
+        patterns = scaler.init_patterns(miller, resolved.geometry, xp)
+
+        is_valid = xp.isfinite(patterns.lines).all(axis=-1)
+        detector_dims = (detector.pixel_size * detector.assembled_shape[0],
+                         detector.pixel_size * detector.assembled_shape[1])
+        is_inbound = (patterns.x >= 0.0) & (patterns.x < detector_dims[-1]) & \
+                     (patterns.y >= 0.0) & (patterns.y < detector_dims[-2])
+        is_valid = is_valid & is_inbound.any(axis=-1)
+
+        return miller[xp.asarray(is_valid, dtype=bool)]
+
+    def streak_indices(self, scaler: ScalerModel, miller: MillerWithRLP, resolved: ResolvedSetup,
+                       detector: Detector, xp: AnyNamespace) -> StreakIndices:
+        sim = scaler.init_patterns(miller, resolved.geometry, xp)
+        sim = detector.to_pixels(sim)
+        dataframe = sim.pattern_dataframe(detector.assembled_shape, self.width, 'rectangular')
+        return StreakIndices.import_dataframe(dataframe, xp)
+
+    def scaler_data(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
+                    resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace) -> ScalerData:
+        streak_ids = self.streak_indices(scaler, miller, resolved, detector, xp)
+        streak_ids = streak_ids.mask(detector.assembler(xp).mask)
+        point_group = PointGroup(self.point_group)
+        return ScalerData.import_data(cryst_data, streak_ids, miller, point_group, detector, xp)
+
+    def init_context(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
+                     resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace
+                     ) -> 'PostRefineContext':
+        data = self.scaler_data(scaler, cryst_data, miller, resolved, detector, xp)
+        return PostRefineContext(scaler=scaler, data=data)
+
+@dataclass
+class PostRefineContext(Container):
+    scaler  : ScalerModel
+    data    : ScalerData
+    logger  : logging.Logger = field(default=default_logger('post-refinement'))
+
+    @property
+    def scaler_loss(self) -> ScalerLoss:
+        return ScalerLoss(self.scaler)
+
+    @property
+    def full_loss(self) -> FullLoss:
+        return FullLoss(self.scaler)
+
+    def refine_scaling(self, initial: ScalerState, resolved: ResolvedSetup,
+                       params: OptimiseParameters) -> Tuple[ScalerState, RefineStats]:
+        xp = self.data.__array_namespace__()
+        modelled = self.scaler.init_model(self.data, resolved, xp)
+
+        loss_grad_fn = jit(value_and_grad(self.scaler_loss, argnums=2))
+
+        def gradient(state: ScalerState) -> Tuple[RealArray, ScalerState]:
+            return loss_grad_fn(modelled, self.data, state)
+
+        solver, schedule = params.optimiser()
+
+        self.logger.info("refining intensities for %d patterns", len(resolved.xtal))
+
+        return optimisation_loop(gradient, initial, solver, schedule, params.schedule.num_steps,
+                                 params.trace_every, params.log_every, self.logger)
+
+    def post_refine(self, initial: FullState, params: OptimiseParameters
+                    ) -> Tuple[ScalerState, ResolvedSetup, RefineStats]:
+        xp = self.data.__array_namespace__()
+        loss_grad_fn = jit(value_and_grad(self.full_loss, argnums=1))
+
+        def gradient(state: FullState) -> Tuple[RealArray, FullState]:
+            return loss_grad_fn(self.data, state)
+
+        solver, schedule = params.optimiser()
+
+        self.logger.info("post-refining of setup for %d patterns", len(initial.setup.xtal))
+
+        state, stats = optimisation_loop(gradient, initial, solver, schedule,
+                                         params.schedule.num_steps, params.trace_every,
+                                         params.log_every, self.logger)
+        return state.scaling, state.setup.resolve(xp), stats
+
+    def to_list(self, state: ScalerState, resolved: ResolvedSetup) -> ReflectionList:
+        xp = self.data.__array_namespace__()
+        modelled = self.scaler.init_model(self.data, resolved, xp)
+        return self.scaler.to_list(modelled, self.data, state, xp)
+
+    def to_result(self, frames: IntArray, state: ScalerState, resolved: ResolvedSetup
+                  ) -> RefineResult:
+        xp = self.data.__array_namespace__()
+        modelled = self.scaler.init_model(self.data, resolved, xp)
+        criterion = self.scaler_loss.per_pattern(modelled, self.data, state)
+        return RefineResult(frames, resolved, criterion)

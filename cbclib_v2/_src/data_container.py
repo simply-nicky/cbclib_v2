@@ -14,17 +14,15 @@ Defines a four-level class hierarchy for holding typed, array-backed data:
 """
 from __future__ import annotations
 from collections import defaultdict
-from dataclasses import InitVar, dataclass, fields
+from dataclasses import dataclass, fields
 from math import prod
 from typing import (Any, DefaultDict, Dict, Generic, Iterable, Iterator, List, Protocol, Sequence,
                     Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints, overload)
 from typing_extensions import Self
 import numpy as np
 from .array_api import array_namespace, ascupy, asjax, asnumpy
-from .src.index import Indexer
-from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, DType, Indices,
-                          IntArray, IntSequence, MultiIndices, NDArray, NDIntArray, NumPy,
-                          RealSequence, Shape)
+from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, Indices, IntArray,
+                          IntSequence, MultiIndices, NumPy, RealSequence, Shape)
 
 def compute_index(index: int, length: int) -> int:
     if index < 0:
@@ -350,6 +348,62 @@ class DataContainer(Container):
                 data[attr] = val.to_numpy()
         return self.replace(**data)
 
+    def to_xp(self: Self, xp: AnyNamespace) -> Self:
+        """Return a copy with all arrays converted to the given array namespace.
+
+        Non-array fields are left unchanged.
+
+        Args:
+            xp: Target array namespace (NumPy, JAX, or CuPy).
+
+        Returns:
+            New container instance with arrays in the target namespace.
+        """
+        name = getattr(xp, "__name__", "")
+        if name == "numpy" or name.startswith("array_api_compat.numpy"):
+            return self.to_numpy()
+        if name.startswith("jax.numpy"):
+            return self.to_jax()
+        if name == "cupy":
+            return self.to_cupy()
+        raise ValueError(f"Unsupported array namespace: {name}")
+
+def normalise_indices(indices: Tuple, shape: Shape) -> Tuple[Indices, ...]:
+    ellipsis_count = sum(index is Ellipsis for index in indices)
+    if ellipsis_count > 1:
+        raise IndexError("An index can only contain one ellipsis")
+
+    consumed = 0
+    for index in indices:
+        if index is Ellipsis:
+            continue
+        if isinstance(index, Array) and index.dtype == bool:
+            consumed += index.ndim
+        else:
+            consumed += 1
+
+    missing = len(shape) - consumed
+    if missing < 0:
+        raise IndexError(f"Too many indices for container with shape {shape}")
+
+    normalized: List[Indices] = []
+    for index in indices:
+        if index is Ellipsis:
+            normalized.extend([slice(None)] * missing)
+        else:
+            normalized.append(index)
+
+    if ellipsis_count == 0:
+        normalized.extend([slice(None)] * missing)
+
+    return tuple(normalized)
+
+def validate_shape(contents: Dict[str, Array], shape: Shape) -> None:
+    for name, value in contents.items():
+        if value.shape[:len(shape)] != shape:
+            raise ValueError(f"Field '{name}' has shape {value.shape} "
+                             f"which is incompatible with leading shape {shape}")
+
 class ArrayContainer(DataContainer):
     """Container for dataclasses whose array fields share a common leading shape.
 
@@ -358,6 +412,8 @@ class ArrayContainer(DataContainer):
     :attr:`shape` property returns the leading dimensions that are identical
     across all array fields.
     """
+    def __post_init__(self):
+        validate_shape(self.contents(), self.shape)
 
     @classmethod
     def is_empty(cls, data: Any) -> bool:
@@ -384,8 +440,6 @@ class ArrayContainer(DataContainer):
         if len(containers) == 0:
             raise ValueError("containers must not be empty")
 
-        defaults = {f.name: getattr(containers[0], f.name) for f in fields(containers[0])}
-
         xp = array_namespace(*containers)
         concatenated : DefaultDict[str, List] = defaultdict(list)
         for container in containers:
@@ -398,7 +452,7 @@ class ArrayContainer(DataContainer):
                 result[key] = xp.concat(vals)
             if isinstance(vals[0], ArrayContainer):
                 result[key] = type(vals[0]).concat(vals)
-        return cls(**(defaults | result))
+        return containers[0].replace(**result)
 
     @classmethod
     def stack(cls: Type[Self], containers: Iterable[Self], axis: int=0) -> Self:
@@ -419,8 +473,6 @@ class ArrayContainer(DataContainer):
         if len(containers) == 0:
             raise ValueError("containers must not be empty")
 
-        defaults = {f.name: getattr(containers[0], f.name) for f in fields(containers[0])}
-
         xp = array_namespace(*containers)
         stacked : DefaultDict[str, List] = defaultdict(list)
         for container in containers:
@@ -433,31 +485,20 @@ class ArrayContainer(DataContainer):
                 result[key] = xp.stack(vals, axis=axis)
             if isinstance(vals[0], ArrayContainer):
                 result[key] = type(vals[0]).stack(vals, axis=axis)
-        return cls(**(defaults | result))
+        return containers[0].replace(**result)
 
     @property
     def shape(self) -> Shape:
-        """Common leading shape shared by all array fields.
+        raise NotImplementedError("ArrayContainer subclasses must implement the 'shape' property")
 
-        Returns the longest prefix of axis lengths that is identical across
-        every array field returned by :meth:`contents`.
+    @property
+    def ndim(self) -> int:
+        """Number of dimensions in the common leading shape.
 
         Returns:
-            Tuple of integers giving the common leading shape.
-
-        Raises:
-            ValueError: If no uniform shape prefix exists.
+            Length of :attr:`shape`.
         """
-        shape: List[int] = []
-        ndim = 0
-        for lengths in zip(*(val.shape for val in self.contents().values())):
-            if len(lengths) == len(self.contents()):
-                if all(l == lengths[0] for l in lengths):
-                    shape.append(lengths[0])
-                ndim += 1
-        if len(shape) == 0 and ndim > 0:
-            raise ValueError("No uniform shape found among array fields")
-        return tuple(shape)
+        return len(self.shape)
 
     @property
     def size(self) -> int:
@@ -480,13 +521,25 @@ class ArrayContainer(DataContainer):
         Returns:
             New container instance with the indexed array fields.
         """
+        if not isinstance(indices, tuple):
+            common_indices = normalise_indices((indices,), self.shape)
+        else:
+            common_indices = normalise_indices(indices, self.shape)
+
         xp = self.__array_namespace__()
         data = {}
-        for attr, val in self.contents().items():
-            if isinstance(val, Array):
-                data[attr] = xp.asarray(val[indices])
-            if isinstance(val, ArrayContainer):
-                data[attr] = val[indices]
+        for attr, value in self.contents().items():
+            if isinstance(value, ArrayContainer):
+                data[attr] = value[common_indices]
+            else:
+                payload_ndim = value.ndim - len(self.shape)
+                if payload_ndim < 0:
+                    raise ValueError(
+                        f"Field {attr!r} has fewer dimensions than container shape "
+                        f"{self.shape}"
+                    )
+                field_indices = common_indices + (slice(None),) * payload_ndim
+                data[attr] = xp.asarray(value[field_indices])
         return self.replace(**data)
 
     def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:
@@ -556,105 +609,57 @@ def split(containers: IC | Array | Sequence[IC | A | Array | Any], n_chunks: int
 I = TypeVar("I", bound="Indexed")
 
 @dataclass
-class IndexArray():
-    """Wrapper around an integer index array backed by a C++ ``Indexer``.
+class IndexLookup(DataContainer):
+    order           : IntArray
+    unique          : IntArray
+    offsets         : IntArray
 
-    Stores a sorted integer array and exposes efficient group-lookup
-    operations used by :class:`IndexedContainer`.  Internally delegates to
-    :class:`~cbclib_v2._src.src.index.Indexer` for range-based lookups.
+    @classmethod
+    def build(cls, array: IntArray) -> IndexLookup:
+        xp = array_namespace(array)
+        values = xp.reshape(array, -1)
+        order = xp.argsort(values, stable=True)
+        sorted_values = values[order]
 
-    The array is always stored as a contiguous 1-D NumPy ``int`` array;
-    arrays on other devices are transferred to CPU at construction time.
+        unique, offsets = xp.unique(sorted_values, return_index=True)
 
-    Attributes:
-        index: C++ ``Indexer`` wrapping the raw integer array.
-    """
+        offsets = xp.concat((offsets, xp.array([values.size], dtype=int)))
+        return cls(order, unique, offsets)
 
-    arr       : InitVar[IntArray]
-
-    def __post_init__(self, arr: IntArray):
-        xp = self.__namespace__ = NumPy
-        arr = xp.asarray(asnumpy(arr), dtype=int)
-        self.index = Indexer(xp.reshape(arr, (-1,) if arr.ndim == 0 else arr.shape))
-
-    def __array_namespace__(self, api_version: str | None = None) -> AnyNamespace:
-        return self.__namespace__
-
-    def __reduce__(self) -> Tuple:
-        return (self.__class__, (self.index.array,))
-
-    def __array__(self, dtype: DType | None=None) -> NDArray:
-        return NumPy.asarray(self.index.array, dtype=dtype)
-
-    def __getitem__(self, idxs: MultiIndices | BoolArray) -> 'IndexArray':
+    def get_index(self, keys: IntSequence) -> Tuple[IntArray, IntArray]:
         xp = self.__array_namespace__()
-        return IndexArray(xp.asarray(self)[idxs])
+        targets = xp.atleast_1d(keys)
+        if targets.size == 0:
+            empty = xp.asarray([], dtype=int)
+            return empty, empty
+        if self.unique.size == 0:
+            raise KeyError(f"Index values are not present: {targets.tolist()}")
 
-    def __setitem__(self, idxs: MultiIndices, value: IntArray):
+        locations = xp.searchsorted(self.unique, targets)
+        clipped = xp.minimum(locations, self.unique.size - 1)
+
+        valid = (
+            (locations < self.unique.size)
+            & (self.unique[clipped] == targets)
+        )
+        if not xp.all(valid):
+            missing = targets[~valid]
+            raise KeyError(f"Index values are not present: {missing.tolist()}")
+
+        starts = self.offsets[locations]
+        stops = self.offsets[locations + 1]
+
+        chunks = [self.order[start:stop] for start, stop in zip(starts, stops)]
+        positions = xp.concat(chunks)
+        reset = xp.repeat(xp.arange(targets.size), stops - starts)
+        return positions, reset
+
+    def reset_index(self) -> IntArray:
         xp = self.__array_namespace__()
-        array = xp.asarray(self.index)
-        array[idxs] = value
-        self.index = Indexer(asnumpy(array))
-
-    def __repr__(self) -> str:
-        return f"IndexArray(index={self.index.array})"
-
-    @property
-    def array(self) -> NDIntArray:
-        """Raw 1-D NumPy integer array of index values."""
-        return self.index.array
-
-    @property
-    def is_decreasing(self) -> bool:
-        """``True`` if the index is strictly decreasing."""
-        return self.index.is_decreasing
-
-    @property
-    def is_increasing(self) -> bool:
-        """``True`` if the index is strictly increasing."""
-        return self.index.is_increasing
-
-    def get_index(self, key: IntSequence) -> Tuple[NDIntArray | slice, NDIntArray]:
-        """Return row positions and reset indices for a key or sequence of keys.
-
-        Args:
-            key: A scalar index value or array of index values to look up.
-
-        Returns:
-            Tuple ``(row_selector, reset_index)`` where *row_selector* is a
-            slice or integer array selecting the matching rows, and
-            *reset_index* is a 0-based integer array for the selected rows.
-        """
-        def to_indices(key: int | np.integer | Array) -> Tuple[slice, NDIntArray]:
-            indices = self.index[int(key)]
-            start, stop, step = indices.indices(self.index.array.size)
-            return indices, NumPy.zeros((stop - start) // step, dtype=int)
-
-        if isinstance(key, (int, np.integer)):
-            return to_indices(key)
-
-        if isinstance(key, Array):
-            key = asnumpy(key)
-            if key.ndim == 0:
-                return to_indices(key)
-
-        return self.index[key]
-
-    def unique(self) -> NDIntArray:
-        """Return the sorted array of unique index values."""
-        return self.index.unique()
-
-    def reset(self) -> 'IndexArray':
-        """Return a new :class:`IndexArray` with 0-based contiguous indices.
-
-        Each unique value in the original index is replaced by its
-        ordinal position (0, 1, 2, …).
-
-        Returns:
-            New :class:`IndexArray` with reset indices.
-        """
-        _, new_index = self.get_index(self.index.unique())
-        return IndexArray(new_index)
+        counts = self.offsets[1:] - self.offsets[:-1]
+        sorted_index = xp.repeat(xp.arange(self.unique.size), counts)
+        inverse_order = xp.argsort(self.order)
+        return sorted_index[inverse_order]
 
 class Indexed(Protocol):
     """Protocol for objects that carry an integer index and support group-wise access.
@@ -664,11 +669,13 @@ class Indexed(Protocol):
     """
     index       : IntArray
 
+    def __array_namespace__(self) -> AnyNamespace: ...
+
     def __getitem__(self: I, indices: Indices | BoolArray) -> I: ...
 
     def replace(self: I, **kwargs: Any) -> I: ...
 
-    def reset_index(self: I) -> I: ...
+    def reset_index(self: I) -> IntArray: ...
 
     def take(self: I, indices: IntSequence, reset_index: bool = False) -> I: ...
 
@@ -685,9 +692,10 @@ class GenericIndexer(Generic[I]):
         obj: The :class:`Indexed` object to index into.
     """
     obj         : I
+    reset_index : bool = False
 
     def __getitem__(self, indices: IntSequence) -> I:
-        return self.obj.take(indices, reset_index=True)
+        return self.obj.take(indices, self.reset_index)
 
 @dataclass
 class ILocIndexer(GenericIndexer[I]):
@@ -697,11 +705,9 @@ class ILocIndexer(GenericIndexer[I]):
     ``obj.unique_index()[i]``.  Supports scalar integers, slices,
     integer arrays, and :class:`IndexArray` objects.
     """
-    def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
-        xp = NumPy
-        if isinstance(indices, IndexArray):
-            idxs = self.obj.unique_index()[xp.asarray(indices)]
-        elif isinstance(indices, int):
+    def __getitem__(self, indices: slice | IntSequence) -> I:
+        xp = self.obj.__array_namespace__()
+        if isinstance(indices, int):
             idxs = self.obj.unique_index()[xp.atleast_1d(indices)]
         else:
             idxs = self.obj.unique_index()[indices]
@@ -716,11 +722,9 @@ class LocIndexer(GenericIndexer[I]):
     :class:`IndexArray` objects.
     """
 
-    def __getitem__(self, indices: slice | IntSequence | IndexArray) -> I:
-        xp = NumPy
-        if isinstance(indices, IndexArray):
-            idxs = xp.asarray(indices)
-        elif isinstance(indices, int):
+    def __getitem__(self, indices: slice | IntSequence) -> I:
+        xp = self.obj.__array_namespace__()
+        if isinstance(indices, int):
             idxs = xp.atleast_1d(indices)
         elif isinstance(indices, slice):
             start, stop, step = indices.indices(self.obj.index.size)
@@ -728,35 +732,6 @@ class LocIndexer(GenericIndexer[I]):
         else:
             idxs = indices
         return super().__getitem__(idxs)
-
-def concatenate_index(arrays: Iterable[IntArray], xp: AnyNamespace=NumPy) -> IntArray:
-    """Concatenate index arrays while preserving monotonicity.
-
-    When the first element of a subsequent array is less than the last
-    element of the previous one, the subsequent array is shifted upward so
-    that the combined sequence remains non-decreasing.  This is used by
-    :meth:`IndexedContainer.concat` to merge frame indices from
-    multiple chunks without collisions.
-
-    Args:
-        arrays: Iterable of 1-D integer arrays to concatenate.
-        xp: Array namespace for intermediate operations.
-
-    Returns:
-        Single concatenated integer array with preserved monotonicity.
-    """
-    indices, last = [], 0
-    for array in arrays:
-        array = xp.asarray(array)
-        array = xp.reshape(array, (-1,) if array.ndim == 0 else array.shape)
-        if len(array) != 0:
-            if array[0] < last:
-                index = array + last - array[0]
-            else:
-                index = array
-            indices.append(index)
-            last = int(index[-1]) + 1
-    return xp.concat(indices)
 
 class IndexedContainer(ArrayContainer):
     """Array container with an integer ``index`` field grouping rows into frames.
@@ -772,86 +747,37 @@ class IndexedContainer(ArrayContainer):
     Attributes:
         index: Integer frame index for each row, shape ``(N,)``.
     """
-
     index       : IntArray
 
     def __post_init__(self):
-        try:
-            self._index = IndexArray(self.index)
-        except ValueError:
-            xp = self.__array_namespace__()
-            indices = xp.argsort(self.index)
-            for attr, val in self.contents().items():
-                setattr(self, attr, val[indices])
-            self.index = self.index[indices]
-            self._index = IndexArray(self.index)
+        if self.index.ndim != self.ndim:
+            raise ValueError(
+                f"Index shape {self.index.shape} is incompatible with "
+                f"leading shape {self.shape}"
+            )
+        if self.ndim and self.index.shape[0] != self.shape[0]:
+            raise ValueError(
+                f"Index shape {self.index.shape} is incompatible with "
+                f"leading shape {self.shape}"
+            )
 
-    @classmethod
-    def concat(cls: Type[Self], containers: Iterable[Self]) -> Self:
-        """Concatenate indexed containers while keeping indices unique.
-
-        Data fields are concatenated field-wise; the combined ``index`` is
-        built by :func:`concatenate_index` so that frame labels remain
-        monotonically non-decreasing and do not collide across chunks.
-
-        Args:
-            containers: Non-empty iterable of container instances of the
-                same concrete type.
-
-        Returns:
-            New container instance with concatenated data and adjusted
-            index.
-        """
-        obj = super(IndexedContainer, cls).concat(containers)
-        xp = obj.__array_namespace__()
-        index = concatenate_index((container.index for container in containers), xp)
-        return cls(**(obj.contents() | {'index': index}))
-
-    @classmethod
-    def stack(cls: Type[Self], containers: Iterable[Self], axis: int=0) -> Self:
-        """Stack indexed containers along a new axis.
-
-        Data fields are stacked field-wise; the ``index`` is taken from the
-        first container.
-
-        Args:
-            containers: Non-empty iterable of container instances of the
-                same concrete type.
-            axis: Axis along which to insert the new dimension.
-
-        Returns:
-            New container instance with stacked data fields.
-
-        Raises:
-            ValueError: If *containers* is empty.
-        """
-        obj = super(IndexedContainer, cls).stack(containers, axis)
-        for container in containers:
-            return cls(**(obj.contents() | {'index': container.index}))
-
-        raise ValueError("containers must not be empty")
-
-    def __getitem__(self: Self, indices: MultiIndices | BoolArray) -> Self:
-        """Index data fields and the corresponding rows of ``index``.
-
-        Args:
-            indices: Position indices or boolean mask applied to all fields.
-
-        Returns:
-            New container with the selected data rows and matching index
-            entries.
-        """
         xp = self.__array_namespace__()
-        obj = super().__getitem__(indices)
+        try:
+            self.index = xp.broadcast_to(self.index, self.shape)
+        except ValueError as error:
+            raise ValueError(
+                f"Index shape {self.index.shape} is incompatible with "
+                f"leading shape {self.shape}"
+            ) from error
 
-        if isinstance(indices, tuple):
-            index = self.index[indices[0]]
-        elif isinstance(indices, Array) and indices.dtype == bool:
-            index = xp.reshape(self.index, (self.index.size,) + (1,) * (indices.ndim - 1))
-            index = xp.broadcast_to(index, indices.shape)[indices]
-        else:
-            index = self.index[indices]
-        return type(self)(**(obj.contents() | {'index': xp.asarray(index)}))
+        super().__post_init__()
+        self._indexer = None
+
+    @property
+    def indexer(self) -> IndexLookup:
+        if self._indexer is None:
+            self._indexer = IndexLookup.build(self.index.reshape(-1))
+        return self._indexer
 
     def __iter__(self: Self) -> Iterator[Self]:
         """Iterate over groups, yielding one container per unique index value.
@@ -859,13 +785,12 @@ class IndexedContainer(ArrayContainer):
         Yields:
             Container slice for each unique value in :attr:`index`.
         """
-        for index in self._index.unique():
-            indexer, _ = self._index.get_index(index)
-            yield self[indexer]
+        for index in self.indexer.unique:
+            yield self.take(index, reset_index=False)
 
     def __len__(self) -> int:
         """Return the number of unique index groups."""
-        return self._index.unique().size
+        return self.indexer.unique.size
 
     @property
     def iloc(self: Self) -> ILocIndexer[Self]:
@@ -886,57 +811,7 @@ class IndexedContainer(ArrayContainer):
         """
         return LocIndexer(self)
 
-    def contents(self) -> Dict[str, Any]:
-        """Return non-empty data fields, **excluding** the ``index`` field.
-
-        The ``index`` attribute is intentionally omitted so that field-wise
-        operations inherited from :class:`ArrayContainer` do not touch it.
-
-        Returns:
-            Mapping of data field names to values.
-        """
-        contents = super().contents()
-        if 'index' in contents:
-            del contents['index']
-        return contents
-
-    def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:
-        """Reshape all data fields and adjust ``index`` to match.
-
-        The ``index`` is collapsed to 1-D by taking the first index value
-        along every trailing axis, which requires all rows in a group to
-        share the same index value.
-
-        Args:
-            shape: Target shape for data fields.  ``None`` flattens to 1-D.
-
-        Returns:
-            New container with reshaped data and adjusted index.
-
-        Raises:
-            ValueError: If the reshape is incompatible with the index
-                grouping.
-        """
-        obj = super().reshape(shape)
-        if obj.shape[0] > prod(obj.shape):
-            raise ValueError("Cannot reshape IndexedContainer: invalid shape for index")
-
-        xp = self.__array_namespace__()
-        sizes = xp.cumulative_prod(obj.shape)
-        index_shape = xp.asarray(obj.shape)[sizes <= self.index.size]
-        if prod(index_shape) != self.index.size:
-            raise ValueError("Cannot reshape IndexedContainer: incompatible index size")
-
-        old_index = self.index.reshape(index_shape)
-        new_index = old_index.reshape((int(index_shape[0]), prod(index_shape[1:])))[:, 0]
-
-        expanded_shape = (new_index.shape[0],) + (1,) * (len(index_shape) - 1) + new_index.shape[1:]
-        expanded_index = xp.reshape(new_index, expanded_shape)
-        if not xp.all(old_index == expanded_index):
-            raise ValueError("Cannot reshape IndexedContainer: inconsistent index grouping")
-        return type(self)(**(obj.contents() | {'index': new_index}))
-
-    def take(self: Self, indices: IntSequence, reset_index: bool = False) -> Self:
+    def take(self: Self, indices: IntSequence, reset_index: bool=False) -> Self:
         """Select groups by index value and return the corresponding slice.
 
         Unlike ``__getitem__``, which operates on raw row positions,
@@ -950,23 +825,31 @@ class IndexedContainer(ArrayContainer):
             New container containing all rows belonging to the requested
             index groups.
         """
-        indexer, new_index = self._index.get_index(indices)
+        flat = self.reshape()
+        positions, new_index = self.indexer.get_index(indices)
+        result = flat[positions]
+
         if reset_index:
-            return self[indexer].replace(index=new_index)
-        return self[indexer]
+            return result.replace(index=new_index)
+        return result
 
-    def reset_index(self: Self) -> Self:
-        """Return a new container with reset indices and adjusted data fields.
-
-        Each unique value in the original ``index`` is replaced by its
-        ordinal position (0, 1, 2, …).  Data fields are permuted to match
-        the new index order.
+    def reset(self: Self) -> Self:
+        """Return a copy of the container with the reset index.
 
         Returns:
-            New container with reset indices.
+            New container instance with the reset index.
+        """
+        return self.replace(index=self.reset_index())
+
+    def reset_index(self: Self) -> IntArray:
+        """Return a reset index where each unique value in the original ``index``
+        is replaced by its ordinal position (0, 1, 2, …).
+
+        Returns:
+            Reset index array.
         """
         xp = self.__array_namespace__()
-        return self.replace(index=xp.asarray(self._index.reset().array))
+        return xp.reshape(self.indexer.reset_index(), self.shape)
 
     def unique_index(self) -> IntArray:
         """Return the sorted array of unique index values.
@@ -974,5 +857,4 @@ class IndexedContainer(ArrayContainer):
         Returns:
             A flat array of unique index values.
         """
-        xp = self.__array_namespace__()
-        return xp.asarray(self._index.unique())
+        return self.indexer.unique

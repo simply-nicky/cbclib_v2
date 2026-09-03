@@ -1,11 +1,10 @@
 from dataclasses import dataclass
 from .._src.annotations import AnyNamespace, RealArray
-from .._src.array_api import add_at, broadcast_to, det_to_k
-from ..indexer.cbc_indexing import CBDSetup
+from .._src.array_api import add_at, broadcast_to, det_to_k, safe_divide
+from ..indexer.cbc_indexing import BaseSetup, CBDSetup
 from ..indexer.cbc_pupil import Rectangle, SourcePlane
 from ..indexer.cbc_setup import ResolvedGeometry, ResolvedSetup
-from .cbc_data import IntensityModel, PhotonCounts, ScalerData, ScalerResult, ScalerState
-from .cbc_symmetry import PointGroup
+from .cbc_data import FullState, IntensityModel, PhotonCounts, ScalerData, ReflectionList, ScalerState
 
 @dataclass(frozen=True, unsafe_hash=True)
 class ScalerModel(CBDSetup):
@@ -24,7 +23,7 @@ class ScalerModel(CBDSetup):
 
         if isinstance(setup.geometry, ResolvedGeometry):
             kin = kout - q
-            smp_pos = self.kin_to_sample(kin, data.points.index, setup.geometry, xp)
+            smp_pos = self.kin_to_sample(data.points.index, kin, setup.geometry, xp)
             kout = det_to_k(data.points.points, smp_pos, xp)
 
         pupil = self.lens.pupil(setup.geometry, xp)
@@ -75,34 +74,70 @@ class ScalerModel(CBDSetup):
         denominator = xp.sqrt(xp.where(positive, information, 1.0))
         return xp.where(positive, 1.0 / denominator, xp.inf)
 
-    def init_result(self, modelled: IntensityModel, data: ScalerData, state: ScalerState,
-                    point_group: PointGroup, xp: AnyNamespace) -> ScalerResult:
+    def to_list(self, modelled: IntensityModel, data: ScalerData, state: ScalerState,
+                xp: AnyNamespace) -> ReflectionList:
         """Return fitted reflection intensities and their conditional standard errors."""
-        return ScalerResult.from_data(data=data, point_group=point_group,
-                                      I_hkl=xp.exp(state.log_hkl),
-                                      sigma_hkl=self.std_hkl(modelled, data, state, xp), xp=xp)
+        sigma_hkl = self.std_hkl(modelled, data, state, xp)
+        return ReflectionList.from_data(data=data, sigma_hkl=sigma_hkl,
+                                        I_hkl=xp.exp(state.log_hkl), xp=xp)
+
+class BaseLoss:
+    model       : ScalerModel
+
+    def poisson_loss(self, modelled: IntensityModel, data: ScalerData, state: ScalerState,
+                     xp: AnyNamespace) -> RealArray:
+        log_signal = self.model.log_signal(modelled, data, state, xp)
+        log_expected = self.model.log_expected(data.counts, log_signal, xp)
+        return self.model.poisson_loss(data.counts, log_expected, xp)
+
+    def loss_per_pattern(self, modelled: IntensityModel, data: ScalerData, state: ScalerState,
+                    xp: AnyNamespace) -> RealArray:
+        loss = self.poisson_loss(modelled, data, state, xp)
+        crit = add_at(xp.zeros(state.n_frames, dtype=loss.dtype), data.points.index, loss)
+        n_points = add_at(xp.zeros(state.n_frames, dtype=loss.dtype), data.points.index,
+                          xp.ones_like(loss))
+        return safe_divide(crit, n_points, xp)
 
 @dataclass(frozen=True, unsafe_hash=True)
-class ScalerLoss:
+class ScalerLoss(BaseLoss):
     model      : ScalerModel
 
     def __call__(self, modelled: IntensityModel, data: ScalerData,
                  state: ScalerState) -> RealArray:
         xp = state.__array_namespace__()
-        log_signal = self.model.log_signal(modelled, data, state, xp)
-        log_expected = self.model.log_expected(data.counts, log_signal, xp)
-        loss = self.model.poisson_loss(data.counts, log_expected, xp)
+        loss = self.poisson_loss(modelled, data, state, xp)
         return xp.mean(loss)
 
+    def per_pattern(self, modelled: IntensityModel, data: ScalerData,
+                    state: ScalerState) -> RealArray:
+        xp = state.__array_namespace__()
+        return self.loss_per_pattern(modelled, data, state, xp)
+
 @dataclass(frozen=True, unsafe_hash=True)
-class SetupLoss:
+class SetupLoss(BaseLoss):
     model      : ScalerModel
 
     def __call__(self, data: ScalerData, state: ScalerState,
-                 setup: ResolvedSetup) -> RealArray:
+                 setup: BaseSetup) -> RealArray:
         xp = setup.__array_namespace__()
-        modelled = self.model.init_model(data, setup, xp)
-        log_signal = self.model.log_signal(modelled, data, state, xp)
-        log_expected = self.model.log_expected(data.counts, log_signal, xp)
-        loss = self.model.poisson_loss(data.counts, log_expected, xp)
+        resolved = setup.resolve(xp)
+        modelled = self.model.init_model(data, resolved, xp)
+        loss = self.poisson_loss(modelled, data, state, xp)
         return xp.mean(loss)
+
+    def per_pattern(self, data: ScalerData, state: ScalerState,
+                    setup: BaseSetup) -> RealArray:
+        xp = setup.__array_namespace__()
+        resolved = setup.resolve(xp)
+        modelled = self.model.init_model(data, resolved, xp)
+        return self.loss_per_pattern(modelled, data, state, xp)
+
+@dataclass(frozen=True, unsafe_hash=True)
+class FullLoss(SetupLoss):
+    model      : ScalerModel
+
+    def __call__(self, data: ScalerData, state: FullState) -> RealArray:
+        return super().__call__(data, state.scaling, state.setup)
+
+    def per_pattern(self, data: ScalerData, state: FullState) -> RealArray:
+        return super().per_pattern(data, state.scaling, state.setup)

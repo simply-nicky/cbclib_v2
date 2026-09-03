@@ -1,7 +1,7 @@
 from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax.test_util import check_grads
-from ..indexer import FixedLens, FixedPupilLens, FixedPupilGeometry, FixedGeometry, XtalState
+from ..indexer import FixedFocus, Focus, FixedLens, FixedPupilLens, FixedPupilGeometry, FixedGeometry, XtalState
 from .annotations import Array, ArrayLike, AnyNamespace, ComplexArray, RealArray
 from .array_api import array_namespace
 
@@ -25,19 +25,19 @@ class TestSetup():
 
     @classmethod
     def fixed_lens(cls) -> FixedLens:
-        return FixedLens(cls.foc_pos, cls.pupil_roi)
+        return FixedLens(FixedFocus(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
     def fixed_pupil_lens(cls, xp: AnyNamespace) -> FixedPupilLens:
-        return FixedPupilLens(xp.asarray(cls.foc_pos), cls.pupil_roi)
+        return FixedPupilLens(Focus(xp.asarray(cls.foc_pos)), cls.pupil_roi)
 
     @classmethod
     def fixed_geometry(cls, size: int=1) -> FixedGeometry:
-        return FixedGeometry(cls.foc_pos, cls.pupil_roi, cls.defoci(size=size))
+        return FixedGeometry(FixedFocus(cls.foc_pos), cls.pupil_roi, cls.defoci(size=size))
 
     @classmethod
     def fixed_pupil_geometry(cls, xp: AnyNamespace, size: int=1) -> FixedPupilGeometry:
-        return FixedPupilGeometry(xp.asarray(cls.foc_pos), cls.pupil_roi, cls.defoci(xp, size))
+        return FixedPupilGeometry(Focus(xp.asarray(cls.foc_pos)), cls.pupil_roi, cls.defoci(xp, size))
 
     @overload
     @classmethod

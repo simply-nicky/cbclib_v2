@@ -528,3 +528,11 @@ def from_file(file: str, container_type: ContainerType, default: str | None=None
     if ext == 'json':
         return JSONParser.from_file(file, container_type, default)
     raise ValueError(f"Unsupported file format: {file}")
+
+def read_all(file: str) -> Dict[str, Any]:
+    ext = get_extension(file)
+    if ext == 'ini':
+        return INIParser.read_all(file)
+    if ext == 'json':
+        return JSONParser.read_all(file)
+    raise ValueError(f"Unsupported file format: {file}")

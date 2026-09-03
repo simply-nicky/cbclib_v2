@@ -91,16 +91,6 @@ class TestCrystMetadataProjection(BackendSuite):
         return ProjectionCase(metadata, data, xp.asarray([[2.0, 2.0]]))
 
     @pytest.fixture
-    def sampling_case(self, xp: TestNamespace) -> ProjectionCase:
-        flatfield = xp.ones((4, 5)) * 3.0
-        fields = xp.stack((xp.ones((4, 5)),
-                           xp.reshape(xp.arange(20), (4, 5)) / 20.0), axis=0)
-        expected = xp.asarray([[2.0, -0.5], [-1.0, 1.5]])
-        data = flatfield + xp.tensordot(expected, fields, axes=((-1,), (0,)))
-        metadata = CrystMetadata(flatfield=flatfield, eigen_field=fields)
-        return ProjectionCase(metadata, data, expected)
-
-    @pytest.fixture
     def mask_case(self, xp: TestNamespace) -> MaskCase:
         flatfield = xp.reshape(xp.arange(12), (3, 4)) + 5.0
         fields = xp.stack((xp.ones((3, 4)), flatfield / 10.0), axis=0)
@@ -142,16 +132,9 @@ class TestCrystMetadataProjection(BackendSuite):
         result = singular_case.metadata.project(singular_case.data, n_iter=1)
         check_close(result.projection, singular_case.expected)
 
-    def test_sampling(self, sampling_case: ProjectionCase):
-        first = sampling_case.metadata.project(sampling_case.data, n_iter=1, n_pixels=7)
-        second = sampling_case.metadata.project(sampling_case.data, n_iter=1, n_pixels=7)
-        check_close(first.projection, sampling_case.expected)
-        check_close(second.projection, first.projection)
-        check_close(first.apply(sampling_case.metadata), sampling_case.data)
-
-    def test_apply_mask(self, mask_case: MaskCase, xp: TestNamespace):
+    def test_pixel_selection(self, mask_case: MaskCase):
         projection = mask_case.metadata.project(mask_case.data, n_iter=1)
-        selected = projection.apply(mask_case.metadata.apply_mask(mask_case.pixels))
+        selected = projection.apply(mask_case.metadata[mask_case.pixels])
         full = projection.apply(mask_case.metadata)
         check_close(selected, full[(...,) + mask_case.pixels])
 
@@ -163,11 +146,43 @@ class TestCrystMetadataProjection(BackendSuite):
         with pytest.raises(ValueError, match='No std'):
             empty_metadata.project(empty_data, n_iter=2)
 
+class TestScaleBackground(BackendSuite):
+    @pytest.fixture
+    def sampling_case(self, xp: TestNamespace) -> ProjectionCase:
+        flatfield = xp.ones((4, 5)) * 3.0
+        fields = xp.stack((xp.ones((4, 5)),
+                           xp.reshape(xp.arange(20), (4, 5)) / 20.0), axis=0)
+        expected = xp.asarray([[2.0, -0.5], [-1.0, 1.5]])
+        data = flatfield + xp.tensordot(expected, fields, axes=((-1,), (0,)))
+        metadata = CrystMetadata(flatfield=flatfield, eigen_field=fields)
+        return ProjectionCase(metadata, data, expected)
+
+    @pytest.fixture
+    def empty_metadata(self, xp: TestNamespace) -> CrystMetadata:
+        return CrystMetadata(flatfield=xp.ones((2, 2)))
+
+    @pytest.fixture
+    def empty_data(self, xp: TestNamespace) -> RealArray:
+        return xp.ones((1, 2, 2))
+
+    def test_sampling(self, sampling_case: ProjectionCase, xp: TestNamespace):
+        frames = xp.asarray([5, 8])
+        params = ScalingParameters(method='robust-lsq', good_fields=(0, 1), n_iter=1,
+                                   n_pixels=7)
+
+        first = scale_background(frames, sampling_case.data, sampling_case.metadata, params)
+        second = scale_background(frames, sampling_case.data, sampling_case.metadata, params)
+
+        # A sufficient deterministic pixel sample recovers the exact PCA background.
+        check_close(first.whitefield, sampling_case.data)
+        check_close(second.whitefield, first.whitefield)
+
     @pytest.mark.parametrize('n_pixels', [0, 5])
     def test_pixels(self, empty_metadata: CrystMetadata, empty_data: RealArray,
-                    n_pixels: int):
-        with pytest.raises(ValueError, match='n_pixels must be between'):
-            empty_metadata.project(empty_data, n_iter=1, n_pixels=n_pixels)
+                    xp: TestNamespace, n_pixels: int):
+        params = ScalingParameters(method='robust-lsq', n_iter=1, n_pixels=n_pixels)
+        with pytest.raises(ValueError, match='Invalid n_pixels'):
+            scale_background(xp.asarray([0]), empty_data, empty_metadata, params)
 
 class TestLSQData(BackendSuite):
     @pytest.fixture

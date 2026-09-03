@@ -1,5 +1,5 @@
 import pandas as pd
-from .._src.annotations import AnyNamespace, IntArray, RealArray
+from .._src.annotations import AnyNamespace, IntArray, RealArray, Shape
 from .._src.array_api import add_at, asnumpy, safe_log, safe_divide
 from .._src.crystfel import Detector
 from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer
@@ -7,13 +7,13 @@ from .._src.data_processing import CrystData
 from .._src.state import field, State
 from ..indexer.cbc_data import AnyPoints, Miller
 from ..indexer.cbc_pupil import BasePupil, SourcePlane
-from ..indexer.cbc_setup import ResolvedSetup
+from ..indexer.cbc_setup import BaseSetup, ResolvedSetup
 from .cbc_symmetry import PointGroup
 
-class IntensityModel(State, ArrayContainer):
-    kout        : RealArray
-    source      : SourcePlane
-    pupil       : BasePupil
+class IntensityModel(State, DataContainer):
+    kout        : RealArray     # (n_points, 3) endpoint kout vectors of the streak line
+    source      : SourcePlane   # (n_points,) source-plane support
+    pupil       : BasePupil     # (n_points,) or (1,) pupil support
 
     @property
     def kin(self) -> RealArray:
@@ -37,10 +37,14 @@ class IntensityModel(State, ArrayContainer):
         """Return the continuous source-plane and pupil-support log profile."""
         return self.log_radial(log_sigma, xp)
 
-class StreakPoints(State, ArrayContainer):
+class StreakPoints(State, IndexedContainer):
     index       : IntArray  # (n_points,) frame index
     streak_id   : IntArray  # (n_points,) streak index
     points      : RealArray # (n_points, 2) (x, y) coordinates in meters
+
+    @property
+    def shape(self) -> Shape:
+        return self.points.shape[:-1]
 
     @property
     def x(self) -> RealArray:
@@ -53,8 +57,8 @@ class StreakPoints(State, ArrayContainer):
 class StreakIndices(State, IndexedContainer):
     index       : IntArray  # (n_points,) frame index
     streak_id   : IntArray  # (n_points,) streak index
-    y           : IntArray # (n_points,) y pixel coordinates
-    x           : IntArray # (n_points,) x pixel coordinates
+    y           : IntArray  # (n_points,) y pixel coordinates
+    x           : IntArray  # (n_points,) x pixel coordinates
 
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame, xp: AnyNamespace) -> 'StreakIndices':
@@ -67,9 +71,16 @@ class StreakIndices(State, IndexedContainer):
         return cls(index=index, y=y, x=x, streak_id=streak_id)
 
     @property
+    def shape(self) -> Shape:
+        return self.y.shape
+
+    @property
     def xy(self) -> IntArray:
         xp = self.__array_namespace__()
         return xp.stack((self.x, self.y), axis=-1)
+
+    def mask(self, is_good: IntArray) -> 'StreakIndices':
+        return self[is_good[self.y, self.x] > 0]
 
     def to_points(self, detector: Detector) -> StreakPoints:
         return StreakPoints(index=self.index, streak_id=self.streak_id,
@@ -89,6 +100,10 @@ class PhotonCounts(State, ArrayContainer):
         return cls(I0=I0, background=background)
 
     @property
+    def shape(self) -> Shape:
+        return self.I0.shape
+
+    @property
     def signal(self) -> RealArray:
         xp = self.__array_namespace__()
         return xp.clip(self.I0 - self.background, 0.0, xp.inf)
@@ -101,9 +116,9 @@ class ReflectionsMap(State, DataContainer):
             with shape ``(n_streaks,)``.
         n_reflections: Number of pattern-local merged reflections.
     """
-
     reflection_id : IntArray
     n_reflections : int = field(static=True)
+    point_group   : str = field(static=True)
 
     @classmethod
     def from_miller(cls, miller: Miller, point_group: PointGroup,
@@ -123,7 +138,8 @@ class ReflectionsMap(State, DataContainer):
         canonical = point_group.canonical(hkl, xp)
         keys = xp.concat((index[:, None], canonical), axis=-1)
         keys, reflection_id = xp.unique(keys, return_inverse=True, axis=0)
-        return cls(reflection_id=xp.asarray(reflection_id), n_reflections=keys.shape[0])
+        return cls(reflection_id=xp.asarray(reflection_id), n_reflections=keys.shape[0],
+                   point_group=point_group.symbol)
 
     def __len__(self) -> int:
         return self.n_reflections
@@ -132,8 +148,7 @@ class ReflectionsMap(State, DataContainer):
         """Return the merged-reflection index associated with each measured point."""
         return self.reflection_id[points.streak_id]
 
-    def canonical(self, miller: Miller, point_group: PointGroup, xp: AnyNamespace
-                  ) -> Miller:
+    def canonical(self, miller: Miller, xp: AnyNamespace) -> Miller:
         """Return one canonical Miller index for each mapped reflection.
 
         The output rows follow ``reflection_id`` order, so row ``r`` is aligned with scaler
@@ -149,14 +164,14 @@ class ReflectionsMap(State, DataContainer):
         """
         index = xp.reshape(xp.broadcast_to(miller.index, miller.hkl.shape[:-1]), (-1,))
         hkl = xp.reshape(miller.hkl_indices, (-1, 3))
-        canonical = point_group.canonical(hkl, xp)
+        canonical = PointGroup(self.point_group).canonical(hkl, xp)
         _, representatives = xp.unique(self.reflection_id, return_index=True)
         return Miller(index=xp.asarray(index[representatives]),
                       hkl=xp.asarray(canonical[representatives]))
 
 class ScalerData(State, DataContainer):
-    """Hold observed streak data and its shared-intensity mapping."""
-
+    """Hold observed streak data and its shared-intensity mapping.
+    """
     points      : StreakPoints
     counts      : PhotonCounts
     miller      : Miller
@@ -196,13 +211,25 @@ class ScalerState(State, DataContainer):
         log_sigma_kin = xp.full((len(setup.xtal),), xp.log(sigma))
         return cls(log_hkl=log_hkl, log_sigma_kin=log_sigma_kin)
 
+    @property
+    def n_reflections(self) -> int:
+        return len(self.log_hkl)
+
+    @property
+    def n_frames(self) -> int:
+        return len(self.log_sigma_kin)
+
     def log_sigma_at(self, points: AnyPoints) -> RealArray:
         return self.log_sigma_kin[points.index]
 
     def log_at(self, points: StreakPoints, reflections: ReflectionsMap) -> RealArray:
         return self.log_hkl[reflections.at(points)]
 
-class ScalerResult(State, DataContainer):
+class FullState(State, DataContainer):
+    scaling : ScalerState
+    setup   : BaseSetup
+
+class ReflectionList(State, DataContainer):
     """Hold fitted reflection intensities and their conditional uncertainties.
 
     Attributes:
@@ -218,8 +245,8 @@ class ScalerResult(State, DataContainer):
     sigma_hkl : RealArray
 
     @classmethod
-    def from_data(cls, data: ScalerData, point_group: PointGroup, I_hkl: RealArray,
-                  sigma_hkl: RealArray, xp: AnyNamespace) -> 'ScalerResult':
+    def from_data(cls, data: ScalerData, I_hkl: RealArray, sigma_hkl: RealArray,
+                  xp: AnyNamespace) -> 'ReflectionList':
         """Construct a result with canonical Miller indices from scaling data.
 
         Canonical indices are merged independently within each pattern in the same order as
@@ -227,7 +254,6 @@ class ScalerResult(State, DataContainer):
 
         Args:
             data: Scaling observations containing the unmerged Miller indices.
-            point_group: Crystallographic point group used for intensity merging.
             I_hkl: Fitted intensities with shape ``(n_reflections,)``.
             sigma_hkl: Conditional standard errors with shape ``(n_reflections,)``.
             xp: Array namespace used for canonicalization.
@@ -235,11 +261,11 @@ class ScalerResult(State, DataContainer):
         Returns:
             Self-contained scaling result aligned with the merged reflection order.
         """
-        miller = data.reflections.canonical(data.miller, point_group, xp)
+        miller = data.reflections.canonical(data.miller, xp)
         return cls(miller=miller, I_hkl=I_hkl, sigma_hkl=sigma_hkl)
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, xp: AnyNamespace) -> 'ScalerResult':
+    def import_dataframe(cls, df: pd.DataFrame, xp: AnyNamespace) -> 'ReflectionList':
         """Import canonical Miller indices, intensities, and uncertainties from a dataframe."""
         hkl = xp.stack((xp.asarray(df['h'].to_numpy()), xp.asarray(df['k'].to_numpy()),
                         xp.asarray(df['l'].to_numpy())), axis=-1)
@@ -247,9 +273,9 @@ class ScalerResult(State, DataContainer):
         return cls(miller=miller, I_hkl=xp.asarray(df['I_hkl'].to_numpy()),
                    sigma_hkl=xp.asarray(df['sigma_hkl'].to_numpy()))
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export canonical Miller indices, intensities, and uncertainties to a dataframe."""
-        return pd.DataFrame({'index': asnumpy(self.miller.index),
+        return pd.DataFrame({'index': asnumpy(frames[self.miller.index]),
                              'h': asnumpy(self.miller.h),
                              'k': asnumpy(self.miller.k),
                              'l': asnumpy(self.miller.l),

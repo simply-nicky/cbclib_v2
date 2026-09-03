@@ -1,12 +1,16 @@
 from typing import Tuple
 from .._src.array_api import array_namespace, kxy_to_k, project_to_rect, safe_divide, safe_sqrt
 from .._src.state import State
-from .._src.data_container import ArrayContainer
-from ..annotations import RealArray
+from .._src.data_container import ArrayContainer, DataContainer
+from ..annotations import RealArray, Shape
 
 class Edge(State, ArrayContainer):
-    tau     : RealArray
-    origin  : RealArray
+    tau     : RealArray     # (..., 4, 2) edge tangents
+    origin  : RealArray     # (..., 4, 2) edge origins
+
+    @property
+    def shape(self) -> Shape:
+        return self.tau.shape[:-2]
 
     @property
     def normal(self) -> RealArray:
@@ -16,8 +20,10 @@ class Edge(State, ArrayContainer):
     def to_points(self, t: RealArray) -> 'EdgePoints':
         return EdgePoints(tau=self.tau[..., None, :], origin=self.origin[..., None, :], t=t)
 
-class EdgePoints(Edge):
-    t       : RealArray
+class EdgePoints(State, DataContainer):
+    tau     : RealArray     # (4, 1, 2) edge tangents
+    origin  : RealArray     # (4, 1, 2) edge origins
+    t       : RealArray     # (M, N, 4, 2) parameters along each edge
 
     @property
     def xy(self) -> RealArray:
@@ -204,6 +210,10 @@ class SourcePlane(State, ArrayContainer):
         xp = array_namespace(q)
         return cls(q=q, q_mag=xp.sum(q**2, axis=-1))
 
+    @property
+    def shape(self) -> Shape:
+        return self.q.shape[:-1]
+
     def expand_dims(self, axis: int | Tuple[int, ...]) -> 'SourcePlane':
         """Return a source plane with new dimensions inserted before the vector axis."""
         xp = self.__array_namespace__()
@@ -228,9 +238,9 @@ class SourcePlane(State, ArrayContainer):
         scale = safe_divide(self.residual(kin), self.q_mag, xp)
         return kin - scale[..., None] * self.q
 
-class PupilIntersection(State, ArrayContainer):
-    """Candidate intersections between an Ewald circle and pupil supporting lines."""
-
+class PupilIntersection(State, DataContainer):
+    """Candidate intersections between an Ewald circle and pupil supporting lines.
+    """
     source : SourcePlane
     edges : Edge
 

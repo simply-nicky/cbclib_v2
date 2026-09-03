@@ -1,9 +1,9 @@
 import pytest
 from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, RealArray, NDArray, NumPy, NumPyNamespace
-from cbclib_v2.indexer import (CBDIndexer, CircleState, FixedSetup, MillerWithRLP, Patterns,
-                               RefinerData, RefinerLoss, RefinerModel, ResolvedSetup,
-                               TiltOverAxisState, UCA)
+from cbclib_v2.indexer import (CBDIndexer, CircleState, FixedSetup, LinePoints, MillerWithRLP,
+                               Patterns, Points, RefinerData, RefinerLoss, RefinerModel,
+                               ResolvedSetup, TiltOverAxisState, UCA)
 from cbclib_v2.test_util import TestSetup, check_close
 
 class TestCBDIndexer():
@@ -27,10 +27,6 @@ class TestCBDIndexer():
 
     @pytest.fixture(params=[10,])
     def num_lines(self, request: pytest.FixtureRequest) -> int:
-        return request.param
-
-    @pytest.fixture(params=[4,])
-    def num_points(self, request: pytest.FixtureRequest) -> int:
         return request.param
 
     @pytest.fixture(params=[0.3])
@@ -57,11 +53,17 @@ class TestCBDIndexer():
         return Patterns(lines=lines, index=index)
 
     @pytest.fixture
-    def kout(self, indexer: CBDIndexer, patterns: Patterns, resolved: ResolvedSetup,
+    def points(self, patterns: Patterns) -> LinePoints:
+        return patterns.to_points()
+
+    @pytest.fixture
+    def centers(self, points: LinePoints, xp: NumPyNamespace) -> Points:
+        return points.sample(xp.full(points.shape[0], 0.5))
+
+    @pytest.fixture
+    def kout(self, indexer: CBDIndexer, centers: Points, resolved: ResolvedSetup,
              xp: NumPyNamespace) -> RealArray:
-        smp_pos = indexer.smp_center(patterns.index, resolved.geometry, xp)
-        return indexer.points_to_kout(patterns.sample(xp.full(patterns.shape[0], 0.5)),
-                                      smp_pos, xp)
+        return indexer.points_to_kout(centers, resolved.geometry, xp)
 
     @pytest.fixture
     def all_rlp(self, indexer: CBDIndexer, patterns: Patterns, q_abs: float, initial: FixedSetup,
@@ -71,9 +73,9 @@ class TestCBDIndexer():
         return MillerWithRLP.concat(list(iterator))
 
     @pytest.fixture
-    def patterns_uca(self, indexer: CBDIndexer, patterns: Patterns, kout: RealArray,
+    def patterns_uca(self, indexer: CBDIndexer, points: LinePoints, kout: RealArray,
                      resolved: ResolvedSetup, xp: NumPyNamespace) -> UCA:
-        return indexer.patterns_to_uca(patterns, kout, resolved.geometry, xp)
+        return indexer.patterns_to_uca(points, kout, resolved.geometry, xp)
 
     @pytest.fixture
     def candidates(self, indexer: CBDIndexer, all_rlp: MillerWithRLP, patterns_uca: UCA,
@@ -86,9 +88,9 @@ class TestCBDIndexer():
         return indexer.candidates(all_rlp, patterns_uca, xp)[1]
 
     @pytest.fixture
-    def data(self, rng: Generator[NDArray], patterns: Patterns, model: RefinerModel,
-             resolved: ResolvedSetup, num_points: int) -> RefinerData:
-        return model.init_data_random(rng, patterns, num_points, resolved)
+    def data(self, points: LinePoints, model: RefinerModel, resolved: ResolvedSetup
+             ) -> RefinerData:
+        return model.init_data(points, resolved)
 
     @pytest.fixture
     def pupil_loss(self, model: RefinerModel, xp: NumPyNamespace) -> RefinerLoss:

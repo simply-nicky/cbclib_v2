@@ -12,7 +12,7 @@ IS_WINDOWS = sys.platform == 'win32'
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-__version__ = '0.13.5'
+__version__ = '0.13.6'
 
 def find_conda_home() -> str:
     """Find the Conda install path."""
@@ -267,9 +267,6 @@ extensions = [
                  cxx_std=17,
                  extra_compile_args=['-fopenmp'],
                  extra_link_args=['-lgomp']),
-    CPPExtension("cbclib_v2._src.src.index",
-                 sources=["cbclib_v2/_src/src/index.cpp"],
-                 cxx_std=17),
     CPPExtension("cbclib_v2._src.src.label",
                  sources=["cbclib_v2/_src/src/label.cpp"],
                  cxx_std=17,

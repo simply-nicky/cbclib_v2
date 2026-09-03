@@ -340,15 +340,14 @@ class TestRealGeometryFile:
         # Check first panel
         assert len(detector.panels) == 32
         assert detector.shape == (16448, 1030)
-        assert detector.assembler().shape == (4433, 4218)
+        assert detector.assembled_shape == (4432, 4217)
         for panel in detector.panels.values():
             assert panel.shape == (514, 1030)
 
     def test_parse_jungfrau_geometry(self) -> None:
         """Test parsing JUNGFRAU geometry file if available."""
         geom_path = Path(
-            "/gpfs/cfel/user/nivanov/cbclib_v2/experiments/exfel/geometry/"
-            "jungfrau_4456_v1.geom"
+            "/gpfs/exfel/exp/SPB/202302/p004456/usr/geometry/jungfrau_4456_v1.geom"
         )
 
         if not geom_path.exists():
@@ -359,6 +358,6 @@ class TestRealGeometryFile:
         # Should have many panels (64 for JUNGFRAU 4M)
         assert len(detector.panels) == 64
         assert detector.shape == (8, 512, 1024)  # Example expected shape
-        assert detector.assembler().shape == (2173, 2398)
+        assert detector.assembled_shape == (2173, 2398)
         for panel in detector.panels.values():
             assert panel.shape == (1, 256, 256)  # Example panel shape

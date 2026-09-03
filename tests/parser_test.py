@@ -7,7 +7,7 @@ from cbclib_v2 import Container, FieldLocator
 from cbclib_v2._src.run import SwissFELConfig
 from cbclib_v2._src.parser import extract_fields, fields, get_type_hints, read_fields
 from cbclib_v2.annotations import NumPy
-from cbclib_v2.indexer import FixedGeometry
+from cbclib_v2.indexer import FixedFocus, FixedGeometry
 from cbclib_v2.scripts import (DetectConfig, MetadataConfig, MetaListConfig, PeakParameters,
                                ScalingParameters, ScanConfig, SetupConfig, StreakFinderConfig,
                                StreakParameters, StructureParameters, SystemConfig)
@@ -97,8 +97,8 @@ class TestFieldMapping:
 class TestParserRoundTrip:
     @pytest.fixture
     def geometry(self) -> FixedGeometry:
-        return FixedGeometry(foc_pos=(0.1, -0.2, 0.3), pupil_roi=(-4.0, 5.0, -6.0, 7.0),
-                             defocus=(-0.1676,))
+        return FixedGeometry(focus=FixedFocus((0.1, -0.2, 0.3)),
+                             pupil_roi=(-4.0, 5.0, -6.0, 7.0), defocus=(-0.1676,))
 
     @pytest.fixture
     def streak_finder(self) -> StreakFinderConfig:
@@ -139,8 +139,9 @@ class TestParserRoundTrip:
             setup=SetupConfig(
                 setup_file='setup.json',
                 unit_file='unit.json',
+                reflections_dir='reflections',
                 xtals_dir='xtals',
-                solutions_dir='solutions',
+                solutions_dir='solutions'
             ),
             detect=DetectConfig(
                 hit_threshold=10,

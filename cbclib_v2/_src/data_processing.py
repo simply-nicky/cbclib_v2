@@ -17,14 +17,14 @@ from dataclasses import dataclass, field
 from weakref import ref
 from typing_extensions import Self
 import numpy as np
-from .array_api import array_namespace, default_rng
+from .array_api import array_namespace
 from .crystfel import Assembler
 from .cxi_protocol import H5Protocol, Kinds
-from .data_container import DataContainer, list_indices
+from .data_container import DataContainer, list_indices, normalise_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
 from .streaks import StackedStreaks, Streaks
-from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, MultiIndices, NumPy,
-                          RealArray, ReferenceType, ROI, Shape)
+from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, MultiIndices, RealArray,
+                          ReferenceType, ROI, Shape)
 from .functions import (LabelResult, RadialProfiles, Structure, center_of_mass, covariance_matrix,
                         ellipse_fit, label, line_fit, median, radial_profiles, robust_mean)
 
@@ -62,8 +62,13 @@ class CrystBase(DataContainer):
         return (0,)
 
     @property
+    def frame_size(self) -> int:
+        return prod(self.frame_shape)
+
+    @property
     def num_modules(self) -> int:
-        return prod(self.frame_shape) // prod(self.frame_shape[-2:])
+        shape = self.frame_shape
+        return prod(shape) // prod(shape[-2:])
 
     def assemble(self: Self, assembler: Assembler) -> Self:
         """Assemble the detector modules data onto a single lab-frame images.
@@ -227,7 +232,7 @@ class CrystMetadata(CrystBase):
         if self.is_empty(self.flatfield) and not self.is_empty(self.whitefields):
             self.flatfield = self.whitefields.mean(axis=0)
 
-    def apply_mask(self, indices: MultiIndices) -> 'CrystMetadata':
+    def __getitem__(self, indices: MultiIndices) -> 'CrystMetadata':
         """Select detector pixels from every frame-like array.
 
         Args:
@@ -237,6 +242,11 @@ class CrystMetadata(CrystBase):
         Returns:
             Metadata restricted to the selected detector pixels.
         """
+        if not isinstance(indices, tuple):
+            indices = normalise_indices((indices,), self.frame_shape)
+        else:
+            indices = normalise_indices(indices, self.frame_shape)
+
         attributes = {}
         for attr, data in self.contents().items():
             if not isinstance(data, Array) or self.is_empty(data):
@@ -246,10 +256,7 @@ class CrystMetadata(CrystBase):
             if kind == Kinds.frame:
                 attributes[attr] = data[indices]
             elif kind == Kinds.stack:
-                if isinstance(indices, tuple):
-                    attributes[attr] = data[(...,) + indices]
-                else:
-                    attributes[attr] = data[..., indices]
+                attributes[attr] = data[(...,) + indices]
         return self.replace(**attributes)
 
     @classmethod
@@ -404,8 +411,8 @@ class CrystMetadata(CrystBase):
         return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
     def project(self, data: RealArray, good_fields: Indices=slice(None),
-                clip_snr: float=3.0, n_iter: int=3, std_min: float=0.0,
-                n_pixels: int | None=None) -> PCAProjection:
+                clip_snr: float=3.0, n_iter: int=3, std_min: float=0.0
+                ) -> PCAProjection:
         """Project detector frames onto the PCA basis.
 
         Fits the residual :math:`D - \\bar{W}` for each frame to a linear
@@ -423,14 +430,10 @@ class CrystMetadata(CrystBase):
                 the preceding background estimate.
             std_min: Lower bound for the per-pixel standard deviation used in
                 signal rejection.
-            n_pixels: Number of detector pixels used for fitting. A deterministic
-                random subset is selected without replacement. By default, the
-                complete frame is used.
 
         Raises:
             ValueError: If ``flatfield`` is absent, ``n_iter`` is less than one,
-                ``n_pixels`` is invalid, or iterative rejection is requested
-                without ``std``.
+                or iterative rejection is requested without ``std``.
 
         Returns:
             A :class:`PCAProjection` with fields ``good_fields`` (selected
@@ -451,37 +454,22 @@ class CrystMetadata(CrystBase):
             raise ValueError('No std in the container for iterative signal rejection')
 
         xp = self.__array_namespace__()
-        frame_size = prod(self.frame_shape)
-        if n_pixels is not None and (n_pixels < 1 or n_pixels > frame_size):
-            raise ValueError(f'n_pixels must be between one and the frame size {frame_size}')
+        data = xp.reshape(data, (-1,) + self.frame_shape)
 
-        indices = None
-        if n_pixels is not None and n_pixels < frame_size:
-            indices = default_rng(0, NumPy).choice(frame_size, (n_pixels,), replace=False)
-            indices = xp.asarray(indices)
-            indices = xp.unravel_index(indices, self.frame_shape)
-
-        if indices is not None:
-            data = xp.reshape(data[(...,) + indices], (-1, n_pixels))
-            metadata = self.apply_mask(indices)
-        else:
-            data = xp.reshape(data, (-1,) + self.frame_shape)
-            metadata = self
-
-        if self.is_empty(metadata.eigen_field):
+        if self.is_empty(self.eigen_field):
             good_fields = xp.array([], dtype=int)
-            lsq_data = LSQData(y=data, W=metadata.flatfield[None, None, ...])
+            lsq_data = LSQData(y=data, W=self.flatfield[None, None, ...])
 
         else:
-            good_fields = list_indices(good_fields, metadata.eigen_field.shape[0])
+            good_fields = list_indices(good_fields, self.eigen_field.shape[0])
             good_fields = xp.asarray(good_fields, dtype=int)
-            fields = metadata.eigen_field[good_fields]
-            lsq_data = LSQData(y=data - metadata.flatfield, W=fields[None, ...])
+            fields = self.eigen_field[good_fields]
+            lsq_data = LSQData(y=data - self.flatfield, W=fields[None, ...])
 
-        if self.is_empty(metadata.mask):
+        if self.is_empty(self.mask):
             mask = xp.ones(data.shape, dtype=bool)
         else:
-            mask = xp.broadcast_to(metadata.mask, data.shape)
+            mask = xp.broadcast_to(self.mask, data.shape)
 
         projection = lsq_data.apply_mask(mask).solve()
         result = PCAProjection(good_fields=good_fields, projection=projection)
@@ -489,9 +477,9 @@ class CrystMetadata(CrystBase):
         if n_iter == 1:
             return result
 
-        std = xp.clip(metadata.std, std_min, xp.inf)
+        std = xp.clip(self.std, std_min, xp.inf)
         for _ in range(1, n_iter):
-            background = result.apply(metadata)
+            background = result.apply(self)
             n_mask = mask & (data <= background + clip_snr * std)
             projection = lsq_data.apply_mask(n_mask).solve()
             result = result.replace(projection=projection)
@@ -567,7 +555,7 @@ class CrystData(CrystBase):
     @property
     def num_whitefields(self) -> int:
         """Number of whitefield images stored (1 for static, N for per-frame)."""
-        return self.whitefield.size // prod(self.frame_shape)
+        return self.whitefield.size // self.frame_size
 
     @property
     def shape(self) -> Shape:
