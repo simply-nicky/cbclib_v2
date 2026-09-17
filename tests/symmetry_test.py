@@ -29,7 +29,7 @@ class TestSymmetryOperator:
         return xp.asarray([1, 2, 3])
 
     def test_composition(self, c4: SymmetryOperator, hkl: IntArray,
-                         xp: NumPyNamespace) -> None:
+                         xp: NumPyNamespace):
         transformed = (c4 @ c4).apply(hkl, xp)
         expected = c4.apply(c4.apply(hkl, xp), xp)
 
@@ -37,13 +37,13 @@ class TestSymmetryOperator:
         assert xp.all(transformed == expected)
 
     def test_friedel(self, c4: SymmetryOperator, hkl: IntArray,
-                     xp: NumPyNamespace) -> None:
+                     xp: NumPyNamespace):
         transformed = (-c4).apply(hkl, xp)
 
         # Friedel inversion negates every transformed Miller index.
         assert xp.all(transformed == -c4.apply(hkl, xp))
 
-    def test_invalid_determinant(self) -> None:
+    def test_invalid_determinant(self):
         with pytest.raises(ValueError, match="determinant"):
             SymmetryOperator(((2, 0, 0), (0, 1, 0), (0, 0, 1)))
 
@@ -56,7 +56,7 @@ class TestSymmetryGroup:
     def group(self, c4: SymmetryOperator) -> SymmetryGroup:
         return SymmetryGroup.from_generators((c4,), expected_order=4)
 
-    def test_from_generators(self, c4: SymmetryOperator, group: SymmetryGroup) -> None:
+    def test_from_generators(self, c4: SymmetryOperator, group: SymmetryGroup):
         operator = SymmetryOperator.identity()
 
         # A generated cyclic group contains every power through the return to identity.
@@ -65,20 +65,20 @@ class TestSymmetryGroup:
             operator = operator @ c4
         assert operator == SymmetryOperator.identity()
 
-    def test_with_friedel(self, group: SymmetryGroup) -> None:
+    def test_with_friedel(self, group: SymmetryGroup):
         completed = group.with_friedel()
         expected = set(group.operators) | {-operator for operator in group.operators}
 
         # Friedel completion is exactly the union of a group and its inverted operators.
         assert set(completed.operators) == expected
 
-    def test_expected_order(self, c4: SymmetryOperator, group: SymmetryGroup) -> None:
+    def test_expected_order(self, c4: SymmetryOperator, group: SymmetryGroup):
         expected_order = len(group) - 1
 
         with pytest.raises(ValueError, match=f"expected order {expected_order}"):
             SymmetryGroup.from_generators((c4,), expected_order=expected_order)
 
-    def test_requires_closure(self, c4: SymmetryOperator) -> None:
+    def test_requires_closure(self, c4: SymmetryOperator):
         with pytest.raises(ValueError, match="closed under composition"):
             SymmetryGroup((SymmetryOperator.identity(), c4))
 
@@ -105,13 +105,13 @@ class TestPointGroup:
 
     @pytest.mark.parametrize(("symbol", "reflection_order"), REFLECTION_GROUP_ORDERS)
     def test_general_reflection_order(self, symbol: str, reflection_order: int,
-                                      xp: NumPyNamespace) -> None:
+                                      xp: NumPyNamespace):
         equivalents = PointGroup(symbol).equivalents(xp.asarray([1, 2, 3]), xp)
 
         # A general reflection has the tabulated crystallographic orbit order.
         assert equivalents.shape == (reflection_order, 3)
 
-    def test_friedel_equivalents(self, hkl: IntArray, xp: NumPyNamespace) -> None:
+    def test_friedel_equivalents(self, hkl: IntArray, xp: NumPyNamespace):
         symmetry = PointGroup("1")
 
         equivalents = symmetry.equivalents(hkl, xp)
@@ -122,7 +122,7 @@ class TestPointGroup:
         assert actual == expected
 
     def test_tetragonal_equivalents(self, symmetry: PointGroup, hkl: IntArray,
-                                    xp: NumPyNamespace) -> None:
+                                    xp: NumPyNamespace):
         equivalents = symmetry.equivalents(hkl, xp)
         actual = {tuple(value.tolist()) for value in equivalents}
         group = symmetry.reflection_symmetry()
@@ -135,7 +135,7 @@ class TestPointGroup:
 
     def test_special_reflection_has_unique_equivalents(self, symmetry: PointGroup,
                                                        special_hkl: IntArray,
-                                                       xp: NumPyNamespace) -> None:
+                                                       xp: NumPyNamespace):
         equivalents = symmetry.equivalents(special_hkl, xp)
         transformed = symmetry.reflection_symmetry().apply(special_hkl, xp)
         unique = xp.unique(transformed, axis=0)
@@ -145,7 +145,7 @@ class TestPointGroup:
         assert equivalents.shape[0] < transformed.shape[0]
 
     def test_canonical(self, symmetry: PointGroup, equivalent_hkl: IntArray,
-                       xp: NumPyNamespace) -> None:
+                       xp: NumPyNamespace):
         canonical = symmetry.canonical(equivalent_hkl, xp)
         expected = xp.asarray([
             max(tuple(value.tolist()) for value in symmetry.equivalents(hkl, xp))
@@ -155,17 +155,17 @@ class TestPointGroup:
         # Canonical indices are the lexicographically maximal members of their orbits.
         assert xp.all(canonical == expected)
 
-    def test_invalid_hkl_shape(self, xp: NumPyNamespace) -> None:
+    def test_invalid_hkl_shape(self, xp: NumPyNamespace):
         with pytest.raises(ValueError, match=r"shape \(3,\)"):
             PointGroup("1").equivalents(xp.ones((2, 3), dtype=int), xp)
 
     @pytest.mark.parametrize(("symbol", "normalized"),
                              ((" 4 / mmm ", "4/mmm"), ("m-3m", "m-3m")))
-    def test_symbol_normalization(self, symbol: str, normalized: str) -> None:
+    def test_symbol_normalization(self, symbol: str, normalized: str):
         # Point-group parsing removes spacing without changing the crystallographic symbol.
         assert PointGroup(symbol).symbol == normalized
 
-    def test_invalid_symbol(self) -> None:
+    def test_invalid_symbol(self):
         with pytest.raises(ValueError, match="Unsupported point-group symbol"):
             PointGroup("not-a-point-group")
 
@@ -206,7 +206,7 @@ class TestReflectionsMap:
         return ReflectionsMap.from_miller(jax_miller, point_group, JaxNumPy)
 
     def test_pattern_local_mapping(self, reflections: ReflectionsMap, miller: Miller,
-                                   point_group: PointGroup, xp: NumPyNamespace) -> None:
+                                   point_group: PointGroup, xp: NumPyNamespace):
         reflection_id = reflections.reflection_id
         canonical = point_group.canonical(miller.hkl_indices, xp)
         same_pattern = miller.index[:, None] == miller.index[None, :]
@@ -218,14 +218,14 @@ class TestReflectionsMap:
         assert len(reflections) == xp.unique_values(reflection_id).size
 
     def test_at_points(self, reflections: ReflectionsMap, points: StreakPoints,
-                       xp: NumPyNamespace) -> None:
+                       xp: NumPyNamespace):
         reflection_id = reflections.at(points)
 
         # Point lookup follows each point's source streak into the reflection map.
         assert xp.all(reflection_id == reflections.reflection_id[points.streak_id])
 
     def test_canonical(self, reflections: ReflectionsMap, miller: Miller,
-                       point_group: PointGroup, xp: NumPyNamespace) -> None:
+                       point_group: PointGroup, xp: NumPyNamespace):
         canonical = reflections.canonical(miller, xp)
 
         # Each output row represents every member of one pattern-local equivalence class.
@@ -236,7 +236,7 @@ class TestReflectionsMap:
             assert xp.all(member_hkl == canonical.hkl[reflection_id])
 
     def test_jax_namespace(self, jax_miller: Miller, jax_reflections: ReflectionsMap,
-                           point_group: PointGroup) -> None:
+                           point_group: PointGroup):
         canonical = point_group.canonical(jax_miller.hkl_indices, JaxNumPy)
         same_orbit = JaxNumPy.all(canonical[:, None, :] == canonical[None, :, :], axis=-1)
         reflection_id = jax_reflections.reflection_id

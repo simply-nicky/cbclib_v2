@@ -60,7 +60,7 @@ class TestArrayContainer:
         )
 
     def test_concat(self, container: CompoundArray, other: CompoundArray,
-                    xp: NumPyNamespace) -> None:
+                    xp: NumPyNamespace):
         result = CompoundArray.concat((container, other))
 
         assert xp.all(result.array == xp.concat((container.array, other.array)))
@@ -68,25 +68,25 @@ class TestArrayContainer:
             (container.container.values, other.container.values)))
 
     def test_stack(self, container: CompoundArray, other: CompoundArray,
-                   xp: NumPyNamespace) -> None:
+                   xp: NumPyNamespace):
         result = CompoundArray.stack((container, other), axis=1)
 
         assert xp.all(result.array == xp.stack((container.array, other.array), axis=1))
         assert xp.all(result.container.values == xp.stack(
             (container.container.values, other.container.values), axis=1))
 
-    def test_shape(self, container: CompoundArray) -> None:
+    def test_shape(self, container: CompoundArray):
         assert container.shape == (4,)
         assert container.container.shape == (4, 2)
 
-    def test_getitem(self, container: CompoundArray, xp: NumPyNamespace) -> None:
+    def test_getitem(self, container: CompoundArray, xp: NumPyNamespace):
         indices = xp.asarray([1, 3])
         result = container[indices]
 
         assert xp.all(result.array == container.array[indices])
         assert xp.all(result.container.values == container.container.values[indices])
 
-    def test_getitem_ellipsis(self, container: CompoundArray, xp: NumPyNamespace) -> None:
+    def test_getitem_ellipsis(self, container: CompoundArray, xp: NumPyNamespace):
         reshaped = container.reshape((2, 2))
         result = reshaped[..., 1]
 
@@ -95,7 +95,7 @@ class TestArrayContainer:
         assert xp.all(result.container.values == reshaped.container.values[:, 1, :])
 
     def test_getitem_boolean_mask(self, container: CompoundArray,
-                                  xp: NumPyNamespace) -> None:
+                                  xp: NumPyNamespace):
         reshaped = container.reshape((2, 2))
         mask = xp.asarray([[True, False], [False, True]])
         result = reshaped[mask]
@@ -104,24 +104,24 @@ class TestArrayContainer:
         assert xp.all(result.array == reshaped.array[mask])
         assert xp.all(result.container.values == reshaped.container.values[mask])
 
-    def test_getitem_scalar_preserves_array(self, xp: NumPyNamespace) -> None:
+    def test_getitem_scalar_preserves_array(self, xp: NumPyNamespace):
         container = ArrayLeaf(values=xp.arange(4))
         result = container[1]
 
         assert result.values.shape == ()
         assert 'values' in result.contents()
 
-    def test_getitem_rejects_multiple_ellipses(self, container: CompoundArray) -> None:
+    def test_getitem_rejects_multiple_ellipses(self, container: CompoundArray):
         with pytest.raises(IndexError, match="one ellipsis"):
             _ = container[..., ...]
 
-    def test_shape_validation(self, xp: NumPyNamespace) -> None:
+    def test_shape_validation(self, xp: NumPyNamespace):
         leaf = ArrayLeaf(values=xp.zeros((5, 2)))
 
         with pytest.raises(ValueError, match="incompatible with leading shape"):
             _ = CompoundArray(array=xp.zeros((4, 3)), container=leaf)
 
-    def test_reshape(self, container: CompoundArray, xp: NumPyNamespace) -> None:
+    def test_reshape(self, container: CompoundArray, xp: NumPyNamespace):
         result = container.reshape((2, 2))
 
         assert result.shape == (2, 2)
@@ -158,7 +158,7 @@ class TestIndexedContainer:
             ),
         )
 
-    def test_getitem(self, container: CompoundIndexed, xp: NumPyNamespace) -> None:
+    def test_getitem(self, container: CompoundIndexed, xp: NumPyNamespace):
         indices = xp.asarray([1, 3])
         result = container[indices]
 
@@ -169,7 +169,7 @@ class TestIndexedContainer:
         assert xp.all(
             result.indexed_container.values == container.indexed_container.values[indices])
 
-    def test_reshape(self, container: CompoundIndexed, xp: NumPyNamespace) -> None:
+    def test_reshape(self, container: CompoundIndexed, xp: NumPyNamespace):
         result = container.reshape((2, 2))
 
         assert xp.all(result.index == xp.reshape(container.index, (2, 2)))
@@ -182,7 +182,7 @@ class TestIndexedContainer:
             container.indexed_container.values, (2, 2, 4)))
 
     def test_concat(self, container: CompoundIndexed, other: CompoundIndexed,
-                    xp: NumPyNamespace) -> None:
+                    xp: NumPyNamespace):
         result = CompoundIndexed.concat((container, other))
 
         assert xp.all(result.index == xp.concat((container.index, other.index)))
@@ -195,7 +195,7 @@ class TestIndexedContainer:
             (container.indexed_container.values, other.indexed_container.values)))
 
     def test_stack(self, container: CompoundIndexed, other: CompoundIndexed,
-                   xp: NumPyNamespace) -> None:
+                   xp: NumPyNamespace):
         result = CompoundIndexed.stack((container, other), axis=1)
 
         assert xp.all(result.index == xp.stack((container.index, other.index), axis=1))
@@ -207,7 +207,7 @@ class TestIndexedContainer:
         assert xp.all(result.indexed_container.values == xp.stack(
             (container.indexed_container.values, other.indexed_container.values), axis=1))
 
-    def test_loc(self, container: CompoundIndexed, xp: NumPyNamespace) -> None:
+    def test_loc(self, container: CompoundIndexed, xp: NumPyNamespace):
         result = container.loc[7]
 
         assert xp.all(result.index == xp.asarray([7, 7]))
@@ -216,7 +216,7 @@ class TestIndexedContainer:
         assert xp.all(result.indexed_container.index == xp.asarray([20, 20]))
         assert xp.all(result.indexed_container.values == container.indexed_container.values[2:])
 
-    def test_iloc(self, container: CompoundIndexed, xp: NumPyNamespace) -> None:
+    def test_iloc(self, container: CompoundIndexed, xp: NumPyNamespace):
         result = container.iloc[1]
 
         assert xp.all(result.index == xp.asarray([7, 7]))
@@ -225,7 +225,7 @@ class TestIndexedContainer:
         assert xp.all(result.indexed_container.index == xp.asarray([20, 20]))
         assert xp.all(result.indexed_container.values == container.indexed_container.values[2:])
 
-    def test_take_unsorted_repeated_index(self, xp: NumPyNamespace) -> None:
+    def test_take_unsorted_repeated_index(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([7, 3, 7, 5, 3]),
             values=xp.reshape(xp.arange(10), (5, 2)),
@@ -236,7 +236,7 @@ class TestIndexedContainer:
         assert xp.all(result.index == xp.asarray([7, 7, 3, 3]))
         assert xp.all(result.values == container.values[positions])
 
-    def test_take_repeated_labels_with_reset(self, xp: NumPyNamespace) -> None:
+    def test_take_repeated_labels_with_reset(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([7, 3, 7]),
             values=xp.reshape(xp.arange(6), (3, 2)),
@@ -246,7 +246,7 @@ class TestIndexedContainer:
         assert xp.all(result.index == xp.asarray([0, 0, 1, 1]))
         assert xp.all(result.values == container.values[xp.asarray([0, 2, 0, 2])])
 
-    def test_reset_preserves_physical_order(self, xp: NumPyNamespace) -> None:
+    def test_reset_preserves_physical_order(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([7, 3, 7, 5, 3]),
             values=xp.reshape(xp.arange(10), (5, 2)),
@@ -256,7 +256,7 @@ class TestIndexedContainer:
         assert xp.all(result.index == xp.asarray([2, 0, 2, 1, 0]))
         assert xp.all(result.values == container.values)
 
-    def test_take_multidimensional_index(self, xp: NumPyNamespace) -> None:
+    def test_take_multidimensional_index(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([[7, 3, 7], [5, 3, 5]]),
             values=xp.reshape(xp.arange(12), (2, 3, 2)),
@@ -269,7 +269,7 @@ class TestIndexedContainer:
         assert xp.all(result.index == xp.asarray([5, 5, 7, 7]))
         assert xp.all(result.values == flat_values[positions])
 
-    def test_reset_multidimensional_index(self, xp: NumPyNamespace) -> None:
+    def test_reset_multidimensional_index(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([[7, 3, 7], [5, 3, 5]]),
             values=xp.reshape(xp.arange(12), (2, 3, 2)),
@@ -280,7 +280,7 @@ class TestIndexedContainer:
         assert xp.all(result.index == xp.asarray([[2, 0, 2], [1, 0, 1]]))
         assert xp.all(result.values == container.values)
 
-    def test_take_empty(self, xp: NumPyNamespace) -> None:
+    def test_take_empty(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([], dtype=int),
             values=xp.empty((0, 2)),
@@ -291,11 +291,11 @@ class TestIndexedContainer:
         assert result.index.size == 0
         assert result.values.shape == (0, 2)
 
-    def test_take_missing_label(self, container: CompoundIndexed) -> None:
+    def test_take_missing_label(self, container: CompoundIndexed):
         with pytest.raises(KeyError, match="not present"):
             _ = container.take([11])
 
-    def test_broadcast_index_lookup(self, xp: NumPyNamespace) -> None:
+    def test_broadcast_index_lookup(self, xp: NumPyNamespace):
         container = IndexedLeaf(
             index=xp.asarray([[7], [3]]),
             values=xp.reshape(xp.arange(12), (2, 3, 2)),

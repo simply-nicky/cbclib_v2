@@ -70,7 +70,7 @@ class LoadWorker(Generic[Output]):
     def __call__(self, index: Any) -> Output:
         raise NotImplementedError
 
-    def initializer(self, *args: Any, is_pool: bool=False, **kwargs: Any) -> None:
+    def initializer(self, *args: Any, is_pool: bool=False, **kwargs: Any):
         raise NotImplementedError
 
     @staticmethod
@@ -481,6 +481,32 @@ class H5Protocol(Container):
 WorkerType = Callable[[Tuple[str, Indices]], NDArray]
 cxi_worker : WorkerType
 
+def load_dataset(data_path: str, index: Tuple[str, Indices],
+              ss_indices: Indices | None, fs_indices: Indices | None) -> NDArray:
+    xp : NumPyNamespace = NumPy
+
+    file, idx = index
+    with h5py.File(file, 'r') as cxi_file:
+        dset = cast(h5py.Dataset, cxi_file[data_path])
+        if ss_indices is not None and fs_indices is not None:
+            if idx != slice(None):
+                chunk = xp.asarray(dset[idx, ..., ss_indices, fs_indices])
+            else:
+                chunk = xp.asarray(dset[..., ss_indices, fs_indices])
+        else:
+            chunk = xp.asarray(dset[idx])
+
+    # Reshape the chunk to remove the leading dimension if it's 1
+    chunk = xp.reshape(chunk, (-1,) + chunk.shape[-2:])
+
+    # Replace NaNs with zeros
+    chunk[xp.where(xp.isnan(chunk))] = 0
+
+    if chunk.shape[0] == 1:
+        chunk = chunk.squeeze(axis=0)
+
+    return chunk
+
 @dataclass
 class H5ReadWorker(LoadWorker[NDArray]):
     data_path   : str
@@ -491,29 +517,7 @@ class H5ReadWorker(LoadWorker[NDArray]):
         return self.load(self.data_path, index)
 
     def load(self, data_path: str, index: Tuple[str, Indices]) -> NDArray:
-        xp : NumPyNamespace = NumPy
-
-        file, idx = index
-        with h5py.File(file, 'r') as cxi_file:
-            dset = cast(h5py.Dataset, cxi_file[data_path])
-            if self.ss_indices is not None and self.fs_indices is not None:
-                if idx != slice(None):
-                    chunk = xp.asarray(dset[idx, ..., self.ss_indices, self.fs_indices])
-                else:
-                    chunk = xp.asarray(dset[..., self.ss_indices, self.fs_indices])
-            else:
-                chunk = xp.asarray(dset[idx])
-
-        # Reshape the chunk to remove the leading dimension if it's 1
-        chunk = xp.reshape(chunk, (-1,) + chunk.shape[-2:])
-
-        # Replace NaNs with zeros
-        chunk[xp.where(xp.isnan(chunk))] = 0
-
-        if chunk.shape[0] == 1:
-            chunk = chunk.squeeze(axis=0)
-
-        return chunk
+        return load_dataset(data_path, index, self.ss_indices, self.fs_indices)
 
     @classmethod
     def initializer(cls, data_path: str, ss_indices: Indices, fs_indices: Indices):

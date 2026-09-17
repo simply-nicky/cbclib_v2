@@ -51,7 +51,7 @@ class AllocatorConfig(TypedDict):
     jax_limit: float | None
     jax_initialized: bool
 
-def set_allocator(allocator: Allocator, *, strict: bool = False) -> None:
+def set_allocator(allocator: Allocator, *, strict: bool = False):
     """Set cbclib C++, CuPy, and JAX allocator modes together.
 
     Args:
@@ -63,7 +63,7 @@ def set_allocator(allocator: Allocator, *, strict: bool = False) -> None:
     set_cupy_allocator(allocator, strict=strict)
     set_jax_allocator(allocator, strict=strict)
 
-def set_cuda_allocator(allocator: Allocator, *, strict: bool = False) -> None:
+def set_cuda_allocator(allocator: Allocator, *, strict: bool = False):
     """Select the allocator used by cbclib CUDA C++ temporary buffers.
 
     The C++ CUDA helpers read the selected mode at allocation time through
@@ -85,7 +85,7 @@ def set_cuda_allocator(allocator: Allocator, *, strict: bool = False) -> None:
     elif os.environ.get(_CUDA_ALLOCATOR_ENV) == "cuda_malloc_async":
         os.environ[_CUDA_ALLOCATOR_ENV] = "default"
 
-def set_cupy_allocator(allocator: Allocator, *, strict: bool = False) -> None:
+def set_cupy_allocator(allocator: Allocator, *, strict: bool = False):
     """Select CuPy's GPU allocator.
 
     CuPy is imported lazily so this function can be called from a notebook
@@ -130,7 +130,7 @@ def set_cupy_allocator(allocator: Allocator, *, strict: bool = False) -> None:
 
     _cupy_allocator = allocator
 
-def set_jax_allocator(allocator: Allocator, *, strict: bool = False) -> None:
+def set_jax_allocator(allocator: Allocator, *, strict: bool = False):
     """Select JAX/XLA's GPU allocator.
 
     JAX reads these settings while initializing XLA, so call this before
@@ -163,7 +163,7 @@ def set_jax_allocator(allocator: Allocator, *, strict: bool = False) -> None:
 
     _jax_allocator = allocator
 
-def set_cupy_limit(limit: int | float | str | None, *, device: int | None = None) -> None:
+def set_cupy_limit(limit: int | float | str | None, *, device: int | None = None):
     """Set CuPy's default memory-pool limit.
 
     Limits are intentionally rejected for ``cuda_malloc_async`` mode because that
@@ -195,7 +195,7 @@ def set_cupy_limit(limit: int | float | str | None, *, device: int | None = None
 
     _cupy_limit = fraction if fraction is not None else size
 
-def set_jax_limit(limit: float | str | None, *, strict: bool = False) -> None:
+def set_jax_limit(limit: float | str | None, *, strict: bool = False):
     """Set JAX's default allocator memory fraction before JAX initializes.
 
     Args:
@@ -243,10 +243,10 @@ def _validate_allocator(allocator: str) -> Allocator:
         raise ValueError("allocator must be 'default' or 'cuda_malloc_async'")
     return allocator  # type: ignore[return-value]
 
-def _set_cupy_default_allocator(cp: Any) -> None:
+def _set_cupy_default_allocator(cp: Any):
     cp.cuda.set_allocator(cp.get_default_memory_pool().malloc)
 
-def _check_jax_not_initialized(action: str, strict: bool) -> None:
+def _check_jax_not_initialized(action: str, strict: bool):
     if _is_jax_backend_initialized():
         _handle_failure(f"Cannot reliably {action} after JAX backend initialization. "
                         "Restart the Python process or Jupyter kernel and configure "
@@ -271,19 +271,19 @@ def _is_jax_backend_initialized() -> bool:
         # may already have happened.
         return True
 
-def _handle_failure(message: str, strict: bool, exc: BaseException | None = None) -> None:
+def _handle_failure(message: str, strict: bool, exc: BaseException | None = None):
     if strict:
         if exc is None:
             raise RuntimeError(message)
         raise RuntimeError(message) from exc
     warnings.warn(message, RuntimeWarning, stacklevel=3)
 
-def _set_managed_env(name: str, value: str) -> None:
+def _set_managed_env(name: str, value: str):
     if name not in _managed_env:
         _managed_env[name] = os.environ.get(name, _UNSET)
     os.environ[name] = value
 
-def _restore_managed_env(name: str) -> None:
+def _restore_managed_env(name: str):
     previous = _managed_env.pop(name, _MISSING)
     if previous is _MISSING:
         return

@@ -6,14 +6,15 @@ jobs to finish.
 """
 import asyncio
 from contextlib import contextmanager
+import logging
 import os
 import re
-from time import sleep
+from time import monotonic, sleep
 from shlex import quote
 from tempfile import NamedTemporaryFile, _TemporaryFileWrapper as TemporaryFileWrapper
 import subprocess
-from typing import (AsyncGenerator, ClassVar, Dict, Iterator, List, NamedTuple, Set,
-                    Tuple, overload)
+from typing import (AsyncGenerator, ClassVar, Dict, Generator, List, NamedTuple, Set,
+                    Sequence, Tuple, overload)
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
 from .._src.parser import from_container, from_file
@@ -120,7 +121,7 @@ class ScriptSpec(Container):
         parser = from_container(file, self, 'parameters')
         parser.write(file, self)
 
-    def add_define(self, key: str, value: str) -> None:
+    def add_define(self, key: str, value: str):
         """Add an exported environment variable.
 
         Args:
@@ -208,7 +209,7 @@ class SLURMScript:
 
     @contextmanager
     def write_file(self, directory: str | os.PathLike[str] | None=None
-                   ) -> Iterator[TemporaryFileWrapper]:
+                   ) -> Generator[TemporaryFileWrapper, None, None]:
         """Write the script to a temporary shell file.
 
         Args:
@@ -226,6 +227,47 @@ class SLURMScript:
             yield temp_file
         finally:
             temp_file.close()
+
+@dataclass
+class SLURMArrayScript(SLURMScript):
+    """SLURM script carrying the task identifiers of its job array.
+
+    Attributes:
+        task_ids: Non-empty array task identifiers supplied to ``sbatch``.
+    """
+    task_ids        : List[int] | range = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.task_ids:
+            raise ValueError("An array script requires at least one task ID")
+        if len(self.task_ids) != len(set(self.task_ids)):
+            raise ValueError("Array task IDs must be unique")
+        if any(isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 0
+               for task_id in self.task_ids):
+            raise ValueError("Array task IDs must be non-negative integers")
+
+    @property
+    def n_tasks(self) -> int:
+        return len(self.task_ids)
+
+    @property
+    def array_string(self) -> str:
+        if isinstance(self.task_ids, list):
+            return ','.join(str(tid) for tid in self.task_ids)
+        if isinstance(self.task_ids, range):
+            return f"{self.task_ids.start}-{self.task_ids.stop - 1}:{self.task_ids.step}"
+        raise TypeError("task_ids must be a list or range")
+
+    def __getitem__(self, index: slice | Sequence[int]) -> 'SLURMArrayScript':
+        if isinstance(index, slice):
+            if index.start < 0 or index.stop > self.n_tasks:
+                raise IndexError("Array task index out of range")
+            return SLURMArrayScript(self.command, self.job_name, self.parameters,
+                                    self.task_ids[index])
+
+        task_ids = list(self.task_ids)
+        return SLURMArrayScript(self.command, self.job_name, self.parameters,
+                                [task_ids[i] for i in index])
 
 @dataclass
 class JobID:
@@ -298,6 +340,53 @@ class JobStatus:
     nodes       : int
     job_id_raw  : int
 
+    completed_state : ClassVar[str] = "COMPLETED"
+    active_states   : ClassVar[Set[str]] = {
+        "COMPLETING", "CONFIGURING", "PENDING", "REQUEUED", "REQUEUE_FED",
+        "REQUEUE_HOLD", "RESIZING", "RUNNING", "SIGNALING", "STAGE_OUT", "STOPPED",
+        "SUSPENDED",
+    }
+
+    @classmethod
+    def normalise_state(cls, state: str) -> str:
+        """Return the canonical name from a SLURM state description.
+
+        Args:
+            state: State reported by ``squeue`` or ``sacct``.
+
+        Returns:
+            Upper-case state name without accounting annotations or a
+            truncation marker.
+        """
+        return state.upper().split(maxsplit=1)[0].removesuffix('+')
+
+    @classmethod
+    def is_active_state(cls, state: str) -> bool:
+        """Return whether a reported state may still advance.
+
+        Args:
+            state: State reported by ``squeue`` or ``sacct``.
+
+        Returns:
+            ``True`` while SLURM may still advance the job.
+        """
+        return cls.normalise_state(state) in cls.active_states
+
+    @property
+    def normalised_state(self) -> str:
+        """Return the canonical SLURM state name."""
+        return self.normalise_state(self.state)
+
+    @property
+    def is_completed(self) -> bool:
+        """Return whether the job completed successfully."""
+        return self.normalised_state == self.completed_state
+
+    @property
+    def is_active(self) -> bool:
+        """Return whether SLURM may still advance the job."""
+        return self.is_active_state(self.state)
+
     def format_filename(self, pattern: str) -> str:
         """Format a SLURM output or error filename pattern.
 
@@ -333,13 +422,14 @@ class SLURMJobManager:
 
     Attributes:
         config: Names or paths of the SLURM command-line tools.
+        logger: Optional logger receiving monitoring updates. When omitted,
+            progress is displayed with ``tqdm``.
+        visibility_timeout: Seconds a job may remain absent from both SLURM
+            queries before waiting fails.
     """
-    config      : SLURMConfig = SLURMConfig()
-    completed   : ClassVar[str] = "COMPLETED"
-    failed      : ClassVar[Set[str]] = {"FAILED", "TIMEOUT", "CANCELLED", "NODE_FAIL",
-                                        "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY", "PREEMPTED"}
-    pending     : ClassVar[str] = "PENDING"
-    running     : ClassVar[Set[str]] = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING"}
+    config             : SLURMConfig = SLURMConfig()
+    logger             : logging.Logger | None = None
+    visibility_timeout : float = 30.0
 
     @staticmethod
     def _parse_job_ids(lines: List[str]) -> List[JobID]:
@@ -432,7 +522,7 @@ class SLURMJobManager:
 
         proc = subprocess.run(
             [self.config.sacct, "-j", self._base_job_ids(job_ids), "-n", "-P", "-X",
-             "--format=JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes,JobIDRaw"],
+             "--format=JobID,Partition,JobName,NodeList,User,State%30,Elapsed,NNodes,JobIDRaw"],
             capture_output=True,
             text=True,
             check=False,
@@ -524,7 +614,7 @@ class SLURMJobManager:
             return jobs[0]
         return jobs
 
-    def cancel(self, job_id: JobID) -> None:
+    def cancel(self, job_id: JobID):
         """Cancel a SLURM job.
 
         Args:
@@ -700,10 +790,10 @@ class SLURMJobManager:
             cannot be resolved.
         """
         state = self.get_state(job_id)
-        while state is not None and state.upper() == self.pending:
+        while state is not None and JobStatus.normalise_state(state) == "PENDING":
             sleep(poll_interval)
             state = self.get_state(job_id)
-            if state is None or state.upper() != self.pending:
+            if state is None or JobStatus.normalise_state(state) != "PENDING":
                 break
 
         status = self.get_status(job_id)
@@ -759,7 +849,7 @@ class SLURMJobManager:
                 fails.
         """
         # id | partition | name | nodelist | user | state | time_used | nodes | raw_id
-        formatter = "JobID,Partition,JobName,NodeList,User,State,Elapsed,NNodes,JobIDRaw"
+        formatter = "JobID,Partition,JobName,NodeList,User,State%30,Elapsed,NNodes,JobIDRaw"
 
         try:
             values = await self.squeue_async(job_id, formatter="%i|%P|%j|%N|%u|%T|%M|%D|%A")
@@ -794,10 +884,10 @@ class SLURMJobManager:
         try:
             values = self.squeue(job_id, formatter="%T")
         except RuntimeError:
-            values = self.sacct(job_id, formatter="State")
+            values = self.sacct(job_id, formatter="State%30")
         else:
             if not values:
-                values = self.sacct(job_id, formatter="State")
+                values = self.sacct(job_id, formatter="State%30")
 
         if not values:
             return None
@@ -816,10 +906,10 @@ class SLURMJobManager:
         try:
             values = await self.squeue_async(job_id, formatter="%T")
         except RuntimeError:
-            values = await self.sacct_async(job_id, formatter="State")
+            values = await self.sacct_async(job_id, formatter="State%30")
         else:
             if not values:
-                values = await self.sacct_async(job_id, formatter="State")
+                values = await self.sacct_async(job_id, formatter="State%30")
 
         if not values:
             return None
@@ -833,13 +923,13 @@ class SLURMJobManager:
             job_id: Job to query.
 
         Returns:
-            ``True`` for pending, running, configuring, or completing jobs.
+            ``True`` while SLURM may still advance the job.
         """
         status = self.get_state(job_id)
         if status is None:
             return False
 
-        return status.upper() in self.running
+        return JobStatus.is_active_state(status)
 
     async def is_running_async(self, job_id: JobID) -> bool:
         """Asynchronously return whether a job is still active.
@@ -848,13 +938,13 @@ class SLURMJobManager:
             job_id: Job to query.
 
         Returns:
-            ``True`` for pending, running, configuring, or completing jobs.
+            ``True`` while SLURM may still advance the job.
         """
         status = await self.get_state_async(job_id)
         if status is None:
             return False
 
-        return status.upper() in self.running
+        return JobStatus.is_active_state(status)
 
     async def stream_job(self, job: JobOutput, poll_interval: float = 0.1
                          ) -> AsyncGenerator[str, None]:
@@ -945,14 +1035,14 @@ class SLURMJobManager:
             self.wait_all(jobs, poll_interval=poll_interval, desc=desc)
         return jobs
 
-    def submit_array(self, script: SLURMScript, task_ids: List[int] | range,
-                     n_tasks: int | None=None, wait: bool=True, poll_interval: float = 0.5,
+    def submit_array(self, script: SLURMArrayScript, wait: bool=True, poll_interval: float = 0.5,
                      desc: str = "SLURM array") -> List[JobID]:
         """Submit a SLURM array job.
 
         Args:
             script: Script specification to submit as an array.
-            task_ids: Array task ids.
+            task_ids: Array task ids. When omitted, use the identifiers carried
+                by an :class:`SLURMArrayScript`.
             n_tasks: Maximum number of simultaneously running array tasks.
             wait: If ``True``, wait until all array tasks finish.
             poll_interval: Delay in seconds between status polls while waiting.
@@ -966,17 +1056,8 @@ class SLURMJobManager:
             RuntimeError: If ``sbatch`` fails or its output does not contain a
                 job id.
         """
-        if isinstance(task_ids, list):
-            array_string = ','.join(str(tid) for tid in task_ids)
-        elif isinstance(task_ids, range):
-            array_string = f"{task_ids.start}-{task_ids.stop - 1}:{task_ids.step}"
-        else:
-            raise ValueError("task_ids must be a list or range")
-        if n_tasks is not None:
-            array_string += f"%{n_tasks}"
-
         with script.write_file() as script_file:
-            result = subprocess.run([self.config.sbatch, f"--array={array_string}",
+            result = subprocess.run([self.config.sbatch, f"--array={script.array_string}",
                                      script_file.name],
                                     capture_output=True, text=True, check=False)
             if result.returncode != 0:
@@ -987,14 +1068,17 @@ class SLURMJobManager:
             if not m:
                 raise RuntimeError(f"Could not parse job ID from sbatch output: {result.stdout}")
             job_id = int(m.group(1))
-            jobs = [JobID(id=job_id, task_id=tid) for tid in task_ids]
+            jobs = [JobID(id=job_id, task_id=tid) for tid in script.task_ids]
+
+        if self.logger is not None:
+            self.logger.info("Submitted array %d with %d tasks", job_id, len(jobs))
 
         if wait:
             self.wait_all(jobs, poll_interval=poll_interval, desc=desc)
         return jobs
 
     def wait_all(self, job_ids: List[JobID], poll_interval: float = 0.1,
-                 desc: str = "SLURM Jobs") -> None:
+                 desc: str = "SLURM Jobs"):
         """Wait until all jobs finish successfully.
 
         Args:
@@ -1003,33 +1087,61 @@ class SLURMJobManager:
             desc: Progress-bar description.
 
         Raises:
-            RuntimeError: If a job is not found or enters a failed state.
+            RuntimeError: If a job remains unavailable beyond the visibility
+                timeout or enters an unsuccessful terminal state.
         """
         pending: List[JobID] = list(job_ids)
         completed: Set[JobID] = set()
+        missing_since: Dict[JobID, float] = {}
+        last_report: Tuple[int, Tuple[Tuple[str, int], ...]] | None = None
 
-        with tqdm(total=len(job_ids), desc=desc, unit="job") as pbar:
+        with tqdm(total=len(job_ids), desc=desc, unit="job",
+                  disable=self.logger is not None) as pbar:
             while pending:
                 still_pending: List[JobID] = []
                 finished = 0
+                state_counts: Dict[str, int] = {}
                 statuses = self.get_status(pending)
+                current_time = monotonic()
                 for job_id, status in zip(pending, statuses):
                     if status is None:
-                        raise RuntimeError(f"Job {job_id} not found in squeue or sacct")
+                        missing_since.setdefault(job_id, current_time)
+                        if current_time - missing_since[job_id] >= self.visibility_timeout:
+                            raise RuntimeError(
+                                f"Job {job_id} was not visible in squeue or sacct for "
+                                f"{self.visibility_timeout:g} seconds"
+                            )
+                        state_counts["MISSING"] = state_counts.get("MISSING", 0) + 1
+                        still_pending.append(job_id)
+                        continue
 
-                    state = status.state
-                    if state.upper() == self.completed:
+                    missing_since.pop(job_id, None)
+                    state = status.normalised_state
+                    if status.is_completed:
                         if job_id not in completed:
                             completed.add(job_id)
                             finished += 1
-                    # Check if the job failed
-                    elif state.upper() in self.failed:
-                        raise RuntimeError(f"Job {job_id} failed with state: {state}")
-                    else:
+                    elif status.is_active:
+                        state_counts[state] = state_counts.get(state, 0) + 1
                         still_pending.append(job_id)
+                    else:
+                        raise RuntimeError(f"Job {job_id} failed with state: {status.state}")
 
                 if finished:
                     pbar.update(finished)
+                report = (len(completed), tuple(sorted(state_counts.items())))
+                if report != last_report:
+                    if self.logger is None:
+                        pbar.set_postfix(state_counts)
+                    else:
+                        details = ', '.join(
+                            f"{count} {state.lower()}"
+                            for state, count in sorted(state_counts.items())
+                        )
+                        suffix = f", {details}" if details else str()
+                        self.logger.info("%s: %d/%d completed%s", desc, len(completed),
+                                         len(job_ids), suffix)
+                    last_report = report
                 pending = still_pending
                 if pending:
                     sleep(poll_interval)

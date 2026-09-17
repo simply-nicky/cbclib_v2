@@ -21,7 +21,7 @@ class SymmetryOperator:
 
     matrix: StaticMatrix
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if len(self.matrix) != 3 or any(len(row) != 3 for row in self.matrix):
             raise ValueError("Symmetry operator matrix must have shape (3, 3)")
         if any(not isinstance(value, Integral) for row in self.matrix for value in row):
@@ -74,7 +74,7 @@ class SymmetryGroup:
 
     operators: Tuple[SymmetryOperator, ...]
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         operators = tuple(sorted(set(self.operators)))
         if not operators:
             raise ValueError("Symmetry group must contain at least one operator")
@@ -212,7 +212,7 @@ class PointGroup:
 
     symbol: str = "1"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         symbol = self.symbol.replace("\N{MINUS SIGN}", "-").replace(" ", "")
         if symbol not in POINT_GROUPS:
             raise ValueError(f"Unsupported point-group symbol: {self.symbol!r}")

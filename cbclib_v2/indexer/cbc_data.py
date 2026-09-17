@@ -244,9 +244,11 @@ class Miller(State, BaseMiller):
         return self.hkl.shape[:-1]
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, frames: IntArray, xp: AnyNamespace
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, frames: IntArray | None, xp: AnyNamespace
                          ) -> 'Miller':
         index = xp.asarray(df['index'])
+        if frames is None:
+            frames = xp.unique(index)
 
         lookup = IndexLookup.build(xp.reshape(frames, -1))
         if lookup.unique.size != frames.size:

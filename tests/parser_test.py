@@ -23,17 +23,17 @@ class ParserContainer(Container):
     value: float
 
 class TestFieldLocator:
-    def test_getattr(self) -> None:
+    def test_getattr(self):
         container = ParserContainer(ParserChild(3, 'value'), 1.5)
 
         assert FieldLocator('child.second').getattr(container) == 'value'
 
-    def test_invalid_field_name(self) -> None:
+    def test_invalid_field_name(self):
         with pytest.raises(ValueError, match='Invalid field name'):
             FieldLocator('child..first')
 
 class TestFields:
-    def test_nested_container(self) -> None:
+    def test_nested_container(self):
         container = ParserContainer(ParserChild(3, 'value'), 1.5)
 
         assert fields(type(container), container.to_dict(), None) == {
@@ -44,7 +44,7 @@ class TestFields:
             'value': FieldLocator('value'),
         }
 
-    def test_default_section_preserves_file_layout(self) -> None:
+    def test_default_section_preserves_file_layout(self):
         container = ParserContainer(ParserChild(3, 'value'), 1.5)
 
         assert fields(type(container), container.to_dict(), 'general') == {
@@ -55,7 +55,7 @@ class TestFields:
             'general': {'value': FieldLocator('value')},
         }
 
-    def test_nested_type_hints(self) -> None:
+    def test_nested_type_hints(self):
         assert get_type_hints(ParserContainer) == {
             'child': {'first': int, 'second': str},
             'value': float,
@@ -75,7 +75,7 @@ class TestFieldMapping:
             },
         }
 
-    def test_read_fields_constructs_object_dictionary(self) -> None:
+    def test_read_fields_constructs_object_dictionary(self):
         data = {
             'nested': {'parameters': {'renamed': 3}},
             'metadata': {'label': 'value', 'value': 1.5},
@@ -86,7 +86,7 @@ class TestFieldMapping:
             'value': 1.5,
         }
 
-    def test_extract_fields_constructs_file_dictionary(self) -> None:
+    def test_extract_fields_constructs_file_dictionary(self):
         container = ParserContainer(ParserChild(3, 'value'), 1.5)
 
         assert extract_fields(self.field_info(), container) == {
@@ -128,7 +128,6 @@ class TestParserRoundTrip:
     @pytest.fixture
     def scan(self) -> ScanConfig:
         return ScanConfig(
-            scan_num=17,
             image_kind='stacked',
             data=SwissFELConfig(
                 data_dir='/data/run_{0:04d}',
@@ -155,7 +154,7 @@ class TestParserRoundTrip:
 
     @pytest.mark.parametrize('extension', ['ini', 'json'])
     def test_fixed_geometry(self, tmp_path: Path, geometry: FixedGeometry,
-                            extension: str) -> None:
+                            extension: str):
         path = tmp_path / f'geometry.{extension}'
 
         geometry.write(str(path))
@@ -164,7 +163,7 @@ class TestParserRoundTrip:
         assert result == geometry
 
     def test_streak_finder_config(self, tmp_path: Path,
-                                  streak_finder: StreakFinderConfig) -> None:
+                                  streak_finder: StreakFinderConfig):
         path = tmp_path / 'streak_finder.json'
 
         streak_finder.write(str(path))
@@ -173,10 +172,11 @@ class TestParserRoundTrip:
         expected = json.loads(json.dumps(streak_finder.to_dict()))
         assert result.to_dict() == expected
 
-    def test_scan_config(self, tmp_path: Path, scan: ScanConfig) -> None:
+    def test_scan_config(self, tmp_path: Path, scan: ScanConfig):
         path = tmp_path / 'scan.json'
 
         scan.write(str(path))
         result = ScanConfig.read(str(path))
 
+        assert 'scan_num' not in json.loads(path.read_text())['parameters']
         assert result == scan

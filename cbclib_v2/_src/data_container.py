@@ -87,12 +87,19 @@ def is_union(t: Any) -> bool:
 def is_compound(t: Any) -> bool:
     return is_generic(t) or is_union(t)
 
-def list_indices(indices: Indices, size: int) -> List[int]:
+def list_indices(indices: int | slice | Iterable[int], size: int | None=None) -> List[int]:
     if isinstance(indices, (int, np.integer)):
         return [indices,]
     if isinstance(indices, slice):
+        if size is None:
+            step = indices.step if indices.step is not None else 1
+            if indices.start is None or indices.stop is None:
+                raise ValueError("scan slices must define start and stop")
+            return list(range(indices.start, indices.stop, step))
         start, stop, step = indices.indices(size)
         return list(range(start, stop, step))
+    if size is None:
+        return list(indices)
     return [index for index in indices if index < size]
 
 def resolved_type(field: type['Container'], field_name: str,
@@ -398,7 +405,7 @@ def normalise_indices(indices: Tuple, shape: Shape) -> Tuple[Indices, ...]:
 
     return tuple(normalized)
 
-def validate_shape(contents: Dict[str, Array], shape: Shape) -> None:
+def validate_shape(contents: Dict[str, Array], shape: Shape):
     for name, value in contents.items():
         if value.shape[:len(shape)] != shape:
             raise ValueError(f"Field '{name}' has shape {value.shape} "
@@ -810,6 +817,48 @@ class IndexedContainer(ArrayContainer):
             ``obj.loc[42]`` returns all rows with ``index == 42``.
         """
         return LocIndexer(self)
+
+    @classmethod
+    def concat(cls: Type[Self], containers: Iterable[Self],
+               monotonic_index: bool=False) -> Self:
+        """Concatenate a sequence of containers field-wise along axis 0.
+
+        With ``monotonic_index=True``, shift overlapping index ranges so that successive
+        containers represent distinct patterns. Index gaps and observation order are preserved.
+
+        Args:
+            containers: Non-empty iterable of container instances of the
+                same concrete type.
+            monotonic_index: Shift index ranges to keep input patterns distinct.
+
+        Returns:
+            New container with all array fields concatenated.
+
+        Raises:
+            ValueError: If *containers* is empty.
+        """
+        def concatenate_index(containers: Iterable[Self]) -> IntArray:
+            xp = array_namespace(*containers)
+            indices, last = [], 0
+            for container in containers:
+                index = container.index
+                if index.size != 0:
+                    flat_index = xp.reshape(index, -1)
+                    current_first = xp.min(flat_index)
+                    if current_first < last:
+                        index = index + last - current_first
+                    indices.append(index)
+                    last = xp.max(index) + 1
+            if len(indices) == 0:
+                return xp.asarray([], dtype=int)
+            return xp.concat(indices)
+
+        containers = list(containers)
+        concatenated = super(IndexedContainer, cls).concat(containers)
+        if monotonic_index:
+            new_index = concatenate_index(containers)
+            return concatenated.replace(index=new_index)
+        return concatenated
 
     def take(self: Self, indices: IntSequence, reset_index: bool=False) -> Self:
         """Select groups by index value and return the corresponding slice.

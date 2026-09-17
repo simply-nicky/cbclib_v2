@@ -13,8 +13,8 @@ Scan configuration
 ------------------
 
 Every workflow starts from a :class:`~cbclib_v2.scripts.ScanConfig` object that
-describes the experiment in full: where the raw data live, how the detector is
-arranged, which processing steps to run, and where to write results.  The
+describes reusable experiment settings: where the raw data live, how the detector
+is arranged, which processing steps to run, and where to write results. The
 configuration is stored as a JSON file and loaded with
 :meth:`~cbclib_v2.scripts.ScanConfig.read`:
 
@@ -23,7 +23,13 @@ configuration is stored as a JSON file and loaded with
    from cbclib_v2.scripts import ScanConfig
 
    config = ScanConfig.read('experiments/exfel/scan.json')
-   run    = config.run()   # returns XFELRun or SwissFELRun
+   scan   = config.open_scan(373)
+   run    = scan.run()   # returns XFELRun or SwissFELRun
+
+``open_scan`` returns a ``Scan`` for an integer and a ``ScanList`` for a list
+or range. A ``ScanList`` supports iteration and positional indexing and exposes
+combined file naming through ``files``; run access and metadata lookup remain
+on each individual ``Scan``.
 
 Below is an annotated example for a run at the European XFEL (SPB instrument,
 run 373):
@@ -32,7 +38,6 @@ run 373):
 
    {
        "parameters": {
-           "scan_num":   373,
            "image_kind": "stacked"
        },
        "data": {
@@ -73,9 +78,11 @@ run 373):
 **Key fields:**
 
 ``parameters``
-   ``scan_num`` — run number passed to :func:`~cbclib_v2.open_run`.
    ``image_kind`` — ``"stacked"`` keeps per-module stacks (fast I/O);
    ``"full"`` assembles them into a single lab-frame image.
+
+The scan number is supplied separately when constructing a :class:`~cbclib_v2.scripts.Scan`
+or invoking a script. This allows one configuration file to be reused across multiple runs.
 
 ``data``
    Facility identity and HDF5 layout.  ``facility`` selects the run class
@@ -191,22 +198,35 @@ The pipeline runs in four sequential steps:
 .. code-block:: bash
 
    # Step 1 — compute the background whitefield
-   cbclib_cli metadata experiments/exfel/scan.json \
-                        experiments/exfel/metadata.json
+   cbclib_cli metadata 373 experiments/exfel/scan.json \
+                            experiments/exfel/metadata.json
 
    # Step 2 — partition data into per-file chunks
    #   -c <chunk_id>  -n <total_chunks>
-   cbclib_cli metalist experiments/exfel/scan.json \
-                       experiments/exfel/metadata.json \
-                       -c 0 -n 7
+   cbclib_cli metalist 373 experiments/exfel/scan.json \
+                           experiments/exfel/metadata.json \
+                           -c 0 -n 7
 
    # Step 3 — detect streaks in each chunk (repeat for each chunk)
-   cbclib_cli detect streaks experiments/exfel/scan.json \
-                              experiments/exfel/detect_streaks.json \
-                              -c 0 -n 7
+   cbclib_cli detect 373 streaks experiments/exfel/scan.json \
+                                  experiments/exfel/detect_streaks.json \
+                                  -c 0 -n 7
 
    # Step 4 — merge per-chunk results into a single HDF5 file
-   cbclib_cli compile streaks experiments/exfel/scan.json
+   cbclib_cli compile 373 streaks experiments/exfel/scan.json
+
+Several scans can be written as whitespace-separated numbers. A range uses
+``start-stop-step`` notation:
+
+.. code-block:: bash
+
+   cbclib_cli compile "373 374" streaks experiments/exfel/scan.json
+   cbclib_cli compile 373-380-2 streaks experiments/exfel/scan.json
+
+The first command writes
+``<streaks_dir>/scan_373_374_full/scan_373_374_full.h5``. Every table and the
+``extra`` provenance table include ``scan_num`` when more than one scan is
+compiled, so frame and chunk identifiers remain unambiguous.
 
 **Step 1** reads raw frames from the facility HDF5 files and computes the
 per-module background whitefields.  The result is written to a single HDF5
@@ -243,16 +263,18 @@ polling; :class:`~cbclib_v2.slurm.Scripts` builds the ``sbatch`` scripts.
 
 .. code-block:: python
 
-   from cbclib_v2.slurm import Scripts, ScanConfig, SLURMJobManager
+   from cbclib_v2.slurm import ScanConfig, Scripts, SLURMJobManager
 
    manager = SLURMJobManager()
 
    config   = ScanConfig.read('experiments/exfel/scan.json')
-   run      = config.run()
+   scan     = config.open_scan(373)
+   run      = scan.run()
    n_chunks = 7   # number of file chunks to split the run into for parallel processing
 
    # --- detect streaks: one SLURM task per file chunk ---
    detect_script = Scripts.sbatch_array.detect(
+       scan.scan_num,
        'streaks',
        'experiments/exfel/scan.json',
        'experiments/exfel/detect_streaks.json',
@@ -271,11 +293,72 @@ polling; :class:`~cbclib_v2.slurm.Scripts` builds the ``sbatch`` scripts.
 
    # --- compile results: single job ---
    compile_script = Scripts.sbatch.compile(
+       scan.scan_num,
        'streaks',
        'experiments/exfel/scan.json',
        'experiments/exfel/script_spec.json',
    )
    manager.submit(compile_script)
+
+A list or range passed to ``Scripts.sbatch.compile`` is compiled by one job
+into one combined artifact:
+
+.. code-block:: python
+
+   compile_script = Scripts.sbatch.compile(
+       [373, 374],
+       'streaks',
+       'experiments/exfel/scan.json',
+       'experiments/exfel/script_spec.json',
+   )
+   manager.submit(compile_script)
+
+To compile each scan's chunked files into a separate artifact, use the array
+factory. The scan numbers become the SLURM task identifiers, and each task runs
+the existing single-scan compilation:
+
+.. code-block:: python
+
+   compile_scripts = Scripts.sbatch_array.compile(
+       range(373, 380, 2),
+       'streaks',
+       'experiments/exfel/scan.json',
+       'experiments/exfel/script_spec.json',
+   )
+   manager.submit_array(compile_scripts, wait=False)
+
+For a large set of scans, pass the numbers to a single-job factory. The
+factory returns a scan-indexed array script whose task identifiers are the
+scan numbers themselves:
+
+.. code-block:: python
+
+   metalist_script = Scripts.sbatch.metalist(
+       [373, 374, 380],
+       'experiments/exfel/scan.json',
+       'experiments/exfel/metadata.json',
+       'experiments/exfel/script_spec.json',
+   )
+   manager.submit_array(metalist_script, wait=False)
+
+Use ``range(373, 380, 2)`` instead of a list for scans 373, 375, 377, and 379.
+Its canonical name is ``373-380-2``; lists use underscore-separated names such
+as ``373_374_380``.
+
+Chunk-array factories expand multiple scan numbers into one chunk-array script
+per scan, keeping the scan and chunk axes independent:
+
+.. code-block:: python
+
+   chunk_scripts = Scripts.sbatch_array.metalist(
+       [373, 374, 380],
+       'experiments/exfel/scan.json',
+       'experiments/exfel/metadata.json',
+       'experiments/exfel/script_spec.json',
+       n_chunks,
+   )
+   for chunk_script in chunk_scripts:
+       manager.submit_array(chunk_script, range(n_chunks), wait=False)
 
 The SLURM job parameters (partition, memory, time limit, conda environment)
 are read from a *script spec* file:

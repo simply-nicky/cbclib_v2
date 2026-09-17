@@ -579,7 +579,7 @@ class BaseLens(Generic[AnyFocus, AnyPupil]):
     def resolve(self, xp: AnyNamespace) -> ResolvedLens:
         raise NotImplementedError
 
-    def write(self, file: str) -> None:
+    def write(self, file: str):
         lens_parser(type(self), file).write(file, self.collapse())
 
 class FixedLens(BaseLens[FixedFocus, StaticPupil], State, eq=True, unsafe_hash=True):
@@ -1075,7 +1075,7 @@ class BaseGeometry(BaseLens, Generic[AnyFocus, AnyPupil, AnyDF]):
         return ResolvedGeometry(resolved.foc_pos, resolved.pupil_roi,
                                 xp.asarray(self.defocus))
 
-    def write(self, file: str) -> None:
+    def write(self, file: str):
         """Write setup geometry to a JSON or INI file."""
         geometry_parser(type(self), file).write(file, self.collapse())
 

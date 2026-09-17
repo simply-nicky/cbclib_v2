@@ -222,7 +222,7 @@ class CrystMetadata(CrystBase):
 
     protocol    : H5Protocol = field(default_factory=lambda: H5Protocol.read(METADATA_PROTOCOL))
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if not self.is_empty(self.mask):
             if not self.is_empty(self.std):
                 self.std *= self.mask

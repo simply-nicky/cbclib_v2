@@ -1319,9 +1319,7 @@ class PostRefineConfig(BaseParameters):
         is_valid = xp.isfinite(patterns.lines).all(axis=-1)
         detector_dims = (detector.pixel_size * detector.assembled_shape[0],
                          detector.pixel_size * detector.assembled_shape[1])
-        is_inbound = (patterns.x >= 0.0) & (patterns.x < detector_dims[-1]) & \
-                     (patterns.y >= 0.0) & (patterns.y < detector_dims[-2])
-        is_valid = is_valid & is_inbound.any(axis=-1)
+        is_valid = is_valid & patterns.is_inbound((0.0, detector_dims[0], 0.0, detector_dims[1]))
 
         return miller[xp.asarray(is_valid, dtype=bool)]
 

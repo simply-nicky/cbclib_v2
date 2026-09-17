@@ -200,7 +200,7 @@ class FieldLocator:
     """
     field_name: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if not self.field_name or any(not name for name in self.path):
             raise ValueError(f"Invalid field name: '{self.field_name}'")
 
@@ -328,7 +328,7 @@ def read_fields(field_info: FieldInfo, data: Dict[str, Any]) -> Dict[str, Any]:
     """
     result: Dict[str, Any] = {}
 
-    def set_value(locator: FieldLocator, value: Any) -> None:
+    def set_value(locator: FieldLocator, value: Any):
         node = result
         for field_name in locator.path[:-1]:
             child = node.setdefault(field_name, {})
@@ -338,7 +338,7 @@ def read_fields(field_info: FieldInfo, data: Dict[str, Any]) -> Dict[str, Any]:
             node = child
         node[locator.path[-1]] = value
 
-    def read_node(node_info: FieldInfo, node_data: Dict[str, Any]) -> None:
+    def read_node(node_info: FieldInfo, node_data: Dict[str, Any]):
         for parameter, attrs in node_info.items():
             if parameter not in node_data:
                 raise ValueError(f"Section '{parameter}' not found in the file")

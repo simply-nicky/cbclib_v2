@@ -12,7 +12,7 @@ IS_WINDOWS = sys.platform == 'win32'
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-__version__ = '0.13.6'
+__version__ = '0.13.7'
 
 def find_conda_home() -> str:
     """Find the Conda install path."""
@@ -68,9 +68,9 @@ class CCompiler(Protocol):
     src_extensions : list[str]
 
     def _compile(self, obj: str, src: str, ext: str, cc_args: list[str],
-                 extra_postargs: list[str], pp_opts: list[str]) -> None: ...
+                 extra_postargs: list[str], pp_opts: list[str]): ...
 
-    def set_executable(self, key: str, value: list[str]) -> None: ...
+    def set_executable(self, key: str, value: list[str]): ...
 
 class CPPExtension(Extension):
     """
@@ -121,7 +121,7 @@ class CPPExtension(Extension):
         include_pybind11: bool = True,
         include_numpy: bool = True,
         py_limited_api: bool = False,
-    ) -> None:
+    ):
         if language is None:
             language = "c++"
 
@@ -187,13 +187,13 @@ class BuildCPPExp(build_ext):
     compiler    : CCompiler
     extensions  : list[AnyExtension]
 
-    def add_cxx_extra_args(self, extension: AnyExtension, args: list[str]) -> None:
+    def add_cxx_extra_args(self, extension: AnyExtension, args: list[str]):
         if isinstance(extension.extra_compile_args, dict):
             extension.extra_compile_args['cxx'] += args
         else:
             extension.extra_compile_args += args
 
-    def add_nvcc_extra_args(self, extension: AnyExtension, args: list[str]) -> None:
+    def add_nvcc_extra_args(self, extension: AnyExtension, args: list[str]):
         if isinstance(extension.extra_compile_args, dict):
             extension.extra_compile_args['nvcc'] += args
 
@@ -220,7 +220,7 @@ class BuildCPPExp(build_ext):
 
         def wrap_single_compile(obj: str, src: str, ext: str, cc_args: list[str],
                                 extra_postargs: list[str] | dict[str, list[str]] | None,
-                                pp_opts: list[str]) -> None:
+                                pp_opts: list[str]):
             # Copy before we make any modifications.
             original_compiler = self.compiler.compiler_so
             if extra_postargs is None:

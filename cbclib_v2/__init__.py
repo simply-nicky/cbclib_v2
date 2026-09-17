@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     from ._src.data_processing import (CrystData, CrystMetadata, LSQData, RegionDetector,
                                        StreakDetector)
     from ._src.parser import FieldLocator
-    from ._src.run import (BaseRun, RunConfig, RunLocator, LCLSConfig, LCLSRun, SwissFELConfig,
-                           SwissFELRun, XFELRun, XFELConfig, open_run)
+    from ._src.run import (BaseRun, RunConfig, RunList, RunListIndices, RunLocator, LCLSConfig,
+                           LCLSRun, SwissFELConfig, SwissFELRun, XFELRun, XFELConfig, open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
     from ._src.streaks import Lines, StackedStreaks, Streaks
 
@@ -66,6 +66,8 @@ _EXPORTS = {
     "RunConfig": ("._src.run", "RunConfig"),
     "RunLocator": ("._src.run", "RunLocator"),
     "BaseRun": ("._src.run", "BaseRun"),
+    "RunList": ("._src.run", "RunList"),
+    "RunListIndices": ("._src.run", "RunListIndices"),
     "LCLSConfig": ("._src.run", "LCLSConfig"),
     "LCLSRun": ("._src.run", "LCLSRun"),
     "XFELConfig": ("._src.run", "XFELConfig"),

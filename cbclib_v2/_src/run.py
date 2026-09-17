@@ -7,13 +7,14 @@ import os
 from pathlib import Path
 import pickle
 import re
-from typing import Any, Callable, Dict, Generic, Iterator, List, Literal, Tuple, TypeVar, overload
+from typing import (Any, Callable, Dict, Generic, Iterator, List, Literal, Tuple, Type, TypeVar,
+                    cast, overload)
 from tqdm.auto import tqdm
-from .annotations import (AnyNamespace, Array, ArrayNamespace, CPArray, Indices, JaxArray, NDArray,
-                          NumPy)
+from .annotations import (AnyNamespace, Array, ArrayNamespace, CPArray, Indices, IntSequence,
+                          JaxArray, NDArray, NumPy)
 from .crystfel import Detector as Geometry, read_crystfel
-from .cxi_protocol import (H5Files, H5Protocol, H5Handler, H5ReadWorker, LoadWorker, StackIndices,
-                           TrainIndexRecord, TrainIndices, WorkerType)
+from .cxi_protocol import (H5Files, H5Protocol, H5Handler, LoadWorker, StackIndices,
+                           TrainIndexRecord, TrainIndices, WorkerType, load_dataset)
 from .data_container import Container, list_indices, split, to_list
 from .scripts import BaseParameters
 
@@ -39,9 +40,9 @@ class RunLocator:
     @classmethod
     def coerce(cls, locator: 'int | RunLocator') -> 'RunLocator':
         """Return *locator* as a :class:`RunLocator`."""
-        if isinstance(locator, cls):
-            return locator
-        return cls(locator)
+        if isinstance(locator, int):
+            return cls(locator)
+        return locator
 
 class IndexCacher:
     """Caching utility for run indices with file modification checking.
@@ -90,7 +91,7 @@ class IndexCacher:
         with open(self.cache_path(), 'rb') as f:
             return pickle.load(f)
 
-    def save(self, indices: TrainIndices) -> None:
+    def save(self, indices: TrainIndices):
         """Save indices to cache."""
         cache_path = self.cache_path()
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,9 +167,11 @@ class RunConfig(BaseParameters):
             return LCLSConfig
         raise ValueError(f"Unsupported facility type: {facility}")
 
-IndicesType = TypeVar('IndicesType', bound='TrainIndices')
+T_Indices = TypeVar('T_Indices', bound='TrainIndices')
+T_RunId = TypeVar('T_RunId')
+T_Config = TypeVar('T_Config', bound='RunConfig')
 
-class BaseRun(Container, Generic[IndicesType]):
+class BaseRun(Container, Generic[T_RunId, T_Indices, T_Config]):
     """Abstract base class for reading detector data from a FEL run.
 
     A run wraps one or more HDF5 files belonging to a single experiment run
@@ -176,7 +179,8 @@ class BaseRun(Container, Generic[IndicesType]):
     metadata arrays. Concrete subclasses are created by :func:`open_run`.
 
     Attributes:
-        run_id: Numeric run identifier.
+        run_id: Numeric run identifier, or an ordered collection of identifiers
+            for a :class:`RunList`.
         config: :class:`RunConfig` that describes file locations and protocol.
 
     Example:
@@ -186,33 +190,33 @@ class BaseRun(Container, Generic[IndicesType]):
         >>> indices = run.indices()
         >>> frames = run.data(indices[:10], geometry=True)
     """
-    run_id  : int
-    config  : RunConfig
+    run_id  : T_RunId
+    config  : T_Config
 
     def attributes(self):
         """This method should return a list of available metadata attributes as defined in the run's
         protocol."""
         raise NotImplementedError
 
-    def indices(self) -> IndicesType:
+    def indices(self) -> T_Indices:
         """This method should return a :class:`TrainIndices` object containing the indices of frames
         available in the run."""
         raise NotImplementedError
 
     @overload
-    def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[CPArray]) -> CPArray: ...
+    def metadata(self, attr: str, keys: T_Indices, *, xp: ArrayNamespace[CPArray]) -> CPArray: ...
 
     @overload
-    def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[JaxArray]
+    def metadata(self, attr: str, keys: T_Indices, *, xp: ArrayNamespace[JaxArray]
                  ) -> JaxArray: ...
 
     @overload
-    def metadata(self, attr: str, keys: IndicesType, *, xp: ArrayNamespace[NDArray]) -> NDArray: ...
+    def metadata(self, attr: str, keys: T_Indices, *, xp: ArrayNamespace[NDArray]) -> NDArray: ...
 
     @overload
-    def metadata(self, attr: str, keys: IndicesType) -> NDArray: ...
+    def metadata(self, attr: str, keys: T_Indices) -> NDArray: ...
 
-    def metadata(self, attr: str, keys: IndicesType, *, xp: AnyNamespace=NumPy) -> Array:
+    def metadata(self, attr: str, keys: T_Indices, *, xp: AnyNamespace=NumPy) -> Array:
         """Load a scalar or sequence metadata attribute for a set of frames.
 
         Args:
@@ -237,22 +241,22 @@ class BaseRun(Container, Generic[IndicesType]):
         return xp.asarray(NumPy.stack(stack, axis=0))
 
     @overload
-    def data(self, keys: IndicesType, *, geometry: bool = False, n_processes: int = 1,
+    def data(self, keys: T_Indices, *, geometry: bool = False, n_processes: int = 1,
              verbose: bool = True, xp: ArrayNamespace[CPArray]) -> CPArray: ...
 
     @overload
-    def data(self, keys: IndicesType, *, geometry: bool = False, n_processes: int = 1,
+    def data(self, keys: T_Indices, *, geometry: bool = False, n_processes: int = 1,
              verbose: bool = True, xp: ArrayNamespace[JaxArray]) -> JaxArray: ...
 
     @overload
-    def data(self, keys: IndicesType, *, geometry: bool = False, n_processes: int = 1,
+    def data(self, keys: T_Indices, *, geometry: bool = False, n_processes: int = 1,
              verbose: bool = True, xp: ArrayNamespace[NDArray]) -> NDArray: ...
 
     @overload
-    def data(self, keys: IndicesType, *, geometry: bool = False, n_processes: int = 1,
+    def data(self, keys: T_Indices, *, geometry: bool = False, n_processes: int = 1,
              verbose: bool = True) -> NDArray: ...
 
-    def data(self, keys: IndicesType, *, geometry: bool = False, n_processes: int = 1,
+    def data(self, keys: T_Indices, *, geometry: bool = False, n_processes: int = 1,
              verbose: bool = True, xp: AnyNamespace=NumPy) -> Array:
         """Load detector frames for a set of indices.
 
@@ -277,7 +281,7 @@ class BaseRun(Container, Generic[IndicesType]):
 
         if n_processes > 1:
             try:
-                pool, worker = self.pool(geometry)
+                pool, worker = self.pool(geometry, n_processes)
             except NotImplementedError as exc:
                 raise ValueError("Multiprocessing is not supported for this run type.") from exc
 
@@ -316,7 +320,7 @@ class BaseRun(Container, Generic[IndicesType]):
         """
         raise NotImplementedError
 
-    def visit_frames(self, keys: IndicesType, geometry: bool = False) -> Iterator[NDArray]:
+    def visit_frames(self, keys: T_Indices, geometry: bool = False) -> Iterator[NDArray]:
         """Iterate over detector frames one at a time without stacking.
 
         Useful for large datasets where loading all frames into memory at once
@@ -379,8 +383,262 @@ class BaseRun(Container, Generic[IndicesType]):
         """
         raise NotImplementedError
 
+T_Files = TypeVar('T_Files')
+
+class FELConfig(RunConfig, Generic[T_Files]):
+    def files(self, locator: int | RunLocator) -> T_Files:
+        """Return a list of H5Files objects for the given run ID.
+
+        Args:
+            locator: The run locator or run ID to load files for.
+
+        Returns:
+            A list of H5Files objects, one for each module in the run.
+        """
+        raise NotImplementedError
+
+    def protocol(self) -> H5Protocol:
+        """Return the HDF5 protocol for the run.
+
+        Returns:
+            An H5Protocol object representing the HDF5 protocol.
+        """
+        raise NotImplementedError
+
+T_Path = TypeVar('T_Path')
+T_Index = TypeVar('T_Index')
+
+class BaseFELReadWorker(LoadWorker[NDArray], Generic[T_Path, T_Index]):
+    data_path   : T_Path
+    ss_indices  : Indices | None
+    fs_indices  : Indices | None
+
+    def __init__(self, data_path: T_Path, ss_indices: Indices | None,
+                 fs_indices: Indices | None): ...
+
+    def __call__(self, indices: T_Index) -> NDArray:
+        raise NotImplementedError
+
+    @classmethod
+    def initializer(cls, data_path: T_Path, ss_indices: Indices, fs_indices: Indices):
+        raise NotImplementedError
+
+    @staticmethod
+    def run(index: T_Index) -> NDArray:
+        raise NotImplementedError
+
+class BaseFELReadWithGeomWorker(LoadWorker[NDArray], Generic[T_Path, T_Index]):
+    @classmethod
+    def worker_class(cls) -> Type[BaseFELReadWorker[T_Path, T_Index]]:
+        raise NotImplementedError
+
+    def __init__(self, data_path: T_Path, ss_indices: Indices | None, fs_indices: Indices | None,
+                 geometry: Geometry):
+        self.worker = self.worker_class()(data_path, ss_indices, fs_indices)
+        self.assembler = geometry.assembler()
+
+    def __call__(self, indices: T_Index) -> NDArray:
+        data = self.worker(indices)
+        return self.assembler(data)
+
+    @classmethod
+    def initializer(cls, data_path: T_Path, ss_indices: Indices, fs_indices: Indices,
+                    geometry: Geometry):
+        raise NotImplementedError
+
+    @classmethod
+    def run(cls, index: T_Index) -> NDArray:
+        return cls.worker_class().run(index)
+
+T_FELConfig = TypeVar('T_FELConfig', bound='FELConfig')
+
+class BaseFELRun(BaseRun[int, T_Indices, T_FELConfig], Generic[T_Path, T_Indices, T_FELConfig]):
+    ss_idxs     : Indices | None = None
+    fs_idxs     : Indices | None = None
+
+    def __post_init__(self):
+        if 'data' not in self.handler.attributes():
+            raise ValueError(
+                f"Protocol must contain 'data' attribute for {self.__class__.__name__}."
+            )
+        self.data_paths : Dict[str, T_Path] = {}
+        self.cacher = IndexCacher(self.run_locator, self.config)
+
+    @classmethod
+    def worker_class(cls) -> Type[BaseFELReadWorker[T_Path, Any]]:
+        raise NotImplementedError
+
+    @classmethod
+    def worker_geom_class(cls) -> Type[BaseFELReadWithGeomWorker[T_Path, Any]]:
+        raise NotImplementedError
+
+    @property
+    def handler(self) -> H5Handler:
+        """Return the H5Handler for the run's protocol."""
+        return H5Handler(self.config.protocol())
+
+    @property
+    def run_locator(self) -> RunLocator:
+        return RunLocator(self.run_id)
+
+    def attributes(self) -> List[str]:
+        """Return a list of attributes available in the HDF5 protocol, excluding 'data'.
+
+        Returns:
+            A list of attribute names as strings.
+        """
+        return [attr for attr in self.handler.attributes() if attr != 'data']
+
+    def data_path(self, attr: str = 'data') -> T_Path:
+        """Return the HDF5 data path for the given attribute.
+
+        Args:
+            attr: The attribute name to locate the data path for.
+
+        Returns:
+            The HDF5 data path as a string or a tuple of strings.
+        """
+        raise NotImplementedError
+
+    def _load_indices(self) -> T_Indices:
+        """Load indices from HDF5 files (uncached implementation)."""
+        raise NotImplementedError
+
+    @cache_indices
+    def indices(self) -> T_Indices:
+        """Return a table of frame indices for the run.
+
+        Returns:
+            An index table containing how to load each frame from the HDF5 files,
+            including file paths and pixel indices.
+        """
+        return self._load_indices()
+
+    def pool(self, geometry: bool=False, processes: int | None=None
+             ) -> Tuple[Pool, WorkerType]:
+        """Return a multiprocessing Pool and worker class for loading data.
+
+        Args:
+            geometry: Whether to apply the CrystFEL geometry in the worker function.
+            processes: The number of worker processes to use. If None, defaults to the
+                number of CPU cores.
+
+        Returns:
+            A tuple containing the Pool object and the worker class to use for loading data.
+
+        Example:
+            Example of using the pool to load data in parallel:
+
+            >>> pool, worker = run.pool(geometry=True)
+            >>> with pool:
+            ...     results = pool.map(worker, run.indices())
+        """
+        if geometry:
+            init_args = (self.data_path(), self.ss_idxs, self.fs_idxs,
+                         self.config.geometry())
+            worker_class = self.worker_geom_class()
+        else:
+            init_args = (self.data_path(), self.ss_idxs, self.fs_idxs)
+            worker_class = self.worker_class()
+
+        pool = Pool(processes=processes, initializer=worker_class.initializer, initargs=init_args)
+        return pool, worker_class.run
+
+    def meta_worker(self, attr: str) -> LoadWorker[NDArray]:
+        """Return a worker for loading metadata. A worker is a callable that takes an index from
+        :meth:`indices` and returns the corresponding data array for the specified attribute.
+
+        Args:
+            attr: The attribute to load.
+
+        Returns:
+            An XFELWorker instance for loading the specified attribute.
+
+        Example:
+            Example of using the metadata worker:
+
+            >>> meta_worker = run.meta_worker('pulse_id')
+            >>> pulse_ids = []
+            >>> for index in run.indices()[:10]:
+            ...     pulse_ids.append(meta_worker(index))
+        """
+        return self.worker_class()(self.data_path(attr), None, None)
+
+    def worker(self, geometry: bool = False) -> LoadWorker[NDArray]:
+        """Return a worker for loading data frames. A worker is a callable that takes an index from
+        :meth:`indices` and returns the corresponding data array for the specified attribute.
+
+        Args:
+            geometry: Whether to apply the CrystFEL geometry in the worker function.
+
+        Returns:
+            An XFELWorker instance for loading data frames.
+
+        Example:
+            Example of using the data worker:
+
+            >>> data_worker = run.worker(geometry=True)
+            >>> frames = []
+            >>> for index in run.indices()[:10]:
+            ...     frames.append(data_worker(index))
+        """
+        if geometry:
+            return self.worker_geom_class()(self.data_path(), self.ss_idxs, self.fs_idxs,
+                                            self.config.geometry())
+        return self.worker_class()(self.data_path(), self.ss_idxs, self.fs_idxs)
+
 @dataclass
-class XFELConfig(RunConfig):
+class FileStackIndices(TrainIndices):
+    file_indices     : List[StackIndices]
+    indices          : List[int] | None = None
+
+    def __post_init__(self):
+        # Validate that all StackIndices have the same number of frames
+        n_frames_set = {len(file_indices) for file_indices in self.file_indices}
+        if len(n_frames_set) > 1:
+            raise ValueError("All StackIndices must have the same number of frames for stacking.")
+        self.total = n_frames_set.pop()
+
+    def __iter__(self) -> Iterator[Tuple[Tuple[str, Indices], ...]]:
+        if self.indices is None:
+            yield from zip(*self.file_indices)
+        else:
+            yield from zip(*(file_indices[self.indices] for file_indices in self.file_indices))
+
+    def __getitem__(self, key: slice | int | IntSequence) -> "FileStackIndices":
+        if isinstance(key, slice):
+            key_list = list_indices(key, len(self))
+        else:
+            key_list = to_list(key)
+        if self.indices is not None:
+            key_list = [self.indices[index] for index in key_list]
+        return FileStackIndices(file_indices=self.file_indices, indices=key_list)
+
+    def __len__(self) -> int:
+        return self.total if self.indices is None else len(self.indices)
+
+    def index(self) -> Iterator[int]:
+        if self.indices is None:
+            yield from range(self.total)
+        else:
+            yield from self.indices
+
+    def records(self) -> Iterator[TrainIndexRecord]:
+        for index, file_indices in zip(self.index(), self):
+            filenames, file_idxs = zip(*file_indices)
+            yield TrainIndexRecord(index, tuple(filenames), tuple(file_idxs))
+
+    def split(self, num_chunks: int) -> Iterator["FileStackIndices"]:
+        if self.indices is None:
+            indices = list(range(self.total))
+        else:
+            indices = self.indices
+
+        for chunk in split(indices, num_chunks):
+            yield FileStackIndices(file_indices=self.file_indices, indices=chunk)
+
+@dataclass
+class XFELConfig(FELConfig[List[H5Files]]):
     """Run configuration for European XFEL experiments.
 
     Locates per-module HDF5 files by scanning a per-run data directory for
@@ -504,64 +762,17 @@ class XFELConfig(RunConfig):
         """
         return H5Protocol.read(self.hdf5_protocol)
 
-@dataclass
-class FileStackIndices(TrainIndices):
-    file_indices     : List[StackIndices]
-    indices          : List[int] | None = None
-
-    def __post_init__(self):
-        # Validate that all StackIndices have the same number of frames
-        n_frames_set = {len(file_indices) for file_indices in self.file_indices}
-        if len(n_frames_set) > 1:
-            raise ValueError("All StackIndices must have the same number of frames for stacking.")
-        self.total = n_frames_set.pop()
-
-    def __iter__(self) -> Iterator[Tuple[Tuple[str, Indices], ...]]:
-        if self.indices is None:
-            yield from zip(*self.file_indices)
-        else:
-            yield from zip(*(file_indices[self.indices] for file_indices in self.file_indices))
-
-    def __getitem__(self, key: Indices) -> "FileStackIndices":
-        if isinstance(key, slice):
-            key_list = list_indices(key, len(self))
-        else:
-            key_list = to_list(key)
-        if self.indices is not None:
-            key_list = [self.indices[index] for index in key_list]
-        return FileStackIndices(file_indices=self.file_indices, indices=key_list)
-
-    def __len__(self) -> int:
-        return self.total if self.indices is None else len(self.indices)
-
-    def index(self) -> Iterator[int]:
-        if self.indices is None:
-            yield from range(self.total)
-        else:
-            yield from self.indices
-
-    def records(self) -> Iterator[TrainIndexRecord]:
-        for index, file_indices in zip(self.index(), self):
-            filenames, file_idxs = zip(*file_indices)
-            yield TrainIndexRecord(index, tuple(filenames), tuple(file_idxs))
-
-    def split(self, num_chunks: int) -> Iterator["FileStackIndices"]:
-        if self.indices is None:
-            indices = list(range(self.total))
-        else:
-            indices = self.indices
-
-        for chunk in split(indices, num_chunks):
-            yield FileStackIndices(file_indices=self.file_indices, indices=chunk)
-
-XFELWorkerType = Callable[[Tuple[Tuple[str, Indices], ...]], NDArray]
-xfel_worker : XFELWorkerType
+xfel_worker : Callable[[Tuple[Tuple[str, Indices], ...]], NDArray]
+XFELPathType = str | Tuple[str, ...]
+XFELIndexType = Tuple[Tuple[str, Indices], ...]
 
 @dataclass
-class XFELReadWorker(H5ReadWorker):
-    data_path   : str | Tuple[str, ...]
+class XFELReadWorker(BaseFELReadWorker[XFELPathType, XFELIndexType]):
+    data_path   : XFELPathType
+    ss_indices  : Indices | None
+    fs_indices  : Indices | None
 
-    def __call__(self, indices: Tuple[Tuple[str, Indices], ...]) -> NDArray:
+    def __call__(self, indices: XFELIndexType) -> NDArray:
         data_arrays = []
 
         if isinstance(self.data_path, tuple):
@@ -572,37 +783,32 @@ class XFELReadWorker(H5ReadWorker):
                 data_arrays.append(self.load(self.data_path, index))
         return NumPy.stack(data_arrays, axis=0)
 
+    def load(self, data_path: str, index: Tuple[str, Indices]) -> NDArray:
+        return load_dataset(data_path, index, self.ss_indices, self.fs_indices)
+
     @classmethod
-    def initializer(cls, data_path: str | Tuple[str, ...], ss_indices: Indices,
+    def initializer(cls, data_path: XFELPathType, ss_indices: Indices,
                     fs_indices: Indices):
         global xfel_worker
         xfel_worker = cls(data_path, ss_indices, fs_indices)
 
     @staticmethod
-    def run(index: Tuple[Tuple[str, Indices], ...]) -> NDArray:
+    def run(index: XFELIndexType) -> NDArray:
         return xfel_worker(index)
 
-@dataclass
-class XFELReadWithGeomWorker(XFELReadWorker):
-    geometry : Geometry
-
-    def __post_init__(self):
-        self.assembler = self.geometry.assembler()
-
-    def __call__(self, indices: Tuple[Tuple[str, Indices], ...]) -> NDArray:
-        data = super().__call__(indices)
-        return self.assembler(data)
+class XFELReadWithGeomWorker(BaseFELReadWithGeomWorker[XFELPathType, XFELIndexType]):
+    @classmethod
+    def worker_class(cls) -> Type[XFELReadWorker]:
+        return XFELReadWorker
 
     @classmethod
-    def initializer(cls, data_path: str | Tuple[str, ...], ss_indices: Indices, fs_indices: Indices,
+    def initializer(cls, data_path: XFELPathType, ss_indices: Indices, fs_indices: Indices,
                     geometry: Geometry):
         global xfel_worker
         xfel_worker = cls(data_path, ss_indices, fs_indices, geometry)
 
-XFELWorker = XFELReadWorker | XFELReadWithGeomWorker
-
 @dataclass
-class XFELRun(BaseRun[FileStackIndices]):
+class XFELRun(BaseFELRun[XFELPathType, FileStackIndices, XFELConfig]):
     """Detector run for European XFEL multi-module experiments.
 
     Reads data from the per-module HDF5 files described by an
@@ -631,24 +837,15 @@ class XFELRun(BaseRun[FileStackIndices]):
     ss_idxs     : Indices | None = None
     fs_idxs     : Indices | None = None
 
-    def __post_init__(self):
-        self.handler = H5Handler(self.config.protocol())
-        locator = RunLocator(self.run_id)
-        self.files = self.config.files(locator)
-        if 'data' not in self.handler.attributes():
-            raise ValueError("Protocol must contain 'data' attribute for XFELRun.")
-        self.data_paths : Dict[str, str | Tuple[str, ...]] = {}
-        self.cacher = IndexCacher(locator, self.config)
+    @classmethod
+    def worker_class(cls) -> Type[XFELReadWorker]:
+        return XFELReadWorker
 
-    def attributes(self) -> List[str]:
-        """Return a list of attributes available in the HDF5 protocol, excluding 'data'.
+    @classmethod
+    def worker_geom_class(cls) -> Type[XFELReadWithGeomWorker]:
+        return XFELReadWithGeomWorker
 
-        Returns:
-            A list of attribute names as strings.
-        """
-        return [attr for attr in self.handler.attributes() if attr != 'data']
-
-    def data_path(self, attr: str = 'data') -> str | Tuple[str, ...]:
+    def data_path(self, attr: str='data') -> XFELPathType:
         """Return the HDF5 data path for the given attribute.
 
         Args:
@@ -659,7 +856,7 @@ class XFELRun(BaseRun[FileStackIndices]):
         """
         if attr not in self.data_paths:
             data_paths = []
-            for module_files in self.files:
+            for module_files in self.config.files(self.run_locator):
                 data_path = ''
                 for file in module_files.visit_files():
                     data_path = self.handler.protocol.find_path(attr, file)
@@ -679,21 +876,11 @@ class XFELRun(BaseRun[FileStackIndices]):
             raise ValueError(f"Attribute '{attr}' not found in protocol for any module.")
         return self.data_paths[attr]
 
-    @cache_indices
-    def indices(self) -> FileStackIndices:
-        """Return a table of frame indices for the run.
-
-        Returns:
-            An index table containing how to load each frame from the HDF5 files,
-            including file paths and pixel indices.
-        """
-        return self._load_indices()
-
     def _load_indices(self) -> FileStackIndices:
         """Load indices from HDF5 files (uncached implementation)."""
         data_paths = []
         file_indices = []
-        for module_files in self.files:
+        for module_files in self.config.files(self.run_locator):
             indices = self.handler.indices(module_files, 'data')
 
             if data_paths:
@@ -707,82 +894,8 @@ class XFELRun(BaseRun[FileStackIndices]):
         self.data_paths['data'] = tuple(data_paths) if len(data_paths) > 1 else data_paths[0]
         return FileStackIndices(file_indices)
 
-    def pool(self, geometry: bool = False, processes: int | None = None
-             ) -> Tuple[Pool, XFELWorkerType]:
-        """Return a multiprocessing Pool and worker function for loading data. Can be used to load
-        data in parallel across multiple processes with :mod:`python:multiprocessing`.
-
-        Args:
-            geometry: Whether to apply the CrystFEL geometry in the worker function.
-            processes: The number of worker processes to use in the pool. If None, it will default
-                to the number of CPU cores.
-
-        Returns:
-            A tuple containing the Pool object and the worker function to use for loading data.
-
-        Example:
-            Example of using the pool to load data in parallel:
-
-            >>> pool, worker = run.pool(geometry=True)
-            >>> with pool:
-            ...     results = pool.map(worker, run.indices())
-        """
-        if geometry:
-            init_args = (self.data_path(), self.ss_idxs, self.fs_idxs,
-                        self.config.geometry())
-            worker_class = XFELReadWithGeomWorker
-        else:
-            init_args = (self.data_path(), self.ss_idxs, self.fs_idxs)
-            worker_class = XFELReadWorker
-
-        pool = Pool(initializer=worker_class.initializer, initargs=init_args, processes=processes)
-        return pool, worker_class.run
-
-    def meta_worker(self, attr: str) -> XFELWorker:
-        """Return a worker for loading metadata. A worker is a callable that takes an index from
-        :meth:`indices` and returns the corresponding data array for the specified attribute.
-
-        Args:
-            attr: The attribute to load.
-
-        Returns:
-            An XFELWorker instance for loading the specified attribute.
-
-        Example:
-            Example of using the metadata worker:
-
-            >>> meta_worker = run.meta_worker('pulse_id')
-            >>> pulse_ids = []
-            >>> for index in run.indices()[:10]:
-            ...     pulse_ids.append(meta_worker(index))
-        """
-        return XFELReadWorker(self.data_path(attr), None, None)
-
-    def worker(self, geometry: bool = False) -> XFELWorker:
-        """Return a worker for loading data frames. A worker is a callable that takes an index from
-        :meth:`indices` and returns the corresponding data array for the specified attribute.
-
-        Args:
-            geometry: Whether to apply the CrystFEL geometry in the worker function.
-
-        Returns:
-            An XFELWorker instance for loading data frames.
-
-        Example:
-            Example of using the data worker:
-
-            >>> data_worker = run.worker(geometry=True)
-            >>> frames = []
-            >>> for index in run.indices()[:10]:
-            ...     frames.append(data_worker(index))
-        """
-        if geometry:
-            return XFELReadWithGeomWorker(self.data_path(), self.ss_idxs, self.fs_idxs,
-                                          self.config.geometry())
-        return XFELReadWorker(self.data_path(), self.ss_idxs, self.fs_idxs)
-
 @dataclass
-class SwissFELConfig(RunConfig):
+class SwissFELConfig(FELConfig[H5Files]):
     """Run configuration for SwissFEL experiments.
 
     Locates HDF5 data files by scanning a per-run data directory for
@@ -883,40 +996,39 @@ class SwissFELConfig(RunConfig):
         """
         return H5Protocol.read(self.hdf5_protocol)
 
-sfel_worker : Callable[[Tuple[str, Indices]], NDArray]
+fel_worker : Callable[[Tuple[str, Indices]], NDArray]
 
 @dataclass
-class SFELReadWorker(H5ReadWorker):
+class FELReadWorker(BaseFELReadWorker[str, Tuple[str, Indices]]):
+    data_path   : str
+    ss_indices  : Indices | None
+    fs_indices  : Indices | None
+
+    def __call__(self, indices: Tuple[str, Indices]) -> NDArray:
+        return load_dataset(self.data_path, indices, self.ss_indices, self.fs_indices)
+
     @classmethod
     def initializer(cls, data_path: str, ss_indices: Indices, fs_indices: Indices):
-        global sfel_worker
-        sfel_worker = cls(data_path, ss_indices, fs_indices)
+        global fel_worker
+        fel_worker = cls(data_path, ss_indices, fs_indices)
 
     @staticmethod
     def run(index: Tuple[str, Indices]) -> NDArray:
-        return sfel_worker(index)
+        return fel_worker(index)
 
-@dataclass
-class SFELReadWithGeomWorker(SFELReadWorker):
-    geometry : Geometry
-
-    def __post_init__(self):
-        self.assembler = self.geometry.assembler()
-
-    def __call__(self, indices: Tuple[str, Indices]) -> NDArray:
-        data = super().__call__(indices)
-        return self.assembler(data)
+class FELReadWithGeomWorker(BaseFELReadWithGeomWorker[str, Tuple[str, Indices]]):
+    @classmethod
+    def worker_class(cls) -> Type[FELReadWorker]:
+        return FELReadWorker
 
     @classmethod
     def initializer(cls, data_path: str, ss_indices: Indices, fs_indices: Indices,
                     geometry: Geometry):
-        global sfel_worker
-        sfel_worker = cls(data_path, ss_indices, fs_indices, geometry)
-
-SFELWorker = SFELReadWorker | SFELReadWithGeomWorker
+        global fel_worker
+        fel_worker = cls(data_path, ss_indices, fs_indices, geometry)
 
 @dataclass
-class SwissFELRun(BaseRun[StackIndices]):
+class SwissFELRun(BaseFELRun[str, StackIndices, SwissFELConfig]):
     """Detector run for SwissFEL experiments.
 
     Reads data from a single-detector HDF5 file collection described by a
@@ -940,16 +1052,15 @@ class SwissFELRun(BaseRun[StackIndices]):
     ss_idxs     : Indices | None = None
     fs_idxs     : Indices | None = None
 
-    def __post_init__(self):
-        self.handler = H5Handler(self.config.protocol())
-        locator = RunLocator(self.run_id)
-        self.files = self.config.files(locator)
-        if 'data' not in self.handler.attributes():
-            raise ValueError("Protocol must contain 'data' attribute for SwissFELRun.")
-        self.data_paths : Dict[str, str] = {}
-        self.cacher = IndexCacher(locator, self.config)
+    @classmethod
+    def worker_class(cls) -> Type[FELReadWorker]:
+        return FELReadWorker
 
-    def data_path(self, attr: str = 'data') -> str:
+    @classmethod
+    def worker_geom_class(cls) -> Type[FELReadWithGeomWorker]:
+        return FELReadWithGeomWorker
+
+    def data_path(self, attr: str='data') -> str:
         """Return the HDF5 data path for the given attribute.
 
         Args:
@@ -959,7 +1070,7 @@ class SwissFELRun(BaseRun[StackIndices]):
             The data path as a string.
         """
         if attr not in self.data_paths:
-            for file in self.files.visit_files():
+            for file in self.config.files(self.run_locator).visit_files():
                 self.data_paths[attr] = self.handler.protocol.find_path(attr, file)
                 if self.data_paths[attr]:
                     break
@@ -968,158 +1079,14 @@ class SwissFELRun(BaseRun[StackIndices]):
             raise ValueError(f"Attribute '{attr}' not found in protocol for any module.")
         return self.data_paths[attr]
 
-    def attributes(self) -> List[str]:
-        """Return a list of attributes available in the HDF5 protocol, excluding 'data'.
-
-        Returns:
-            A list of attribute names as strings.
-        """
-        return [attr for attr in self.handler.attributes() if attr != 'data']
-
-    @cache_indices
-    def indices(self) -> StackIndices:
-        """Return a table of frame indices for the run.
-
-        Returns:
-            An index table containing how to load each frame from the HDF5 files,
-            including file paths and pixel indices.
-        """
-        return self._load_indices()
-
     def _load_indices(self) -> StackIndices:
         """Load indices from HDF5 files (uncached implementation)."""
-        indices = self.handler.indices(self.files, 'data')
+        indices = self.handler.indices(self.config.files(self.run_locator), 'data')
         self.data_paths['data'] = indices.data_path
         return indices.indices
 
-    def pool(self, geometry: bool = False, processes: int | None = None
-             ) -> Tuple[Pool, WorkerType]:
-        """Return a multiprocessing Pool and worker class for loading data.
-
-        Args:
-            geometry: Whether to apply the CrystFEL geometry in the worker function.
-            processes: The number of worker processes to use. If None, defaults to the
-                number of CPU cores.
-
-        Returns:
-            A tuple containing the Pool object and the worker class to use for loading data.
-
-        Example:
-            Example of using the pool to load data in parallel:
-
-            >>> pool, worker = run.pool(geometry=True)
-            >>> with pool:
-            ...     results = pool.map(worker, run.indices())
-        """
-        if geometry:
-            init_args = (self.data_path(), self.ss_idxs, self.fs_idxs,
-                         self.config.geometry())
-            worker_class = SFELReadWithGeomWorker
-        else:
-            init_args = (self.data_path(), self.ss_idxs, self.fs_idxs)
-            worker_class = SFELReadWorker
-
-        pool = Pool(processes=processes, initializer=worker_class.initializer, initargs=init_args)
-        return pool, worker_class.run
-
-    def meta_worker(self, attr: str) -> SFELWorker:
-        """Return a worker for loading metadata. A worker is a callable that takes an index from
-        :meth:`indices` and returns the corresponding data array for the specified attribute.
-
-        Args:
-            attr: The attribute to load.
-
-        Returns:
-            An SFELWorker instance for loading the specified attribute.
-
-        Example:
-            Example of using the metadata worker:
-
-            >>> meta_worker = run.meta_worker('pulse_id')
-            >>> pulse_ids = []
-            >>> for index in run.indices()[:10]:
-            ...     pulse_ids.append(meta_worker(index))
-        """
-        return SFELReadWorker(self.data_path(attr), None, None)
-
-    def worker(self, geometry: bool = False) -> SFELWorker:
-        """Return a worker for loading data frames. A worker is a callable that takes an index from
-        :meth:`indices` and returns the corresponding data array for the specified attribute.
-
-        Args:
-            geometry: Whether to apply the CrystFEL geometry in the worker function.
-
-        Returns:
-            An SFELWorker instance for loading data frames.
-
-        Example:
-            Example of using the data worker:
-
-            >>> data_worker = run.worker(geometry=True)
-            >>> frames = []
-            >>> for index in run.indices()[:10]:
-            ...     frames.append(data_worker(index))
-        """
-        if geometry:
-            return SFELReadWithGeomWorker(self.data_path(), self.ss_idxs, self.fs_idxs,
-                                          self.config.geometry())
-        return SFELReadWorker(self.data_path(), self.ss_idxs, self.fs_idxs)
-
-@overload
-def open_run(run_id: int, config: XFELConfig) -> XFELRun: ...
-
-@overload
-def open_run(run_id: int, config: SwissFELConfig) -> SwissFELRun: ...
-
-@overload
-def open_run(run_id: int, config: LCLSConfig, *, variant: str | None = None) -> LCLSRun: ...
-
-@overload
-def open_run(run_id: int, config: RunConfig, *, variant: str | None = None
-             ) -> BaseRun[TrainIndices]: ...
-
-def open_run(run_id: int, config: RunConfig, *, variant: str | None = None
-             ) -> XFELRun | SwissFELRun | LCLSRun | BaseRun[TrainIndices]:
-    """Create a run object from a run ID and facility configuration.
-
-    Dispatches on the concrete type of *config* and returns the matching
-    :class:`BaseRun` subclass: :class:`XFELRun` for :class:`XFELConfig`,
-    :class:`SwissFELRun` for :class:`SwissFELConfig`, and :class:`LCLSRun`
-    for :class:`LCLSConfig`.
-
-    Args:
-        run_id: Numeric identifier of the run to open.
-        config: Facility-specific run configuration.
-        variant: Optional facility-specific run discriminator. For LCLS, this is used
-            as the run directory suffix.
-
-    Returns:
-        :class:`XFELRun`, :class:`SwissFELRun`, or :class:`LCLSRun` wrapping the
-        requested run.
-
-    Raises:
-        ValueError: If *config* is not a recognized :class:`RunConfig` subclass.
-
-    Example:
-        Open a run with an XFEL configuration JSON file and load the first 10 frames with
-        geometry applied:
-
-        >>> config = XFELConfig.read('xfel_config.json')
-        >>> run = open_run(100, config)
-        >>> frames = run.data(run.indices()[:10], geometry=True)
-    """
-    if isinstance(config, LCLSConfig):
-        return LCLSRun(run_id, config, variant=variant)
-    if variant is not None:
-        raise ValueError(f"Run variants are not supported for {config.facility} runs.")
-    if isinstance(config, XFELConfig):
-        return XFELRun(run_id, config)
-    if isinstance(config, SwissFELConfig):
-        return SwissFELRun(run_id, config)
-    raise ValueError(f"Unsupported RunConfig type: {type(config)}")
-
 @dataclass
-class LCLSConfig(RunConfig):
+class LCLSConfig(FELConfig[H5Files]):
     """Run configuration for LCLS experiments.
 
     Locates HDF5 data files by scanning a per-run data directory for
@@ -1233,7 +1200,7 @@ class LCLSConfig(RunConfig):
         return H5Protocol.read(self.hdf5_protocol)
 
 @dataclass
-class LCLSRun(SwissFELRun):
+class LCLSRun(BaseFELRun[str, StackIndices, LCLSConfig]):
     """Detector run for LCLS experiments.
 
     Reads data from a single-detector HDF5 file collection described by a
@@ -1252,14 +1219,262 @@ class LCLSRun(SwissFELRun):
         >>> indices = run.indices()
         >>> frames = run.data(indices[:20], geometry=True)
     """
+    run_id      : int
     config      : LCLSConfig
+    ss_idxs     : Indices | None = None
+    fs_idxs     : Indices | None = None
     variant     : str | None = None
 
+    @classmethod
+    def worker_class(cls) -> Type[FELReadWorker]:
+        return FELReadWorker
+
+    @classmethod
+    def worker_geom_class(cls) -> Type[FELReadWithGeomWorker]:
+        return FELReadWithGeomWorker
+
+    @property
+    def run_locator(self) -> RunLocator:
+        return RunLocator(self.run_id, self.variant)
+
+    def data_path(self, attr: str='data') -> str:
+        """Return the HDF5 data path for the given attribute.
+
+        Args:
+            attr: The attribute name to locate the data path for.
+
+        Returns:
+            The data path as a string.
+        """
+        if attr not in self.data_paths:
+            for file in self.config.files(self.run_locator).visit_files():
+                self.data_paths[attr] = self.handler.protocol.find_path(attr, file)
+                if self.data_paths[attr]:
+                    break
+
+        if not self.data_paths[attr]:
+            raise ValueError(f"Attribute '{attr}' not found in protocol for any module.")
+        return self.data_paths[attr]
+
+    def _load_indices(self) -> StackIndices:
+        """Load indices from HDF5 files (uncached implementation)."""
+        indices = self.handler.indices(self.config.files(self.run_locator), 'data')
+        self.data_paths['data'] = indices.data_path
+        return indices.indices
+
+AnyRun = XFELRun | SwissFELRun | LCLSRun
+RunListIndex = Tuple[int, Any]
+
+@dataclass
+class RunListIndices(TrainIndices):
+    """Flatten frame indices from an ordered collection of runs.
+
+    Iteration qualifies each native child index with the position of its run,
+    allowing :class:`RunList` workers to dispatch without interpreting the
+    facility-specific index representation.
+
+    Attributes:
+        run_indices: Native frame indices for each run in collection order.
+        indices: Optional global frame positions selecting from the flattened
+            collection.
+    """
+    run_indices     : List[TrainIndices]
+    indices         : List[int] | None = None
+
     def __post_init__(self):
-        locator = RunLocator(self.run_id, self.variant)
-        self.handler = H5Handler(self.config.protocol())
-        self.files = self.config.files(locator)
-        if 'data' not in self.handler.attributes():
-            raise ValueError("Protocol must contain 'data' attribute for LCLSRun.")
-        self.data_paths : Dict[str, str] = {}
-        self.cacher = IndexCacher(locator, self.config)
+        self.offsets = [0]
+        for indices in self.run_indices:
+            self.offsets.append(self.offsets[-1] + len(indices))
+        self.total = self.offsets[-1]
+
+    def _selected_positions(self) -> Iterator[Tuple[int, int, int]]:
+        """Yield global, run, and local positions for the selected frames."""
+        run_index = 0
+        previous = -1
+        for index in self.indices or []:
+            if index < 0:
+                index += self.total
+            if index < 0 or index >= self.total:
+                raise IndexError(f"Index {index} is out of bounds for length {self.total}")
+
+            if index < previous:
+                run_index = int(NumPy.searchsorted(self.offsets, index, side='right') - 1)
+            else:
+                while index >= self.offsets[run_index + 1]:
+                    run_index += 1
+
+            yield index, run_index, index - self.offsets[run_index]
+            previous = index
+
+    def __iter__(self) -> Iterator[RunListIndex]:
+        if self.indices is None:
+            for run_index, indices in enumerate(self.run_indices):
+                for native_index in indices:
+                    yield run_index, native_index
+        else:
+            for _, run_index, local_index in self._selected_positions():
+                native_index = next(iter(self.run_indices[run_index][local_index]))
+                yield run_index, native_index
+
+    def __getitem__(self, key: Indices) -> "RunListIndices":
+        if isinstance(key, slice):
+            key_list = list_indices(key, len(self))
+        else:
+            key_list = to_list(cast(IntSequence, key))
+        positions = list(self.index())
+        return RunListIndices(self.run_indices, [positions[index] for index in key_list])
+
+    def __len__(self) -> int:
+        return self.total if self.indices is None else len(self.indices)
+
+    def index(self) -> Iterator[int]:
+        if self.indices is None:
+            yield from range(self.total)
+        else:
+            yield from self.indices
+
+    def records(self) -> Iterator[TrainIndexRecord]:
+        if self.indices is None:
+            for run_index, indices in enumerate(self.run_indices):
+                for local_index, record in enumerate(indices.records()):
+                    index = self.offsets[run_index] + local_index
+                    yield TrainIndexRecord(index, record.filename, record.file_index)
+        else:
+            for index, run_index, local_index in self._selected_positions():
+                record = next(self.run_indices[run_index][local_index].records())
+                yield TrainIndexRecord(index, record.filename, record.file_index)
+
+    def split(self, num_chunks: int) -> Iterator["RunListIndices"]:
+        positions = list(self.index())
+        for chunk in split(positions, num_chunks):
+            yield RunListIndices(self.run_indices, cast(List[int], chunk))
+
+run_list_worker : RunListWorker[Any]
+T_Output = TypeVar('T_Output')
+
+@dataclass
+class RunListWorker(LoadWorker[T_Output]):
+    """Dispatch run-qualified indices to the corresponding child worker."""
+    workers     : List[LoadWorker[T_Output]]
+
+    def __call__(self, index: RunListIndex) -> T_Output:
+        run_index, native_index = index
+        return self.workers[run_index](native_index)
+
+    @classmethod
+    def initializer(cls, workers: List[LoadWorker[T_Output]]):
+        global run_list_worker
+        run_list_worker = cls(workers)
+
+    @staticmethod
+    def run(index: RunListIndex) -> T_Output:
+        return run_list_worker(index)
+
+@dataclass
+class RunList(BaseRun[range | List[int], RunListIndices, RunConfig]):
+    """Expose an ordered collection of facility runs through the run interface.
+
+    Each child run retains ownership of file discovery, index caching, geometry,
+    and HDF5 loading. This class only flattens their frame indices and dispatches
+    run-qualified work to the corresponding child.
+
+    Attributes:
+        run_id: Non-empty list or range of numeric run identifiers.
+        config: Shared facility configuration used to open every child run.
+        variant: Optional facility-specific discriminator applied to every run.
+    """
+    run_id      : range | List[int]
+    config      : RunConfig
+    variant     : str | None = None
+    runs        : Tuple[BaseRun[int, Any, Any], ...] = field(init=False)
+
+    def __post_init__(self):
+        if len(self.run_id) == 0:
+            raise ValueError("RunList requires at least one run ID.")
+        self.run_id = list(self.run_id)
+        self.runs = tuple(open_run(run_id, self.config, variant=self.variant)
+                          for run_id in self.run_id)
+
+    def attributes(self) -> List[str]:
+        """Return metadata attributes exposed by the shared run configuration."""
+        return self.runs[0].attributes()
+
+    def indices(self) -> RunListIndices:
+        """Return the flattened, run-qualified frame indices."""
+        return RunListIndices([run.indices() for run in self.runs])
+
+    def pool(self, geometry: bool = False, processes: int | None = None
+             ) -> Tuple[Pool, Callable[[RunListIndex], NDArray]]:
+        """Return a pool dispatching frame loads to child run workers."""
+        workers = [run.worker(geometry) for run in self.runs]
+        pool = Pool(processes=processes, initializer=RunListWorker.initializer,
+                    initargs=(workers,))
+        return pool, RunListWorker.run
+
+    def meta_worker(self, attr: str) -> RunListWorker[NDArray]:
+        """Return a worker dispatching metadata loads to child runs."""
+        return RunListWorker([run.meta_worker(attr) for run in self.runs])
+
+    def worker(self, geometry: bool = False) -> RunListWorker[NDArray]:
+        """Return a worker dispatching detector frame loads to child runs."""
+        return RunListWorker([run.worker(geometry) for run in self.runs])
+
+
+@overload
+def open_run(run_id: int, config: XFELConfig) -> XFELRun: ...
+
+@overload
+def open_run(run_id: int, config: SwissFELConfig) -> SwissFELRun: ...
+
+@overload
+def open_run(run_id: int, config: LCLSConfig, *, variant: str | None = None) -> LCLSRun: ...
+
+@overload
+def open_run(run_id: range | List[int], config: RunConfig, *, variant: str | None = None
+             ) -> RunList: ...
+
+@overload
+def open_run(run_id: int, config: RunConfig, *, variant: str | None = None
+             ) -> BaseRun[int, Any, Any]: ...
+
+def open_run(run_id: int | range | List[int], config: RunConfig, *, variant: str | None = None
+             ) -> BaseRun[int, Any, Any] | AnyRun | RunList:
+    """Create a run object from a run ID and facility configuration.
+
+    Dispatches on the concrete type of *config* and returns the matching
+    :class:`BaseRun` subclass: :class:`XFELRun` for :class:`XFELConfig`,
+    :class:`SwissFELRun` for :class:`SwissFELConfig`, and :class:`LCLSRun`
+    for :class:`LCLSConfig`.
+
+    Args:
+        run_id: Numeric identifier, list of identifiers, or range of runs to open.
+        config: Facility-specific run configuration.
+        variant: Optional facility-specific run discriminator. For LCLS, this is used
+            as the run directory suffix.
+
+    Returns:
+        A facility-specific run for one identifier, or :class:`RunList` for a
+        list or range of identifiers.
+
+    Raises:
+        ValueError: If *config* is not a recognized :class:`RunConfig` subclass.
+
+    Example:
+        Open a run with an XFEL configuration JSON file and load the first 10 frames with
+        geometry applied:
+
+        >>> config = XFELConfig.read('xfel_config.json')
+        >>> run = open_run(100, config)
+        >>> frames = run.data(run.indices()[:10], geometry=True)
+    """
+    if isinstance(run_id, (list, range)):
+        return RunList(run_id, config, variant)
+    if isinstance(config, LCLSConfig):
+        return LCLSRun(run_id, config, variant=variant)
+    if variant is not None:
+        raise ValueError(f"Run variants are not supported for {config.facility} runs.")
+    if isinstance(config, XFELConfig):
+        return XFELRun(run_id, config)
+    if isinstance(config, SwissFELConfig):
+        return SwissFELRun(run_id, config)
+    raise ValueError(f"Unsupported RunConfig type: {type(config)}")

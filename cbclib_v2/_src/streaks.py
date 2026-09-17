@@ -89,6 +89,21 @@ class BaseLines(ArrayContainer):
                         vector_dot(tau, other_tau), xp)
         return self.pt0 + t[..., None] * tau
 
+    def is_inbound(self, roi: Tuple[float, float, float, float]) -> BoolArray:
+        """Check whether each line segment is partially contained in a rectangular ROI.
+
+        Args:
+            roi: Tuple ``(y_min, y_max, x_min, x_max)`` defining the rectangular region
+                of interest.
+
+        Returns:
+            Boolean array of shape ``(...,)``; ``True`` for segments partially inside the ROI.
+        """
+        xp = self.__array_namespace__()
+        y_min, y_max, x_min, x_max = roi
+        return xp.any(((self.x >= x_min) & (self.x <= x_max) &
+                       (self.y >= y_min) & (self.y <= y_max)), axis=-1)
+
     def project(self, point: RealArray) -> RealArray:
         """Project *point* onto the nearest location on each segment.
 

@@ -21,7 +21,7 @@ class TestIntensityModel:
     def model(self, kin: RealArray, q: RealArray, pupil: Rectangle) -> IntensityModel:
         return IntensityModel(kout=kin + q, source=SourcePlane.from_q(q=q), pupil=pupil)
 
-    def test_source_distance(self, xp: NumPyNamespace) -> None:
+    def test_source_distance(self, xp: NumPyNamespace):
         kin = xp.asarray([1.0, 0.0, 0.0])
         q = xp.asarray([2.0, 0.0, 0.0])
         pupil = Rectangle(roi=xp.asarray([-1.0, 1.0, -1.0, 1.0]))
@@ -31,7 +31,7 @@ class TestIntensityModel:
         expected = -0.5 * model.distance_sq
         check_close(model.log_radial(xp.asarray(0.0), xp), expected)
 
-    def test_outside_pupil(self, xp: NumPyNamespace) -> None:
+    def test_outside_pupil(self, xp: NumPyNamespace):
         kin = xp.asarray([0.2, 0.0, xp.sqrt(0.96)])
         q = xp.zeros(3)
         pupil = Rectangle(roi=xp.asarray([-0.1, 0.1, -0.1, 0.1]))
@@ -42,7 +42,7 @@ class TestIntensityModel:
         assert xp.all(profile > 0.0)
         assert xp.all(profile < 1.0)
 
-    def test_log_profile(self, xp: NumPyNamespace) -> None:
+    def test_log_profile(self, xp: NumPyNamespace):
         kin = xp.asarray([0.2, 0.0, xp.sqrt(0.96)])
         q = xp.asarray([0.1, 0.0, 0.0])
         pupil = Rectangle(roi=xp.asarray([-0.1, 0.1, -0.1, 0.1]))
@@ -56,7 +56,7 @@ class TestPoissonLoss:
     def xp(self) -> NumPyNamespace:
         return NumPy
 
-    def test_signal_and_background(self, xp: NumPyNamespace) -> None:
+    def test_signal_and_background(self, xp: NumPyNamespace):
         model = ScalerModel()
         counts = PhotonCounts(I0=xp.asarray([4]), background=xp.asarray([3.0]))
         log_signal = xp.log(xp.asarray([2.0]))
@@ -68,7 +68,7 @@ class TestPoissonLoss:
         # The Poisson negative log-likelihood combines the full expected rate and counts.
         check_close(loss, expected_rate - counts.I0 * log_expected)
 
-    def test_signal_underflow(self, xp: NumPyNamespace) -> None:
+    def test_signal_underflow(self, xp: NumPyNamespace):
         model = ScalerModel()
         counts = PhotonCounts(I0=xp.asarray([1]), background=xp.asarray([0.0]))
         log_expected = model.log_expected(counts, xp.asarray([-1000.0]), xp)
@@ -77,7 +77,7 @@ class TestPoissonLoss:
 
         assert xp.all(xp.isfinite(loss))
 
-    def test_rate_floor(self, xp: NumPyNamespace) -> None:
+    def test_rate_floor(self, xp: NumPyNamespace):
         model = ScalerModel()
         counts = PhotonCounts(I0=xp.asarray([0]), background=xp.asarray([0.0]))
         log_expected = model.log_expected(counts, xp.asarray([-xp.inf]), xp)
@@ -87,7 +87,7 @@ class TestPoissonLoss:
         # With no signal, background, or counts, the loss is the configured rate floor.
         check_close(loss, xp.full(counts.shape, model.rate_floor))
 
-    def test_custom_rate_floor(self, xp: NumPyNamespace) -> None:
+    def test_custom_rate_floor(self, xp: NumPyNamespace):
         model = ScalerModel(rate_floor=0.25)
         counts = PhotonCounts(I0=xp.asarray([0]), background=xp.asarray([0.0]))
         log_expected = model.log_expected(counts, xp.asarray([-xp.inf]), xp)
@@ -97,7 +97,7 @@ class TestPoissonLoss:
         # A custom floor governs the zero-signal expected rate in the same way.
         check_close(loss, xp.full(counts.shape, model.rate_floor))
 
-    def test_invalid_rate_floor(self) -> None:
+    def test_invalid_rate_floor(self):
         with pytest.raises(ValueError, match="rate_floor must be positive"):
             ScalerModel(rate_floor=0.0)
 
@@ -160,7 +160,7 @@ class TestLossGradients:
                                    sigma=0.02, xp=xp)
 
     def check_gradient(self, value: RealArray, gradient: ScalerState | BaseSetup,
-                       xp: JaxNamespace) -> None:
+                       xp: JaxNamespace):
         leaves = tree.leaves(gradient)
 
         assert xp.isfinite(value)
@@ -168,7 +168,7 @@ class TestLossGradients:
         assert any(xp.any(leaf != 0.0) for leaf in leaves)
 
     def test_scaler(self, model: ScalerModel, modelled: IntensityModel, data: ScalerData,
-                    state: ScalerState, xp: JaxNamespace) -> None:
+                    state: ScalerState, xp: JaxNamespace):
         loss = ScalerLoss(model)
         loss_grad_fn = cast(ScalerLossGradFn, jit(value_and_grad(loss, argnums=2)))
         value, gradient = loss_grad_fn(modelled, data, state)
@@ -176,7 +176,7 @@ class TestLossGradients:
         self.check_gradient(value, gradient, xp)
 
     def test_setup(self, model: ScalerModel, data: ScalerData, state: ScalerState,
-                   setup: FixedPupilSetup, xp: JaxNamespace) -> None:
+                   setup: FixedPupilSetup, xp: JaxNamespace):
         loss = SetupLoss(model)
         loss_grad_fn = cast(SetupLossGradFn, jit(value_and_grad(loss, argnums=2)))
         value, gradient = loss_grad_fn(data, state, setup)
@@ -234,7 +234,7 @@ class TestSymmetryScaling:
         return model.init_model(data, setup, xp)
 
     def test_pattern_local_reflections(self, data: ScalerData, point_group: PointGroup,
-                                       xp: JaxNamespace) -> None:
+                                       xp: JaxNamespace):
         canonical = point_group.canonical(data.miller.hkl_indices, xp)
         same_pattern = data.miller.index[:, None] == data.miller.index[None, :]
         same_orbit = xp.all(canonical[:, None, :] == canonical[None, :, :], axis=-1)
@@ -245,7 +245,7 @@ class TestSymmetryScaling:
         assert xp.all(same_reflection == (same_pattern & same_orbit))
 
     def test_state_initialization(self, data: ScalerData, setup: ResolvedSetup,
-                                  xp: JaxNamespace) -> None:
+                                  xp: JaxNamespace):
         state = ScalerState.from_data(data, setup, sigma=0.02)
         reflection_id = data.reflections.at(data.points)
         expected = xp.asarray([
@@ -258,7 +258,7 @@ class TestSymmetryScaling:
 
     def test_original_hkl_geometry(self, model: ScalerModel, data: ScalerData,
                                    modelled: IntensityModel, setup: ResolvedSetup,
-                                   xp: JaxNamespace) -> None:
+                                   xp: JaxNamespace):
         miller = model.xtal.hkl_to_q(data.miller, setup.xtal, xp)
         q = miller.q[data.points.streak_id]
 
@@ -267,7 +267,7 @@ class TestSymmetryScaling:
 
     def test_shared_intensity_gradient(self, model: ScalerModel, modelled: IntensityModel,
                                        data: ScalerData, setup: ResolvedSetup,
-                                       xp: JaxNamespace) -> None:
+                                       xp: JaxNamespace):
         state = ScalerState.from_data(data, setup, sigma=0.02)
 
         loss = ScalerLoss(model)
@@ -281,7 +281,7 @@ class TestSymmetryScaling:
 
     def test_result(self, model: ScalerModel, modelled: IntensityModel,
                     data: ScalerData, setup: ResolvedSetup,
-                    xp: JaxNamespace) -> None:
+                    xp: JaxNamespace):
         state = ScalerState.from_data(data, setup, sigma=0.02)
         result = model.to_list(modelled, data, state, xp)
         log_profile = modelled.log_profile(state.log_sigma_at(data.points), xp)
@@ -296,30 +296,30 @@ class TestSymmetryScaling:
         canonical = data.reflections.canonical(data.miller, xp)
 
         # Results contain one canonical row per merged reflection in reflection-id order.
-        assert xp.all(result.miller.index == canonical.index)
-        assert xp.all(result.miller.hkl == canonical.hkl)
+        assert xp.all(result.index == canonical.index)
+        assert xp.all(result.hkl == canonical.hkl)
         check_close(result.I_hkl, xp.exp(state.log_hkl))
         # Reflection uncertainty is the inverse square root of its summed point information.
         check_close(result.sigma_hkl, 1.0 / xp.sqrt(information))
 
     def test_result_dataframe(self, model: ScalerModel, modelled: IntensityModel,
                               data: ScalerData, setup: ResolvedSetup,
-                              xp: JaxNamespace) -> None:
+                              xp: JaxNamespace):
         state = ScalerState.from_data(data, setup, sigma=0.02)
         result = model.to_list(modelled, data, state, xp)
         frames = xp.unique(data.points.index)
 
-        imported = ReflectionList.import_dataframe(result.to_dataframe(frames), xp)
+        imported = ReflectionList.import_dataframe(result.to_dataframe(frames), frames, xp)
 
         # Dataframe export and import preserve every fitted reflection field.
-        assert xp.all(imported.miller.index == result.miller.index)
-        assert xp.all(imported.miller.hkl == result.miller.hkl)
+        assert xp.all(imported.index == result.index)
+        assert xp.all(imported.hkl == result.hkl)
         check_close(imported.I_hkl, result.I_hkl)
         check_close(imported.sigma_hkl, result.sigma_hkl)
 
     def test_zero_information(self, model: ScalerModel, modelled: IntensityModel,
                               data: ScalerData, setup: ResolvedSetup,
-                              xp: JaxNamespace) -> None:
+                              xp: JaxNamespace):
         state = ScalerState.from_data(data, setup, sigma=0.02)
         counts = data.counts.replace(I0=xp.zeros_like(data.counts.I0))
         std_hkl = model.std_hkl(modelled, data.replace(counts=counts), state, xp)

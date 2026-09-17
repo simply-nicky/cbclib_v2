@@ -1,16 +1,18 @@
 from dataclasses import dataclass
+from math import isfinite
 from .._src.annotations import AnyNamespace, RealArray
 from .._src.array_api import add_at, broadcast_to, det_to_k, safe_divide
 from ..indexer.cbc_indexing import BaseSetup, CBDSetup
 from ..indexer.cbc_pupil import Rectangle, SourcePlane
 from ..indexer.cbc_setup import ResolvedGeometry, ResolvedSetup
-from .cbc_data import FullState, IntensityModel, PhotonCounts, ScalerData, ReflectionList, ScalerState
+from .cbc_data import (FullState, IntensityModel, MergeState, PhotonCounts, ScalerData, Reflections,
+                       ReflectionList, ScalerState)
 
 @dataclass(frozen=True, unsafe_hash=True)
 class ScalerModel(CBDSetup):
     rate_floor: float = 1e-6
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if self.rate_floor <= 0.0:
             raise ValueError("rate_floor must be positive")
 
@@ -141,3 +143,60 @@ class FullLoss(SetupLoss):
 
     def per_pattern(self, data: ScalerData, state: FullState) -> RealArray:
         return super().per_pattern(data, state.scaling, state.setup)
+
+@dataclass(frozen=True)
+class MergeModel:
+    """Student-t residual model for conditional intensity standard errors.
+
+    The prediction is ``scale[pattern] * I_hkl[reflection]``. Conditional uncertainties stay
+    fixed while robust weights suppress individual inconsistent observations, not indexing
+    alternatives or systematic whole-pattern errors. Mapping construction and initialisation are
+    eager caller responsibilities; numerical methods support JAX compilation with fixed shapes.
+
+    Attributes:
+        nu: Finite positive Student-t degrees of freedom.
+    """
+    nu: float = 4.0
+
+    def __post_init__(self):
+        if not isfinite(self.nu) or self.nu <= 0.0:
+            raise ValueError('nu must be finite and positive')
+
+    def expected(self, data: ReflectionList, reflections: Reflections,
+                 state: MergeState) -> RealArray:
+        """Predict fitted intensities in observation order."""
+        return state.scale_at(data) * state.intensity_at(reflections)
+
+    def residuals(self, data: ReflectionList, reflections: Reflections,
+                  state: MergeState) -> RealArray:
+        """Return standardised residuals, with zero at unsupported observations."""
+        return (data.I_hkl - self.expected(data, reflections, state)) / data.sigma_hkl
+
+    def robust_weights(self, residuals: RealArray) -> RealArray:
+        """Return dimensionless Student-t weights for standardised residuals."""
+        return (self.nu + 1.0) / (self.nu + residuals**2)
+
+    def weights(self, data: ReflectionList, reflections: Reflections,
+                state: MergeState) -> RealArray:
+        """Return robust inverse variances; unsupported observations receive zero weight."""
+        residual = self.residuals(data, reflections, state)
+        return self.robust_weights(residual) / (data.sigma_hkl * data.sigma_hkl)
+
+    def loss(self, data: ReflectionList, reflections: Reflections,
+             state: MergeState) -> RealArray:
+        """Sum Student-t negative log likelihood terms, omitting fixed constants."""
+        xp = data.__array_namespace__()
+        residual = self.residuals(data, reflections, state)
+        return 0.5 * (self.nu + 1.0) * xp.sum(xp.log1p(residual**2 / self.nu))
+
+    def step(self, data: ReflectionList, reflections: Reflections,
+             state: MergeState) -> MergeState:
+        """Perform one fixed-weight intensity/scale sweep and normalise its gauge.
+        """
+        xp = state.__array_namespace__()
+        weights = self.weights(data, reflections, state)
+        intensity = reflections.merge(data, weights, state)
+        updated = state.replace(I_hkl=intensity)
+        scale = data.fit_scales(updated.intensity_at(reflections), weights,
+                                xp.exp(state.log_scale))
+        return updated.replace(log_scale=xp.log(scale)).normalise()

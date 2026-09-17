@@ -212,7 +212,7 @@ class TestPupilProjection:
     def incident_vectors(self, xp: NumPyNamespace) -> RealArray:
         return xp.asarray([[0.0, 0.0, 1.0], [0.2, 0.0, xp.sqrt(0.96)]])
 
-    def check_edge_projection(self, points: EdgePoints, xp: NumPyNamespace) -> None:
+    def check_edge_projection(self, points: EdgePoints, xp: NumPyNamespace):
         projected = points.project()
         expected_t = xp.clip(points.t, 0.0, 1.0)
         displacement = points.xy - projected.xy
@@ -223,16 +223,16 @@ class TestPupilProjection:
         check_close(points.distance(), expected_distance)
 
     def test_rectangle_distance(self, rectangle_points: EdgePoints,
-                                xp: NumPyNamespace) -> None:
+                                xp: NumPyNamespace):
         self.check_edge_projection(rectangle_points, xp)
 
     def test_polygon_projection(self, polygon_points: EdgePoints,
-                                xp: NumPyNamespace) -> None:
+                                xp: NumPyNamespace):
         self.check_edge_projection(polygon_points, xp)
 
     def test_spherical_projection(self, spherical_pupil: Rectangle,
                                   incident_vectors: RealArray,
-                                  xp: NumPyNamespace) -> None:
+                                  xp: NumPyNamespace):
         projected = spherical_pupil.project(incident_vectors)
         expected_xy = xp.clip(incident_vectors[..., :2], spherical_pupil.min,
                               spherical_pupil.max)
@@ -280,7 +280,7 @@ class TestSourcePlane:
         return batched_source.expand_dims(axis=1)
 
     def test_normalised_distance(self, source: SourcePlane, kin: RealArray,
-                                 xp: NumPyNamespace) -> None:
+                                 xp: NumPyNamespace):
         projected = source.project(kin)
         displacement = kin - projected
 
@@ -290,13 +290,13 @@ class TestSourcePlane:
         check_close(source.distance(kin), xp.sqrt(xp.sum(displacement**2, axis=-1)))
 
     def test_zero_q(self, zero_source: SourcePlane, kin: RealArray,
-                    xp: NumPyNamespace) -> None:
+                    xp: NumPyNamespace):
         # A zero reciprocal vector defines no plane correction or perpendicular distance.
         check_close(zero_source.project(kin), kin)
         check_close(zero_source.distance(kin), xp.zeros_like(zero_source.distance(kin)))
 
     def test_expand_dims(self, expanded_source: SourcePlane, batched_kin: RealArray,
-                         xp: NumPyNamespace) -> None:
+                         xp: NumPyNamespace):
         projected = expanded_source.project(batched_kin)
         displacement = batched_kin - projected
 
@@ -350,7 +350,7 @@ class TestPupilIntersection:
 
     def test_outside_score(self, outside_pupil: Rectangle,
                            outside_intersection: PupilIntersection,
-                           outside_solutions: EdgePoints, xp: NumPyNamespace) -> None:
+                           outside_solutions: EdgePoints, xp: NumPyNamespace):
         projected = outside_solutions.project()
         edge_distance = xp.sqrt(xp.sum((outside_solutions.xy - projected.xy)**2, axis=-1))
         plane_distance = outside_intersection.source.distance(outside_solutions.points)
@@ -366,7 +366,7 @@ class TestPupilIntersection:
 
     def test_parallel_plane(self, parallel_pupil: Rectangle, parallel_q: RealArray,
                             parallel_intersection: PupilIntersection,
-                            xp: NumPyNamespace) -> None:
+                            xp: NumPyNamespace):
         kin, score = parallel_intersection.select(parallel_intersection.solutions())
         plane_y = -0.5 * xp.sum(parallel_q**2, axis=-1) / parallel_q[..., 1]
         expected_y = xp.clip(plane_y, parallel_pupil.y0, parallel_pupil.y1)

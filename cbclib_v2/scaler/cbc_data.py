@@ -1,11 +1,14 @@
+from typing import Iterable, Type
+from typing_extensions import Self
 import pandas as pd
-from .._src.annotations import AnyNamespace, IntArray, RealArray, Shape
+
+from .._src.annotations import AnyNamespace, BoolArray, IntArray, IntSequence, RealArray, Shape
 from .._src.array_api import add_at, asnumpy, safe_log, safe_divide
 from .._src.crystfel import Detector
 from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer
 from .._src.data_processing import CrystData
 from .._src.state import field, State
-from ..indexer.cbc_data import AnyPoints, Miller
+from ..indexer.cbc_data import AnyPoints, IndexLookup, Miller
 from ..indexer.cbc_pupil import BasePupil, SourcePlane
 from ..indexer.cbc_setup import BaseSetup, ResolvedSetup
 from .cbc_symmetry import PointGroup
@@ -106,7 +109,74 @@ class PhotonCounts(State, ArrayContainer):
     @property
     def signal(self) -> RealArray:
         xp = self.__array_namespace__()
-        return xp.clip(self.I0 - self.background, 0.0, xp.inf)
+        return self.I0 - self.background
+
+class WeightedLinearEstimator(State, DataContainer):
+    """Estimate grouped weighted linear coefficients through the origin.
+
+    Attributes:
+        group_id: Group index for every observation, with shape ``(n_observations,)``.
+        weights: Non-negative observation weights with the same shape.
+    """
+    group_id: IntArray
+    weights: RealArray
+
+    def fit(self, predictor: RealArray, response: RealArray,
+            previous: RealArray) -> RealArray:
+        """Fit one coefficient per group, retaining unsupported previous estimates."""
+        xp = self.__array_namespace__()
+        numerator = add_at(xp.zeros_like(previous), self.group_id,
+                           self.weights * predictor * response)
+        denominator = add_at(xp.zeros_like(previous), self.group_id,
+                             self.weights * predictor**2)
+        estimate = safe_divide(numerator, denominator, xp)
+        return xp.where(denominator > 0.0, estimate, previous)
+
+class Reflections(State, DataContainer):
+    hkl             : IntArray  # (n_reflections, 3) canonical Miller indices
+    reflection_id   : IntArray  # (n_observations,) compact reflection index
+
+    def __post_init__(self):
+        self._indexer = None
+
+    @classmethod
+    def from_miller(cls, index: IntArray, hkl: IntArray, xp: AnyNamespace) -> 'Reflections':
+        keys = xp.concat((index[:, None], hkl), axis=-1)
+        keys, reflection_id = xp.unique(keys, return_inverse=True, axis=0)
+        return cls(hkl=keys[:, 1:], reflection_id=reflection_id)
+
+    @classmethod
+    def from_hkl(cls, hkl: IntArray, xp: AnyNamespace) -> 'Reflections':
+        keys, reflection_id = xp.unique(hkl, return_inverse=True, axis=0)
+        return cls(hkl=keys, reflection_id=reflection_id)
+
+    @property
+    def indexer(self) -> IndexLookup:
+        """Return a lookup for the reflection ID of each observation."""
+        if self._indexer is None:
+            self._indexer = IndexLookup.build(self.reflection_id)
+        return self._indexer
+
+    @property
+    def n_observations(self) -> IntArray:
+        xp = self.__array_namespace__()
+        return add_at(xp.zeros((self.n_reflections,), dtype=int), self.reflection_id,
+                      xp.ones_like(self.reflection_id))
+
+    @property
+    def n_reflections(self) -> int:
+        return self.hkl.shape[0]
+
+    def estimator(self, weights: RealArray) -> WeightedLinearEstimator:
+        """Bind observation weights to the canonical-reflection grouping."""
+        return WeightedLinearEstimator(group_id=self.reflection_id, weights=weights)
+
+    def merge(self, data: 'ReflectionList', weights: RealArray, state: 'MergeState') -> RealArray:
+        """Return merged intensities in reflection order."""
+        return self.estimator(weights).fit(state.scale_at(data), data.I_hkl, state.I_hkl)
+
+    def where(self, reflection_ids: IntSequence) -> IntArray:
+        return self.indexer.get_index(reflection_ids)[0]
 
 class ReflectionsMap(State, DataContainer):
     """Map observed streaks to pattern-local symmetry-equivalent reflections.
@@ -133,12 +203,10 @@ class ReflectionsMap(State, DataContainer):
         Returns:
             Streak-to-reflection mapping and the number of merged reflections.
         """
-        index = xp.reshape(xp.broadcast_to(miller.index, miller.hkl.shape[:-1]), (-1,))
-        hkl = xp.reshape(miller.hkl_indices, (-1, 3))
-        canonical = point_group.canonical(hkl, xp)
-        keys = xp.concat((index[:, None], canonical), axis=-1)
-        keys, reflection_id = xp.unique(keys, return_inverse=True, axis=0)
-        return cls(reflection_id=xp.asarray(reflection_id), n_reflections=keys.shape[0],
+        canonical = point_group.canonical(miller.hkl_indices, xp)
+        reflections = Reflections.from_miller(miller.index, canonical, xp)
+        return cls(reflection_id=xp.asarray(reflections.reflection_id),
+                   n_reflections=reflections.n_reflections,
                    point_group=point_group.symbol)
 
     def __len__(self) -> int:
@@ -162,12 +230,10 @@ class ReflectionsMap(State, DataContainer):
         Returns:
             Pattern-local canonical Miller indices with shape ``(n_reflections,)``.
         """
-        index = xp.reshape(xp.broadcast_to(miller.index, miller.hkl.shape[:-1]), (-1,))
-        hkl = xp.reshape(miller.hkl_indices, (-1, 3))
-        canonical = PointGroup(self.point_group).canonical(hkl, xp)
+        canonical = PointGroup(self.point_group).canonical(miller.hkl_indices, xp)
         _, representatives = xp.unique(self.reflection_id, return_index=True)
-        return Miller(index=xp.asarray(index[representatives]),
-                      hkl=xp.asarray(canonical[representatives]))
+        return Miller(index=miller.index[representatives],
+                      hkl=canonical[representatives])
 
 class ScalerData(State, DataContainer):
     """Hold observed streak data and its shared-intensity mapping.
@@ -229,20 +295,32 @@ class FullState(State, DataContainer):
     scaling : ScalerState
     setup   : BaseSetup
 
-class ReflectionList(State, DataContainer):
+class ReflectionList(State, IndexedContainer):
     """Hold fitted reflection intensities and their conditional uncertainties.
 
     Attributes:
-        miller: Pattern-local canonical Miller indices, with shape
-            ``(n_reflections,)``.
-        I_hkl: Fitted intensities, with shape ``(n_reflections,)``.
+        index: Nonnegative pattern index per observation, with shape ``(n_observations,)``.
+        hkl: Canonical HKL per observation, with shape ``(n_observations, 3)``.
+            The same HKL may occur in several patterns.
+        I_hkl: Fitted intensities, with shape ``(n_observations,)``.
         sigma_hkl: Conditional Poisson standard errors of ``I_hkl``, with shape
-            ``(n_reflections,)``.
+            ``(n_observations,)``. Positive infinity denotes zero conditional information.
     """
+    index           : IntArray    # (n_observations,) compact index
+    hkl             : IntArray    # (n_observations, 3) canonical hkl indices
+    I_hkl           : RealArray   # (n_observations,) fitted intensities
+    sigma_hkl       : RealArray   # (n_observations,) conditional uncertainties
 
-    miller    : Miller
-    I_hkl     : RealArray
-    sigma_hkl : RealArray
+    @classmethod
+    def concat(cls: Type[Self], containers: Iterable[Self],
+               monotonic_index: bool=True) -> Self:
+        """Combine observations, treating input pattern ranges as distinct by default.
+
+        Set ``monotonic_index=False`` when indices already identify patterns globally.
+        Canonical HKLs and observation order are preserved; derive reflection mappings
+        from the combined list before scaling.
+        """
+        return super().concat(containers, monotonic_index=monotonic_index)
 
     @classmethod
     def from_data(cls, data: ScalerData, I_hkl: RealArray, sigma_hkl: RealArray,
@@ -262,22 +340,130 @@ class ReflectionList(State, DataContainer):
             Self-contained scaling result aligned with the merged reflection order.
         """
         miller = data.reflections.canonical(data.miller, xp)
-        return cls(miller=miller, I_hkl=I_hkl, sigma_hkl=sigma_hkl)
+        return cls(index=miller.index, hkl=miller.hkl_indices,
+                   I_hkl=I_hkl, sigma_hkl=sigma_hkl)
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame, xp: AnyNamespace) -> 'ReflectionList':
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, frames: IntArray | None,
+                         xp: AnyNamespace) -> 'ReflectionList':
         """Import canonical Miller indices, intensities, and uncertainties from a dataframe."""
-        hkl = xp.stack((xp.asarray(df['h'].to_numpy()), xp.asarray(df['k'].to_numpy()),
-                        xp.asarray(df['l'].to_numpy())), axis=-1)
-        miller = Miller(index=xp.asarray(df['index'].to_numpy()), hkl=hkl)
-        return cls(miller=miller, I_hkl=xp.asarray(df['I_hkl'].to_numpy()),
-                   sigma_hkl=xp.asarray(df['sigma_hkl'].to_numpy()))
+        miller = Miller.import_dataframe(df, frames, xp)
+        return cls(index=miller.index, hkl=miller.hkl_indices, I_hkl=xp.asarray(df['I_hkl']),
+                   sigma_hkl=xp.asarray(df['sigma_hkl']))
+
+    @property
+    def shape(self) -> Shape:
+        return self.hkl.shape[:-1]
+
+    @property
+    def h(self) -> IntArray:
+        return self.hkl[..., 0]
+
+    @property
+    def k(self) -> IntArray:
+        return self.hkl[..., 1]
+
+    @property
+    def l(self) -> IntArray:
+        return self.hkl[..., 2]
+
+    @property
+    def n_patterns(self) -> int:
+        """Return the pattern lookup size, including index gaps; zero for an empty list."""
+        xp = self.__array_namespace__()
+        return int(xp.max(self.index)) + 1 if self.index.size else 0
+
+    def reflections(self) -> Reflections:
+        """Return unique canonical HKLs and the reflection ID of each observation.
+
+        Returns:
+            HKLs with shape ``(n_unique, 3)`` and integer IDs with the observation shape.
+            Indexing the HKL table by these IDs reconstructs :attr:`hkl`. Inputs must
+            already use the same symmetry and indexing convention. No symmetry is applied.
+            Results stay in the input array namespace. This discrete operation is not JIT-safe.
+        """
+        xp = self.__array_namespace__()
+        return Reflections.from_hkl(self.hkl, xp)
+
+    @property
+    def is_informative(self) -> BoolArray:
+        """Return observations carrying finite conditional information."""
+        xp = self.__array_namespace__()
+        return xp.isfinite(self.sigma_hkl)
+
+    def n_informative(self, reflections: Reflections) -> IntArray:
+        """Return the number of informative observations per reflection.
+
+        Args:
+            reflections: Reflection mapping for the observations in this list.
+
+        Returns:
+            Counts with shape ``(n_reflections,)``.
+        """
+        xp = self.__array_namespace__()
+        return add_at(xp.zeros((reflections.n_reflections,), dtype=int),
+                      reflections.reflection_id, self.is_informative)
+
+    def estimator(self, weights: RealArray) -> WeightedLinearEstimator:
+        """Bind observation weights and a fixed output domain to the pattern grouping."""
+        return WeightedLinearEstimator(group_id=self.index, weights=weights)
+
+    def fit_scales(self, intensity: RealArray, weights: RealArray, previous: RealArray
+                   ) -> RealArray:
+        """Fit one scale per pattern, retaining unsupported previous estimates."""
+        return self.estimator(weights).fit(intensity, self.I_hkl, previous)
 
     def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export canonical Miller indices, intensities, and uncertainties to a dataframe."""
-        return pd.DataFrame({'index': asnumpy(frames[self.miller.index]),
-                             'h': asnumpy(self.miller.h),
-                             'k': asnumpy(self.miller.k),
-                             'l': asnumpy(self.miller.l),
-                             'I_hkl': asnumpy(self.I_hkl),
-                             'sigma_hkl': asnumpy(self.sigma_hkl)})
+        return pd.DataFrame({'index': asnumpy(frames[self.index]),
+                             'h': asnumpy(self.h), 'k': asnumpy(self.k), 'l': asnumpy(self.l),
+                             'I_hkl': asnumpy(self.I_hkl), 'sigma_hkl': asnumpy(self.sigma_hkl)})
+
+class MergeState(State, DataContainer):
+    """Shared intensities and positive illumination scales for one connected component.
+
+    Attributes:
+        log_scale: Natural log scales, shape ``(n_patterns,)``, including index gaps.
+        I_hkl: Non-negative intensities, shape ``(n_reflections,)``, ordered by Reflections.
+            Initial values must be finite; initialise supported HKLs above zero.
+    """
+    log_scale: RealArray
+    I_hkl: RealArray
+
+    @classmethod
+    def from_data(cls, data: ReflectionList, reflections: Reflections,
+                  log_scale: RealArray | None=None) -> 'MergeState':
+        xp = data.__array_namespace__()
+        if log_scale is None:
+            log_scale = xp.zeros((data.n_patterns,))
+
+        # Return an unweighted upper median for each reflection.
+        reflection_id = reflections.reflection_id
+        intensity = data.I_hkl / xp.exp(log_scale[data.index])
+        indices = xp.lexsort((intensity, reflection_id))
+        counts = add_at(xp.zeros((reflections.n_reflections,), dtype=reflection_id.dtype),
+                        reflection_id, xp.ones_like(reflection_id))
+        offsets = xp.cumsum(counts) - counts
+        medians = intensity[indices][offsets + counts // 2]
+        return cls(log_scale=log_scale, I_hkl=medians).normalise()
+
+    def scale_at(self, data: ReflectionList) -> RealArray:
+        """Return positive scales in observation order."""
+        xp = self.__array_namespace__()
+        return xp.exp(self.log_scale[data.index])
+
+    def intensity_at(self, reflections: Reflections) -> RealArray:
+        """Return shared intensities in observation order."""
+        return self.I_hkl[reflections.reflection_id]
+
+    def normalise(self) -> 'MergeState':
+        """Set the geometric mean scale to one while preserving every prediction.
+
+        This fixes one gauge only; disconnected components must be fitted independently.
+        Empty states are unchanged. Index gaps participate in the gauge convention.
+        """
+        if not self.log_scale.size:
+            return self
+        xp = self.__array_namespace__()
+        shift = xp.mean(self.log_scale)
+        return self.replace(log_scale=self.log_scale - shift, I_hkl=self.I_hkl * xp.exp(shift))

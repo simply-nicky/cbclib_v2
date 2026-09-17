@@ -64,7 +64,7 @@ class BasePupil(ArrayContainer):
 class Rectangle(State, BasePupil):
     roi : RealArray     # (n_samples, 4) rectangle coordinates (ky_0, ky_1, kx_0, kx_1)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         self.roi = self.roi.reshape((-1, 4))
 
     def __len__(self) -> int:
@@ -153,7 +153,7 @@ class ConvexPolygon(State, BasePupil):
     center   : RealArray
     lengths  : RealArray
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if self.center.shape[-1:] != (2,):
             raise ValueError("center must have shape (..., 2)")
         if self.lengths.ndim == 0 or self.lengths.shape[-1] < 3:

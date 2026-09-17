@@ -9,7 +9,7 @@ class TestCudaAllocator():
         monkeypatch.delitem(sys.modules, "cbclib_v2.cuda", raising=False)
         return importlib.import_module("cbclib_v2.cuda")
 
-    def remove_jax_modules(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def remove_jax_modules(self, monkeypatch: pytest.MonkeyPatch):
         for name in list(sys.modules):
             if name == "jax" or name.startswith("jax."):
                 monkeypatch.delitem(sys.modules, name, raising=False)
