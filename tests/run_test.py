@@ -1,11 +1,14 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List
+import h5py
 import numpy as np
 import pytest
 from cbclib_v2._src import run as run_module
 from cbclib_v2._src.annotations import NDArray
-from cbclib_v2._src.cxi_protocol import LoadWorker, StackIndex, StackIndices
-from cbclib_v2._src.run import BaseRun, RunConfig, RunList, RunListIndices
+from cbclib_v2._src.cxi_protocol import H5Protocol, LoadWorker, StackIndex, StackIndices
+from cbclib_v2._src.run import (BaseRun, FileStackIndices, RunConfig, RunList, RunListIndices,
+                                XFELConfig, XFELRun)
 
 @dataclass
 class ValueWorker(LoadWorker[NDArray]):
@@ -34,6 +37,77 @@ class StubRun:
 
     def worker(self, geometry: bool = False) -> ValueWorker:
         return ValueWorker(self.run_id)
+
+class TestXFELRun:
+    @pytest.fixture(autouse=True)
+    def cache_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('CBCLIB_CACHE_DIR', str(tmp_path / 'cache'))
+
+    @pytest.fixture
+    def protocol_path(self, tmp_path: Path) -> Path:
+        path = tmp_path / 'protocol.json'
+        H5Protocol(paths={'data': ['data'], 'pulse_id': ['pulse_id']},
+                   kinds={'data': 'stack', 'pulse_id': 'sequence'}).write(str(path))
+        return path
+
+    @pytest.fixture
+    def config(self, tmp_path: Path, protocol_path: Path) -> XFELConfig:
+        return XFELConfig(data_dir=str(tmp_path), hdf5_protocol=str(protocol_path),
+                          file_pattern=r'run_{0:d}_module_{1:d}\.h5', geometry_file='',
+                          num_modules=3)
+
+    def write_module(self, tmp_path: Path, module_id: int, pulse_ids: List[int]) -> None:
+        path = tmp_path / f'run_1_module_{module_id}.h5'
+        data = np.arange(len(pulse_ids) * 4).reshape(-1, 2, 2) + 100 * module_id
+        with h5py.File(path, 'w') as output_file:
+            output_file['data'] = data
+            output_file['pulse_id'] = pulse_ids
+
+    def test_equal_lengths_use_positional_indices(self, tmp_path: Path,
+                                                  config: XFELConfig) -> None:
+        for module_id in range(config.num_modules):
+            self.write_module(tmp_path, module_id, [10, 11])
+            path = tmp_path / f'run_1_module_{module_id}.h5'
+            with h5py.File(path, 'a') as output_file:
+                del output_file['pulse_id']
+
+        indices = XFELRun(1, config).indices()
+
+        assert isinstance(indices, FileStackIndices)
+        assert len(indices) == 2
+
+    def test_aligns_missing_frames_by_pulse_id(self, tmp_path: Path,
+                                               config: XFELConfig) -> None:
+        self.write_module(tmp_path, 0, [10, 11, 12, 13])
+        self.write_module(tmp_path, 1, [10, 12, 13])
+        self.write_module(tmp_path, 2, [10, 11, 13])
+
+        run = XFELRun(1, config)
+        indices = run.indices()
+
+        # Only pulses saved by every module form complete detector frames.
+        assert list(indices) == [
+            ((str(tmp_path / 'run_1_module_0.h5'), 0),
+             (str(tmp_path / 'run_1_module_1.h5'), 0),
+             (str(tmp_path / 'run_1_module_2.h5'), 0)),
+            ((str(tmp_path / 'run_1_module_0.h5'), 3),
+             (str(tmp_path / 'run_1_module_1.h5'), 2),
+             (str(tmp_path / 'run_1_module_2.h5'), 2)),
+        ]
+        assert np.array_equal(run.metadata('pulse_id', indices),
+                              np.asarray([[10, 10, 10], [13, 13, 13]]))
+
+    def test_empty_intersection_is_valid(self, tmp_path: Path,
+                                         config: XFELConfig) -> None:
+        self.write_module(tmp_path, 0, [10, 11, 12])
+        self.write_module(tmp_path, 1, [13, 14])
+        self.write_module(tmp_path, 2, [15])
+
+        indices = XFELRun(1, config).indices()
+
+        assert isinstance(indices, FileStackIndices)
+        assert len(indices) == 0
+        assert list(indices) == []
 
 class TestRunList:
     @pytest.fixture

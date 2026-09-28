@@ -1,8 +1,6 @@
 import pytest
-from cbclib_v2.annotations import IntArray, JaxNumPy, NumPy, NumPyNamespace
-from cbclib_v2.indexer import Miller
-from cbclib_v2.scaler import (PointGroup, ReflectionsMap, StreakPoints, SymmetryGroup,
-                              SymmetryOperator)
+from cbclib_v2.annotations import IntArray, NumPy, NumPyNamespace
+from cbclib_v2.scaler import PointGroup, SymmetryGroup, SymmetryOperator
 
 REFLECTION_GROUP_ORDERS = (
     ("1", 2), ("-1", 2), ("2", 4), ("m", 4), ("2/m", 4),
@@ -168,80 +166,3 @@ class TestPointGroup:
     def test_invalid_symbol(self):
         with pytest.raises(ValueError, match="Unsupported point-group symbol"):
             PointGroup("not-a-point-group")
-
-class TestReflectionsMap:
-    @pytest.fixture
-    def xp(self) -> NumPyNamespace:
-        return NumPy
-
-    @pytest.fixture
-    def point_group(self) -> PointGroup:
-        return PointGroup("4mm")
-
-    @pytest.fixture
-    def miller(self, xp: NumPyNamespace) -> Miller:
-        return Miller(index=xp.asarray([0, 0, 0, 1, 1]),
-                      hkl=xp.asarray([[1, 2, 3], [-2, 1, 3], [4, 0, 1],
-                                      [1, 2, 3], [-1, -2, -3]]))
-
-    @pytest.fixture
-    def reflections(self, miller: Miller, point_group: PointGroup,
-                    xp: NumPyNamespace) -> ReflectionsMap:
-        return ReflectionsMap.from_miller(miller, point_group, xp)
-
-    @pytest.fixture
-    def points(self, xp: NumPyNamespace) -> StreakPoints:
-        return StreakPoints(index=xp.asarray([0, 0, 1]),
-                            streak_id=xp.asarray([0, 2, 4]),
-                            points=xp.zeros((3, 2)))
-
-    @pytest.fixture
-    def jax_miller(self) -> Miller:
-        return Miller(index=JaxNumPy.asarray([0, 0]),
-                      hkl=JaxNumPy.asarray([[1, 2, 3], [-2, 1, 3]]))
-
-    @pytest.fixture
-    def jax_reflections(self, jax_miller: Miller,
-                        point_group: PointGroup) -> ReflectionsMap:
-        return ReflectionsMap.from_miller(jax_miller, point_group, JaxNumPy)
-
-    def test_pattern_local_mapping(self, reflections: ReflectionsMap, miller: Miller,
-                                   point_group: PointGroup, xp: NumPyNamespace):
-        reflection_id = reflections.reflection_id
-        canonical = point_group.canonical(miller.hkl_indices, xp)
-        same_pattern = miller.index[:, None] == miller.index[None, :]
-        same_orbit = xp.all(canonical[:, None, :] == canonical[None, :, :], axis=-1)
-        same_reflection = reflection_id[:, None] == reflection_id[None, :]
-
-        # Reflections merge exactly when they share both a pattern and a symmetry orbit.
-        assert xp.all(same_reflection == (same_pattern & same_orbit))
-        assert len(reflections) == xp.unique_values(reflection_id).size
-
-    def test_at_points(self, reflections: ReflectionsMap, points: StreakPoints,
-                       xp: NumPyNamespace):
-        reflection_id = reflections.at(points)
-
-        # Point lookup follows each point's source streak into the reflection map.
-        assert xp.all(reflection_id == reflections.reflection_id[points.streak_id])
-
-    def test_canonical(self, reflections: ReflectionsMap, miller: Miller,
-                       point_group: PointGroup, xp: NumPyNamespace):
-        canonical = reflections.canonical(miller, xp)
-
-        # Each output row represents every member of one pattern-local equivalence class.
-        for reflection_id in range(len(reflections)):
-            members = xp.where(reflections.reflection_id == reflection_id)[0]
-            member_hkl = point_group.canonical(miller.hkl_indices[members], xp)
-            assert xp.all(miller.index[members] == canonical.index[reflection_id])
-            assert xp.all(member_hkl == canonical.hkl[reflection_id])
-
-    def test_jax_namespace(self, jax_miller: Miller, jax_reflections: ReflectionsMap,
-                           point_group: PointGroup):
-        canonical = point_group.canonical(jax_miller.hkl_indices, JaxNumPy)
-        same_orbit = JaxNumPy.all(canonical[:, None, :] == canonical[None, :, :], axis=-1)
-        reflection_id = jax_reflections.reflection_id
-        same_reflection = reflection_id[:, None] == reflection_id[None, :]
-
-        # JAX construction preserves the same orbit relation and originating namespace.
-        assert JaxNumPy.all(same_reflection == same_orbit)
-        assert jax_reflections.__array_namespace__() is JaxNumPy

@@ -18,8 +18,8 @@ if TYPE_CHECKING:
                                     write_hdf)
     from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexedContainer,
                                       split, to_list)
-    from ._src.data_processing import (CrystData, CrystMetadata, LSQData, RegionDetector,
-                                       StreakDetector)
+    from ._src.data_processing import (CrystData, CrystMetadata, LSQData, PCAProjection,
+                                       RegionDetector, SimpleProjection, StreakDetector)
     from ._src.parser import FieldLocator
     from ._src.run import (BaseRun, RunConfig, RunList, RunListIndices, RunLocator, LCLSConfig,
                            LCLSRun, SwissFELConfig, SwissFELRun, XFELRun, XFELConfig, open_run)
@@ -59,6 +59,8 @@ _EXPORTS = {
     "CrystData": ("._src.data_processing", "CrystData"),
     "CrystMetadata": ("._src.data_processing", "CrystMetadata"),
     "LSQData": ("._src.data_processing", "LSQData"),
+    "PCAProjection": ("._src.data_processing", "PCAProjection"),
+    "SimpleProjection": ("._src.data_processing", "SimpleProjection"),
     "OnlineDetector": ("._src.data_processing", "OnlineDetector"),
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),

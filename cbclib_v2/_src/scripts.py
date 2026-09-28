@@ -29,14 +29,13 @@ from .streaks import StackedStreaks, Streaks
 from ..indexer.cbc_data import LinePoints, Miller, MillerWithRLP, RefinerData
 from ..indexer.cbc_indexing import CBDIndexer, RefinerLoss, RefinerModel
 from ..indexer.cbc_setup import (BaseGeometry, BaseLens, BaseSetup, FixedApertureGeometry,
-                                 FixedApertureLens, FixedApertureSetup, FixedLens,
-                                 FixedPupilGeometry, FixedPupilLens, FixedPupilSetup,
-                                 FixedGeometry, FixedSetup, Geometry, Lens, IndexingResult,
-                                 RefineResult, ResolvedSetup, Setup, TiltOverAxisState,
-                                 XtalState)
-from ..scaler.cbc_data import FullState, ScalerData, ScalerState, StreakIndices, ReflectionList
-from ..scaler.cbc_symmetry import PointGroup
-from ..scaler.cbc_scaling import FullLoss, ScalerLoss, ScalerModel
+                                 FixedApertureLens, FixedApertureSetup, FixedLens, FixedPupilGeometry,
+                                 FixedPupilLens, FixedPupilSetup, FixedGeometry, FixedSetup, Geometry,
+                                 Lens, IndexingResult, RefineResult, ResolvedSetup, Setup,
+                                 TiltOverAxisState, XtalState)
+from ..scaler.cbc_data import (FullState, PedestalData, ReflectionList, RefineStreakState, StreakData,
+                               StreakState, StreakIndices)
+from ..scaler.cbc_scaling import FullLoss, RefineStreakLoss, ScalerModel, StreakLoss
 
 class BaseParameters(Container):
     """Base class for JSON-serialisable parameter containers.
@@ -343,6 +342,10 @@ class ScalingParameters(Container):
     std_min     : float = 0.0
     n_pixels    : int | None = None
 
+    @property
+    def n_fields(self) -> int:
+        return len(self.good_fields)
+
     def metadata(self, metapath: str, xp: AnyNamespace=NumPy) -> CrystMetadata:
         """Load a :class:`~cbclib_v2.CrystMetadata` from a metalist HDF5 file.
 
@@ -417,11 +420,10 @@ def scale_background(frames: IntArray | int, images: Array, metadata: CrystMetad
             rng = default_rng(0, default_api(platform))
             indices = xp.asarray(rng.choice(metadata.frame_size, params.n_pixels, replace=False))
             indices = xp.unravel_index(indices, metadata.frame_shape)
-            projection = metadata[indices].project(images[(...,) + indices], params.good_fields,
-                                                   params.clip_snr, params.n_iter, params.std_min)
+            projection = metadata[indices].project(images[(...,) + indices], params.clip_snr,
+                                                   params.n_iter, params.std_min)
         else:
-            projection = metadata.project(images, params.good_fields, params.clip_snr,
-                                          params.n_iter, params.std_min)
+            projection = metadata.project(images, params.clip_snr, params.n_iter, params.std_min)
         return metadata.to_data(images, frames, projection)
 
     raise ValueError(f'Invalid method keyword: {params.method}')
@@ -1172,6 +1174,13 @@ class RefineStats(Container):
         self.grad_norm.append(self.norm(grad))
         self.update_norm.append(self.norm(updates))
 
+    def extend(self, other: 'RefineStats'):
+        self.step.extend(other.step)
+        self.loss.extend(other.loss)
+        self.learning_rate.extend(other.learning_rate)
+        self.grad_norm.extend(other.grad_norm)
+        self.update_norm.extend(other.update_norm)
+
     def to_dataframe(self) -> pd.DataFrame:
         """Return the optimisation trace as a tabular record."""
         return pd.DataFrame(self.to_dict())
@@ -1192,7 +1201,6 @@ def optimisation_loop(gradient: LossGradFn, initial: StateT,
     log_every = max(log_every, 0)
 
     opt_state = optimiser.init(cast(Params, state))
-
     loss, grad = gradient(state)
     stats.append(0, float(loss), float(schedule(0)), grad, None)
     if logger is not None:
@@ -1301,12 +1309,9 @@ class PostRefineConfig(BaseParameters):
     optimise        : PostRefineOptimiseParameters
     setup           : PostRefineSetupParameters
     miller          : Literal['indexed', 'all']
-    point_group     : str
+    refine_streaks  : bool
     sigma           : float
     width           : int
-
-    def cryst_data(self, frames: IntArray, images: Array, metadata: CrystMetadata) -> CrystData:
-        return scale_background(frames, images, metadata, self.scaling)
 
     def all_hkl(self, q_abs: RealArray | float, scaler: ScalerModel, resolved: ResolvedSetup,
                 detector: Detector, xp: AnyNamespace) -> MillerWithRLP:
@@ -1328,77 +1333,102 @@ class PostRefineConfig(BaseParameters):
         sim = scaler.init_patterns(miller, resolved.geometry, xp)
         sim = detector.to_pixels(sim)
         dataframe = sim.pattern_dataframe(detector.assembled_shape, self.width, 'rectangular')
-        return StreakIndices.import_dataframe(dataframe, xp)
+        streak_ids = StreakIndices.import_dataframe(dataframe, xp)
+        return streak_ids.mask(detector.assembler(xp).mask)
 
-    def scaler_data(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
-                    resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace) -> ScalerData:
+    def streak_data(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
+                    resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace) -> StreakData:
         streak_ids = self.streak_indices(scaler, miller, resolved, detector, xp)
-        streak_ids = streak_ids.mask(detector.assembler(xp).mask)
-        point_group = PointGroup(self.point_group)
-        return ScalerData.import_data(cryst_data, streak_ids, miller, point_group, detector, xp)
+        data = PedestalData.import_data(cryst_data, streak_ids, miller, detector, xp)
+        modelled = scaler.init_model(data, resolved, xp)
+        return StreakData(data, modelled)
 
     def init_context(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
                      resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace
                      ) -> 'PostRefineContext':
-        data = self.scaler_data(scaler, cryst_data, miller, resolved, detector, xp)
+        data = self.streak_data(scaler, cryst_data, miller, resolved, detector, xp)
         return PostRefineContext(scaler=scaler, data=data)
 
 @dataclass
 class PostRefineContext(Container):
     scaler  : ScalerModel
-    data    : ScalerData
+    data    : StreakData
     logger  : logging.Logger = field(default=default_logger('post-refinement'))
-
-    @property
-    def scaler_loss(self) -> ScalerLoss:
-        return ScalerLoss(self.scaler)
 
     @property
     def full_loss(self) -> FullLoss:
         return FullLoss(self.scaler)
 
-    def refine_scaling(self, initial: ScalerState, resolved: ResolvedSetup,
-                       params: OptimiseParameters) -> Tuple[ScalerState, RefineStats]:
+    @property
+    def refine_streak_loss(self) -> RefineStreakLoss:
+        return RefineStreakLoss(self.scaler)
+
+    @property
+    def streak_loss(self) -> StreakLoss:
+        return StreakLoss(self.scaler)
+
+    def init_streaks(self, sigma: float) -> StreakState:
         xp = self.data.__array_namespace__()
-        modelled = self.scaler.init_model(self.data, resolved, xp)
+        log_expected = self.scaler.log_rate(self.data.counts.background, xp)
+        weights = xp.exp(-log_expected)
+        return StreakState.from_data(self.data, sigma, weights, xp)
 
-        loss_grad_fn = jit(value_and_grad(self.scaler_loss, argnums=2))
-
-        def gradient(state: ScalerState) -> Tuple[RealArray, ScalerState]:
-            return loss_grad_fn(modelled, self.data, state)
-
-        solver, schedule = params.optimiser()
-
-        self.logger.info("refining intensities for %d patterns", len(resolved.xtal))
-
-        return optimisation_loop(gradient, initial, solver, schedule, params.schedule.num_steps,
-                                 params.trace_every, params.log_every, self.logger)
-
-    def post_refine(self, initial: FullState, params: OptimiseParameters
-                    ) -> Tuple[ScalerState, ResolvedSetup, RefineStats]:
+    def refine_setup(self, initial: FullState, params: OptimiseParameters
+                     ) -> Tuple[StreakState, ResolvedSetup, RefineStats]:
         xp = self.data.__array_namespace__()
         loss_grad_fn = jit(value_and_grad(self.full_loss, argnums=1))
 
         def gradient(state: FullState) -> Tuple[RealArray, FullState]:
-            return loss_grad_fn(self.data, state)
+            return loss_grad_fn(self.data.scaling, state)
 
         solver, schedule = params.optimiser()
 
-        self.logger.info("post-refining of setup for %d patterns", len(initial.setup.xtal))
+        self.logger.info("post-refining setup for %d patterns", self.data.n_patterns)
 
         state, stats = optimisation_loop(gradient, initial, solver, schedule,
                                          params.schedule.num_steps, params.trace_every,
                                          params.log_every, self.logger)
-        return state.scaling, state.setup.resolve(xp), stats
+        return state.streaks, state.setup.resolve(xp), stats
 
-    def to_list(self, state: ScalerState, resolved: ResolvedSetup) -> ReflectionList:
+    def refine_streaks(self, initial: RefineStreakState, params: OptimiseParameters
+                       ) -> Tuple[RefineStreakState, RefineStats]:
+        loss_grad_fn = jit(value_and_grad(self.refine_streak_loss, argnums=1))
+
+        def gradient(state: RefineStreakState) -> Tuple[RealArray, RefineStreakState]:
+            return loss_grad_fn(self.data, state)
+
+        solver, schedule = params.optimiser()
+
+        self.logger.info("refining streak scaling for %d patterns", self.data.n_patterns)
+
+        return optimisation_loop(gradient, initial, solver, schedule, params.schedule.num_steps,
+                                 params.trace_every, params.log_every, self.logger)
+
+    def scale_streaks(self, initial: StreakState, params: OptimiseParameters
+                      ) -> Tuple[StreakState, RefineStats]:
+        loss_grad_fn = jit(value_and_grad(self.streak_loss, argnums=1))
+
+        def gradient(state: StreakState) -> Tuple[RealArray, StreakState]:
+            return loss_grad_fn(self.data, state)
+
+        solver, schedule = params.optimiser()
+
+        self.logger.info("scaling streaks for %d patterns", self.data.n_patterns)
+
+        return optimisation_loop(gradient, initial, solver, schedule, params.schedule.num_steps,
+                                 params.trace_every, params.log_every, self.logger)
+
+    def to_list(self, state: StreakState) -> ReflectionList:
+        xp = self.data.__array_namespace__()
+        if isinstance(state, RefineStreakState):
+            return self.refine_streak_loss.to_list(self.data, state, xp)
+        return self.streak_loss.to_list(self.data, state, xp)
+
+    def loss_by_pattern(self, state: StreakState) -> RealArray:
+        xp = self.data.__array_namespace__()
+        return self.streak_loss.poisson_loss(self.data, state, xp)
+
+    def update_setup(self, resolved: ResolvedSetup) -> 'PostRefineContext':
         xp = self.data.__array_namespace__()
         modelled = self.scaler.init_model(self.data, resolved, xp)
-        return self.scaler.to_list(modelled, self.data, state, xp)
-
-    def to_result(self, frames: IntArray, state: ScalerState, resolved: ResolvedSetup
-                  ) -> RefineResult:
-        xp = self.data.__array_namespace__()
-        modelled = self.scaler.init_model(self.data, resolved, xp)
-        criterion = self.scaler_loss.per_pattern(modelled, self.data, state)
-        return RefineResult(frames, resolved, criterion)
+        return self.replace(data=StreakData(self.data.scaling, modelled))

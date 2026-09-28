@@ -6,6 +6,8 @@ dependencies:
   - cxx-compiler
   - h5py
   - hdf5plugin
+  - google-api-python-client
+  - google-auth
   - jax
   - libxcrypt
   - llvm-openmp

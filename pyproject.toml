@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.13.7'
+version = '0.13.8'
 dependencies = [
     'array_api_compat',
     'h5py',
@@ -35,6 +35,7 @@ classifiers = [
 
 [project.optional-dependencies]
 cuda = ["cupy>=13.0.0"]
+sheets = ['google-api-python-client', 'google-auth']
 dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio', 'scipy']
 docs = [
     'sphinx>=7',

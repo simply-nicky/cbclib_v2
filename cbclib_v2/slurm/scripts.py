@@ -14,14 +14,16 @@ from .._src.crystfel import Detector
 from .._src.data_container import compute_index
 from .._src.data_processing import CrystMetadata
 from .._src.cxi_protocol import H5Handler, TrainIndices, write_hdf
-from .._src.run import BaseRun, RunConfig
 from .._src.scripts import (FinderConfig, IndexingConfig, MetadataParameters, PostRefineConfig,
                             RefineConfig, RegionFinderConfig, StreakFinderConfig)
 from .._src.scripts import create_metadata, pool_detection, pool_indexing, scale_background
 from .._src.streaks import StackedStreaks, Streaks
-from ..indexer import BaseSetup, LinePoints, Miller, Patterns, ResolvedSetup, XtalState
-from ..scaler import FullState, ScalerModel, ScalerState
-from .config import Scan, ScanArgument, ScanConfig, ScanList, ScanNumbers
+from ..indexer import (BaseSetup, LinePoints, Miller, Patterns, RefineResult, ResolvedSetup,
+                       XtalState)
+from ..scaler import FullState, RefineStreakState, ScalerModel
+from .config import (DetectionAttributes, DetectionKind, DetectionMetadata, Scan, ScanArgument,
+                     ScanConfig, ScanList, ScanNumbers)
+from .logbook import DetectionLogEntry, GoogleSheetsConfig, GoogleSheetsLog
 from .slurm_manager import SLURMArrayScript, SLURMScript, ScriptSpec
 
 @dataclass
@@ -62,7 +64,6 @@ class BaseScript:
     def run(self):
         raise NotImplementedError
 
-DetectionKind = Literal['streaks', 'regions']
 FileKind = Literal['streaks', 'regions', 'xtals', 'solutions', 'reflections']
 HitsDir = Literal['streaks', 'regions']
 XtalDir = Literal['xtals', 'solutions']
@@ -313,12 +314,17 @@ class CompileFiles(BaseScript):
         for key in schema.tables:
             if key in schema.optional_tables and not key in files:
                 continue
-            if key == 'data' and frame_offsets is not None:
+            if key in ('data', 'stats') and frame_offsets is not None:
                 df = files.compile_with_offsets(key, 'index', frame_offsets)
                 df.to_hdf(output_path, key=key, mode=mode)
             else:
                 files.compile(key).to_hdf(output_path, key=key, mode=mode)
             mode = 'a'
+
+        if self.kind in ('streaks', 'regions') and isinstance(self.scan, Scan):
+            attributes = DetectionAttributes.concat([
+                DetectionAttributes.read(path) for _, path in paths])
+            attributes.write(output_path, mode='a')
 
         if files.has_extra:
             with h5py.File(output_path, mode='a') as output_file:
@@ -386,8 +392,8 @@ class CreateMetadata(BaseScript):
         with self.scan.config.system.cpu_config():
             metadata = create_metadata(images, self.params)
 
-        output_file = os.path.join(self.scan.config.metadata.output_dir,
-                                   self.scan.files.scan_file())
+        output_file = self.scan.files.scan_file(dir=self.scan.config.metadata.output_dir,
+                                                make_dirs=True)
         print(f"Saving to {output_file}")
         write_hdf(metadata, output_file, H5Handler(metadata.protocol))
 
@@ -525,10 +531,10 @@ class DetectHits(BaseScript):
 
     @classmethod
     def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
-        initial.add_argument('scan_num', type=str,
-                             help='Scan number, range, or underscore-separated scan list')
         initial.add_argument('kind', type=str, choices=['streaks', 'regions'],
                              help='Kind of detection to perform')
+        initial.add_argument('scan_num', type=str,
+                             help='Scan number, range, or underscore-separated scan list')
         initial.add_argument('scan', type=str,
                              help='Path to a scan parameters JSON file')
         initial.add_argument('parameters', type=str,
@@ -546,7 +552,7 @@ class DetectHits(BaseScript):
         return "Detect streaks in CBD patterns"
 
     @classmethod
-    def from_file(cls, scan_num: int, kind: DetectionKind, scan_file: str, params_file: str,
+    def from_file(cls, kind: DetectionKind, scan_num: int, scan_file: str, params_file: str,
                   chunk_id: int | None, n_chunks: int | None, frames_only: bool,
                   out_suffix: str) -> 'DetectHits':
         scan = ScanConfig.read(scan_file).open_scan(scan_num)
@@ -558,6 +564,12 @@ class DetectHits(BaseScript):
             raise ValueError(f"Invalid detection kind: {kind}")
         return cls(scan, params, chunk_id, n_chunks, frames_only, out_suffix)
 
+    def attributes(self, n_frames: int) -> DetectionAttributes:
+        if isinstance(self.chunk_id, int) and isinstance(self.n_chunks, int):
+            return DetectionAttributes.from_chunk(
+                self.scan, self.kind, self.chunk_id, self.n_chunks, n_frames)
+        return DetectionAttributes.from_scan(self.scan, self.kind, n_frames)
+
     @property
     def kind(self) -> DetectionKind:
         """Detection kind derived from the type of :attr:`params`."""
@@ -567,28 +579,12 @@ class DetectHits(BaseScript):
             return 'regions'
         raise ValueError(f"Invalid parameters type for detection: {type(self.params)}")
 
-    @staticmethod
-    def meta_dataframe(run: BaseRun[int, TrainIndices, RunConfig], hits: TrainIndices
-                       ) -> pd.DataFrame:
-        """Build a per-hit-frame metadata table for a detection chunk."""
-
-        def serialize(value: str | int | tuple[str, ...] | tuple[int, ...]
-                           ) -> str | int:
-            """Return a scalar HDF5 table value for a frame provenance field."""
-            if isinstance(value, tuple):
-                return json.dumps(value)
-            return value
-
-        pulse_ids = run.metadata('pulse_id', hits)
-        if pulse_ids.ndim > 1:
-            pulse_ids = pulse_ids[:, 0]
-
-        dataframe = {'index': [], 'filename': [], 'file_index': [], 'pulse_id': pulse_ids}
-        for record in hits.records():
-            dataframe['index'].append(serialize(record.index))
-            dataframe['filename'].append(serialize(record.filename))
-            dataframe['file_index'].append(serialize(record.file_index))
-        return pd.DataFrame(dataframe)
+    @property
+    def detector(self) -> Detector | None:
+        """Return the detector geometry if :attr:`apply_geometry` is ``False``."""
+        if self.scan.config.apply_geometry:
+            return self.scan.config.data.geometry()
+        return None
 
     def run(self):
         xp = self.scan.config.system.array_api()
@@ -604,41 +600,99 @@ class DetectHits(BaseScript):
         print(f"Using the metadata saved at {metadata_path}")
 
         loader = run.worker(self.scan.config.apply_geometry)
-        detector = None if self.scan.config.apply_geometry else self.scan.config.data.geometry()
         with self.scan.config.system.cpu_config():
             streaks = pool_detection(loader, chunk, metadata_path, self.params,
-                                     self.scan.config.system.platform, detector)
+                                     self.scan.config.system.platform, self.detector)
 
         indices, counts = xp.unique_counts(streaks.index)
-        hit_indices = indices[counts > self.scan.config.detect.hit_threshold]
+        attributes = self.attributes(len(chunk))
+        hit_mask = attributes.is_hit(counts)
+        hit_indices = indices[hit_mask]
+        hit_counts = counts[hit_mask]
         hits = streaks.take(hit_indices)
-        print(f"{hit_indices.size:d} hits were found.")
 
-        if len(hits) > 0:
-            if self.kind == 'streaks':
-                output_dir = self.scan.config.detect.streaks_dir
-            else:
-                output_dir = self.scan.config.detect.regions_dir
+        pulse_ids = run.metadata('pulse_id', chunk[hit_indices])
+        metadata = DetectionMetadata.from_run(chunk[hit_indices], pulse_ids, hit_counts, xp)
+        print(f"{metadata.size:d} hits were found.")
 
-            if self.frames_only:
-                print("Frames only requested, skipping saving the full hits data.")
-                output_path = self.scan.files.scan_file(
-                    self.chunk_id, extension='.csv', suffix=self.out_suffix,
-                    dir=output_dir, make_dirs=True)
-                dataframe = pd.DataFrame({'frame': asnumpy(frames[hit_indices])})
-                dataframe.to_csv(output_path, index=False)
-                print(f"The results were saved to {output_path}")
-            else:
-                print("Preparing the file...")
-                df = hits.to_dataframe(frames)
-                metadata = self.meta_dataframe(run, chunk[hit_indices])
+        output_dir = self.scan.config.detect.output_dir(self.kind)
+        output_path = self.scan.files.scan_file(
+            self.chunk_id, suffix=self.out_suffix, dir=output_dir, make_dirs=True)
+        print(f"The detection metadata will be saved to {output_path}")
 
-                output_path = self.scan.files.scan_file(
-                    self.chunk_id, suffix=self.out_suffix, dir=output_dir, make_dirs=True)
-                print(f"The results will be saved to {output_path}")
+        if self.frames_only:
+            print("Frames only requested, skipping saving the full hits data.")
+            csv_path = self.scan.files.scan_file(
+                self.chunk_id, extension='.csv', suffix=self.out_suffix,
+                dir=output_dir, make_dirs=True)
+            dataframe = pd.DataFrame({'frame': asnumpy(frames[hit_indices])})
+            dataframe.to_csv(csv_path, index=False)
+            metadata.to_dataframe().to_hdf(output_path, key='metadata', mode='a')
+            print(f"The hit frames were saved to {csv_path}")
+        else:
+            print("Preparing the file...")
+            hits.to_dataframe(frames).to_hdf(output_path, key='data', mode='w')
+            metadata.to_dataframe().to_hdf(output_path, key='metadata', mode='a')
+        attributes.write(output_path, mode='a')
 
-                df.to_hdf(output_path, key='data')
-                metadata.to_hdf(output_path, key='metadata')
+@dataclass
+class LogDetections(BaseScript):
+    """Publish completed scan-level detection summaries to Google Sheets."""
+    scan          : Scan
+    kind          : DetectionKind
+    sheets        : GoogleSheetsConfig
+    in_suffix     : str = str()
+    sample        : str = str()
+    notes         : str = str()
+
+    @classmethod
+    def parser(cls, initial: ArgumentParser=ArgumentParser()) -> ArgumentParser:
+        initial.add_argument('scan_num', type=str,
+                             help='Scan number, range, or underscore-separated scan list')
+        initial.add_argument('kind', type=str, choices=['streaks', 'regions'],
+                             help='Kind of detection results to log')
+        initial.add_argument('scan', type=str, help='Path to a scan parameters JSON file')
+        initial.add_argument('google', type=str,
+                             help='Path to a Google Sheets parameters JSON file')
+        initial.add_argument('--in-suffix', type=str, default=str(),
+                             help='Suffix of the detection files to read')
+        initial.add_argument('--sample', type=str, default=str(),
+                             help='Sample description to record in the log')
+        initial.add_argument('--notes', type=str, default=str(),
+                             help='Free-form notes to record in the log')
+        return initial
+
+    @classmethod
+    def parser_description(cls) -> str:
+        return "Log detection summaries to Google Sheets"
+
+    @classmethod
+    def from_file(cls, scan_num: int, kind: DetectionKind, scan_file: str,
+                  google_file: str, in_suffix: str, sample: str=str(), notes: str=str()
+                  ) -> 'LogDetections':
+        scan = ScanConfig.read(scan_file).open_scan(scan_num)
+        sheets = GoogleSheetsConfig.read(google_file)
+        return cls(scan, kind, sheets, in_suffix, sample, notes)
+
+    def result_files(self) -> List[str]:
+        """Return the compiled scan artifact, falling back to ordered chunks."""
+        output_dir = self.scan.config.detect.output_dir(self.kind)
+        path = self.scan.files.scan_file(suffix=self.in_suffix, dir=output_dir)
+        if os.path.isfile(path):
+            return [path]
+
+        chunk_dir = self.scan.files.scan_subdir(output_dir, self.in_suffix)
+        if os.path.isdir(chunk_dir):
+            return [match.filename for match in sorted(
+                self.scan.files.list_files(chunk_dir),
+                key=lambda match: match.chunk_id or 0)]
+        return []
+
+    def run(self):
+        entry = DetectionLogEntry.from_files(
+            self.result_files(), self.in_suffix, self.sample, self.notes)
+        GoogleSheetsLog(self.sheets).upsert([entry])
+        print(f"Logged {self.kind} summary for scan {self.scan.scan_num:d}")
 
 @dataclass
 class IndexingScript(BaseScript):
@@ -1039,16 +1093,16 @@ class PostRefineScript(BaseScript):
         context = self.params.init_context(scaler, cryst_data, miller, resolved, geometry, xp)
 
         print(f"Refining scaling for {frames.size:d} patterns...")
-        initial = ScalerState.default(len(context.data.reflections), len(resolved.xtal),
-                                      self.params.sigma, xp)
-        optimised, stats = context.refine_scaling(initial, resolved,
-                                                  self.params.optimise.intensities)
+        initial = context.init_streaks(self.params.sigma)
+        optimised, stats = context.scale_streaks(initial, self.params.optimise.intensities)
 
         if self.params.optimise.setup:
-            print(f"Post-refining {frames.size:d} patterns...")
+            print(f"Post-refining the setup for {frames.size:d} patterns...")
             full = FullState(optimised, self.params.setup.import_resolved(resolved))
-            optimised, resolved, post_stats = context.post_refine(full, self.params.optimise.setup)
-            result = context.to_result(frames, optimised, resolved)
+            optimised, resolved, post_stats = context.refine_setup(full, self.params.optimise.setup)
+
+            context = context.update_setup(resolved)
+            result = RefineResult(frames, resolved, context.loss_by_pattern(optimised))
 
             output_path = self.scan.files.scan_file(
                 self.chunk_id, dir=self.scan.config.setup.solutions_dir,
@@ -1060,9 +1114,17 @@ class PostRefineScript(BaseScript):
             result.to_dataframe().to_hdf(output_path, key='data', mode='a')
             miller.to_dataframe(frames).to_hdf(output_path, key='miller', mode='a')
         else:
-            print(f"Skipping post-refinement for {frames.size:d} patterns...")
+            print(f"Skipping post-refinement of setup for {frames.size:d} patterns...")
 
-        reflections = context.to_list(optimised, resolved)
+        if self.params.refine_streaks:
+            print(f"Scaling refined streaks for {frames.size:d} patterns...")
+
+            initial = RefineStreakState.from_streaks(optimised, geometry.pixel_size)
+            optimised, refine_stats = context.refine_streaks(initial,
+                                                             self.params.optimise.intensities)
+            stats.extend(refine_stats)
+
+        reflections = context.to_list(optimised)
 
         output_path = self.scan.files.scan_file(
             self.chunk_id, dir=self.scan.config.setup.reflections_dir,
@@ -1081,6 +1143,29 @@ class SBatchScripts:
     one scan or an array script carrying multiple scan numbers.
     """
     main        : ClassVar[str] = 'cbclib_cli'
+
+    @classmethod
+    def log(cls, scan_num: ScanNumbers, kind: DetectionKind, scan_file: str,
+            google_file: str, script_file: str,
+            in_suffix: str | None=None, sample: str | None=None,
+            notes: str | None=None) -> SLURMScript:
+        """Build one job that logs detection summaries sequentially.
+
+        A scan selection remains in one job so concurrent tasks never race to
+        append or replace rows in the same worksheet.
+        """
+        command = (f"{cls.main} log {{scan_num}} {quote(kind)} {quote(scan_file)} "
+                   f"{quote(google_file)}")
+        if in_suffix is not None:
+            command += f" --in-suffix {quote(in_suffix)}"
+        if sample is not None:
+            command += f" --sample {quote(sample)}"
+        if notes is not None:
+            command += f" --notes {quote(notes)}"
+        script_spec = ScriptSpec.read(script_file)
+        scans = ScanArgument(scan_num)
+        return SLURMScript(scans.slurm_command(command), scans.job_name(f"log_{kind}"),
+                           script_spec)
 
     @classmethod
     def compile(cls, kind: FileKind, scan_num: ScanNumbers, scan_file: str,
@@ -1247,28 +1332,28 @@ class SBatchScripts:
 
     @overload
     @classmethod
-    def detect(cls, scan_num: int, kind: DetectionKind, scan_file: str,
+    def detect(cls, kind: DetectionKind, scan_num: int, scan_file: str,
                params_file: str, script_file: str, chunk_id: int | None=None,
                n_chunks: int | None=None, frames_only: bool=False,
                out_suffix: str | None=None) -> SLURMScript: ...
 
     @overload
     @classmethod
-    def detect(cls, scan_num: range | List[int], kind: DetectionKind, scan_file: str,
+    def detect(cls, kind: DetectionKind, scan_num: range | List[int], scan_file: str,
                params_file: str, script_file: str, chunk_id: int | None=None,
                n_chunks: int | None=None, frames_only: bool=False,
                out_suffix: str | None=None) -> SLURMArrayScript: ...
 
     @classmethod
-    def detect(cls, scan_num: ScanNumbers, kind: DetectionKind, scan_file: str,
+    def detect(cls, kind: DetectionKind, scan_num: ScanNumbers, scan_file: str,
                params_file: str, script_file: str, chunk_id: int | None=None,
                n_chunks: int | None=None, frames_only: bool=False,
                out_suffix: str | None=None) -> SLURMScript:
         """Build a ``cbclib_cli detect`` script.
 
         Args:
-            scan_num: One scan number or scan numbers used as SLURM array task IDs.
             kind: ``'streaks'`` or ``'regions'``.
+            scan_num: One scan number or scan numbers used as SLURM array task IDs.
             scan_file: Path to the scan configuration JSON.
             params_file: Path to the detection parameters JSON.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
@@ -1281,7 +1366,7 @@ class SBatchScripts:
         Returns:
             :class:`~cbclib_v2.slurm.SLURMScript` for the detection step.
         """
-        command = (f"{cls.main} detect {{scan_num}} {quote(kind)} "
+        command = (f"{cls.main} detect {quote(kind)} {{scan_num}} "
                    f"{quote(scan_file)} {quote(params_file)}")
         if chunk_id is not None and n_chunks is not None:
             command += f' --chunk_id {chunk_id:d}'
@@ -1536,26 +1621,26 @@ class SBatchArrayScripts:
 
     @overload
     @classmethod
-    def detect(cls, scan_num: int, n_tasks: int, kind: DetectionKind, scan_file: str,
+    def detect(cls, kind: DetectionKind, scan_num: int, n_tasks: int, scan_file: str,
                params_file: str, script_file: str, out_suffix: str | None=None
                ) -> SLURMArrayScript: ...
 
     @overload
     @classmethod
-    def detect(cls, scan_num: range | List[int], n_tasks: int, kind: DetectionKind, scan_file: str,
+    def detect(cls, kind: DetectionKind, scan_num: range | List[int], n_tasks: int, scan_file: str,
                params_file: str, script_file: str, out_suffix: str | None=None
                ) -> List[SLURMArrayScript]: ...
 
     @classmethod
-    def detect(cls, scan_num: ScanNumbers, n_tasks: int, kind: DetectionKind, scan_file: str,
+    def detect(cls, kind: DetectionKind, scan_num: ScanNumbers, n_tasks: int, scan_file: str,
                params_file: str, script_file: str, out_suffix: str | None=None
                ) -> SLURMArrayScript | List[SLURMArrayScript]:
         """Build a ``cbclib_cli detect`` array script for *n_tasks* tasks.
 
         Args:
+            kind: ``'streaks'`` or ``'regions'``.
             scan_num: One scan number, or scan numbers used to build separate chunk arrays.
             n_tasks: Total number of array tasks.
-            kind: ``'streaks'`` or ``'regions'``.
             scan_file: Path to the scan configuration JSON.
             params_file: Path to the detection parameters JSON.
             script_file: Path to the :class:`~cbclib_v2.slurm.ScriptSpec` JSON.
@@ -1564,7 +1649,7 @@ class SBatchArrayScripts:
         Returns:
             One chunk-array script for a scalar scan number, otherwise one script per scan.
         """
-        command = (f"{cls.main} detect {{scan_num}} {quote(kind)} {quote(scan_file)}"
+        command = (f"{cls.main} detect {quote(kind)} {{scan_num}} {quote(scan_file)}"
                    f" {quote(params_file)} --n_chunks {n_tasks:d}"
                    " --chunk_id ${{FILE_INDEX}}")
         if out_suffix is not None:
@@ -1700,6 +1785,7 @@ class Scripts:
         metadata: :class:`CreateMetadata` — compute background whitefield.
         metalist: :class:`CreateMetaList` — compute PCA metalist.
         detect: :class:`DetectHits` — run streak or region detection.
+        log: :class:`LogDetections` — publish detection summaries.
         index: :class:`IndexingScript` — index detected patterns.
         refine: :class:`RefineScript` — refine indexed orientations.
         post_refine: :class:`PostRefineScript` — post-refine indexed orientations.
@@ -1711,6 +1797,7 @@ class Scripts:
     metadata        : ClassVar[Type[CreateMetadata]] = CreateMetadata
     metalist        : ClassVar[Type[CreateMetaList]] = CreateMetaList
     detect          : ClassVar[Type[DetectHits]] = DetectHits
+    log             : ClassVar[Type[LogDetections]] = LogDetections
     refine          : ClassVar[Type[RefineScript]] = RefineScript
     post_refine     : ClassVar[Type[PostRefineScript]] = PostRefineScript
 
@@ -1772,8 +1859,13 @@ def main():
         elif args['command'] == 'detect':
             print(f"JSON file with the streak finding parameters: {args['parameters']}")
             script = DetectHits.from_file(
-                scan_num, args['kind'], args['scan'], args['parameters'], args['chunk_id'],
+                args['kind'], scan_num, args['scan'], args['parameters'], args['chunk_id'],
                 args['n_chunks'], args['frames_only'], args['out_suffix'])
+        elif args['command'] == 'log':
+            print(f"JSON file with the Google Sheets parameters: {args['google']}")
+            script = LogDetections.from_file(
+                scan_num, args['kind'], args['scan'], args['google'], args['in_suffix'],
+                args['sample'], args['notes'])
         elif args['command'] == 'refine':
             print(f"JSON file with the refinement parameters: {args['parameters']}")
             script = RefineScript.from_file(

@@ -50,7 +50,8 @@ class TestCrystMetadataProjection(BackendSuite):
 
     @pytest.fixture
     def rejection_case(self, xp: TestNamespace) -> ProjectionCase:
-        flatfield = xp.ones((2, 5)) * 5.0
+        flatfield = xp.reshape(xp.asarray([5.0, 1.0, 2.0, 3.0, 4.0,
+                                           6.0, 7.0, 8.0, 9.0, 5.0]), (2, 5))
         fields = xp.ones((1, 2, 5))
         data = xp.stack((flatfield + 2.0, flatfield - 1.0), axis=0)
         data = data.copy()
@@ -64,7 +65,8 @@ class TestCrystMetadataProjection(BackendSuite):
 
     @pytest.fixture
     def std_case(self, xp: TestNamespace) -> ProjectionCase:
-        flatfield = xp.ones((1, 10)) * 5.0
+        flatfield = xp.asarray([[5.0, 1.0, 2.0, 3.0, 4.0,
+                                 6.0, 7.0, 8.0, 9.0, 5.0]])
         data = flatfield[None] + 1.0
         data = data.copy()
         data[0, 0, 0] += 5.0
@@ -82,6 +84,16 @@ class TestCrystMetadataProjection(BackendSuite):
         data[..., 1, 1] = 1000.0
         mask = xp.asarray([[True, True], [True, False]])
         return ProjectionCase(CrystMetadata(flatfield=flatfield, mask=mask), data, expected)
+
+    @pytest.fixture
+    def noise_scale_case(self, xp: TestNamespace) -> ProjectionCase:
+        flatfield = xp.ones((1, 6)) * 10.0
+        residual = xp.asarray([[-2.0, -1.0, 0.0, 1.0, 2.0, 100.0]])
+        data = flatfield[None] + residual
+        metadata = CrystMetadata(flatfield=flatfield,
+                                 mask=xp.ones(flatfield.shape, dtype=bool),
+                                 std=xp.ones(flatfield.shape))
+        return ProjectionCase(metadata, data, xp.asarray([2.0 ** 0.5]))
 
     @pytest.fixture
     def singular_case(self, xp: TestNamespace) -> ProjectionCase:
@@ -108,25 +120,36 @@ class TestCrystMetadataProjection(BackendSuite):
     def empty_data(self, xp: TestNamespace) -> RealArray:
         return xp.ones((1, 2, 2))
 
-    def test_lsq(self, lsq_case: ProjectionCase):
+    def test_lsq(self, lsq_case: ProjectionCase, xp: TestNamespace):
         result = lsq_case.metadata.project(lsq_case.data, n_iter=1)
+        # The synthetic background contains an unscaled flatfield.
+        check_close(result.scale, xp.ones(result.scale.shape))
         check_close(result.projection, lsq_case.expected)
 
-    def test_rejection(self, rejection_case: ProjectionCase):
+    def test_rejection(self, rejection_case: ProjectionCase, xp: TestNamespace):
         result = rejection_case.metadata.project(rejection_case.data, clip_snr=3.0,
                                                  n_iter=2)
+        check_close(result.scale, xp.ones(result.scale.shape))
         check_close(result.projection, rejection_case.expected)
 
-    def test_std_min(self, std_case: ProjectionCase):
+    def test_std_min(self, std_case: ProjectionCase, xp: TestNamespace):
         result = std_case.metadata.project(std_case.data, clip_snr=10.0,
                                            n_iter=2, std_min=1.0)
+        check_close(result.scale, xp.ones(result.scale.shape))
         check_close(result.projection, std_case.expected)
+
+    def test_noise_scale(self, noise_scale_case: ProjectionCase):
+        result = noise_scale_case.metadata.project(noise_scale_case.data, n_iter=2)
+        # The masked RMS of [-2, -1, 0, 1, 2] is sqrt(2).
+        check_close(result.std_scale, noise_scale_case.expected)
+        expected = noise_scale_case.expected[:, None, None] * noise_scale_case.metadata.std
+        check_close(result.std(noise_scale_case.metadata), expected)
 
     def test_flatfield(self, flatfield_case: ProjectionCase):
         result = flatfield_case.metadata.project(flatfield_case.data, n_iter=1)
-        check_close(result.projection, flatfield_case.expected)
+        check_close(result.scale, flatfield_case.expected[:, 0])
         expected = flatfield_case.expected[..., None] * flatfield_case.metadata.flatfield
-        check_close(result.apply(flatfield_case.metadata), expected)
+        check_close(result.whitefield(flatfield_case.metadata), expected)
 
     def test_singular(self, singular_case: ProjectionCase):
         result = singular_case.metadata.project(singular_case.data, n_iter=1)
@@ -134,8 +157,8 @@ class TestCrystMetadataProjection(BackendSuite):
 
     def test_pixel_selection(self, mask_case: MaskCase):
         projection = mask_case.metadata.project(mask_case.data, n_iter=1)
-        selected = projection.apply(mask_case.metadata[mask_case.pixels])
-        full = projection.apply(mask_case.metadata)
+        selected = projection.whitefield(mask_case.metadata[mask_case.pixels])
+        full = projection.whitefield(mask_case.metadata)
         check_close(selected, full[(...,) + mask_case.pixels])
 
     def test_iterations(self, empty_metadata: CrystMetadata, empty_data: RealArray):

@@ -275,13 +275,13 @@ polling; :class:`~cbclib_v2.slurm.Scripts` builds the ``sbatch`` scripts.
    # --- detect streaks: one SLURM task per file chunk ---
    detect_script = Scripts.sbatch_array.detect(
        scan.scan_num,
+       n_chunks,
        'streaks',
        'experiments/exfel/scan.json',
        'experiments/exfel/detect_streaks.json',
        'experiments/exfel/script_spec.json',
-       n_chunks,
    )
-   job_id = manager.submit_array(detect_script, range(n_chunks), wait=False)
+   job_id = manager.submit_array(detect_script, wait=False)
 
    # --- wait for all tasks to finish ---
    manager.wait_all(job_id)   # block until all tasks finish
@@ -384,6 +384,63 @@ The ``submit_array`` call expands to a ``sbatch --array`` command; each
 task receives its chunk index via the ``SLURM_ARRAY_TASK_ID`` environment
 variable.  :meth:`~cbclib_v2.slurm.SLURMJobManager.wait_all` polls until
 all tasks complete and raises on failure.
+
+Google Sheets experiment log
+----------------------------
+
+See :doc:`autologger` for the complete setup and usage guide, including user
+sign-in, spreadsheet sharing, credential configuration, row ordering, and
+troubleshooting.
+
+Detection artifacts record ``n_detections`` alongside the metadata for each hit
+frame. A scalar frame count is written even when a chunk has no hits, allowing
+completed zero-hit scans to be distinguished from incomplete jobs.
+
+The spreadsheet may remain owned by an experimenter's Google account. The
+logger can use that owner's Application Default Credentials, or the owner can
+share the spreadsheet with a service account as an Editor for unattended
+logging. Install the optional clients into the Conda environment with ``conda
+install -c conda-forge google-api-python-client google-auth``.
+
+The Sheets configuration contains identifiers but no credentials:
+
+.. code-block:: json
+
+   {
+       "parameters": {
+           "spreadsheet_id": "1Abc...",
+           "worksheet": "CBC autolog",
+           "sort_rows": true
+       }
+   }
+
+After all detection tasks for a scan finish, log one summary row with:
+
+.. code-block:: console
+
+   cbclib_cli log 373 streaks experiments/exfel/scan.json \
+       experiments/exfel/sheets.json --in-suffix online \
+       --sample lysozyme --notes "alignment check"
+
+The row is keyed by scan number, detection kind, and result suffix. Repeating
+the command replaces that row rather than appending a duplicate. By default,
+the machine-owned table is sorted by that key after every update; set
+``sort_rows`` to ``false`` to preserve existing row order and add new keys at
+the end. Multiple scans can be handled sequentially by one SLURM job:
+
+.. code-block:: python
+
+   log_script = Scripts.sbatch.log(
+       [373, 374],
+       'streaks',
+       'experiments/exfel/scan.json',
+       'experiments/exfel/sheets.json',
+       'experiments/exfel/script_spec.json',
+       in_suffix='online',
+       sample='lysozyme',
+       notes='alignment check',
+   )
+   manager.submit(log_script)
 
 .. seealso::
 

@@ -12,6 +12,7 @@ from typing import (Any, Callable, Dict, Generic, Iterator, List, Literal, Tuple
 from tqdm.auto import tqdm
 from .annotations import (AnyNamespace, Array, ArrayNamespace, CPArray, Indices, IntSequence,
                           JaxArray, NDArray, NumPy)
+from .array_api import array_namespace
 from .crystfel import Detector as Geometry, read_crystfel
 from .cxi_protocol import (H5Files, H5Protocol, H5Handler, LoadWorker, StackIndices,
                            TrainIndexRecord, TrainIndices, WorkerType, load_dataset)
@@ -232,13 +233,16 @@ class BaseRun(Container, Generic[T_RunId, T_Indices, T_Config]):
 
             >>> pulse_ids = run.metadata('pulse_id', indices[:50])
         """
+        if not keys:
+            return xp.array([])
+
         worker = self.meta_worker(attr)
 
         stack = []
         for index in iter(keys):
             stack.append(worker(index))
 
-        return xp.asarray(NumPy.stack(stack, axis=0))
+        return xp.stack(stack, axis=0)
 
     @overload
     def data(self, keys: T_Indices, *, geometry: bool = False, n_processes: int = 1,
@@ -277,6 +281,9 @@ class BaseRun(Container, Generic[T_RunId, T_Indices, T_Config]):
             >>> indices = run.indices()
             >>> frames = run.data(indices[:100], geometry=True, n_processes=4)
         """
+        if not keys:
+            return xp.array([])
+
         stack = []
 
         if n_processes > 1:
@@ -295,7 +302,7 @@ class BaseRun(Container, Generic[T_RunId, T_Indices, T_Config]):
             for index in tqdm(keys, disable=not verbose, desc="Loading data"):
                 stack.append(worker(index))
 
-        return xp.asarray(NumPy.stack(stack, axis=0))
+        return xp.stack(stack, axis=0)
 
     def pool(self, geometry: bool = False, processes: int | None = None
              ) -> Tuple[Pool, Callable[..., NDArray]]:
@@ -592,6 +599,54 @@ class FileStackIndices(TrainIndices):
     file_indices     : List[StackIndices]
     indices          : List[int] | None = None
 
+    @classmethod
+    def from_pulse_ids(cls, file_indices: List[StackIndices],
+                       pulse_ids: List[NDArray]) -> "FileStackIndices":
+        """Align module frame indices by a shared frame identifier.
+
+        The returned stack contains only identifiers present in every module,
+        ordered by their acquisition order in the first module.
+
+        Args:
+            file_indices: Data indices for each detector module.
+            pulse_ids: Scalar frame identifiers corresponding to each
+                module's data indices.
+
+        Returns:
+            Module indices selected and ordered by their shared identifiers.
+
+        Raises:
+            ValueError: If identifiers are missing, non-scalar, or do not
+                correspond one-to-one with the module data.
+        """
+        if not file_indices or len(file_indices) != len(pulse_ids):
+            raise ValueError("Each module must provide frame indices and identifiers.")
+
+        xp = array_namespace(*pulse_ids)
+        for module_id, (module_indices, ids) in enumerate(zip(file_indices, pulse_ids)):
+            if ids.ndim != 1:
+                raise ValueError(
+                    f"Module {module_id} pulse_id values must be scalar for each frame."
+                )
+            if ids.shape[0] != len(module_indices):
+                raise ValueError(
+                    f"Module {module_id} has {len(module_indices)} data frames but "
+                    f"{ids.shape[0]} pulse_id values."
+                )
+
+        shared_mask = xp.ones(pulse_ids[0].shape, dtype=bool)
+        for ids in pulse_ids[1:]:
+            shared_mask = shared_mask & xp.isin(pulse_ids[0], ids)
+        shared_ids = xp.take(pulse_ids[0], xp.nonzero(shared_mask)[0])
+
+        aligned_indices = []
+        for module_indices, ids in zip(file_indices, pulse_ids):
+            order = xp.argsort(ids)
+            sorted_ids = xp.take(ids, order)
+            positions = xp.take(order, xp.searchsorted(sorted_ids, shared_ids))
+            aligned_indices.append(module_indices[positions])
+        return cls(aligned_indices)
+
     def __post_init__(self):
         # Validate that all StackIndices have the same number of frames
         n_frames_set = {len(file_indices) for file_indices in self.file_indices}
@@ -880,7 +935,8 @@ class XFELRun(BaseFELRun[XFELPathType, FileStackIndices, XFELConfig]):
         """Load indices from HDF5 files (uncached implementation)."""
         data_paths = []
         file_indices = []
-        for module_files in self.config.files(self.run_locator):
+        module_files_list = self.config.files(self.run_locator)
+        for module_files in module_files_list:
             indices = self.handler.indices(module_files, 'data')
 
             if data_paths:
@@ -892,7 +948,18 @@ class XFELRun(BaseFELRun[XFELPathType, FileStackIndices, XFELConfig]):
             file_indices.append(indices.indices)
 
         self.data_paths['data'] = tuple(data_paths) if len(data_paths) > 1 else data_paths[0]
-        return FileStackIndices(file_indices)
+        try:
+            return FileStackIndices(file_indices)
+        except ValueError as exc:
+            identifiers = []
+            for module_id, module_files in enumerate(module_files_list):
+                pulse_indices = self.handler.indices(module_files, 'pulse_id')
+                if not isinstance(pulse_indices.indices, StackIndices):
+                    raise ValueError(
+                        f"Module {module_id} pulse_id metadata must be a sequence."
+                    ) from exc
+                identifiers.append(self.handler.load(pulse_indices, verbose=False))
+            return FileStackIndices.from_pulse_ids(file_indices, identifiers)
 
 @dataclass
 class SwissFELConfig(FELConfig[H5Files]):

@@ -1,15 +1,19 @@
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, fields
+import json
 from multiprocessing import cpu_count
+from numbers import Integral
 import os
 import re
-from typing import ClassVar, Iterator, List, Literal, overload
+from typing import ClassVar, Iterator, List, Literal, Sequence, overload
+import h5py
+import pandas as pd
 from jax import config as jax_config
 from .. import cuda
 from ..cuda import Allocator
-from .._src.annotations import AnyNamespace, JaxNumPy, NumPy
-from .._src.array_api import default_api, Platform
+from .._src.annotations import AnyNamespace, Array, BoolArray, IntArray, JaxNumPy, NumPy, Shape
+from .._src.array_api import asnumpy, default_api, Platform
 from .._src.config import CPUConfig
-from .._src.data_container import list_indices
+from .._src.data_container import ArrayContainer, Container, list_indices
 from .._src.cxi_protocol import TrainIndices
 from .._src.parser import read_all
 from .._src.run import BaseRun, RunConfig, RunList, open_run
@@ -18,6 +22,7 @@ from ..indexer import FixedGeometry, FixedLens, XtalCell, XtalState
 from .slurm_manager import SLURMArrayScript, ScriptSpec
 
 ScanNumbers = int | range | List[int]
+DetectionKind = Literal['streaks', 'regions']
 ImageKind = Literal['full', 'stacked']
 
 @dataclass
@@ -106,6 +111,205 @@ class DetectConfig(BaseParameters):
     hit_threshold   : int
     streaks_dir     : str
     regions_dir     : str
+
+    def output_dir(self, kind: DetectionKind) -> str:
+        """Return the configured output directory for a detection kind.
+
+        Args:
+            kind: Detection representation written by the pipeline.
+
+        Returns:
+            Root directory for the requested detection artifacts.
+        """
+        if kind == 'streaks':
+            return self.streaks_dir
+        if kind == 'regions':
+            return self.regions_dir
+        raise ValueError(f"Invalid detection kind: {kind}")
+
+@dataclass
+class DetectionAttributes(Container):
+    """HDF5 provenance identifying one detection-metadata chunk."""
+    scan_num          : int
+    detection_kind    : DetectionKind
+    hit_threshold     : int
+    chunk_id          : int
+    n_chunks          : int
+    n_frames          : int
+
+    def is_hit(self, n_detections: IntArray) -> BoolArray:
+        """Return which detection counts exceed this result's hit threshold."""
+        return n_detections > self.hit_threshold
+
+    def hit_rate(self, n_hits: int) -> float:
+        """Return the hit fraction for this result's processed-frame count."""
+        return n_hits / self.n_frames if self.n_frames else 0.0
+
+    @classmethod
+    def read_integer(cls, attributes: h5py.AttributeManager, key: str) -> int:
+        """Read one attribute from an HDF5 file and validate its type."""
+        if key not in attributes:
+            raise ValueError(f"Missing attribute {key}")
+        value = attributes[key]
+        if not isinstance(value, Integral):
+            raise ValueError(f"Invalid attribute {key}: expected int, got {type(value)}")
+        return int(value)
+
+    @classmethod
+    def read_string(cls, attributes: h5py.AttributeManager, key: str) -> str:
+        """Read one attribute from an HDF5 file and validate its type."""
+        if key not in attributes:
+            raise ValueError(f"Missing attribute {key}")
+        value = attributes[key]
+        if not isinstance(value, (str, bytes)):
+            raise ValueError(f"Invalid attribute {key}: expected str or bytes, got {type(value)}")
+        return value.decode('utf-8') if isinstance(value, bytes) else value
+
+    @classmethod
+    def read(cls, path: str) -> 'DetectionAttributes':
+        """Read and validate detection provenance from one artifact."""
+        with h5py.File(path, mode='r') as input_file:
+            kind_str = cls.read_string(input_file.attrs, 'detection_kind')
+            if kind_str == 'streaks':
+                detection_kind = 'streaks'
+            elif kind_str == 'regions':
+                detection_kind = 'regions'
+            else:
+                raise ValueError(f"Invalid detection kind: {kind_str}")
+            return cls(
+                scan_num=cls.read_integer(input_file.attrs, 'scan_num'),
+                detection_kind=detection_kind,
+                hit_threshold=cls.read_integer(input_file.attrs, 'hit_threshold'),
+                chunk_id=cls.read_integer(input_file.attrs, 'chunk_id'),
+                n_chunks=cls.read_integer(input_file.attrs, 'n_chunks'),
+                n_frames=cls.read_integer(input_file.attrs, 'n_frames'))
+
+    @classmethod
+    def concat(cls, chunks: Sequence['DetectionAttributes']) -> 'DetectionAttributes':
+        """Validate and aggregate detection artifact attributes."""
+        if not chunks:
+            raise ValueError("No detection artifacts found")
+        expected = (chunks[0].scan_num, chunks[0].detection_kind,
+                    chunks[0].hit_threshold, chunks[0].n_chunks)
+        n_frames = chunks[0].n_frames
+        for chunk in chunks[1:]:
+            if (chunk.scan_num, chunk.detection_kind,
+                chunk.hit_threshold, chunk.n_chunks) != expected:
+                raise ValueError("Detection artifacts describe different scan results")
+            n_frames += chunk.n_frames
+        return cls(expected[0], expected[1], expected[2], 0, 1, n_frames)
+
+    @classmethod
+    def from_scan(cls, scan: 'Scan', kind: DetectionKind, n_frames: int) -> 'DetectionAttributes':
+        return cls(scan_num=scan.scan_num, detection_kind=kind,
+                   hit_threshold=scan.config.detect.hit_threshold,
+                   chunk_id=0, n_chunks=1, n_frames=n_frames)
+
+    @classmethod
+    def from_chunk(cls, scan: 'Scan', kind: DetectionKind, chunk_id: int, n_chunks: int,
+                   n_frames: int) -> 'DetectionAttributes':
+        return cls(scan_num=scan.scan_num, detection_kind=kind,
+                   hit_threshold=scan.config.detect.hit_threshold,
+                   chunk_id=chunk_id, n_chunks=n_chunks, n_frames=n_frames)
+
+    def write(self, path: str, mode: Literal['a', 'w', 'r+']='a'):
+        """Write detection provenance to an HDF5 artifact."""
+        with h5py.File(path, mode=mode) as output_file:
+            for name, value in self.to_dict().items():
+                output_file.attrs[name] = value
+
+@dataclass
+class DetectionMetadata(ArrayContainer):
+    """Hold hit metadata and derive scan-level detection statistics."""
+    index           : IntArray          # (n_hits,)
+    filename        : Array             # (n_hits, n_files_per_hit)
+    file_index      : IntArray          # (n_hits, n_files_per_hit)
+    pulse_id        : IntArray          # (n_hits,)
+    n_detections    : IntArray          # (n_hits,)
+
+    @staticmethod
+    def serialise_rows(values: Array) -> list[str]:
+        """Serialise per-hit source addresses for storage in one table column."""
+        return [json.dumps(row.tolist()) for row in values]
+
+    @staticmethod
+    def deserialise_rows(values: pd.Series, dtype: type[str] | type[int],
+                         xp: AnyNamespace) -> Array:
+        """Restore per-hit source addresses from one table column."""
+        if values.empty:
+            return xp.empty((0, 0), dtype=dtype)
+        return xp.asarray([json.loads(value) for value in values], dtype=dtype)
+
+    @classmethod
+    def from_run(cls, hits: TrainIndices, pulse_ids: IntArray, n_detections: IntArray,
+                 xp: AnyNamespace) -> 'DetectionMetadata':
+        """Load facility metadata and bind detection counts to hit frames."""
+        if len(hits) == 0:
+            return cls(
+                index=xp.zeros(0, dtype=int),
+                filename=xp.empty((0, 0), dtype=str),
+                file_index=xp.empty((0, 0), dtype=int),
+                pulse_id=xp.zeros(0, dtype=int),
+                n_detections=xp.zeros(0, dtype=int))
+
+        if pulse_ids.ndim > 1:
+            pulse_ids = pulse_ids[:, 0]
+
+        index, filenames, file_index = [], [], []
+        for record in hits.records():
+            index.append(record.index)
+            filenames.append(record.filename)
+            file_index.append(record.file_index)
+
+        return cls(index=xp.asarray(index), filename=xp.asarray(filenames, dtype=str),
+                   file_index=xp.asarray(file_index, dtype=int),
+                   pulse_id=xp.asarray(pulse_ids), n_detections=xp.asarray(n_detections))
+
+    @classmethod
+    def import_dataframe(cls, dataframe: pd.DataFrame | pd.Series, xp: AnyNamespace
+                         ) -> 'DetectionMetadata':
+        """Read hit metadata from one detection artifact."""
+        filenames = cls.deserialise_rows(dataframe['filename'], str, xp)
+        file_index = cls.deserialise_rows(dataframe['file_index'], int, xp)
+        return cls(index=xp.asarray(dataframe['index']), filename=filenames,
+                   file_index=file_index, pulse_id=xp.asarray(dataframe['pulse_id']),
+                   n_detections=xp.asarray(dataframe['n_detections']))
+
+    @property
+    def shape(self) -> Shape:
+        return self.index.shape
+
+    @property
+    def detections_in_hits(self) -> int:
+        return int(self.n_detections.sum())
+
+    @property
+    def mean_per_hit(self) -> float:
+        if self.size == 0:
+            return 0.0
+        return float(self.n_detections.mean())
+
+    @property
+    def median_per_hit(self) -> float:
+        if self.size == 0:
+            return 0.0
+        xp = self.__array_namespace__()
+        return float(xp.median(self.n_detections))
+
+    @property
+    def maximum_per_hit(self) -> int:
+        if self.size == 0:
+            return 0
+        return int(self.n_detections.max())
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return the hit metadata in the detection artifact schema."""
+        return pd.DataFrame({
+            'index': asnumpy(self.index),
+            'filename': self.serialise_rows(self.filename),
+            'file_index': self.serialise_rows(self.file_index),
+            'pulse_id': asnumpy(self.pulse_id),
+            'n_detections': asnumpy(self.n_detections)})
 
 @dataclass
 class MetadataConfig(BaseParameters):
