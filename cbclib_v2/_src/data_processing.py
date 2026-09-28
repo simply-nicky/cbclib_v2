@@ -176,6 +176,9 @@ class SimpleProjection(DataContainer):
             Per-frame noise standard deviation array, shape ``(N, *frame_shape)``.
         """
         xp = self.__array_namespace__()
+        if metadata.is_empty(metadata.std):
+            return xp.empty(self.std_scale.shape + metadata.std.shape,
+                            dtype=metadata.std.dtype)
         return xp.tensordot(self.std_scale, metadata.std, axes=0)
 
     def scale_std(self, data: RealArray, metadata: CrystMetadata,

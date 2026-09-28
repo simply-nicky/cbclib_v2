@@ -165,6 +165,11 @@ class TestDetectionLogEntry:
             DetectionLogEntry.from_files([str(frames_only_path)])
 
 class TestGoogleSheetsLog:
+    @pytest.fixture
+    def google_dependencies(self) -> None:
+        pytest.importorskip('google.auth')
+        pytest.importorskip('googleapiclient.discovery')
+
     def sheet_row(self, entry: DetectionLogEntry) -> list[str | int | float]:
         row = entry.to_row()
         timestamp = datetime.fromisoformat(entry.updated_at).replace(tzinfo=None)
@@ -244,7 +249,7 @@ class TestGoogleSheetsLog:
         return GoogleSheetsLog(config, FakeService(ordered_values))
 
     def test_builds_service_from_configured_credentials(
-            self, monkeypatch: pytest.MonkeyPatch):
+            self, monkeypatch: pytest.MonkeyPatch, google_dependencies: None):
         credentials = object()
         service = object()
         calls: list[tuple[Any, ...]] = []
@@ -270,7 +275,8 @@ class TestGoogleSheetsLog:
                 'credentials': credentials, 'cache_discovery': False})]
 
     def test_builds_service_from_adc_by_default(self, config: GoogleSheetsConfig,
-                                                monkeypatch: pytest.MonkeyPatch):
+                                                monkeypatch: pytest.MonkeyPatch,
+                                                google_dependencies: None):
         credentials = object()
         service = object()
         calls: list[tuple[Any, ...]] = []

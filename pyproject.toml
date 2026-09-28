@@ -36,7 +36,7 @@ classifiers = [
 [project.optional-dependencies]
 cuda = ["cupy>=13.0.0"]
 sheets = ['google-api-python-client', 'google-auth']
-dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio', 'scipy']
+dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio']
 docs = [
     'sphinx>=7',
     'pydata-sphinx-theme>=0.15',

@@ -1,4 +1,4 @@
-from math import prod
+from math import lgamma, prod
 from typing import Tuple
 import pytest
 from cbclib_v2 import Lines, default_rng
@@ -43,13 +43,7 @@ class TestNewStreakFinder:
         return xp.concat((ctr + hw[..., None] * tau, ctr - hw[..., None] * tau), axis=-1)
 
     def lgamma(self, x: int | IntArray, xp: TestNamespace) -> RealArray:
-        if xp is NumPy:
-            from scipy.special import gammaln
-            return gammaln(x)
-        if xp is CuPy:
-            import cupyx.scipy.special as cpx
-            return cpx.gammaln(x)
-        raise ValueError(f"Unknown Array API: {xp}")
+        return xp.asarray(lgamma(int(x)))
 
     def logbinom(self, n: int | IntArray, k: int | IntArray, p: float | RealArray,
                  xp: TestNamespace) -> RealArray:

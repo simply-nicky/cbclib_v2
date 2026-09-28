@@ -196,9 +196,10 @@ class TestScaleBackground(BackendSuite):
         first = scale_background(frames, sampling_case.data, sampling_case.metadata, params)
         second = scale_background(frames, sampling_case.data, sampling_case.metadata, params)
 
-        # A sufficient deterministic pixel sample recovers the exact PCA background.
+        # Sampling recovers the PCA background while an absent noise frame remains absent.
         check_close(first.whitefield, sampling_case.data)
         check_close(second.whitefield, first.whitefield)
+        assert first.std.size == 0
 
     @pytest.mark.parametrize('n_pixels', [0, 5])
     def test_pixels(self, empty_metadata: CrystMetadata, empty_data: RealArray,
