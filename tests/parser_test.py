@@ -8,6 +8,7 @@ from cbclib_v2._src.run import SwissFELConfig
 from cbclib_v2._src.parser import extract_fields, fields, get_type_hints, read_fields
 from cbclib_v2.annotations import NumPy
 from cbclib_v2.indexer import FixedFocus, FixedGeometry
+from cbclib_v2.slurm import ScanArgument
 from cbclib_v2.scripts import (DetectConfig, MetadataConfig, MetaListConfig, PeakParameters,
                                ScalingParameters, ScanConfig, SetupConfig, StreakFinderConfig,
                                StreakParameters, StructureParameters, SystemConfig)
@@ -180,3 +181,13 @@ class TestParserRoundTrip:
 
         assert 'scan_num' not in json.loads(path.read_text())['parameters']
         assert result == scan
+
+class TestScanArgument:
+    @pytest.fixture(params=[[], [7, 7], [-1]])
+    def invalid_scan_num(self, request: pytest.FixtureRequest) -> list[int]:
+        return request.param
+
+    def test_invalid_numbers(self, invalid_scan_num: list[int]) -> None:
+        # Scan selections are non-empty collections of unique, non-negative numbers.
+        with pytest.raises(ValueError, match='scan_num'):
+            ScanArgument(invalid_scan_num).enumerate()

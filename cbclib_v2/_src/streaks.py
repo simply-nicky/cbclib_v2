@@ -245,12 +245,12 @@ class BaseStreaks(IndexedContainer, BaseLines):
     def pattern_dataframe(self, shape: Tuple[int, int], width: float, kernel: str='gaussian'
                           ) -> pd.DataFrame:
         xp = self.__array_namespace__()
-        indices, streak_id, values = write_lines(self.lines, (len(self),) + shape, self.index,
+        indices, streak_id, values = write_lines(self.lines, (len(self),) + shape, self.reset_index(),
                                                  width=width, kernel=kernel)
         index, pixel_id = indices // prod(shape), indices % prod(shape)
         y, x = xp.unravel_index(pixel_id, shape)
-        return pd.DataFrame({'index': asnumpy(index), 'y': asnumpy(y), 'x': asnumpy(x),
-                             'streak_id': asnumpy(streak_id), 'value': asnumpy(values)})
+        return pd.DataFrame({'index': asnumpy(self.unique_index()[index]), 'y': asnumpy(y),
+                             'x': asnumpy(x), 'streak_id': asnumpy(streak_id), 'value': asnumpy(values)})
 
     def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.

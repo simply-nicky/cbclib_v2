@@ -1310,6 +1310,7 @@ class PostRefineConfig(BaseParameters):
     setup           : PostRefineSetupParameters
     miller          : Literal['indexed', 'all']
     refine_streaks  : bool
+    I_min           : float
     sigma           : float
     width           : int
 
@@ -1325,6 +1326,8 @@ class PostRefineConfig(BaseParameters):
         detector_dims = (detector.pixel_size * detector.assembled_shape[0],
                          detector.pixel_size * detector.assembled_shape[1])
         is_valid = is_valid & patterns.is_inbound((0.0, detector_dims[0], 0.0, detector_dims[1]))
+        streaks = detector.to_pixels(patterns)
+        is_valid = is_valid & detector.is_onpanel(streaks.x, streaks.y)
 
         return miller[xp.asarray(is_valid, dtype=bool)]
 
@@ -1339,7 +1342,8 @@ class PostRefineConfig(BaseParameters):
     def streak_data(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
                     resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace) -> StreakData:
         streak_ids = self.streak_indices(scaler, miller, resolved, detector, xp)
-        data = PedestalData.import_data(cryst_data, streak_ids, miller, detector, xp)
+        data = PedestalData.import_data(
+            cryst_data, streak_ids, miller, detector, xp, I_min=self.I_min)
         modelled = scaler.init_model(data, resolved, xp)
         return StreakData(data, modelled)
 

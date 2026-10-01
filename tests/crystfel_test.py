@@ -322,6 +322,38 @@ class TestFullGeometryParsing:
         assert detector.panels['panel0'].shape == (512, 512)
         assert detector.panels['panel1'].shape == (512, 512)
 
+    def test_is_onpanel(self, tmp_path: Path, xp: NumPyNamespace):
+        """Test that points must lie on a panel rather than in overall detector bounds."""
+        geom_file = tmp_path / "panels.geom"
+        content = (
+            "clen = 0.1m\n"
+            "res = 2\n"
+            "panel0/corner_x = -0.5\n"
+            "panel0/corner_y = -0.5\n"
+            "panel0/fs = +1.0x+0.0y\n"
+            "panel0/ss = +0.0x+1.0y\n"
+            "panel0/min_fs = 0\n"
+            "panel0/max_fs = 2\n"
+            "panel0/min_ss = 0\n"
+            "panel0/max_ss = 2\n"
+            "panel1/corner_x = +9.5\n"
+            "panel1/corner_y = -0.5\n"
+            "panel1/fs = +1.0x+0.0y\n"
+            "panel1/ss = +0.0x+1.0y\n"
+            "panel1/min_fs = 3\n"
+            "panel1/max_fs = 5\n"
+            "panel1/min_ss = 0\n"
+            "panel1/max_ss = 2\n"
+        )
+        geom_file.write_text(content)
+        detector = read_crystfel(str(geom_file))
+        x = xp.asarray([[0.5, 1.5], [-2.0, -1.0], [4.0, 8.0], [8.0, 11.0]])
+        y = xp.ones_like(x)
+
+        # Any on-panel endpoint counts; off-detector and panel-gap endpoints do not.
+        expected = xp.asarray([True, False, False, True])
+        assert xp.all(detector.is_onpanel(x, y) == expected)
+
 class TestRealGeometryFile:
     """Test with actual geometry file from experiments."""
 
@@ -358,6 +390,6 @@ class TestRealGeometryFile:
         # Should have many panels (64 for JUNGFRAU 4M)
         assert len(detector.panels) == 64
         assert detector.shape == (8, 512, 1024)  # Example expected shape
-        assert detector.assembled_shape == (2173, 2398)
+        assert detector.assembled_shape == (2172, 2398)
         for panel in detector.panels.values():
             assert panel.shape == (1, 256, 256)  # Example panel shape

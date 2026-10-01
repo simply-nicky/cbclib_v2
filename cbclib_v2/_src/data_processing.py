@@ -595,7 +595,8 @@ class CrystData(CrystBase):
         data: Raw detector frames, shape ``(n_frames, *frame_shape)``.
         whitefield: Background model, shape ``frame_shape`` (static) or
             ``(n_frames, *frame_shape)`` (per-frame).
-        std: Per-pixel noise standard deviation, shape ``frame_shape``.
+        std: Per-pixel noise standard deviation, shape ``frame_shape`` (static) or
+            ``(n_frames, *frame_shape)`` (per-frame).
         snr: Background-corrected signal-to-noise ratio, shape
             ``(n_frames, *frame_shape)``. Computed by :meth:`update_snr`.
         frames: Integer indices of the frames in this container.
@@ -655,6 +656,33 @@ class CrystData(CrystBase):
     def shape(self) -> Shape:
         """Full shape of the data array: ``(n_frames, *frame_shape)``."""
         return (self.num_frames,) + self.frame_shape
+
+    def values_at(self, attribute: Literal['data', 'whitefield', 'std'], index: IntArray,
+                  y: IntArray, x: IntArray) -> IntArray | RealArray:
+        """Sample a detector field at frame-indexed pixel coordinates.
+
+        Frame fields are shared by every pattern, while stack fields are indexed by the
+        compact frame index associated with each point.
+
+        Args:
+            attribute: Detector field to sample.
+            index: Compact frame index for each point.
+            y: Detector row for each point.
+            x: Detector column for each point.
+
+        Returns:
+            Sampled values with the same shape as ``index``.
+
+        Raises:
+            ValueError: If the selected field is neither a frame nor a stack.
+        """
+        values = getattr(self, attribute)
+        kind = self.protocol.get_kind(attribute)
+        if kind == Kinds.frame:
+            return values[(y, x)]
+        if kind == Kinds.stack:
+            return values[(index, y, x)]
+        raise ValueError(f"{attribute} is not a detector frame or stack")
 
     @classmethod
     def default_protocol(cls) -> H5Protocol:

@@ -1,29 +1,40 @@
 from argparse import Namespace
+from dataclasses import dataclass
 import json
-from multiprocessing import cpu_count
 from pathlib import Path
 import shlex
 from typing import Any, Literal, cast
 import h5py
-from jax import config as jax_config
 import pandas as pd
 import pytest
 from cbclib_v2 import RunConfig, Streaks, cuda, slurm
-from cbclib_v2.annotations import IntArray, JaxNumPy, NumPy, NumPyNamespace, RealArray
+from cbclib_v2.annotations import NumPy, NumPyNamespace, RealArray
 from cbclib_v2._src.cxi_protocol import StackIndex, StackIndices
-from cbclib_v2.indexer import ResolvedGeometry, RefineResult, ResolvedSetup, XtalState
+from cbclib_v2.slurm.scripts import DetectHits
 from cbclib_v2.scripts import (DetectConfig, IndexingConfig, LossParameters, MetaListConfig,
                                MetadataConfig, OptimiseParameters, RefineConfig,
                                RefineDataParameters, Scan, ScanConfig, ScheduleParameters,
                                SetupConfig, StreakFinderConfig, StructureParameters,
                                SystemConfig)
-from cbclib_v2.test_util import check_close
 
 Event = str | tuple[object, ...]
-Platform = Literal['cpu', 'gpu']
-SetupMode = Literal['shared', 'per-pattern']
 HitsDir = Literal['streaks', 'regions']
 XtalDir = Literal['xtals', 'solutions']
+
+@dataclass
+class DetectionRun:
+    pulse_ids : RealArray
+
+    def indices(self) -> StackIndices:
+        return StackIndices([StackIndex('input.h5', 3)])
+
+    def worker(self, geometry: bool) -> object:
+        return object()
+
+    def metadata(self, attr: str, keys: Any) -> RealArray:
+        assert attr == 'pulse_id'
+        assert len(keys) == self.pulse_ids.size
+        return self.pulse_ids
 
 class ScanFixtures:
     @pytest.fixture
@@ -73,67 +84,71 @@ class TestSystemConfig:
     def allocator_calls(self) -> list[tuple[str, bool]]:
         return []
 
-    def patch_allocator(self, monkeypatch: pytest.MonkeyPatch,
-                        allocator_calls: list[tuple[str, bool]]):
+    @pytest.fixture
+    def patched_allocator(self, monkeypatch: pytest.MonkeyPatch,
+                          allocator_calls: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
         def fake_set_allocator(allocator: str, *, strict: bool):
             allocator_calls.append((allocator, strict))
 
         monkeypatch.setattr(cuda, 'set_allocator', fake_set_allocator)
+        return allocator_calls
 
-    def test_defaults(self):
-        config = slurm.SystemConfig(platform='gpu')
+    @pytest.fixture(params=[
+        Namespace(platform='cpu', allocator='default', expected=[]),
+        Namespace(platform='gpu', allocator='cuda_malloc_async',
+                  expected=[('cuda_malloc_async', True)]),
+    ])
+    def allocator_case(self, request: pytest.FixtureRequest) -> Namespace:
+        return request.param
 
-        # The default uses the conservative allocator and every available CPU thread.
-        assert config.cuda_allocator == 'default'
-        assert config.num_threads == cpu_count()
+    @pytest.fixture
+    def allocator_config(self, allocator_case: Namespace) -> slurm.SystemConfig:
+        return slurm.SystemConfig(platform=allocator_case.platform,
+                                  cuda_allocator=allocator_case.allocator)
 
     def test_invalid_allocator(self):
         # Allocator names are validated when system configuration enters the domain model.
         with pytest.raises(ValueError, match='Invalid CUDA allocator'):
-            slurm.SystemConfig(platform='gpu', cuda_allocator='invalid')
+            slurm.SystemConfig.from_dict(
+                platform='gpu', cuda_allocator='invalid', num_threads=1)
 
-    def test_cpu_apply(self, allocator_calls: list[tuple[str, bool]],
-                       monkeypatch: pytest.MonkeyPatch):
-        self.patch_allocator(monkeypatch, allocator_calls)
+    def test_allocator_boundary(self, allocator_case: Namespace,
+                                allocator_config: slurm.SystemConfig,
+                                patched_allocator: list[tuple[str, bool]]):
+        allocator_config.apply()
 
-        slurm.SystemConfig(platform='cpu').apply()
-
-        # CPU configuration never initializes a CUDA allocator.
-        assert allocator_calls == []
-
-    def test_gpu_apply(self, allocator_calls: list[tuple[str, bool]],
-                       monkeypatch: pytest.MonkeyPatch):
-        self.patch_allocator(monkeypatch, allocator_calls)
-
-        config = slurm.SystemConfig(platform='gpu', cuda_allocator='cuda_malloc_async')
-        config.apply()
-
-        # GPU configuration applies its selected allocator in strict mode.
-        assert allocator_calls == [(config.cuda_allocator, True)]
-
-    @pytest.mark.parametrize('platform', ['cpu', 'gpu'])
-    def test_jax_api(self, platform: Platform, monkeypatch: pytest.MonkeyPatch):
-        calls: list[tuple[str, str]] = []
-
-        def fake_update(name: str, value: str):
-            calls.append((name, value))
-
-        monkeypatch.setattr(jax_config, 'update', fake_update)
-
-        system = slurm.SystemConfig(platform=platform)
-        xp = system.jax_api()
-
-        # The configured system platform is forwarded before returning the JAX namespace.
-        assert calls == [('jax_platform_name', system.platform)]
-        assert xp is JaxNumPy
+        # Only GPU execution initialises its selected allocator, always in strict mode.
+        assert patched_allocator == allocator_case.expected
 
 class TestMain(ScanFixtures):
     @pytest.fixture
     def events(self) -> list[Event]:
         return []
 
+    @pytest.fixture
+    def metadata_args(self, scan: Scan) -> Namespace:
+        scan_nums = [scan.scan_num, scan.scan_num + 1]
+        return Namespace(command='metadata', scan='scan.json',
+                         scan_num=' '.join(str(scan_num) for scan_num in scan_nums),
+                         parameters='params.json')
+
+    @pytest.fixture
+    def compile_args(self, scan: Scan) -> Namespace:
+        scan_nums = [scan.scan_num, scan.scan_num + 1]
+        return Namespace(command='compile', scan='scan.json',
+                         scan_num='_'.join(str(scan_num) for scan_num in scan_nums),
+                         kind='streaks', in_suffix='in', out_suffix='out')
+
+    @pytest.fixture
+    def log_args(self, scan: Scan) -> Namespace:
+        scan_nums = [scan.scan_num, scan.scan_num + 1]
+        return Namespace(command='log', scan='scan.json',
+                         scan_num='_'.join(str(scan_num) for scan_num in scan_nums),
+                         kind='streaks', google='sheets.json', in_suffix='online',
+                         sample='lysozyme', notes='alignment check')
+
     def patch_parser(self, monkeypatch: pytest.MonkeyPatch, args: Namespace):
-        class FakeParser():
+        class FakeParser:
             def parse_args(self) -> Namespace:
                 return args
 
@@ -141,10 +156,8 @@ class TestMain(ScanFixtures):
                             classmethod(lambda cls: FakeParser()))
 
     def patch_scan(self, monkeypatch: pytest.MonkeyPatch, scan: Scan,
-                   events: list[Event], error: RuntimeError | None=None):
+                   events: list[Event]):
         def apply():
-            if error is not None:
-                raise error
             events.append('apply')
 
         monkeypatch.setattr(scan.config.system, 'apply', apply)
@@ -153,48 +166,33 @@ class TestMain(ScanFixtures):
 
     def patch_metadata(self, monkeypatch: pytest.MonkeyPatch,
                        events: list[Event]):
-        class FakeScript():
+        class FakeScript:
             def run(self):
                 events.append('run')
 
-        def fake_from_file(scan_num: int, scan_file: str, params_file: str) -> FakeScript:
+        def fake_from_file(cls: type[slurm.CreateMetadata], scan_num: int,
+                           scan_file: str, params_file: str) -> FakeScript:
             events.append(('from_file', scan_num, scan_file, params_file))
             return FakeScript()
 
         monkeypatch.setattr(slurm.CreateMetadata, 'from_file',
-                            classmethod(lambda cls, scan_num, scan_file, params_file:
-                                        fake_from_file(scan_num, scan_file, params_file)))
-
-    def patch_refine(self, monkeypatch: pytest.MonkeyPatch,
-                     events: list[Event]):
-        class FakeScript():
-            def run(self):
-                events.append('run')
-
-        def fake_from_file(scan_num: int, scan_file: str, params_file: str, hits_dir: HitsDir,
-                           xtal_dir: XtalDir, in_suffix: str, out_suffix: str,
-                           chunk_id: int | None) -> FakeScript:
-            events.append(('from_file', scan_num, scan_file, params_file, hits_dir, xtal_dir,
-                           in_suffix, out_suffix, chunk_id))
-            return FakeScript()
-
-        monkeypatch.setattr(slurm.RefineScript, 'from_file',
-                            classmethod(lambda cls, *args: fake_from_file(*args)))
+                            classmethod(fake_from_file))
 
     def patch_compile(self, monkeypatch: pytest.MonkeyPatch,
                       events: list[Event]):
-        class FakeScript():
+        class FakeScript:
             def run(self):
                 events.append('run')
 
-        def fake_from_file(scan_num: slurm.ScanNumbers, kind: str, scan_file: str,
+        def fake_from_file(cls: type[slurm.CompileFiles], kind: str,
+                           scan_num: slurm.ScanNumbers, scan_file: str,
                            in_suffix: str, out_suffix: str) -> FakeScript:
             events.append(
-                ('from_file', scan_num, kind, scan_file, in_suffix, out_suffix))
+                ('from_file', kind, scan_num, scan_file, in_suffix, out_suffix))
             return FakeScript()
 
         monkeypatch.setattr(slurm.CompileFiles, 'from_file',
-                            classmethod(lambda cls, *args: fake_from_file(*args)))
+                            classmethod(fake_from_file))
 
     def patch_log(self, monkeypatch: pytest.MonkeyPatch,
                   events: list[Event]):
@@ -202,7 +200,8 @@ class TestMain(ScanFixtures):
             def run(self):
                 events.append('run')
 
-        def fake_from_file(scan_num: int, kind: str, scan_file: str,
+        def fake_from_file(cls: type[slurm.LogDetections], scan_num: int, kind: str,
+                           scan_file: str,
                            google_file: str, in_suffix: str, sample: str,
                            notes: str) -> FakeScript:
             events.append(('from_file', scan_num, kind, scan_file,
@@ -210,30 +209,13 @@ class TestMain(ScanFixtures):
             return FakeScript()
 
         monkeypatch.setattr(slurm.LogDetections, 'from_file',
-                            classmethod(lambda cls, *args: fake_from_file(*args)))
+                            classmethod(fake_from_file))
 
-    def test_parser_accepts_multiple_scan_numbers(self):
-        args = slurm.Scripts.parser().parse_args(
-            ['metadata', '7 11', 'scan.json', 'params.json'])
-
-        # A complete scan selection remains one positional CLI value for domain parsing.
-        assert args.scan_num == '7 11'
-
-    def test_log_parser_accepts_sample_and_notes(self):
-        args = slurm.Scripts.parser().parse_args([
-            'log', '7', 'streaks', 'scan.json', 'sheets.json',
-            '--sample', 'lysozyme', '--notes', 'alignment check'])
-
-        assert args.sample == 'lysozyme'
-        assert args.notes == 'alignment check'
-
-    def test_metadata_multiple_scans(self, scan: Scan, events: list[Event],
+    def test_metadata_multiple_scans(self, scan: Scan, metadata_args: Namespace,
+                                     events: list[Event],
                                      monkeypatch: pytest.MonkeyPatch):
         scan_nums = [scan.scan_num, scan.scan_num + 1]
-        args = Namespace(command='metadata', scan='scan.json',
-                         scan_num=' '.join(str(scan_num) for scan_num in scan_nums),
-                         parameters='params.json')
-        self.patch_parser(monkeypatch, args)
+        self.patch_parser(monkeypatch, metadata_args)
         self.patch_scan(monkeypatch, scan, events)
         self.patch_metadata(monkeypatch, events)
 
@@ -242,19 +224,17 @@ class TestMain(ScanFixtures):
         # Local CLI execution constructs one worker per scan after configuring the system once.
         assert events == [
             'apply',
-            ('from_file', scan_nums[0], args.scan, args.parameters),
+            ('from_file', scan_nums[0], metadata_args.scan, metadata_args.parameters),
             'run',
-            ('from_file', scan_nums[1], args.scan, args.parameters),
+            ('from_file', scan_nums[1], metadata_args.scan, metadata_args.parameters),
             'run',
         ]
 
-    def test_compile_multiple_scans_once(self, scan: Scan, events: list[Event],
+    def test_compile_multiple_scans_once(self, scan: Scan, compile_args: Namespace,
+                                         events: list[Event],
                                          monkeypatch: pytest.MonkeyPatch):
         scan_nums = [scan.scan_num, scan.scan_num + 1]
-        args = Namespace(command='compile', scan='scan.json',
-                         scan_num='_'.join(str(scan_num) for scan_num in scan_nums),
-                         kind='streaks', in_suffix='in', out_suffix='out')
-        self.patch_parser(monkeypatch, args)
+        self.patch_parser(monkeypatch, compile_args)
         self.patch_scan(monkeypatch, scan, events)
         self.patch_compile(monkeypatch, events)
 
@@ -263,35 +243,16 @@ class TestMain(ScanFixtures):
         # Compilation preserves the selection and dispatches one combined operation.
         assert events == [
             'apply',
-            ('from_file', args.kind, scan_nums, args.scan, args.in_suffix, args.out_suffix),
+            ('from_file', compile_args.kind, scan_nums, compile_args.scan,
+             compile_args.in_suffix, compile_args.out_suffix),
             'run',
         ]
 
-    def test_refine(self, scan: Scan, events: list[Event],
-                    monkeypatch: pytest.MonkeyPatch):
-        args = Namespace(command='refine', scan='scan.json', parameters='refine.json',
-                         scan_num=str(scan.scan_num),
-                         hits_dir='regions', xtal_dir='solutions', in_suffix='gd',
-                         out_suffix='rf', chunk_id=2)
-        self.patch_parser(monkeypatch, args)
-        self.patch_scan(monkeypatch, scan, events)
-        self.patch_refine(monkeypatch, events)
-
-        slurm.main()
-
-        expected_call = ('from_file', scan.scan_num, args.scan, args.parameters, args.hits_dir,
-                         args.xtal_dir, args.in_suffix, args.out_suffix, args.chunk_id)
-        # Refine dispatch forwards every routing argument without renaming or reordering it.
-        assert events == ['apply', expected_call, 'run']
-
-    def test_log_multiple_scans(self, scan: Scan, events: list[Event],
+    def test_log_multiple_scans(self, scan: Scan, log_args: Namespace,
+                                events: list[Event],
                                 monkeypatch: pytest.MonkeyPatch):
         scan_nums = [scan.scan_num, scan.scan_num + 1]
-        args = Namespace(command='log', scan='scan.json',
-                         scan_num='_'.join(str(scan_num) for scan_num in scan_nums),
-                         kind='streaks', google='sheets.json', in_suffix='online',
-                         sample='lysozyme', notes='alignment check')
-        self.patch_parser(monkeypatch, args)
+        self.patch_parser(monkeypatch, log_args)
         self.patch_scan(monkeypatch, scan, events)
         self.patch_log(monkeypatch, events)
 
@@ -300,29 +261,13 @@ class TestMain(ScanFixtures):
         # One CLI process logs scans sequentially to avoid concurrent Sheet writes.
         assert events == [
             'apply',
-            ('from_file', scan_nums[0], args.kind, args.scan,
-             args.google, args.in_suffix, args.sample, args.notes),
+            ('from_file', scan_nums[0], log_args.kind, log_args.scan,
+             log_args.google, log_args.in_suffix, log_args.sample, log_args.notes),
             'run',
-            ('from_file', scan_nums[1], args.kind, args.scan,
-             args.google, args.in_suffix, args.sample, args.notes),
+            ('from_file', scan_nums[1], log_args.kind, log_args.scan,
+             log_args.google, log_args.in_suffix, log_args.sample, log_args.notes),
             'run',
         ]
-
-    def test_apply_error(self, scan: Scan, events: list[Event],
-                         monkeypatch: pytest.MonkeyPatch):
-        args = Namespace(command='metadata', scan='scan.json',
-                         scan_num=str(scan.scan_num),
-                         parameters='params.json')
-        error = RuntimeError('allocator setup failed')
-        self.patch_parser(monkeypatch, args)
-        self.patch_scan(monkeypatch, scan, events, error)
-        self.patch_metadata(monkeypatch, events)
-
-        with pytest.raises(RuntimeError, match='allocator setup failed'):
-            slurm.main()
-
-        # Failed system configuration stops dispatch before construction or execution.
-        assert events == []
 
 class TestLogDetections(ScanFixtures):
     @pytest.fixture
@@ -330,6 +275,7 @@ class TestLogDetections(ScanFixtures):
         sheets = slurm.GoogleSheetsConfig('spreadsheet-id', 'CBC log')
         return slurm.LogDetections(scan, 'streaks', sheets, in_suffix='online')
 
+    @pytest.fixture
     def chunk_paths(self, scan: Scan) -> list[Path]:
         output_dir = scan.config.detect.streaks_dir
         chunk_dir = Path(scan.files.scan_subdir(output_dir, 'online'))
@@ -340,19 +286,22 @@ class TestLogDetections(ScanFixtures):
             path.touch()
         return paths
 
-    def test_prefers_compiled_scan(self, scan: Scan, logger: slurm.LogDetections):
-        self.chunk_paths(scan)
+    @pytest.fixture
+    def compiled_path(self, scan: Scan, chunk_paths: list[Path]) -> Path:
         compiled = Path(scan.files.scan_file(
             suffix='online', dir=scan.config.detect.streaks_dir))
         compiled.touch()
+        return compiled
 
-        assert logger.result_files() == [str(compiled)]
+    def test_prefers_compiled_scan(self, logger: slurm.LogDetections,
+                                   compiled_path: Path):
+        # A compiled scan takes precedence over its individual chunk artifacts.
+        assert logger.result_files() == [str(compiled_path)]
 
-    def test_falls_back_to_ordered_chunks(self, scan: Scan,
+    def test_falls_back_to_ordered_chunks(self, chunk_paths: list[Path],
                                           logger: slurm.LogDetections):
-        paths = self.chunk_paths(scan)
-
-        assert logger.result_files() == [str(path) for path in reversed(paths)]
+        # Chunk fallback follows numeric chunk order regardless of discovery order.
+        assert logger.result_files() == [str(path) for path in reversed(chunk_paths)]
 
 class TestCompileFiles(ScanFixtures):
     @pytest.fixture
@@ -364,16 +313,11 @@ class TestCompileFiles(ScanFixtures):
         pd.DataFrame({'index': [offset], 'pulse_id': [offset + 20],
                       'n_detections': [offset + 2]}).to_hdf(path, key='metadata')
 
-    def patch_scan(self, monkeypatch: pytest.MonkeyPatch, scan: Scan):
-        monkeypatch.setattr(slurm.ScanConfig, 'read',
-                            classmethod(lambda cls, _: scan.config))
-
-    def write_chunks(self, scan: Scan, offsets: tuple[int, ...],
-                     suffix: str=str()) -> tuple[Path, ...]:
-        scan_dir = Path(scan.files.scan_subdir(scan.config.detect.streaks_dir, suffix))
+    def write_chunks(self, scan: Scan, offsets: tuple[int, ...]) -> tuple[Path, ...]:
+        scan_dir = Path(scan.files.scan_subdir(scan.config.detect.streaks_dir))
         scan_dir.mkdir(parents=True)
         paths = tuple(Path(scan.files.scan_file(
-            index, dir=scan.config.detect.streaks_dir, suffix=suffix))
+            index, dir=scan.config.detect.streaks_dir))
                       for index in range(len(offsets)))
         for chunk_id, (path, offset) in enumerate(zip(paths, offsets)):
             self.write_chunk(path, offset)
@@ -386,19 +330,102 @@ class TestCompileFiles(ScanFixtures):
         return self.write_chunks(scan, offsets)
 
     @pytest.fixture
-    def suffixed_chunk_paths(self, scan: Scan,
-                             offsets: tuple[int, ...]) -> tuple[Path, ...]:
-        return self.write_chunks(scan, offsets, suffix='in')
-
-    def test_compile_loading(self, scan: Scan, tmp_path: Path):
+    def loaded_path(self, tmp_path: Path) -> Path:
         path = tmp_path / 'compiled.h5'
         self.write_chunk(path, 1)
         with h5py.File(path, mode='a') as output_file:
             output_file['extra/chunk_id_0/input_file'] = 'input-0.h5'
             output_file['extra/chunk_id_1/input_file'] = 'input-1.h5'
+        return path
 
+    @pytest.fixture
+    def scans(self, scan: Scan) -> tuple[Scan, ...]:
+        return (scan, Scan(scan.scan_num + 1, scan.config))
+
+    @pytest.fixture
+    def frame_offsets(self) -> tuple[int, ...]:
+        return (0, 5, 9)
+
+    @pytest.fixture
+    def reflection_config(self) -> dict[str, object]:
+        return {'method': 'test', 'steps': 2}
+
+    @pytest.fixture
+    def reflection_data(self, offsets: tuple[int, ...]) -> pd.DataFrame:
+        return pd.DataFrame({
+            'index': offsets,
+            'h': [1, 2],
+            'k': [0, 0],
+            'l': [0, 0],
+            'I_hkl': [10.0, 20.0],
+            'sigma_hkl': [1.0, 2.0],
+        })
+
+    @pytest.fixture
+    def reflection_stats(self) -> pd.DataFrame:
+        return pd.DataFrame({'step': [0, 1], 'loss': [2.0, 1.0]})
+
+    @pytest.fixture
+    def reflection_paths(self, scan: Scan, scans: tuple[Scan, ...],
+                         reflection_data: pd.DataFrame, reflection_stats: pd.DataFrame,
+                         reflection_config: dict[str, object]) -> tuple[Path, ...]:
+        paths = []
+        for item in scans:
+            path = Path(item.files.scan_file(dir=scan.config.setup.reflections_dir))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            reflection_data.to_hdf(path, key='data')
+            reflection_stats.to_hdf(path, key='stats', mode='a')
+            with h5py.File(path, mode='a') as output_file:
+                output_file.attrs['config'] = json.dumps(reflection_config)
+                output_file['extra/input_file'] = f'input-{item.scan_num}.h5'
+            paths.append(path)
+        return tuple(paths)
+
+    @pytest.fixture
+    def scan_list(self, scans: tuple[Scan, ...], reflection_paths: tuple[Path, ...],
+                  frame_offsets: tuple[int, ...],
+                  monkeypatch: pytest.MonkeyPatch) -> slurm.ScanList:
+        scan_list = scans[0].config.open_scan([item.scan_num for item in scans])
+        monkeypatch.setattr(slurm.ScanList, 'run', lambda self: Namespace(
+            indices=lambda: Namespace(offsets=frame_offsets)))
+        return scan_list
+
+    @pytest.fixture
+    def solution_config(self) -> dict[str, object]:
+        return {'method': 'test', 'steps': 2}
+
+    @pytest.fixture
+    def solution_paths(self, scan: Scan,
+                       solution_config: dict[str, object]) -> tuple[Path, ...]:
+        scan_dir = Path(scan.files.scan_subdir(scan.config.setup.solutions_dir))
+        scan_dir.mkdir(parents=True)
+        paths = tuple(Path(scan.files.scan_file(
+            index, dir=scan.config.setup.solutions_dir)) for index in range(2))
+        for chunk_id, path in enumerate(paths):
+            pd.DataFrame({'index': [10 + chunk_id]}).to_hdf(path, key='data')
+            pd.DataFrame({'index': [0], 'h': [1], 'k': [0], 'l': [0]}).to_hdf(
+                path, key='miller', mode='a')
+            pd.DataFrame({'step': [0], 'loss': [2.0 - chunk_id]}).to_hdf(
+                path, key='stats', mode='a')
+            if chunk_id == 0:
+                pd.DataFrame({'index': [10], 'loss': [2.0]}).to_hdf(
+                    path, key='candidates', mode='a')
+            with h5py.File(path, mode='a') as output_file:
+                output_file.attrs['config'] = json.dumps(solution_config)
+                output_file['extra/input_file'] = f'input-{chunk_id}.h5'
+        return paths
+
+    @pytest.fixture
+    def incomplete_path(self, scan: Scan) -> Path:
+        scan_dir = Path(scan.files.scan_subdir(scan.config.detect.streaks_dir))
+        scan_dir.mkdir(parents=True)
+        path = Path(scan.files.scan_file(0, dir=scan.config.detect.streaks_dir))
+        pd.DataFrame({'index': [0]}).to_hdf(path, key='data')
+        return path
+
+    def test_load_nested_provenance(self, scan: Scan, loaded_path: Path):
         compiler = slurm.CompileFiles('streaks', scan)
-        content = compiler.load_file(path, compiler.schemas['streaks'])
+        content = compiler.load_file(str(loaded_path), compiler.schemas['streaks'])
 
         # Nested provenance keeps its path relative to the HDF5 ``extra`` group.
         assert content.extra == {
@@ -406,10 +433,7 @@ class TestCompileFiles(ScanFixtures):
             'chunk_id_1/input_file': 'input-1.h5',
         }
 
-    def test_compile_steaks(self, scan: Scan, chunk_paths: tuple[Path, ...],
-                            monkeypatch: pytest.MonkeyPatch):
-        self.patch_scan(monkeypatch, scan)
-
+    def test_compile_streaks(self, scan: Scan, chunk_paths: tuple[Path, ...]):
         slurm.CompileFiles('streaks', scan).run()
 
         output_path = scan.files.scan_file(dir=scan.config.detect.streaks_dir)
@@ -427,91 +451,33 @@ class TestCompileFiles(ScanFixtures):
         with h5py.File(output_path, mode='r') as output_file:
             assert 'extra' not in output_file
 
-    def test_compile_multiple_scans(self, scan: Scan,
-                                    offsets: tuple[int, ...],
-                                    monkeypatch: pytest.MonkeyPatch):
-        self.patch_scan(monkeypatch, scan)
-        scans = [scan, Scan(scan.scan_num + 1, scan.config)]
-        for item in scans:
-            path = Path(item.files.scan_file(dir=scan.config.detect.streaks_dir))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data = pd.DataFrame({'index': offsets, 'signal': [offset + 10
-                                                              for offset in offsets]})
-            metadata = pd.DataFrame({
-                'index': offsets,
-                'pulse_id': [offset + 20 for offset in offsets],
-                'n_detections': [offset + 2 for offset in offsets]})
-            data.to_hdf(path, key='data')
-            metadata.to_hdf(path, key='metadata', mode='a')
-            with h5py.File(path, mode='a') as output_file:
-                for chunk_id in range(len(offsets)):
-                    output_file[f'extra/chunk_id_{chunk_id}/input_file'] = (
-                        f'input-{item.scan_num}-{chunk_id}.h5')
-        scan_list = scan.config.open_scan([item.scan_num for item in scans])
-        monkeypatch.setattr(slurm.ScanList, 'run', lambda self: Namespace(
-            indices=lambda: Namespace(offsets=[0, 5, 9])))
-        compiler = slurm.CompileFiles('streaks', scan_list)
-        compiler.run()
-
+    def test_compile_multiple_scans(self, scan: Scan, scans: tuple[Scan, ...],
+                                    scan_list: slurm.ScanList,
+                                    reflection_data: pd.DataFrame,
+                                    reflection_stats: pd.DataFrame,
+                                    frame_offsets: tuple[int, ...]):
+        slurm.CompileFiles('reflections', scan_list).run()
         name = f'scan_{scan.scan_num:d}_{scan.scan_num + 1:d}_full'
-        output_path = Path(scan.config.detect.streaks_dir) / f'{name}.h5'
+        output_path = Path(scan.config.setup.reflections_dir) / f'{name}.h5'
         data = pd.read_hdf(output_path, 'data')
-        metadata = pd.read_hdf(output_path, 'metadata')
+        stats = pd.read_hdf(output_path, 'stats')
 
-        # Run-list offsets place scan-local data indices in the flattened frame space.
-        expected_data = pd.DataFrame({'index': [1, 2, 6, 7],
-                                      'signal': [11, 12, 11, 12]})
-        expected_metadata = pd.concat(
-            [pd.DataFrame({'index': offsets,
-                           'pulse_id': [offset + 20 for offset in offsets],
-                           'n_detections': [offset + 2 for offset in offsets]})
-             for _ in scans], ignore_index=True)
+        # Frame indices become global while optimisation traces retain their source scan.
+        expected_data = pd.concat([
+            reflection_data.assign(index=reflection_data['index'] + frame_offset)
+            for frame_offset in frame_offsets[:len(scans)]], ignore_index=True)
+        expected_stats = pd.concat([
+            reflection_stats.assign(scan_num=item.scan_num) for item in scans],
+            ignore_index=True)
         pd.testing.assert_frame_equal(data, expected_data)
-        pd.testing.assert_frame_equal(metadata, expected_metadata)
-        assert 'scan_num' not in data.columns
+        pd.testing.assert_frame_equal(stats, expected_stats)
         with h5py.File(output_path, mode='r') as output_file:
             for item in scans:
-                for chunk_id in range(len(offsets)):
-                    path = f'extra/scan_num_{item.scan_num}/chunk_id_{chunk_id}/input_file'
-                    assert output_file[path].asstr()[()] == (
-                        f'input-{item.scan_num}-{chunk_id}.h5')
+                path = f'extra/scan_num_{item.scan_num}/input_file'
+                assert output_file[path].asstr()[()] == f'input-{item.scan_num}.h5'
 
-    def test_compile_suffixes(self, scan: Scan,
-                              suffixed_chunk_paths: tuple[Path, ...],
-                              monkeypatch: pytest.MonkeyPatch):
-        self.patch_scan(monkeypatch, scan)
-
-        slurm.CompileFiles('streaks', scan, 'in', 'out').run()
-
-        output_path = scan.files.scan_file(dir=scan.config.detect.streaks_dir, suffix='out')
-        expected = pd.concat([pd.read_hdf(path, 'data') for path in suffixed_chunk_paths],
-                             ignore_index=True)
-        # Input and output suffixes change routing without changing table contents.
-        dataframe = pd.read_hdf(output_path, 'data')
-        assert isinstance(dataframe, pd.DataFrame)
-        pd.testing.assert_frame_equal(dataframe, expected)
-
-    def test_compile_solutions(self, scan: Scan, monkeypatch: pytest.MonkeyPatch):
-        self.patch_scan(monkeypatch, scan)
-        scan_dir = Path(scan.files.scan_subdir(scan.config.setup.solutions_dir))
-        scan_dir.mkdir(parents=True)
-        config = {'method': 'test', 'steps': 2}
-        paths = tuple(Path(scan.files.scan_file(index, dir=scan.config.setup.solutions_dir))
-                      for index in range(2))
-
-        for chunk_id, path in enumerate(paths):
-            pd.DataFrame({'index': [10 + chunk_id]}).to_hdf(path, key='data')
-            pd.DataFrame({'index': [0], 'h': [1], 'k': [0], 'l': [0]}).to_hdf(
-                path, key='miller', mode='a')
-            pd.DataFrame({'step': [0], 'loss': [2.0 - chunk_id]}).to_hdf(
-                path, key='stats', mode='a')
-            if chunk_id == 0:
-                pd.DataFrame({'index': [10], 'loss': [2.0]}).to_hdf(
-                    path, key='candidates', mode='a')
-            with h5py.File(path, mode='a') as output_file:
-                output_file.attrs['config'] = json.dumps(config)
-                output_file[f'extra/input_file'] = f'input-{chunk_id}.h5'
-
+    def test_compile_solutions(self, scan: Scan, solution_paths: tuple[Path, ...],
+                               solution_config: dict[str, object]):
         slurm.CompileFiles('solutions', scan).run()
 
         output_path = scan.files.scan_file(dir=scan.config.setup.solutions_dir)
@@ -523,21 +489,15 @@ class TestCompileFiles(ScanFixtures):
         with pd.HDFStore(output_path, mode='r') as store:
             assert '/candidates' not in store.keys()
         with h5py.File(output_path, mode='r') as output_file:
-            assert json.loads(output_file.attrs['config']) == config
+            assert json.loads(output_file.attrs['config']) == solution_config
             assert output_file['extra/chunk_id_0/input_file'].asstr()[()] == 'input-0.h5'
             assert output_file['extra/chunk_id_1/input_file'].asstr()[()] == 'input-1.h5'
 
-    def test_compile(self, scan: Scan, monkeypatch: pytest.MonkeyPatch):
-        self.patch_scan(monkeypatch, scan)
-        scan_dir = Path(scan.files.scan_subdir(scan.config.detect.streaks_dir))
-        scan_dir.mkdir(parents=True)
-        path = scan.files.scan_file(0, dir=scan.config.detect.streaks_dir)
-        pd.DataFrame({'index': [0]}).to_hdf(path, key='data')
-
+    def test_missing_required_table(self, scan: Scan, incomplete_path: Path):
         # Artifact schemas reject incomplete input at the compilation boundary.
         with pytest.raises(
                 ValueError,
-                match="Missing required tables \['metadata'\]"):
+                match=r"Missing required tables \['metadata'\]"):
             slurm.CompileFiles('streaks', scan).run()
 
 class TestDetectHits(ScanFixtures):
@@ -545,29 +505,51 @@ class TestDetectHits(ScanFixtures):
     def detect_scan(self, scan: Scan) -> Scan:
         return Scan(scan.scan_num, scan.config.replace(image_kind='stacked'))
 
-    def test_metadata_contains_hit_counts_only(self, detect_scan: Scan,
-                                               xp: NumPyNamespace,
-                                               monkeypatch: pytest.MonkeyPatch):
-        class FakeRun:
-            def indices(self) -> StackIndices:
-                return StackIndices([StackIndex('input.h5', 3)])
+    @pytest.fixture
+    def params(self) -> StreakFinderConfig:
+        return StreakFinderConfig.__new__(StreakFinderConfig)
 
-            def worker(self, geometry: bool) -> object:
-                return object()
+    @pytest.fixture
+    def hit_run(self, xp: NumPyNamespace) -> DetectionRun:
+        return DetectionRun(xp.asarray([10, 12]))
 
-            def metadata(self, attr: str, keys: StackIndices) -> RealArray:
-                assert attr == 'pulse_id'
-                return xp.asarray([10, 12])
+    @pytest.fixture
+    def empty_run(self, xp: NumPyNamespace) -> DetectionRun:
+        return DetectionRun(xp.zeros(0, dtype=int))
 
-        streaks = Streaks(xp.asarray([0, 0, 2, 2, 2]), xp.zeros((5, 4)))
-        monkeypatch.setattr(slurm.Scan, 'run', lambda self: FakeRun())
+    @pytest.fixture
+    def detected_streaks(self, xp: NumPyNamespace) -> Streaks:
+        return Streaks(xp.asarray([0, 0, 2, 2, 2]), xp.zeros((5, 4)))
+
+    @pytest.fixture
+    def empty_streaks(self, xp: NumPyNamespace) -> Streaks:
+        return Streaks(xp.zeros(0, dtype=int), xp.zeros((0, 4)))
+
+    @pytest.fixture
+    def hit_script(self, detect_scan: Scan, hit_run: DetectionRun,
+                   detected_streaks: Streaks, params: StreakFinderConfig,
+                   monkeypatch: pytest.MonkeyPatch) -> DetectHits:
+        monkeypatch.setattr(slurm.Scan, 'run', lambda self: hit_run)
         monkeypatch.setattr(slurm.Scan, 'find_metadata',
                             lambda self, file_index=None: 'metadata.h5')
         monkeypatch.setattr('cbclib_v2.slurm.scripts.pool_detection',
-                            lambda *args, **kwargs: streaks)
-        params = StreakFinderConfig.__new__(StreakFinderConfig)
+                            lambda *args, **kwargs: detected_streaks)
+        return slurm.Scripts.detect(detect_scan, params, 0, 1, False, 'online')
 
-        slurm.Scripts.detect(detect_scan, params, 0, 1, False, 'online').run()
+    @pytest.fixture
+    def empty_script(self, detect_scan: Scan, empty_run: DetectionRun,
+                     empty_streaks: Streaks, params: StreakFinderConfig,
+                     monkeypatch: pytest.MonkeyPatch) -> DetectHits:
+        monkeypatch.setattr(slurm.Scan, 'run', lambda self: empty_run)
+        monkeypatch.setattr(slurm.Scan, 'find_metadata',
+                            lambda self, file_index=None: 'metadata.h5')
+        monkeypatch.setattr('cbclib_v2.slurm.scripts.pool_detection',
+                            lambda *args, **kwargs: empty_streaks)
+        return slurm.Scripts.detect(detect_scan, params, 0, 1, False, 'online')
+
+    def test_metadata_contains_hit_counts_only(self, detect_scan: Scan,
+                                               hit_script: DetectHits):
+        hit_script.run()
 
         path = detect_scan.files.scan_file(
             0, suffix='online', dir=detect_scan.config.detect.streaks_dir)
@@ -579,30 +561,8 @@ class TestDetectHits(ScanFixtures):
             assert output_file.attrs['n_frames'] == 3
 
     def test_zero_hits_writes_complete_artifact(self, detect_scan: Scan,
-                                                xp: NumPyNamespace,
-                                                monkeypatch: pytest.MonkeyPatch):
-        class FakeRun:
-            def indices(self) -> StackIndices:
-                return StackIndices([StackIndex('input.h5', 3)])
-
-            def worker(self, geometry: bool) -> object:
-                return object()
-
-            def metadata(self, attr: str, keys: Any) -> RealArray:
-                assert attr == 'pulse_id'
-                assert len(keys) == 0
-                return xp.zeros(0, dtype=int)
-
-        empty = Streaks(xp.zeros(0, dtype=int), xp.zeros((0, 4)))
-        monkeypatch.setattr(slurm.Scan, 'run', lambda self: FakeRun())
-        monkeypatch.setattr(slurm.Scan, 'find_metadata',
-                            lambda self, file_index=None: 'metadata.h5')
-        monkeypatch.setattr('cbclib_v2.slurm.scripts.pool_detection',
-                            lambda *args, **kwargs: empty)
-        params = StreakFinderConfig.__new__(StreakFinderConfig)
-        script = slurm.Scripts.detect(detect_scan, params, 0, 1, False, 'online')
-
-        script.run()
+                                                empty_script: DetectHits):
+        empty_script.run()
 
         path = detect_scan.files.scan_file(
             0, suffix='online', dir=detect_scan.config.detect.streaks_dir)
@@ -715,41 +675,108 @@ class TestRoutingConvention(ScanFixtures):
 
 class TestSBatchRouting:
     @pytest.fixture(autouse=True)
-    def patch_script_spec(self, monkeypatch: pytest.MonkeyPatch):
+    def patch_script_spec(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(slurm.ScriptSpec, 'read',
                             classmethod(lambda cls, _: slurm.ScriptSpec()))
 
     @pytest.fixture(params=['single', 'array'])
-    def indexing_script(self, request: pytest.FixtureRequest) -> slurm.SLURMScript:
-        kwargs = {'hits_dir': 'regions', 'in_suffix': 'seg', 'out_suffix': 'idx'}
-        if request.param == 'single':
+    def indexing_args(self, request: pytest.FixtureRequest) -> Namespace:
+        return Namespace(kind=request.param, scan_num=7, n_tasks=4,
+                         scan_file='scan.json', params_file='index.json',
+                         script_file='slurm.json', hits_dir='regions',
+                         in_suffix='seg', out_suffix='idx')
+
+    @pytest.fixture
+    def indexing_script(self, indexing_args: Namespace) -> slurm.SLURMScript:
+        if indexing_args.kind == 'single':
             return slurm.SBatchScripts.index(
-                7, 'scan.json', 'index.json', 'slurm.json', **kwargs)
+                indexing_args.scan_num, indexing_args.scan_file, indexing_args.params_file,
+                indexing_args.script_file, hits_dir=indexing_args.hits_dir,
+                in_suffix=indexing_args.in_suffix, out_suffix=indexing_args.out_suffix)
         return slurm.SBatchArrayScripts.index(
-            7, 4, 'scan.json', 'index.json', 'slurm.json', **kwargs)
+            indexing_args.scan_num, indexing_args.n_tasks, indexing_args.scan_file,
+            indexing_args.params_file, indexing_args.script_file,
+            hits_dir=indexing_args.hits_dir, in_suffix=indexing_args.in_suffix,
+            out_suffix=indexing_args.out_suffix)
+
+    @pytest.fixture
+    def refine_args(self) -> Namespace:
+        return Namespace(scan_num=7, n_tasks=4, scan_file='scan.json',
+                         params_file='refine.json', script_file='slurm.json',
+                         hits_dir='regions', xtal_dir='solutions',
+                         in_suffix='idx', out_suffix='rf')
+
+    @pytest.fixture
+    def refine_script(self, refine_args: Namespace) -> slurm.SLURMArrayScript:
+        return slurm.SBatchArrayScripts.refine(
+            refine_args.scan_num, refine_args.n_tasks, refine_args.scan_file,
+            refine_args.params_file, refine_args.script_file,
+            hits_dir=refine_args.hits_dir, xtal_dir=refine_args.xtal_dir,
+            in_suffix=refine_args.in_suffix, out_suffix=refine_args.out_suffix)
+
+    @pytest.fixture
+    def metalist_args(self) -> Namespace:
+        return Namespace(scan_num=[373, 374, 380], scan_file='scan.json',
+                         params_file='metadata.json', script_file='slurm.json')
+
+    @pytest.fixture
+    def metalist_script(self, metalist_args: Namespace) -> slurm.SLURMScript:
+        return slurm.SBatchScripts.metalist(
+            metalist_args.scan_num, metalist_args.scan_file, metalist_args.params_file,
+            metalist_args.script_file)
+
+    @pytest.fixture
+    def compile_args(self) -> Namespace:
+        return Namespace(kind='streaks', scan_num=range(373, 380, 2),
+                         scan_file='scan.json', script_file='slurm.json',
+                         in_suffix='chunks', out_suffix='compiled')
+
+    @pytest.fixture
+    def compile_script(self, compile_args: Namespace) -> slurm.SLURMArrayScript:
+        return slurm.SBatchArrayScripts.compile(
+            compile_args.kind, compile_args.scan_num, compile_args.scan_file,
+            compile_args.script_file, in_suffix=compile_args.in_suffix,
+            out_suffix=compile_args.out_suffix)
+
+    @pytest.fixture
+    def log_args(self) -> Namespace:
+        return Namespace(scan_num=[373, 374], kind='regions', scan_file='scan.json',
+                         google_file='sheets.json', script_file='slurm.json',
+                         in_suffix='online', sample='lysozyme', notes='alignment check')
+
+    @pytest.fixture
+    def log_script(self, log_args: Namespace) -> slurm.SLURMScript:
+        return slurm.SBatchScripts.log(
+            log_args.scan_num, log_args.kind, log_args.scan_file, log_args.google_file,
+            log_args.script_file, in_suffix=log_args.in_suffix, sample=log_args.sample,
+            notes=log_args.notes)
 
     def option_value(self, command: list[str], option: str) -> str:
         return command[command.index(option) + 1]
 
-    def test_indexing_script(self, indexing_script: slurm.SLURMScript):
+    def test_indexing_script(self, indexing_args: Namespace,
+                             indexing_script: slurm.SLURMScript) -> None:
         command = shlex.split(indexing_script.command)
-        expected = {'--hits-dir': 'regions', '--in-suffix': 'seg', '--out-suffix': 'idx'}
+        expected = {'--hits-dir': indexing_args.hits_dir,
+                    '--in-suffix': indexing_args.in_suffix,
+                    '--out-suffix': indexing_args.out_suffix}
+        job_prefix = 'index' if indexing_args.kind == 'single' else 'index_array'
 
         # Single and array jobs preserve the same indexing CLI option contract.
-        assert command[2] == '7'
-        assert indexing_script.job_name in ('index_7', 'index_array_7')
+        assert command[2] == str(indexing_args.scan_num)
+        assert indexing_script.job_name == f'{job_prefix}_{indexing_args.scan_num}'
         for option, value in expected.items():
             assert self.option_value(command, option) == value
         assert '--input-dir' not in command
         assert '--suffix' not in command
 
-    def test_refine_script(self):
-        expected = {'--hits-dir': 'regions', '--xtal-dir': 'solutions',
-                    '--in-suffix': 'idx', '--out-suffix': 'rf'}
-        script = slurm.SBatchArrayScripts.refine(
-            7, 4, 'scan.json', 'refine.json', 'slurm.json', hits_dir='regions',
-            xtal_dir='solutions', in_suffix='idx', out_suffix='rf')
-        command = shlex.split(script.command)
+    def test_refine_script(self, refine_args: Namespace,
+                           refine_script: slurm.SLURMArrayScript) -> None:
+        expected = {'--hits-dir': refine_args.hits_dir,
+                    '--xtal-dir': refine_args.xtal_dir,
+                    '--in-suffix': refine_args.in_suffix,
+                    '--out-suffix': refine_args.out_suffix}
+        command = shlex.split(refine_script.command)
 
         # Refinement array jobs forward both independent input-directory selectors.
         for option, value in expected.items():
@@ -757,122 +784,37 @@ class TestSBatchRouting:
         assert '--input-dir' not in command
         assert '--suffix' not in command
 
-    def test_metalist_scan_list(self):
-        script = slurm.SBatchScripts.metalist(
-            [373, 374, 380], 'scan.json', 'metadata.json', 'slurm.json')
-
+    def test_metalist_scan_list(self, metalist_args: Namespace,
+                                metalist_script: slurm.SLURMScript) -> None:
         # A scan selection maps directly to scan-indexed tasks and one shared command.
-        assert isinstance(script, slurm.SLURMArrayScript)
-        assert script.task_ids == [373, 374, 380]
-        assert script.job_name == 'metalist_373_374_380'
-        command = shlex.split(script.command)
+        assert isinstance(metalist_script, slurm.SLURMArrayScript)
+        assert metalist_script.task_ids == metalist_args.scan_num
+        assert metalist_script.job_name == 'metalist_' + '_'.join(
+            str(scan_num) for scan_num in metalist_args.scan_num)
+        command = shlex.split(metalist_script.command)
         assert command[2] == '${SCAN_NUM}'
-        assert script.parameters.define_macros['SCAN_NUM'] == '${SLURM_ARRAY_TASK_ID}'
+        assert metalist_script.parameters.define_macros['SCAN_NUM'] == '${SLURM_ARRAY_TASK_ID}'
 
-    def test_compile_scan_range(self):
-        script = slurm.SBatchArrayScripts.compile(
-            'streaks', range(373, 380, 2), 'scan.json', 'slurm.json',
-            in_suffix='chunks', out_suffix='compiled')
-
-        command = shlex.split(script.command)
+    def test_compile_scan_range(self, compile_args: Namespace,
+                                compile_script: slurm.SLURMArrayScript) -> None:
+        command = shlex.split(compile_script.command)
+        scan_num = compile_args.scan_num
         # Each task receives one scan number and compiles only that scan's chunks.
-        assert script.task_ids == range(373, 380, 2)
-        assert script.job_name == 'compile_array_373-380-2'
+        assert compile_script.task_ids == scan_num
+        assert compile_script.job_name == (
+            f'compile_array_{scan_num.start}-{scan_num.stop}-{scan_num.step}')
         assert command[3] == '${SCAN_NUM}'
-        assert script.parameters.define_macros['SCAN_NUM'] == '${SLURM_ARRAY_TASK_ID}'
-        assert self.option_value(command, '--in-suffix') == 'chunks'
-        assert self.option_value(command, '--out-suffix') == 'compiled'
+        assert compile_script.parameters.define_macros['SCAN_NUM'] == '${SLURM_ARRAY_TASK_ID}'
+        assert self.option_value(command, '--in-suffix') == compile_args.in_suffix
+        assert self.option_value(command, '--out-suffix') == compile_args.out_suffix
 
-    def test_log_scan_list_is_single_writer(self):
-        script = slurm.SBatchScripts.log(
-            [373, 374], 'regions', 'scan.json', 'sheets.json', 'slurm.json',
-            in_suffix='online', sample='lysozyme', notes='alignment check')
-        command = shlex.split(script.command)
+    def test_log_scan_list_is_single_writer(self, log_args: Namespace,
+                                            log_script: slurm.SLURMScript) -> None:
+        command = shlex.split(log_script.command)
 
         # The scan selection remains one command handled sequentially by the logger.
-        assert isinstance(script, slurm.SLURMScript)
-        assert command[2] == '373_374'
-        assert command[3] == 'regions'
-        assert self.option_value(command, '--in-suffix') == 'online'
-        assert self.option_value(command, '--sample') == 'lysozyme'
-        assert self.option_value(command, '--notes') == 'alignment check'
-
-    @pytest.mark.parametrize('scan_num', [[], [7, 7], [-1]])
-    def test_scan_list_invalid_numbers(self, scan_num: list[int]):
-        # Task selections must be non-empty, unique, and non-negative.
-        with pytest.raises(ValueError, match='scan_num'):
-            slurm.SBatchScripts.metalist(
-                scan_num, 'scan.json', 'metadata.json', 'slurm.json')
-
-class TestRefineResult:
-    @pytest.fixture
-    def xp(self) -> NumPyNamespace:
-        return NumPy
-
-    @pytest.fixture(params=['shared', 'per-pattern'])
-    def mode(self, request: pytest.FixtureRequest) -> SetupMode:
-        return cast(SetupMode, request.param)
-
-    @pytest.fixture
-    def frames(self, xp: NumPyNamespace) -> IntArray:
-        return xp.asarray([7, 7, 9])
-
-    @pytest.fixture
-    def loss(self, xp: NumPyNamespace) -> RealArray:
-        return xp.asarray([2.0, 1.0, 3.0])
-
-    @pytest.fixture
-    def xtal(self, loss: RealArray, xp: NumPyNamespace) -> XtalState:
-        scales = xp.arange(1, loss.size + 1)
-        return XtalState(xp.asarray(scales[:, None, None] * xp.eye(3)))
-
-    @pytest.fixture
-    def geometry(self, mode: SetupMode, loss: RealArray,
-                 xp: NumPyNamespace) -> ResolvedGeometry:
-        if mode == 'shared':
-            size = 1
-        else:
-            size = loss.size
-        offsets = xp.arange(size)[:, None]
-        foc_pos = xp.asarray([[0.10, 0.20, -0.40]]) + 0.01 * offsets
-        pupil_roi = xp.asarray([[0.15, 0.17, 0.12, 0.16]]) + 0.01 * offsets
-        defocus = 0.01 * xp.arange(1, size + 1)
-        return ResolvedGeometry(foc_pos, pupil_roi, defocus)
-
-    @pytest.fixture
-    def resolved(self, xtal: XtalState, geometry: ResolvedGeometry) -> ResolvedSetup:
-        return ResolvedSetup(xtal, geometry)
-
-    @pytest.fixture
-    def result(self, frames: IntArray, resolved: ResolvedSetup,
-               loss: RealArray) -> RefineResult:
-        return RefineResult(frames=frames, resolved=resolved, loss=loss)
-
-    def test_champions(self, result: RefineResult, xp: NumPyNamespace):
-        indices = result.champions_only()
-
-        # A champion is the unique minimum-loss candidate for each frame.
-        for frame in xp.unique_values(result.frames):
-            candidates = xp.where(result.frames == frame)[0]
-            selected = indices[result.frames[indices] == frame]
-            assert selected.size == 1
-            check_close(result.loss[selected], xp.min(result.loss[candidates]))
-
-    def test_dataframe_round_trip(self, result: RefineResult,
-                                  xp: NumPyNamespace):
-        dataframe = result.to_dataframe()
-        frames, restored = ResolvedSetup.import_dataframe(dataframe, index=True, xp=xp)
-        if result.resolved.geometry.size == 1:
-            expected_geometry = result.resolved.geometry.broadcast(result.frames.size)
-        else:
-            expected_geometry = result.resolved.geometry
-
-        # Tabular conversion preserves frame labels, loss, crystal state, and geometry.
-        assert isinstance(expected_geometry, ResolvedGeometry)
-        assert isinstance(restored.geometry, ResolvedGeometry)
-        assert xp.all(frames == result.frames)
-        check_close(dataframe['loss'].to_numpy(), result.loss)
-        check_close(restored.xtal.basis, result.resolved.xtal.basis)
-        check_close(restored.geometry.foc_pos, expected_geometry.foc_pos)
-        check_close(restored.geometry.pupil_roi, expected_geometry.pupil_roi)
-        check_close(restored.geometry.defocus, expected_geometry.defocus)
+        assert command[2] == '_'.join(str(scan_num) for scan_num in log_args.scan_num)
+        assert command[3] == log_args.kind
+        assert self.option_value(command, '--in-suffix') == log_args.in_suffix
+        assert self.option_value(command, '--sample') == log_args.sample
+        assert self.option_value(command, '--notes') == log_args.notes

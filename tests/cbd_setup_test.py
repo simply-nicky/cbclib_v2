@@ -1,12 +1,15 @@
+from typing import Literal, cast
 import pytest
 from cbclib_v2 import default_rng
-from cbclib_v2.annotations import Generator, NDArray, NumPyNamespace, NumPy, RealArray
+from cbclib_v2.annotations import Generator, IntArray, NDArray, NumPyNamespace, NumPy, RealArray
 from cbclib_v2.indexer import (CBDPoints, ConvexPolygon, EdgePoints, FixedApertureSetup,
                                FixedPupilSetup, FixedSetup, LinePoints, Miller, MillerWithRLP,
-                               PupilIntersection, Rectangle, RefinerModel, ResolvedGeometry,
-                               ResolvedSetup, RotationState, SimulatedVectors, SourcePlane,
-                               XtalCell, XtalState)
+                               PupilIntersection, Rectangle, RefineResult, RefinerModel,
+                               ResolvedGeometry, ResolvedSetup, RotationState, SimulatedVectors,
+                               SourcePlane, XtalCell, XtalState)
 from cbclib_v2.test_util import TestSetup, check_close
+
+SetupMode = Literal['shared', 'per-pattern']
 
 class TestCBDSetup():
     @pytest.fixture
@@ -379,3 +382,73 @@ class TestPupilIntersection:
         check_close(kin[..., 1], xp.broadcast_to(expected_y[..., None], score.shape))
         check_close(score, expected_score)
         check_close(xp.sum(kin**2, axis=-1), xp.ones(kin.shape[:-1]))
+
+class TestRefineResult:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    @pytest.fixture(params=['shared', 'per-pattern'])
+    def mode(self, request: pytest.FixtureRequest) -> SetupMode:
+        return cast(SetupMode, request.param)
+
+    @pytest.fixture
+    def frames(self, xp: NumPyNamespace) -> IntArray:
+        return xp.asarray([7, 7, 9])
+
+    @pytest.fixture
+    def loss(self, xp: NumPyNamespace) -> RealArray:
+        return xp.asarray([2.0, 1.0, 3.0])
+
+    @pytest.fixture
+    def xtal(self, loss: RealArray, xp: NumPyNamespace) -> XtalState:
+        scales = xp.arange(1, loss.size + 1)
+        return XtalState(xp.asarray(scales[:, None, None] * xp.eye(3)))
+
+    @pytest.fixture
+    def geometry(self, mode: SetupMode, loss: RealArray,
+                 xp: NumPyNamespace) -> ResolvedGeometry:
+        size = 1 if mode == 'shared' else loss.size
+        offsets = xp.arange(size)[:, None]
+        foc_pos = xp.asarray([[0.10, 0.20, -0.40]]) + 0.01 * offsets
+        pupil_roi = xp.asarray([[0.15, 0.17, 0.12, 0.16]]) + 0.01 * offsets
+        defocus = 0.01 * xp.arange(1, size + 1)
+        return ResolvedGeometry(foc_pos, pupil_roi, defocus)
+
+    @pytest.fixture
+    def resolved(self, xtal: XtalState, geometry: ResolvedGeometry) -> ResolvedSetup:
+        return ResolvedSetup(xtal, geometry)
+
+    @pytest.fixture
+    def result(self, frames: IntArray, resolved: ResolvedSetup,
+               loss: RealArray) -> RefineResult:
+        return RefineResult(frames=frames, resolved=resolved, loss=loss)
+
+    def test_champions(self, result: RefineResult, xp: NumPyNamespace) -> None:
+        indices = result.champions_only()
+
+        # A champion is the unique minimum-loss candidate for each frame.
+        for frame in xp.unique_values(result.frames):
+            candidates = xp.where(result.frames == frame)[0]
+            selected = indices[result.frames[indices] == frame]
+            assert selected.size == 1
+            check_close(result.loss[selected], xp.min(result.loss[candidates]))
+
+    def test_dataframe_round_trip(self, result: RefineResult,
+                                  xp: NumPyNamespace) -> None:
+        dataframe = result.to_dataframe()
+        frames, restored = ResolvedSetup.import_dataframe(dataframe, index=True, xp=xp)
+        if result.resolved.geometry.size == 1:
+            expected_geometry = result.resolved.geometry.broadcast(result.frames.size)
+        else:
+            expected_geometry = result.resolved.geometry
+
+        # Tabular conversion preserves frame labels, loss, crystal state, and geometry.
+        assert isinstance(expected_geometry, ResolvedGeometry)
+        assert isinstance(restored.geometry, ResolvedGeometry)
+        assert xp.all(frames == result.frames)
+        check_close(dataframe['loss'].to_numpy(), result.loss)
+        check_close(restored.xtal.basis, result.resolved.xtal.basis)
+        check_close(restored.geometry.foc_pos, expected_geometry.foc_pos)
+        check_close(restored.geometry.pupil_roi, expected_geometry.pupil_roi)
+        check_close(restored.geometry.defocus, expected_geometry.defocus)

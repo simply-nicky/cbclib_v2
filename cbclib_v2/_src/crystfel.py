@@ -9,8 +9,8 @@ import re
 from types import TracebackType
 from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, Literal,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import (Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy,
-                          RealArray, Shape)
+from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, IntArray, NDArray,
+                          NumPy, RealArray, Shape)
 from .array_api import array_namespace, set_at
 from .data_container import ArrayContainer, Container
 from .functions import pixel_map, radius, radial_index
@@ -714,8 +714,23 @@ class Panel(Container):
     def bounds(self) -> Tuple[float, float, float, float]:
         """Bounding box ``(x_min, y_min, x_max, y_max)`` in lab-frame pixel units."""
         x0, y0, _ = self.to_detector(0, 0)
-        x1, y1, _ = self.to_detector(self.shape[0] - 1, self.shape[1] - 1)
+        x1, y1, _ = self.to_detector(self.shape[-2] - 1, self.shape[-1] - 1)
         return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+    def is_inbound(self, x: RealArray, y: RealArray) -> BoolArray:
+        """Check whether any point lies inside this panel.
+
+        Args:
+            x: Point x-coordinates in lab-frame pixels.
+            y: Point y-coordinates in lab-frame pixels.
+
+        Returns:
+            Boolean array reduced over the final point axis.
+        """
+        xp = array_namespace(x, y)
+        x_min, y_min, x_max, y_max = self.bounds
+        return xp.any(((x >= x_min) & (x <= x_max) &
+                       (y >= y_min) & (y <= y_max)), axis=-1)
 
     def distance(self, *coordinates: IntArray | RealArray) -> RealArray:
         """Distance from each coordinate to the nearest point on this panel.
@@ -991,6 +1006,28 @@ class Detector():
             self._assembler = self._assembler.to_xp(xp)
 
         return self._assembler
+
+    def is_onpanel(self, x: RealArray, y: RealArray) -> BoolArray:
+        """Check whether any point lies inside a detector panel.
+
+        Detector-frame pixel coordinates are translated to the CrystFEL lab
+        frame before each panel performs its own bounds check.
+
+        Args:
+            x: Point x-coordinates in detector-frame pixels.
+            y: Point y-coordinates in detector-frame pixels.
+
+        Returns:
+            Boolean array reduced over the final point axis.
+        """
+        xp = array_namespace(x, y)
+        x_min, y_min = self.bounds[:2]
+        x = x + x_min
+        y = y + y_min
+        is_onpanel = xp.zeros(x.shape[:-1], dtype=bool)
+        for panel in self.panels.values():
+            is_onpanel = is_onpanel | panel.is_inbound(x, y)
+        return is_onpanel
 
     def panel(self, module_id: int) -> Panel:
         """Return the panel for a given zero-based module index.

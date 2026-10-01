@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import json
 import os
 from shlex import quote
-from typing import (Any, ClassVar, Dict, ItemsView, Iterator, KeysView, List, Literal, ValuesView,
-                    overload, Tuple, Type)
+from typing import (Any, cast, ClassVar, Dict, ItemsView, Iterator, KeysView, List, Literal,
+                    ValuesView, overload, Tuple, Type)
 import h5py
 import pandas as pd
 from tqdm.auto import tqdm
@@ -158,13 +158,32 @@ class CompiledFiles:
             tables.append(table)
         return pd.concat(tables, ignore_index=True)
 
+    def compile_with_identifier(self, key: str, identifier: str) -> pd.DataFrame:
+        """Concatenate one semantic table with its source-file identifier.
+
+        Args:
+            key: Table name to concatenate.
+            identifier: Column name used to identify each source file.
+
+        Returns:
+            Concatenated table with one source identifier per row.
+        """
+        tables: List[pd.DataFrame] = []
+        for file_id, chunk in self.files.items():
+            if key not in chunk.tables:
+                raise ValueError(f"No table found for '{key}' in file No. {file_id}")
+            table = cast(pd.DataFrame, chunk.tables[key])
+            tables.append(table.assign(**{identifier: file_id}))
+        return pd.concat(tables, ignore_index=True)
+
 @dataclass
 class CompileFiles(BaseScript):
     """Implements ``cbclib_cli compile``.
 
     Validates and concatenates per-chunk pipeline artifacts into one HDF5 file.
-    Optimisation traces retain their chunk identity, compatible configurations
-    are preserved at the root, and source provenance is written to ``extra``.
+    Optimisation traces retain their source scan when scan artifacts are merged,
+    compatible configurations are preserved at the root, and source provenance
+    is written to ``extra``.
 
     Attributes:
         kind: ``'streaks'``, ``'regions'``, ``'xtals'``, ``'solutions'``, or
@@ -196,9 +215,9 @@ class CompileFiles(BaseScript):
         initial.add_argument('scan_num', type=str,
                              help='Scan number, range, or underscore-separated scan list')
         initial.add_argument('scan', type=str, help='Path to a scan parameters JSON file')
-        initial.add_argument('--in-suffix', type=str, default=str(),
+        initial.add_argument('--in-suffix', '-is', type=str, default=str(),
                              help='Suffix of the per-chunk detection files to read')
-        initial.add_argument('--out-suffix', type=str, default=str(),
+        initial.add_argument('--out-suffix', '-os', type=str, default=str(),
                              help='Suffix of the merged detection file to write')
         return initial
 
@@ -314,11 +333,13 @@ class CompileFiles(BaseScript):
         for key in schema.tables:
             if key in schema.optional_tables and not key in files:
                 continue
-            if key in ('data', 'stats') and frame_offsets is not None:
+            if key == 'data' and frame_offsets is not None:
                 df = files.compile_with_offsets(key, 'index', frame_offsets)
-                df.to_hdf(output_path, key=key, mode=mode)
+            elif key == 'stats':
+                df = files.compile_with_identifier(key, self.file_key)
             else:
-                files.compile(key).to_hdf(output_path, key=key, mode=mode)
+                df = files.compile(key)
+            df.to_hdf(output_path, key=key, mode=mode)
             mode = 'a'
 
         if self.kind in ('streaks', 'regions') and isinstance(self.scan, Scan):
@@ -654,7 +675,7 @@ class LogDetections(BaseScript):
         initial.add_argument('scan', type=str, help='Path to a scan parameters JSON file')
         initial.add_argument('google', type=str,
                              help='Path to a Google Sheets parameters JSON file')
-        initial.add_argument('--in-suffix', type=str, default=str(),
+        initial.add_argument('--in-suffix', '-is', type=str, default=str(),
                              help='Suffix of the detection files to read')
         initial.add_argument('--sample', type=str, default=str(),
                              help='Sample description to record in the log')

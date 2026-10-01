@@ -8,9 +8,9 @@ from ..indexer.cbc_data import Miller
 from ..indexer.cbc_indexing import CBDSetup
 from ..indexer.cbc_pupil import Rectangle, SourcePlane
 from ..indexer.cbc_setup import ResolvedGeometry, ResolvedSetup
-from .cbc_data import (BaseData, FullState, IntensityModel, MergeState, PedestalState,
-                       PhotonCounts, RefineStreakState, ReflectionList, Reflections,
-                       PedestalData, StreakData, StreakPoints, StreakState)
+from .cbc_data import (BaseData, MergeState, FullState, IntensityModel, MergeData, PedestalState,
+                       PhotonCounts, RefineStreakState, ReflectionList, PedestalData, StreakData,
+                       StreakPoints, StreakState)
 
 @dataclass(frozen=True, unsafe_hash=True)
 class ScalerModel(CBDSetup):
@@ -51,10 +51,14 @@ class ScalerModel(CBDSetup):
         """Map unconstrained additive predictions to smooth positive rates."""
         return self.rate_floor + xp.logaddexp(values, 0.0)
 
-    def poisson_information(self, values: RealArray, xp: AnyNamespace) -> RealArray:
-        """Return Fisher information for the raw predictor at each detector point."""
-        slope = xp.exp(-xp.logaddexp(-values, 0.0))
-        return slope**2 / self.rate(values, xp)
+    def rate_slope(self, values: RealArray, xp: AnyNamespace) -> RealArray:
+        """Return the derivative of the positive rate with respect to its predictor."""
+        return xp.exp(-xp.logaddexp(-values, 0.0))
+
+    def rate_contrast(self, baseline: RealArray, signal: RealArray,
+                      xp: AnyNamespace) -> RealArray:
+        """Return the signed rate change caused by an additive predictor signal."""
+        return self.rate(baseline + signal, xp) - self.rate(baseline, xp)
 
     def combine_rates(self, log_background: RealArray, log_signal: RealArray, xp: AnyNamespace
                       ) -> RealArray:
@@ -110,39 +114,18 @@ class BaseLoss(Generic[T_Data, T_State]):
         xp = state.__array_namespace__()
         return xp.mean(self.poisson_loss(data, state, xp))
 
-    def coefficient(self, state: T_State, xp: AnyNamespace) -> RealArray:
+    def I_hkl(self, data: T_Data, state: T_State, xp: AnyNamespace) -> RealArray:
+        """Return the profile-normalised fitted rate contrast for each reflection."""
         raise NotImplementedError
 
-    def I_hkl(self, state: T_State, xp: AnyNamespace) -> RealArray:
-        """Return the fitted streak intensity coefficient for each reflection."""
-        return self.coefficient(state, xp)
-
-    def information(self, data: T_Data, state: T_State, xp: AnyNamespace) -> RealArray:
-        """Return conditional information for each unnormalised profile coefficient."""
-        profile = self.profile(data, state, xp)
-        point_information = self.model.poisson_information(
-            self.predictor(data, state, xp), xp)
-        return data.sum_by_streak(point_information * profile**2, xp)
-
     def std_hkl(self, data: T_Data, state: T_State, xp: AnyNamespace) -> RealArray:
-        """Return conditional Poisson standard errors of fitted intensities.
-
-        All parameters other than the linear peak intensities are held fixed. The uncertainty
-        is the inverse square root of the Fisher information.
-
-        Returns:
-            Standard errors with shape ``(n_streaks,)``. Streaks with zero information
-            have infinite uncertainty.
-        """
-        information = self.information(data, state, xp)
-        positive = information > 0.0
-        denominator = xp.sqrt(xp.where(positive, information, 1.0))
-        return xp.where(positive, 1.0 / denominator, xp.inf)
+        """Return profile-coefficient errors propagated from detector noise."""
+        return data.std_by_streak(self.profile(data, state, xp), xp)
 
     def to_list(self, data: T_Data, state: T_State, xp: AnyNamespace) -> ReflectionList:
-        """Return fitted intensities and their conditional standard errors."""
+        """Return fitted reflection signals and their conditional standard errors."""
         return ReflectionList.import_miller(miller=data.miller,
-                                            I_hkl=self.I_hkl(state, xp),
+                                            I_hkl=self.I_hkl(data, state, xp),
                                             sigma_hkl=self.std_hkl(data, state, xp))
 
 @dataclass(frozen=True, unsafe_hash=True)
@@ -160,12 +143,13 @@ class PedestalLoss(BaseLoss[PedestalData, PedestalState]):
         """Return the background-plus-pedestal predictor."""
         return data.counts.background + state.pedestal_at(data.points)
 
-    def coefficient(self, state: PedestalState, xp: AnyNamespace) -> RealArray:
-        return state.pedestal
+    def I_hkl(self, data: PedestalData, state: PedestalState,
+              xp: AnyNamespace) -> RealArray:
+        return xp.zeros(state.pedestal.shape, dtype=state.pedestal.dtype)
 
 @dataclass(frozen=True, unsafe_hash=True)
 class StreakLoss(BaseLoss[StreakData, StreakState]):
-    """Fit a local pedestal and signed profile coefficient at fixed streak geometry."""
+    """Fit a signed profile coefficient at fixed streak geometry."""
     model : ScalerModel
 
     def log_profile(self, data: StreakData, state: StreakState,
@@ -176,20 +160,23 @@ class StreakLoss(BaseLoss[StreakData, StreakState]):
 
     def predictor(self, data: StreakData, state: StreakState,
                   xp: AnyNamespace) -> RealArray:
-        """Return the background, pedestal, and profile-intensity predictor."""
-        return (data.counts.background + state.pedestal_at(data.points)
+        """Return the background-plus-profile-intensity predictor."""
+        return (data.counts.background
                 + state.intensity_at(data.points) * self.profile(data, state, xp))
 
-    def coefficient(self, state: StreakState, xp: AnyNamespace) -> RealArray:
-        return state.intensity
+    # def I_hkl(self, data: StreakData, state: StreakState,
+    #           xp: AnyNamespace) -> RealArray:
+    #     profile = self.profile(data, state, xp)
+    #     baseline = data.counts.background
+    #     signal = state.intensity_at(data.points)
+    #     contrast = self.model.rate_contrast(baseline, signal, xp)
+    #     return data.mean_by_profile(contrast, profile, xp)
 
-    def information(self, data: StreakData, state: StreakState,
-                    xp: AnyNamespace) -> RealArray:
-        """Return coefficient information after profiling out each streak's pedestal."""
+    def I_hkl(self, data: StreakData, state: StreakState,
+              xp: AnyNamespace) -> RealArray:
+        """Return the profile-normalised fitted rate contrast for each reflection."""
         profile = self.profile(data, state, xp)
-        point_information = self.model.poisson_information(
-            self.predictor(data, state, xp), xp)
-        return data.profiled_information(profile, point_information, xp)
+        return data.mean_by_profile(data.counts.signal, profile, xp)
 
 @dataclass(frozen=True, unsafe_hash=True)
 class RefineStreakLoss(StreakLoss):
@@ -225,30 +212,29 @@ class FullLoss(BaseLoss[PedestalData, FullState]):
 
     def predictor(self, data: PedestalData, state: FullState,
                   xp: AnyNamespace) -> RealArray:
-        """Return the background, pedestal, and profile-intensity predictor."""
+        """Return the background-plus-profile-intensity predictor."""
         streaks = state.streaks
-        return (data.counts.background + streaks.pedestal_at(data.points)
+        return (data.counts.background
                 + streaks.intensity_at(data.points) * self.profile(data, state, xp))
 
-    def coefficient(self, state: FullState, xp: AnyNamespace) -> RealArray:
-        return state.streaks.intensity
-
-    def information(self, data: PedestalData, state: FullState,
-                    xp: AnyNamespace) -> RealArray:
-        """Return coefficient information after profiling out each streak's pedestal."""
+    def I_hkl(self, data: PedestalData, state: FullState,
+              xp: AnyNamespace) -> RealArray:
         profile = self.profile(data, state, xp)
-        point_information = self.model.poisson_information(
-            self.predictor(data, state, xp), xp)
-        return data.profiled_information(profile, point_information, xp)
+        baseline = data.counts.background
+        signal = state.streaks.intensity_at(data.points)
+        contrast = self.model.rate_contrast(baseline, signal, xp)
+        return data.mean_by_profile(contrast, profile, xp)
 
 @dataclass(frozen=True)
 class MergeModel:
-    """Student-t residual model for conditional intensity standard errors.
+    """Student-t loss for jointly optimised pattern scales and merged intensities.
 
-    The prediction is ``scale[pattern] * I_hkl[reflection]``. Conditional uncertainties stay
-    fixed while robust weights suppress individual inconsistent observations, not indexing
-    alternatives or systematic whole-pattern errors. Mapping construction and initialisation are
-    eager caller responsibilities; numerical methods support JAX compilation with fixed shapes.
+    Gradient optimisation uses :class:`MergeState`, whose exponential scale parameterisation
+    stays positive. Iteratively reweighted fitting uses :class:`LinearMergeState`, whose scales
+    and merged intensities are unrestricted. Conditional uncertainties stay fixed and the
+    Student-t tails suppress individual inconsistent observations, not indexing alternatives
+    or systematic whole-pattern errors. Mapping construction and initialisation are eager
+    caller responsibilities; numerical methods support JAX compilation with fixed shapes.
 
     Attributes:
         nu: Finite positive Student-t degrees of freedom.
@@ -259,41 +245,18 @@ class MergeModel:
         if not isfinite(self.nu) or self.nu <= 0.0:
             raise ValueError('nu must be finite and positive')
 
-    def expected(self, data: ReflectionList, reflections: Reflections,
-                 state: MergeState) -> RealArray:
+    def expected(self, data: MergeData, state: MergeState) -> RealArray:
         """Predict fitted intensities in observation order."""
-        return state.scale_at(data) * state.intensity_at(reflections)
+        return state.scale_at(data) * state.intensity_at(data)
 
-    def residuals(self, data: ReflectionList, reflections: Reflections,
-                  state: MergeState) -> RealArray:
+    def residuals(self, data: MergeData, state: MergeState) -> RealArray:
         """Return standardised residuals, with zero at unsupported observations."""
-        return (data.I_hkl - self.expected(data, reflections, state)) / data.sigma_hkl
+        return (data.I_hkl - self.expected(data, state)) / data.sigma_hkl
 
-    def robust_weights(self, residuals: RealArray) -> RealArray:
-        """Return dimensionless Student-t weights for standardised residuals."""
-        return (self.nu + 1.0) / (self.nu + residuals**2)
-
-    def weights(self, data: ReflectionList, reflections: Reflections,
-                state: MergeState) -> RealArray:
-        """Return robust inverse variances; unsupported observations receive zero weight."""
-        residual = self.residuals(data, reflections, state)
-        return self.robust_weights(residual) / (data.sigma_hkl * data.sigma_hkl)
-
-    def loss(self, data: ReflectionList, reflections: Reflections,
-             state: MergeState) -> RealArray:
-        """Sum Student-t negative log likelihood terms, omitting fixed constants."""
+    def __call__(self, data: MergeData, state: MergeState) -> RealArray:
+        """Return the mean Student-t negative log likelihood without fixed constants."""
         xp = data.__array_namespace__()
-        residual = self.residuals(data, reflections, state)
-        return 0.5 * (self.nu + 1.0) * xp.sum(xp.log1p(residual**2 / self.nu))
-
-    def step(self, data: ReflectionList, reflections: Reflections,
-             state: MergeState) -> MergeState:
-        """Perform one fixed-weight intensity/scale sweep and normalise its gauge.
-        """
-        xp = state.__array_namespace__()
-        weights = self.weights(data, reflections, state)
-        intensity = reflections.merge(data, weights, state)
-        updated = state.replace(I_hkl=intensity)
-        scale = data.fit_scales(updated.intensity_at(reflections), weights,
-                                xp.exp(state.log_scale))
-        return updated.replace(log_scale=xp.log(scale)).normalise()
+        residual = self.residuals(data, state)
+        if not residual.size:
+            return xp.asarray(0.0, dtype=state.I_hkl.dtype)
+        return 0.5 * (self.nu + 1.0) * xp.mean(xp.log1p(residual**2 / self.nu))
