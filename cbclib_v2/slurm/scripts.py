@@ -20,9 +20,9 @@ from .._src.scripts import create_metadata, pool_detection, pool_indexing, scale
 from .._src.streaks import StackedStreaks, Streaks
 from ..indexer import (BaseSetup, LinePoints, Miller, Patterns, RefineResult, ResolvedSetup,
                        XtalState)
-from ..scaler import FullState, RefineStreakState, ScalerModel
-from .config import (DetectionAttributes, DetectionKind, DetectionMetadata, Scan, ScanArgument,
-                     ScanConfig, ScanList, ScanNumbers)
+from ..scaler import FullState, RefineStreakState, ScalerModel, StreakState
+from .config import (DetectionAttributes, DetectionKind, DetectionMetadata, HDFKey, Scan,
+                     ScanArgument, ScanConfig, ScanList, ScanNumbers)
 from .logbook import DetectionLogEntry, GoogleSheetsConfig, GoogleSheetsLog
 from .slurm_manager import SLURMArrayScript, SLURMScript, ScriptSpec
 
@@ -40,12 +40,12 @@ class BaseScript:
         return indices
 
     def get_patterns(self, hits_file: str, geometry: Detector, xp: AnyNamespace) -> Patterns:
-        dataframe = pd.read_hdf(hits_file, 'data')
+        dataframe = pd.read_hdf(hits_file, HDFKey.data)
         if 'module_id' in dataframe.columns:
             num_modules = geometry.num_modules
-            streaks = StackedStreaks.import_dataframe(dataframe, num_modules=num_modules, xp=xp)
+            streaks = StackedStreaks.import_dataframe(dataframe, num_modules, xp)
         else:
-            streaks = Streaks.import_dataframe(dataframe, xp=xp)
+            streaks = Streaks.import_dataframe(dataframe, xp)
         assembled = geometry.to_streaks(streaks)
         return geometry.to_meters(assembled)
 
@@ -198,14 +198,14 @@ class CompileFiles(BaseScript):
     out_suffix      : str = str()
 
     schemas : ClassVar[Dict[FileKind, CompileSchema]] = {
-        'streaks': CompileSchema(required_tables=('data', 'metadata')),
-        'regions': CompileSchema(required_tables=('data', 'metadata')),
-        'xtals': CompileSchema(required_tables=('data',), preserve_config=True),
-        'solutions': CompileSchema(required_tables=('data', 'miller', 'stats'),
-                                   optional_tables=('candidates',),
-                                   preserve_config=True),
-        'reflections': CompileSchema(required_tables=('data', 'stats'),
-                                     preserve_config=True),
+        'streaks': CompileSchema(required_tables=(HDFKey.data, HDFKey.metadata)),
+        'regions': CompileSchema(required_tables=(HDFKey.data, HDFKey.metadata)),
+        'xtals': CompileSchema(required_tables=(HDFKey.xtals,), preserve_config=True),
+        'solutions': CompileSchema(
+            required_tables=(HDFKey.setup, HDFKey.miller, HDFKey.stats),
+            optional_tables=(HDFKey.candidates, HDFKey.streaks),
+            preserve_config=True),
+        'reflections': CompileSchema(required_tables=(HDFKey.reflections,)),
     }
 
     @classmethod
@@ -333,9 +333,11 @@ class CompileFiles(BaseScript):
         for key in schema.tables:
             if key in schema.optional_tables and not key in files:
                 continue
-            if key == 'data' and frame_offsets is not None:
+            if key in (HDFKey.data, HDFKey.xtals, HDFKey.reflections, HDFKey.setup,
+                       HDFKey.miller, HDFKey.candidates, HDFKey.streaks) \
+                    and frame_offsets is not None:
                 df = files.compile_with_offsets(key, 'index', frame_offsets)
-            elif key == 'stats':
+            elif key == HDFKey.stats:
                 df = files.compile_with_identifier(key, self.file_key)
             else:
                 df = files.compile(key)
@@ -648,12 +650,12 @@ class DetectHits(BaseScript):
                 dir=output_dir, make_dirs=True)
             dataframe = pd.DataFrame({'frame': asnumpy(frames[hit_indices])})
             dataframe.to_csv(csv_path, index=False)
-            metadata.to_dataframe().to_hdf(output_path, key='metadata', mode='a')
+            metadata.to_dataframe().to_hdf(output_path, key=HDFKey.metadata, mode='a')
             print(f"The hit frames were saved to {csv_path}")
         else:
             print("Preparing the file...")
-            hits.to_dataframe(frames).to_hdf(output_path, key='data', mode='w')
-            metadata.to_dataframe().to_hdf(output_path, key='metadata', mode='a')
+            hits.to_dataframe(frames).to_hdf(output_path, key=HDFKey.data, mode='w')
+            metadata.to_dataframe().to_hdf(output_path, key=HDFKey.metadata, mode='a')
         attributes.write(output_path, mode='a')
 
 @dataclass
@@ -809,8 +811,8 @@ class IndexingScript(BaseScript):
 
         if self.xtals:
             print(f"Loading crystal orientations from {self.xtal_file}...")
-            df = pd.read_hdf(self.xtals, 'data')
-            xtals = XtalState.import_dataframe(df, xp=xp)
+            df = pd.read_hdf(self.xtals, HDFKey.xtals)
+            xtals = XtalState.import_dataframe(df, xp)
         else:
             print("No crystal orientations provided, "\
                   f"using the unit cell from {self.xtal_file}...")
@@ -830,7 +832,7 @@ class IndexingScript(BaseScript):
         extra = {'xtal_file': self.xtal_file, 'hits_file': hits_file,
                  'setup_file': self.scan.config.setup.setup_file}
         self.params.save(output_path, mode='w', extra=extra)
-        result.to_dataframe(frames).to_hdf(output_path, key='data')
+        result.to_dataframe(frames).to_hdf(output_path, key=HDFKey.xtals)
 
 @dataclass
 class RefineScript(BaseScript):
@@ -838,7 +840,7 @@ class RefineScript(BaseScript):
 
     Loads a per-chunk indexed crystal orientations file, refines the orientations
     against the detected streaks, and writes the refinement result to an HDF5
-    file.  The output stores champion orientations under ``data``, all refined
+    file.  The output stores champion orientations under ``setup``, all refined
     candidates under ``candidates``, the optimisation trace under ``stats``, and
     input-file provenance under ``files``. The refinement configuration is
     retained in the root HDF5 metadata.
@@ -926,14 +928,14 @@ class RefineScript(BaseScript):
 
     def import_xtals(self, patterns: Patterns, df: pd.DataFrame | pd.Series,
                      xp: AnyNamespace) -> Tuple[IntArray, LinePoints, BaseSetup]:
-        frames, xtals = XtalState.import_dataframe(df, index=True, xp=xp)
+        frames, xtals = XtalState.import_dataframe(df, xp, index=True)
         target = patterns.take(frames, reset_index=True)
         initial = self.params.setup.import_xtal(xtals, self.setup_file)
         return frames, target.to_points(), initial
 
     def import_solutions(self, patterns: Patterns, df: pd.DataFrame | pd.Series,
                          xp: AnyNamespace) -> Tuple[IntArray, LinePoints, BaseSetup]:
-        frames, resolved = ResolvedSetup.import_dataframe(df, index=True, xp=xp)
+        frames, resolved = ResolvedSetup.import_dataframe(df, xp, index=True)
         target = patterns.loc[frames]
         initial = self.params.setup.import_resolved(resolved)
         return frames, target.to_points(), initial
@@ -950,7 +952,8 @@ class RefineScript(BaseScript):
             return
 
         print(f"Loading indexed crystal orientations from {in_file}...")
-        df = pd.read_hdf(in_file, 'data')
+        key = HDFKey.setup if self.xtal_dir == 'solutions' else HDFKey.xtals
+        df = pd.read_hdf(in_file, key)
 
         hits_file = self.scan.files.scan_file(self.chunk_id, dir=self.hits_directory)
         if not os.path.isfile(hits_file):
@@ -995,7 +998,7 @@ class RefineScript(BaseScript):
         print(f"Saving refined crystal orientations to {output_path}...")
         extra = {'input_file': in_file, 'hits_file': hits_file, 'setup_file': self.setup_file}
         self.params.save(output_path, mode='w', extra=extra)
-        stats.to_dataframe().to_hdf(output_path, key='stats', mode='a')
+        stats.to_dataframe().to_hdf(output_path, key=HDFKey.stats, mode='a')
 
         if self.params.indexed_thr > 0.0:
             if candidates is None:
@@ -1011,12 +1014,14 @@ class RefineScript(BaseScript):
                   f"{self.params.indexed_thr:.2f}...")
 
         miller = context.miller(champions.resolved)
-        miller.to_dataframe(champions.frames).to_hdf(output_path, key='miller', mode='a')
-        champions.to_dataframe().to_hdf(output_path, key='data', mode='a')
+        miller.to_dataframe(champions.frames).to_hdf(
+            output_path, key=HDFKey.miller, mode='a')
+        champions.to_dataframe().to_hdf(output_path, key=HDFKey.setup, mode='a')
 
         if candidates is not None:
             print(f"Saving all candidates to {output_path}...")
-            candidates.to_dataframe().to_hdf(output_path, key='candidates', mode='a')
+            candidates.to_dataframe().to_hdf(
+                output_path, key=HDFKey.candidates, mode='a')
 
 @dataclass
 class PostRefineScript(BaseScript):
@@ -1024,10 +1029,9 @@ class PostRefineScript(BaseScript):
 
     Loads a per-chunk refined crystal orientations file, performs post-refinement
     against the measured patterns, and writes the result to an HDF5 file.  The
-    output stores champion orientations under ``data``, all refined candidates
-    under ``candidates``, the optimisation trace under ``stats``, and input-file
-    provenance under ``files``. The refinement configuration is retained in the
-    root HDF5 metadata.
+    output stores refined orientations under ``setup``, the final photometric state
+    under ``streaks``, the optimisation trace under ``stats``, and input-file provenance
+    under ``files``. The refinement configuration is retained in the root HDF5 metadata.
 
     Attributes:
         scan: Scan configuration.
@@ -1068,26 +1072,36 @@ class PostRefineScript(BaseScript):
         params = PostRefineConfig.read(params_file)
         return cls(scan, params, in_suffix, out_suffix, chunk_id)
 
+    @property
+    def in_file(self) -> str:
+        """Return the path to the refinement file to read."""
+        return self.scan.files.scan_file(self.chunk_id, dir=self.scan.config.setup.solutions_dir,
+                                         suffix=self.in_suffix)
+
+    @property
+    def has_streaks(self) -> bool:
+        with pd.HDFStore(self.in_file, mode='r') as store:
+            has_streaks = f'/{HDFKey.streaks}' in store.keys()
+        return has_streaks
+
     def run(self):
         print("Configuring the script...")
         xp = self.scan.config.system.jax_api()
 
         geometry = self.scan.config.data.geometry()
-        in_file = self.scan.files.scan_file(
-            self.chunk_id, dir=self.scan.config.setup.solutions_dir,
-            suffix=self.in_suffix)
-        if not os.path.isfile(in_file):
-            print(f"No refined crystal orientations file found at {in_file}")
+        if not os.path.isfile(self.in_file):
+            print(f"No refined crystal orientations file found at {self.in_file}")
             return
 
-        print(f"Loading refined crystal orientations from {in_file}...")
-        df = pd.read_hdf(in_file, 'data')
-        frames, resolved = ResolvedSetup.import_dataframe(df, index=True, xp=xp)
+        print(f"Loading refined crystal orientations from {self.in_file}...")
+        df = pd.read_hdf(self.in_file, HDFKey.setup)
+        frames, resolved = ResolvedSetup.import_dataframe(df, xp, index=True)
 
         scaler = ScalerModel()
         if self.params.miller == 'indexed':
-            print(f"Loading indexed miller indices from {in_file}...")
-            miller = Miller.import_dataframe(pd.read_hdf(in_file, 'miller'), frames, xp)
+            print(f"Loading indexed miller indices from {self.in_file}...")
+            miller = Miller.import_dataframe(
+                pd.read_hdf(self.in_file, HDFKey.miller), frames, xp)
             miller = scaler.xtal.hkl_to_q(miller, resolved.xtal, xp)
         elif self.params.miller == 'all':
             q_abs = scaler.lens.max_resolution(xp.asarray(geometry.corners), resolved.geometry,
@@ -1110,51 +1124,66 @@ class PostRefineScript(BaseScript):
         print(f"Scaling background for {frames.size:d} frames...")
         cryst_data = scale_background(frames, images, metadata, self.params.scaling)
 
-        extra = {'input_file': in_file, 'metadata_file': metadata_path}
+        extra = {'input_file': self.in_file, 'metadata_file': metadata_path}
         context = self.params.init_context(scaler, cryst_data, miller, resolved, geometry, xp)
 
         print(f"Refining scaling for {frames.size:d} patterns...")
         initial = context.init_streaks(self.params.sigma)
         optimised, stats = context.scale_streaks(initial, self.params.optimise.intensities)
 
+        solutions_path = self.scan.files.scan_file(
+            self.chunk_id, dir=self.scan.config.setup.solutions_dir,
+            suffix=self.out_suffix, make_dirs=True)
+
         if self.params.optimise.setup:
             print(f"Post-refining the setup for {frames.size:d} patterns...")
             full = FullState(optimised, self.params.setup.import_resolved(resolved))
             optimised, resolved, post_stats = context.refine_setup(full, self.params.optimise.setup)
+            stats.extend(post_stats)
 
             context = context.update_setup(resolved)
-            result = RefineResult(frames, resolved, context.loss_by_pattern(optimised))
-
-            output_path = self.scan.files.scan_file(
-                self.chunk_id, dir=self.scan.config.setup.solutions_dir,
-                suffix=self.out_suffix, make_dirs=True)
-
-            print(f"Saving the refined crystal orientations to {output_path}...")
-            self.params.save(output_path, mode='w', extra=extra)
-            post_stats.to_dataframe().to_hdf(output_path, key='stats', mode='a')
-            result.to_dataframe().to_hdf(output_path, key='data', mode='a')
-            miller.to_dataframe(frames).to_hdf(output_path, key='miller', mode='a')
         else:
             print(f"Skipping post-refinement of setup for {frames.size:d} patterns...")
+            if self.has_streaks:
+                df = pd.read_hdf(self.in_file, HDFKey.streaks)
+                optimised = StreakState.import_dataframe(df, xp)
+
+        result = RefineResult(frames, resolved, context.loss_by_pattern(optimised))
 
         if self.params.refine_streaks:
             print(f"Scaling refined streaks for {frames.size:d} patterns...")
 
-            initial = RefineStreakState.from_streaks(optimised, geometry.pixel_size)
+            if isinstance(optimised, RefineStreakState):
+                initial = optimised
+            else:
+                initial = RefineStreakState.from_streaks(optimised, geometry.pixel_size)
             optimised, refine_stats = context.refine_streaks(initial,
                                                              self.params.optimise.intensities)
             stats.extend(refine_stats)
+        else:
+            print(f"Skipping scaling of refined streaks for {frames.size:d} patterns...")
+            if self.has_streaks:
+                df = pd.read_hdf(self.in_file, HDFKey.streaks)
+                if RefineStreakState.has_displacements(df):
+                    optimised = RefineStreakState.import_dataframe(df, geometry.pixel_size, xp)
+
+        print(f"Saving the optimised solution to {solutions_path}...")
+        self.params.save(solutions_path, mode='w', extra=extra)
+        result.to_dataframe().to_hdf(solutions_path, key=HDFKey.setup, mode='a')
+        miller.to_dataframe(frames).to_hdf(solutions_path, key=HDFKey.miller, mode='a')
+        stats.to_dataframe().to_hdf(solutions_path, key=HDFKey.stats, mode='a')
+        optimised.to_dataframe(miller.index, frames).to_hdf(
+            solutions_path, key=HDFKey.streaks, mode='a')
 
         reflections = context.to_list(optimised)
 
-        output_path = self.scan.files.scan_file(
+        reflections_path = self.scan.files.scan_file(
             self.chunk_id, dir=self.scan.config.setup.reflections_dir,
             suffix=self.out_suffix, make_dirs=True)
-        print(f"Saving the refined reflections to {output_path}...")
+        print(f"Saving the refined reflections to {reflections_path}...")
 
-        self.params.save(output_path, mode='w', extra=extra)
-        reflections.to_dataframe(frames).to_hdf(output_path, key='data', mode='a')
-        stats.to_dataframe().to_hdf(output_path, key='stats', mode='a')
+        reflections.to_dataframe(frames).to_hdf(
+            reflections_path, key=HDFKey.reflections, mode='w')
 
 class SBatchScripts:
     """Factory for scalar jobs and scan-indexed ``sbatch`` arrays.

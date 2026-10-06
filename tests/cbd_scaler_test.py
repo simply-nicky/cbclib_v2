@@ -4,9 +4,9 @@ from jax import jit, tree, value_and_grad
 from cbclib_v2 import CrystData
 from cbclib_v2.annotations import IntArray, JaxNamespace, JaxNumPy, NumPy, NumPyNamespace, RealArray
 from cbclib_v2.indexer import (FixedPupilSetup, Miller, Rectangle, ResolvedSetup, SourcePlane)
-from cbclib_v2.scaler import (FullLoss, FullState, IntensityModel, PhotonCounts, ReflectionList,
-                              PedestalData, ScalerModel, StreakState, StreakData, StreakLoss,
-                              StreakIndices, StreakPoints)
+from cbclib_v2.scaler import (FullLoss, FullState, IntensityModel, PhotonCounts,
+                              RefineStreakState, ReflectionList, PedestalData, ScalerModel,
+                              StreakState, StreakData, StreakLoss, StreakIndices, StreakPoints)
 from cbclib_v2.test_util import check_close, TestSetup
 
 StreakLossGradFn = Callable[[StreakData, StreakState], Tuple[RealArray, StreakState]]
@@ -363,8 +363,9 @@ class TestStreakScaling:
         # Local fitting uses each streak's original hkl without applying symmetry.
         check_close(modelled.source.q, q)
 
-    def test_result(self, streak_data: StreakData,  result_profile: RealArray,
-                    reflection_list: ReflectionList, xp: JaxNamespace):
+    def test_result(self, streak_data: StreakData, result_state: StreakState,
+                    result_profile: RealArray, reflection_list: ReflectionList,
+                    xp: JaxNamespace):
         expected = self.profile_mean(
             streak_data.counts.signal, result_profile, streak_data, xp)
 
@@ -372,6 +373,26 @@ class TestStreakScaling:
         assert xp.all(reflection_list.index == streak_data.miller.index)
         assert xp.all(reflection_list.hkl == streak_data.miller.hkl)
         check_close(reflection_list.I_hkl, expected)
+
+        frames = xp.asarray([10, 20])
+        index = streak_data.miller.index
+        saved_frames, restored = StreakState.import_dataframe(
+            result_state.to_dataframe(index, frames), index=True, xp=xp)
+        assert xp.all(saved_frames == frames)
+        check_close(restored.asinh_hkl, result_state.asinh_hkl)
+        check_close(restored.log_sigma, result_state.log_sigma)
+
+        refined = RefineStreakState.from_streaks(result_state, pixel_size=0.1)
+        displacement = xp.arange(2 * refined.n_streaks, dtype=float).reshape((-1, 2))
+        refined = refined.replace(displacement=displacement)
+        saved_frames, restored_refined = RefineStreakState.import_dataframe(
+            refined.to_dataframe(index, frames), index=True, xp=xp,
+            pixel_size=refined.pixel_size)
+        assert xp.all(saved_frames == frames)
+        check_close(restored_refined.asinh_hkl, refined.asinh_hkl)
+        check_close(restored_refined.log_sigma, refined.log_sigma)
+        check_close(restored_refined.displacement, refined.displacement)
+        assert restored_refined.pixel_size == refined.pixel_size
 
     def test_std_by_streak(self, loss: StreakLoss, streak_data: StreakData,
                            result_state: StreakState, result_std: RealArray,

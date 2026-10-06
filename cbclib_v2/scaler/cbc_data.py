@@ -1,7 +1,8 @@
-from typing import Iterable, Type
+from typing import Iterable, Literal, overload, Tuple, Type
 from typing_extensions import Self
 import pandas as pd
-from .._src.annotations import AnyNamespace, BoolArray, IntArray, IntSequence, RealArray, Shape
+from .._src.annotations import (AnyNamespace, BoolArray, IntArray, IntSequence, JaxNumPy,
+                                RealArray, Shape)
 from .._src.array_api import add_at, asnumpy, det_to_k, safe_divide
 from .._src.crystfel import Detector
 from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer, IndexLookup
@@ -316,6 +317,27 @@ class StreakState(State, DataContainer):
         intensity = estimator.fit_median(profile, data.counts.signal, previous)
         return cls(asinh_hkl=xp.arcsinh(intensity), log_sigma=log_sigma)
 
+    @overload
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[False]=False) -> 'StreakState': ...
+
+    @overload
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[True]) -> Tuple[IntArray, 'StreakState']: ...
+
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: bool=False
+                         ) -> 'StreakState' | Tuple[IntArray, 'StreakState']:
+        lookup = IndexLookup.build(xp.asarray(df['index']))
+        state = cls(asinh_hkl=xp.asarray(df['asinh_hkl']),
+                    log_sigma=xp.asarray(df['log_sigma'])[lookup.indices()])
+        if index:
+            return lookup.unique, state
+        return state
+
     @property
     def n_streaks(self) -> int:
         """Return the number of independently fitted predicted streaks."""
@@ -334,6 +356,14 @@ class StreakState(State, DataContainer):
     def log_sigma_at(self, points: StreakPoints) -> RealArray:
         """Return the log profile width associated with each measured point."""
         return self.log_sigma[points.index]
+
+    def to_dataframe(self, index: IntArray, frames: IntArray) -> pd.DataFrame:
+        """Export photometric parameters for each predicted streak."""
+        if index.size != self.n_streaks or frames.size != self.n_patterns:
+            raise ValueError("Index and frame arrays must match the streak and pattern sizes.")
+        return pd.DataFrame({'index': asnumpy(frames[index]),
+                             'asinh_hkl': asnumpy(self.asinh_hkl),
+                             'log_sigma': asnumpy(self.log_sigma[index])})
 
 class RefineStreakState(StreakState):
     """Hold refined position and broadening parameters for predicted streaks.
@@ -364,6 +394,36 @@ class RefineStreakState(StreakState):
         return cls(asinh_hkl=streaks.asinh_hkl, log_sigma=streaks.log_sigma,
                    displacement=xp.zeros((streaks.n_streaks, 2)), pixel_size=pixel_size)
 
+    @overload
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, pixel_size: float,
+                         xp: AnyNamespace, *, index: Literal[False]=False,
+                         ) -> 'RefineStreakState': ...
+
+    @overload
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, pixel_size: float,
+                         xp: AnyNamespace, *, index: Literal[True]
+                         ) -> Tuple[IntArray, 'RefineStreakState']: ...
+
+    @classmethod
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, pixel_size: float,
+                         xp: AnyNamespace, *, index: bool=False
+                         ) -> 'RefineStreakState' | Tuple[IntArray, 'RefineStreakState']:
+        frames, streaks = StreakState.import_dataframe(df, index=True, xp=xp)
+        displacement = xp.stack((xp.asarray(df['displacement_x']),
+                                 xp.asarray(df['displacement_y'])), axis=-1)
+        state = cls(asinh_hkl=streaks.asinh_hkl, log_sigma=streaks.log_sigma,
+                    displacement=displacement, pixel_size=pixel_size)
+        if index:
+            return frames, state
+        return state
+
+    @classmethod
+    def has_displacements(cls, df: pd.DataFrame | pd.Series) -> bool:
+        """Return whether the dataframe contains per-streak displacements."""
+        return 'displacement_x' in df and 'displacement_y' in df
+
     def displacement_at(self, points: StreakPoints) -> RealArray:
         """Return the detector-plane displacement associated with each measured point."""
         return self.pixel_size * self.displacement[points.streak_id]
@@ -371,6 +431,13 @@ class RefineStreakState(StreakState):
     def points_at(self, points: StreakPoints) -> StreakPoints:
         """Return detector points translated by their per-streak displacement."""
         return points.replace(points=points.points + self.displacement_at(points))
+
+    def to_dataframe(self, index: IntArray, frames: IntArray) -> pd.DataFrame:
+        """Export photometric and displacement parameters for each predicted streak."""
+        df = super().to_dataframe(index, frames)
+        df['displacement_x'] = asnumpy(self.displacement[..., 0])
+        df['displacement_y'] = asnumpy(self.displacement[..., 1])
+        return df
 
 class FullState(State, DataContainer):
     streaks : StreakState

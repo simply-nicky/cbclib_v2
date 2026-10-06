@@ -1430,7 +1430,8 @@ class PostRefineContext(Container):
 
     def loss_by_pattern(self, state: StreakState) -> RealArray:
         xp = self.data.__array_namespace__()
-        return self.streak_loss.poisson_loss(self.data, state, xp)
+        crit = self.streak_loss.poisson_loss(self.data, state, xp)
+        return self.data.mean_by_pattern(crit, xp)
 
     def update_setup(self, resolved: ResolvedSetup) -> 'PostRefineContext':
         xp = self.data.__array_namespace__()

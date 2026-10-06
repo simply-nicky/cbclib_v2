@@ -661,6 +661,10 @@ class IndexLookup(DataContainer):
         reset = xp.repeat(xp.arange(targets.size), stops - starts)
         return positions, reset
 
+    def indices(self) -> IntArray:
+        """Return the original index of the first item in each unique group."""
+        return self.order[self.offsets[:-1]]
+
     def reset_index(self) -> IntArray:
         xp = self.__array_namespace__()
         counts = self.offsets[1:] - self.offsets[:-1]

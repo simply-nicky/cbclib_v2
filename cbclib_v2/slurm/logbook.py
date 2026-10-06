@@ -7,7 +7,7 @@ import pandas as pd
 from .._src.annotations import NumPy
 from .._src.scripts import BaseParameters
 from .._src.streaks import Streaks
-from .config import DetectionAttributes, DetectionKind, DetectionMetadata
+from .config import DetectionAttributes, DetectionKind, DetectionMetadata, HDFKey
 
 @dataclass(frozen=True)
 class DetectionLogEntry:
@@ -69,9 +69,9 @@ class DetectionLogEntry:
         total_length = 0.0
         n_streaks = 0
         for path in paths:
-            metadata_df = cast(pd.DataFrame, pd.read_hdf(path, key='metadata', mode='r'))
+            metadata_df = cast(pd.DataFrame, pd.read_hdf(path, key=HDFKey.metadata, mode='r'))
             try:
-                streaks_df = cast(pd.DataFrame, pd.read_hdf(path, key='data', mode='r'))
+                streaks_df = cast(pd.DataFrame, pd.read_hdf(path, key=HDFKey.data, mode='r'))
             except KeyError as error:
                 raise ValueError(
                     f"Detection artifact does not contain streak geometry: {path}"

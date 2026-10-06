@@ -100,9 +100,9 @@ class TestCBDSetup():
         check_close(xp.linalg.det(ormatrix.matrix), xp.array(1.0))
         check_close(ormatrix @ basis.basis, xtal.basis)
 
-    def test_xtal_to_spherical(self, xtal: XtalState):
+    def test_xtal_to_spherical(self, xtal: XtalState, xp: NumPyNamespace):
         r, theta, phi = xtal.to_spherical()
-        basis = XtalState.import_spherical(r, theta, phi).basis
+        basis = XtalState.import_spherical(r, theta, phi, xp).basis
         check_close(xtal.basis, basis)
 
     def text_reciprocate_xtal(self, xtal: XtalState):

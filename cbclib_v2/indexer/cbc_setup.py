@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Callable, Generic, Iterator, Literal, Sequence, Tuple, Type, TypeVar, overload
 from typing_extensions import Self
 import pandas as pd
-from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, IntArray, JaxNumPy,
+from .._src.annotations import (AnyGenerator, AnyNamespace, BoolArray, Indices, IntArray, NumPy,
                                 RealArray, RealSequence, Shape)
 from .._src.array_api import (array_namespace, asnumpy, euler_angles, euler_matrix, safe_divide,
                               safe_sqrt, tilt_angles, tilt_matrix)
@@ -44,8 +44,7 @@ def random_state(state: S, span: S) -> Callable[[AnyGenerator], S]:
 
     return random
 
-def random_rotation(shape: Shape=(), xp: AnyNamespace = JaxNumPy
-                    ) -> Callable[[AnyGenerator], 'RotationState']:
+def random_rotation(shape: Shape=(), xp: AnyNamespace=NumPy) -> Callable[[AnyGenerator], 'RotationState']:
     def random(rng: AnyGenerator):
         """Creates a random rotation matrix.
         """
@@ -66,8 +65,7 @@ def random_rotation(shape: Shape=(), xp: AnyNamespace = JaxNumPy
 
     return random
 
-def random_euler(shape: Shape=(), xp: AnyNamespace=JaxNumPy
-                 ) -> Callable[[AnyGenerator], 'EulerState']:
+def random_euler(shape: Shape=(), xp: AnyNamespace=NumPy) -> Callable[[AnyGenerator], 'EulerState']:
     def random(rng: AnyGenerator):
         angles = rng.uniform(xp.array([0.0, 0.0, 0.0]), xp.array([2 * xp.pi, xp.pi, 2 * xp.pi]),
                              size=shape + (3,))
@@ -93,7 +91,7 @@ class BaseCell(Generic[AnyAngles, AnyLengths]):
     angles  : AnyAngles
     lengths : AnyLengths
 
-    def to_basis(self, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
+    def to_basis(self, xp: AnyNamespace) -> 'XtalState':
         gamma = xp.asarray(self.angles)[..., 2]
         cos = xp.cos(xp.asarray(self.angles))
         sin = xp.sin(gamma)
@@ -109,11 +107,11 @@ class BaseCell(Generic[AnyAngles, AnyLengths]):
 
     @classmethod
     def from_parameters(cls: Type[Self], lengths: Sequence[float], angles: Sequence[float],
-                        xp: AnyNamespace=JaxNumPy) -> Self:
+                        xp: AnyNamespace) -> Self:
         raise NotImplementedError
 
     @classmethod
-    def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
+    def read(cls: Type[Self], file: str, xp: AnyNamespace) -> Self:
         data = cell_parser(cls, file).read(file)
         return cls.from_parameters(data['lengths'], data['angles'], xp)
 
@@ -132,7 +130,7 @@ class FixedXtalCell(BaseCell[StaticAngles, StaticLengths], State, eq=True, unsaf
 
     @classmethod
     def from_parameters(cls, lengths: Sequence[float], angles: Sequence[float],
-                        xp: AnyNamespace=JaxNumPy) -> 'FixedXtalCell':
+                        xp: AnyNamespace) -> 'FixedXtalCell':
         return cls((float(angles[0]), float(angles[1]), float(angles[2])),
                    (float(lengths[0]), float(lengths[1]), float(lengths[2])))
 
@@ -184,7 +182,7 @@ class XtalCell(BaseCell[RealArray, RealArray], ArrayContainer, State):
 
     @classmethod
     def from_parameters(cls, lengths: Sequence[float], angles: Sequence[float],
-                        xp: AnyNamespace=JaxNumPy) -> 'XtalCell':
+                        xp: AnyNamespace) -> 'XtalCell':
         return cls(xp.asarray(angles), xp.asarray(lengths))
 
     def collapse(self) -> 'XtalCell':
@@ -243,24 +241,23 @@ class XtalState(ArrayContainer, State):
             yield XtalState(basis[None])
 
     @classmethod
-    def read(cls, file: str, xp: AnyNamespace=JaxNumPy) -> 'XtalState':
+    def read(cls, file: str, xp: AnyNamespace) -> 'XtalState':
         data = xtal_parser(file).read(file)
         return cls(xp.stack((data['a'], data['b'], data['c'])))
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[False]=False,
-                         xp: AnyNamespace=JaxNumPy) -> 'XtalState': ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[False]=False) -> 'XtalState': ...
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[True],
-                         xp: AnyNamespace=JaxNumPy) -> Tuple[IntArray, 'XtalState']: ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[True]) -> Tuple[IntArray, 'XtalState']: ...
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: bool=False,
-                         xp: AnyNamespace=JaxNumPy
-                         ) -> 'XtalState' | Tuple[IntArray, 'XtalState']:
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: bool=False) -> 'XtalState' | Tuple[IntArray, 'XtalState']:
         a = xp.stack((xp.asarray(df['a_x']), xp.asarray(df['a_y']), xp.asarray(df['a_z'])), axis=-1)
         b = xp.stack((xp.asarray(df['b_x']), xp.asarray(df['b_y']), xp.asarray(df['b_z'])), axis=-1)
         c = xp.stack((xp.asarray(df['c_x']), xp.asarray(df['c_y']), xp.asarray(df['c_z'])), axis=-1)
@@ -270,7 +267,7 @@ class XtalState(ArrayContainer, State):
 
     @classmethod
     def import_spherical(cls, r: RealArray, theta: RealArray, phi: RealArray,
-                         xp: AnyNamespace=JaxNumPy) -> 'XtalState':
+                         xp: AnyNamespace) -> 'XtalState':
         """Return a new :class:`XtalState` object, initialised by a stacked matrix of three basis
         vectors written in spherical coordinate system.
 
@@ -360,17 +357,17 @@ class ResolvedLens(State, ArrayContainer):
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[False]=False,
-                         xp: AnyNamespace=JaxNumPy) -> 'ResolvedLens': ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[False]=False) -> 'ResolvedLens': ...
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[True],
-                         xp: AnyNamespace=JaxNumPy) -> Tuple[IntArray, 'ResolvedLens']: ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[True]) -> Tuple[IntArray, 'ResolvedLens']: ...
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: bool=False,
-                         xp: AnyNamespace=JaxNumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: bool=False
                          ) -> 'ResolvedLens' | Tuple[IntArray, 'ResolvedLens']:
         foc_pos = xp.stack((xp.asarray(df['foc_x']),
                             xp.asarray(df['foc_y']),
@@ -562,7 +559,7 @@ class BaseLens(Generic[AnyFocus, AnyPupil]):
         raise NotImplementedError
 
     @classmethod
-    def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
+    def read(cls: Type[Self], file: str, xp: AnyNamespace) -> Self:
         data = lens_parser(cls, file).read(file)
         return cls.from_parameters(data['focus']['pos'], data['pupil_roi'], xp)
 
@@ -788,7 +785,7 @@ class RotationState(ArrayContainer, State):
         return other @ self.matrix
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace=JaxNumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace
                          ) -> 'RotationState':
         """Initialize a new :class:`Sample` object with a :class:`pandas.Series` array. The array
         must contain the following columns:
@@ -959,23 +956,23 @@ class ResolvedGeometry(ResolvedLens):
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[False]=False,
-                         xp: AnyNamespace=JaxNumPy) -> 'ResolvedGeometry': ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[False]=False) -> 'ResolvedGeometry': ...
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[True],
-                         xp: AnyNamespace=JaxNumPy) -> Tuple[IntArray, 'ResolvedGeometry']: ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[True]) -> Tuple[IntArray, 'ResolvedGeometry']: ...
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: bool=False,
-                         xp: AnyNamespace=JaxNumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: bool=False
                          ) -> 'ResolvedGeometry' | Tuple[IntArray, 'ResolvedGeometry']:
         defocus = xp.asarray(df['defocus'])
         if index:
-            idx, lens = ResolvedLens.import_dataframe(df, index, xp)
+            idx, lens = ResolvedLens.import_dataframe(df, xp, index=index)
             return idx, cls(lens.foc_pos, lens.pupil_roi, defocus)
-        lens = ResolvedLens.import_dataframe(df, index, xp)
+        lens = ResolvedLens.import_dataframe(df, xp, index=index)
         return cls(lens.foc_pos, lens.pupil_roi, defocus)
 
     def broadcast(self, size: int) -> 'ResolvedGeometry':
@@ -1021,7 +1018,7 @@ class BaseGeometry(BaseLens, Generic[AnyFocus, AnyPupil, AnyDF]):
 
     @classmethod
     def from_parameters(cls: Type[Self], foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy) -> Self:
+                        defocus: Sequence[float], xp: AnyNamespace) -> Self:
         """Construct an experimental setup from effective geometry values.
 
         Args:
@@ -1040,7 +1037,7 @@ class BaseGeometry(BaseLens, Generic[AnyFocus, AnyPupil, AnyDF]):
         raise NotImplementedError
 
     @classmethod
-    def read(cls: Type[Self], file: str, xp: AnyNamespace=JaxNumPy) -> Self:
+    def read(cls: Type[Self], file: str, xp: AnyNamespace) -> Self:
         """Read setup geometry from a JSON or INI file."""
         data = geometry_parser(cls, file).read(file)
         return cls.from_parameters(data['focus']['pos'], data['pupil_roi'],
@@ -1084,7 +1081,7 @@ class FixedGeometry(BaseGeometry[FixedFocus, StaticPupil, Tuple[float, ...]], Fi
 
     @classmethod
     def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'FixedGeometry':
+                        defocus: Sequence[float], xp: AnyNamespace) -> 'FixedGeometry':
         lens = FixedLens.from_parameters(foc_pos, pupil_roi, xp)
         return cls(lens.focus, lens.pupil_roi, tuple(float(val) for val in defocus))
 
@@ -1111,8 +1108,7 @@ class FixedPupilGeometry(BaseGeometry[FixedFocalDist | Focus, StaticPupil, RealA
 
     @classmethod
     def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy
-                        ) -> 'FixedPupilGeometry':
+                        defocus: Sequence[float], xp: AnyNamespace) -> 'FixedPupilGeometry':
         lens = FixedPupilLens.from_parameters(foc_pos, pupil_roi, xp)
         return cls(lens.focus, lens.pupil_roi, xp.asarray(defocus))
 
@@ -1148,8 +1144,7 @@ class FixedApertureGeometry(BaseGeometry[FixedFocalDist | Focus, RealArray, Real
 
     @classmethod
     def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy
-                        ) -> 'FixedApertureGeometry':
+                        defocus: Sequence[float], xp: AnyNamespace) -> 'FixedApertureGeometry':
         lens = FixedApertureLens.from_parameters(foc_pos, pupil_roi, xp)
         return cls(lens.focus, lens.pupil_center, lens.aperture, xp.asarray(defocus))
 
@@ -1185,7 +1180,7 @@ class Geometry(BaseGeometry[Focus | FixedFocalDist | FixedFocus, RealArray, Real
 
     @classmethod
     def from_parameters(cls, foc_pos: Sequence[float], pupil_roi: Sequence[float],
-                        defocus: Sequence[float], xp: AnyNamespace=JaxNumPy) -> 'Geometry':
+                        defocus: Sequence[float], xp: AnyNamespace) -> 'Geometry':
         lens = Lens.from_parameters(foc_pos, pupil_roi, xp)
         return cls(lens.focus, lens.pupil_roi, xp.asarray(defocus))
 
@@ -1224,25 +1219,25 @@ class ResolvedSetup(State, DataContainer):
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[False]=False,
-                         xp: AnyNamespace=JaxNumPy) -> 'ResolvedSetup': ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[False]=False) -> 'ResolvedSetup': ...
 
     @overload
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: Literal[True],
-                         xp: AnyNamespace=JaxNumPy) -> Tuple[IntArray, 'ResolvedSetup']: ...
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: Literal[True]) -> Tuple[IntArray, 'ResolvedSetup']: ...
 
     @classmethod
-    def import_dataframe(cls, df: pd.DataFrame | pd.Series, index: bool=False,
-                         xp: AnyNamespace=JaxNumPy
+    def import_dataframe(cls, df: pd.DataFrame | pd.Series, xp: AnyNamespace, *,
+                         index: bool=False
                          ) -> 'ResolvedSetup' | Tuple[IntArray, 'ResolvedSetup']:
         geometry_cls = ResolvedGeometry if 'defocus' in df else ResolvedLens
 
         if index:
-            idx, geometry = geometry_cls.import_dataframe(df, index, xp)
+            idx, geometry = geometry_cls.import_dataframe(df, xp, index=index)
             return idx, cls(XtalState.import_dataframe(df, xp=xp), geometry)
 
-        geometry = geometry_cls.import_dataframe(df, index, xp)
+        geometry = geometry_cls.import_dataframe(df, xp, index=index)
         return cls(XtalState.import_dataframe(df, xp=xp), geometry)
 
     def __getitem__(self, indices: Indices | BoolArray) -> 'ResolvedSetup':

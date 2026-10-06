@@ -347,10 +347,6 @@ class TestCompileFiles(ScanFixtures):
         return (0, 5, 9)
 
     @pytest.fixture
-    def reflection_config(self) -> dict[str, object]:
-        return {'method': 'test', 'steps': 2}
-
-    @pytest.fixture
     def reflection_data(self, offsets: tuple[int, ...]) -> pd.DataFrame:
         return pd.DataFrame({
             'index': offsets,
@@ -362,22 +358,13 @@ class TestCompileFiles(ScanFixtures):
         })
 
     @pytest.fixture
-    def reflection_stats(self) -> pd.DataFrame:
-        return pd.DataFrame({'step': [0, 1], 'loss': [2.0, 1.0]})
-
-    @pytest.fixture
     def reflection_paths(self, scan: Scan, scans: tuple[Scan, ...],
-                         reflection_data: pd.DataFrame, reflection_stats: pd.DataFrame,
-                         reflection_config: dict[str, object]) -> tuple[Path, ...]:
+                         reflection_data: pd.DataFrame) -> tuple[Path, ...]:
         paths = []
         for item in scans:
             path = Path(item.files.scan_file(dir=scan.config.setup.reflections_dir))
             path.parent.mkdir(parents=True, exist_ok=True)
-            reflection_data.to_hdf(path, key='data')
-            reflection_stats.to_hdf(path, key='stats', mode='a')
-            with h5py.File(path, mode='a') as output_file:
-                output_file.attrs['config'] = json.dumps(reflection_config)
-                output_file['extra/input_file'] = f'input-{item.scan_num}.h5'
+            reflection_data.to_hdf(path, key='reflections')
             paths.append(path)
         return tuple(paths)
 
@@ -402,9 +389,11 @@ class TestCompileFiles(ScanFixtures):
         paths = tuple(Path(scan.files.scan_file(
             index, dir=scan.config.setup.solutions_dir)) for index in range(2))
         for chunk_id, path in enumerate(paths):
-            pd.DataFrame({'index': [10 + chunk_id]}).to_hdf(path, key='data')
-            pd.DataFrame({'index': [0], 'h': [1], 'k': [0], 'l': [0]}).to_hdf(
+            pd.DataFrame({'index': [10 + chunk_id]}).to_hdf(path, key='setup')
+            pd.DataFrame({'index': [10 + chunk_id], 'h': [1], 'k': [0], 'l': [0]}).to_hdf(
                 path, key='miller', mode='a')
+            pd.DataFrame({'index': [10 + chunk_id], 'asinh_hkl': [1.0],
+                          'log_sigma': [-1.0]}).to_hdf(path, key='streaks', mode='a')
             pd.DataFrame({'step': [0], 'loss': [2.0 - chunk_id]}).to_hdf(
                 path, key='stats', mode='a')
             if chunk_id == 0:
@@ -454,27 +443,20 @@ class TestCompileFiles(ScanFixtures):
     def test_compile_multiple_scans(self, scan: Scan, scans: tuple[Scan, ...],
                                     scan_list: slurm.ScanList,
                                     reflection_data: pd.DataFrame,
-                                    reflection_stats: pd.DataFrame,
                                     frame_offsets: tuple[int, ...]):
         slurm.CompileFiles('reflections', scan_list).run()
         name = f'scan_{scan.scan_num:d}_{scan.scan_num + 1:d}_full'
         output_path = Path(scan.config.setup.reflections_dir) / f'{name}.h5'
-        data = pd.read_hdf(output_path, 'data')
-        stats = pd.read_hdf(output_path, 'stats')
+        data = pd.read_hdf(output_path, 'reflections')
 
-        # Frame indices become global while optimisation traces retain their source scan.
+        # Frame indices become global when reflection lists from multiple scans are compiled.
         expected_data = pd.concat([
             reflection_data.assign(index=reflection_data['index'] + frame_offset)
             for frame_offset in frame_offsets[:len(scans)]], ignore_index=True)
-        expected_stats = pd.concat([
-            reflection_stats.assign(scan_num=item.scan_num) for item in scans],
-            ignore_index=True)
         pd.testing.assert_frame_equal(data, expected_data)
-        pd.testing.assert_frame_equal(stats, expected_stats)
         with h5py.File(output_path, mode='r') as output_file:
-            for item in scans:
-                path = f'extra/scan_num_{item.scan_num}/input_file'
-                assert output_file[path].asstr()[()] == f'input-{item.scan_num}.h5'
+            assert 'config' not in output_file.attrs
+            assert 'extra' not in output_file
 
     def test_compile_solutions(self, scan: Scan, solution_paths: tuple[Path, ...],
                                solution_config: dict[str, object]):
@@ -482,9 +464,11 @@ class TestCompileFiles(ScanFixtures):
 
         output_path = scan.files.scan_file(dir=scan.config.setup.solutions_dir)
         stats = pd.read_hdf(output_path, 'stats')
+        streaks = pd.read_hdf(output_path, 'streaks')
         # Required tables concatenate, partially present optional tables are omitted, and
         # configuration and provenance survive compilation.
         assert stats['step'].tolist() == [0, 0]
+        assert streaks['index'].tolist() == [10, 11]
 
         with pd.HDFStore(output_path, mode='r') as store:
             assert '/candidates' not in store.keys()
@@ -656,6 +640,8 @@ class TestRoutingConvention(ScanFixtures):
         # A logical hit source selects its configured root and canonical chunk path.
         assert indexing_script.hits_directory == expected_dir
         assert actual_path == str(expected_path)
+        assert slurm.HDFKey.xtals == 'xtals'
+        assert slurm.CompileFiles.schemas['xtals'].required_tables == ('xtals',)
 
     def test_refine_script(self, scan: Scan,
                            refine_script: slurm.RefineScript):

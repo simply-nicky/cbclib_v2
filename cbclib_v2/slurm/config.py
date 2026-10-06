@@ -25,6 +25,18 @@ ScanNumbers = int | range | List[int]
 DetectionKind = Literal['streaks', 'regions']
 ImageKind = Literal['full', 'stacked']
 
+class HDFKey:
+    """Names of dataframes stored in pipeline HDF5 artifacts."""
+    data: ClassVar[str] = 'data'
+    metadata: ClassVar[str] = 'metadata'
+    xtals: ClassVar[str] = 'xtals'
+    reflections: ClassVar[str] = 'reflections'
+    setup: ClassVar[str] = 'setup'
+    miller: ClassVar[str] = 'miller'
+    streaks: ClassVar[str] = 'streaks'
+    stats: ClassVar[str] = 'stats'
+    candidates: ClassVar[str] = 'candidates'
+
 @dataclass
 class SystemConfig(BaseParameters):
     """Compute backend and thread-count configuration.
@@ -398,7 +410,7 @@ class SetupConfig(BaseParameters):
         """
         return self.unit_cell(xp).to_basis()
 
-    def geometry(self) -> FixedLens | FixedGeometry:
+    def geometry(self, xp: AnyNamespace=NumPy) -> FixedLens | FixedGeometry:
         """Load the fixed detector geometry from :attr:`setup_file`.
 
         Returns:
@@ -410,8 +422,8 @@ class SetupConfig(BaseParameters):
         if self.setup_file == str():
             raise ValueError("No setup file provided")
         if 'defocus' in read_all(self.setup_file):
-            return FixedGeometry.read(self.setup_file)
-        return FixedLens.read(self.setup_file)
+            return FixedGeometry.read(self.setup_file, xp)
+        return FixedLens.read(self.setup_file, xp)
 
 @dataclass
 class ScanArgument:
