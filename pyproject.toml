@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 name = 'cbclib_v2'
 authors = [{name = 'Nikolay Ivanov', email = 'nikolay.ivanov@desy.de'}]
 description = 'Convergent beam crystallography data processing library'
-version = '0.13.5'
+version = '0.13.9'
 dependencies = [
     'array_api_compat',
     'h5py',
@@ -35,7 +35,8 @@ classifiers = [
 
 [project.optional-dependencies]
 cuda = ["cupy>=13.0.0"]
-dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio', 'scipy']
+sheets = ['google-api-python-client', 'google-auth']
+dev = ['jupyter', 'matplotlib', 'pytest', 'pytest-asyncio']
 docs = [
     'sphinx>=7',
     'pydata-sphinx-theme>=0.15',
@@ -66,7 +67,6 @@ extension-pkg-allow-list = [
     "cbclib_v2._src.src.cuda_label",
     "cbclib_v2._src.src.cuda_median",
     "cbclib_v2._src.src.cuda_streak_finder",
-    "cbclib_v2._src.src.index",
     "cbclib_v2._src.src.label",
     "cbclib_v2._src.src.median",
     "cbclib_v2._src.src.streak_finder"

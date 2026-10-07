@@ -151,6 +151,12 @@ workflow.
    :nosignatures:
 
    Scripts
+   LogDetections
+   DetectionAttributes
+   DetectionMetadata
+   DetectionLogEntry
+   GoogleSheetsConfig
+   GoogleSheetsLog
    SLURMJobManager
 
 SLURM data types

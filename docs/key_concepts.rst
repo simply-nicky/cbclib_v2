@@ -50,3 +50,4 @@ the MAXWELL cluster using SLURM.
    :maxdepth: 1
 
    workflows
+   autologger

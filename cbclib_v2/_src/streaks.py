@@ -1,30 +1,35 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from math import prod
 from typing import Tuple
 from typing_extensions import Self
 import pandas as pd
 from .annotations import AnyNamespace, BoolArray, IntArray, NumPy, RealArray
-from .array_api import array_namespace, asnumpy
+from .array_api import array_namespace, asnumpy, project_to_streak, safe_divide
 from .data_container import ArrayContainer, IndexedContainer
-from .functions import draw_lines
+from .functions import draw_lines, write_lines
 
 class BaseLines(ArrayContainer):
     """Base class for line-segment containers.
 
     A line segment is parameterised by two endpoints stored in a flat array
-    of shape ``(..., 2 * ndim)`` in the order ``(x0, y0, ..., x1, y1, ...)``.
+    of shape ``(..., 2 * ptdim)`` in the order ``(x0, y0, ..., x1, y1, ...)``.
     Subclasses inherit geometry methods for intersection, projection, and
     distance computation.
 
     Attributes:
-        lines: Float array of shape ``(..., 2 * ndim)`` with the endpoint
+        lines: Float array of shape ``(..., 2 * ptdim)`` with the endpoint
             coordinates of each line segment.
     """
-
     lines       : RealArray
 
     @property
-    def ndim(self) -> int:
+    def shape(self) -> Tuple[int, ...]:
+        """Shape of the line array, excluding the last axis."""
+        return self.lines.shape[:-1]
+
+    @property
+    def ptdim(self) -> int:
         """Number of spatial dimensions (half the size of the last axis)."""
         return self.lines.shape[-1] // 2
 
@@ -36,33 +41,33 @@ class BaseLines(ArrayContainer):
 
     @property
     def points(self) -> RealArray:
-        """Endpoints reshaped to ``(..., 2, ndim)``."""
-        return self.lines.reshape(self.lines.shape[:-1] + (2, self.ndim))
+        """Endpoints reshaped to ``(..., 2, ptdim)``."""
+        return self.lines.reshape(self.lines.shape[:-1] + (2, self.ptdim))
 
     @property
     def pt0(self) -> RealArray:
-        """First endpoint, shape ``(..., ndim)``."""
-        return self.lines[..., :self.ndim]
+        """First endpoint, shape ``(..., ptdim)``."""
+        return self.lines[..., :self.ptdim]
 
     @property
     def pt1(self) -> RealArray:
-        """Second endpoint, shape ``(..., ndim)``."""
-        return self.lines[..., self.ndim:]
+        """Second endpoint, shape ``(..., ptdim)``."""
+        return self.lines[..., self.ptdim:]
 
     @property
     def x(self) -> RealArray:
         """x-coordinates of both endpoints, shape ``(..., 2)``."""
-        return self.lines[..., ::self.ndim]
+        return self.lines[..., ::self.ptdim]
 
     @property
     def y(self) -> RealArray:
         """y-coordinates of both endpoints, shape ``(..., 2)``."""
-        return self.lines[..., 1::self.ndim]
+        return self.lines[..., 1::self.ptdim]
 
     def intersection(self: Self, other: Self) -> RealArray:
         """Compute the intersection point of each line pair ``(self[i], other[i])``.
 
-        Uses the cross-product formula for line–line intersection in 2-D.
+        Uses the cross-product formula for line-line intersection in 2-D.
         The result lies on the infinite extension of *self*; no clamping to
         the segment endpoints is performed.
 
@@ -70,16 +75,34 @@ class BaseLines(ArrayContainer):
             other: Another :class:`BaseLines` container broadcastable with *self*.
 
         Returns:
-            Array of shape ``(..., ndim)`` with the intersection coordinates.
+            Array of shape ``(..., ptdim)`` with the intersection coordinates.
         """
+        xp = self.__array_namespace__()
+
         def vector_dot(a: RealArray, b: RealArray) -> RealArray:
             return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
 
         tau = self.pt1 - self.pt0
         other_tau = other.pt1 - other.pt0
 
-        t = vector_dot(other.pt0 - self.pt0, other_tau) / vector_dot(tau, other_tau)
+        t = safe_divide(vector_dot(other.pt0 - self.pt0, other_tau),
+                        vector_dot(tau, other_tau), xp)
         return self.pt0 + t[..., None] * tau
+
+    def is_inbound(self, roi: Tuple[float, float, float, float]) -> BoolArray:
+        """Check whether each line segment is partially contained in a rectangular ROI.
+
+        Args:
+            roi: Tuple ``(y_min, y_max, x_min, x_max)`` defining the rectangular region
+                of interest.
+
+        Returns:
+            Boolean array of shape ``(...,)``; ``True`` for segments partially inside the ROI.
+        """
+        xp = self.__array_namespace__()
+        y_min, y_max, x_min, x_max = roi
+        return xp.any(((self.x >= x_min) & (self.x <= x_max) &
+                       (self.y >= y_min) & (self.y <= y_max)), axis=-1)
 
     def project(self, point: RealArray) -> RealArray:
         """Project *point* onto the nearest location on each segment.
@@ -89,21 +112,15 @@ class BaseLines(ArrayContainer):
         the segment midpoint and *tau* is its direction vector.
 
         Args:
-            point: Array broadcastable to ``(..., ndim)``.
+            point: Array broadcastable to ``(..., ptdim)``.
 
         Returns:
-            Array of shape ``(..., ndim)`` with the clamped projection
+            Array of shape ``(..., ptdim)`` with the clamped projection
             coordinates.
         """
         xp = self.__array_namespace__()
-        tau = self.pt1 - self.pt0
-        center = 0.5 * (self.pt0 + self.pt1)
-        r = point - center
-        tau_mag = xp.sum(tau**2, axis=-1)
-        tau_mag_safe = xp.where(tau_mag != 0, tau_mag, 1)
-        r_tau = xp.where(tau_mag != 0, xp.sum(tau * r, axis=-1) / tau_mag_safe, 0)
-        r_tau = xp.clip(r_tau[..., None], -0.5, 0.5)
-        return tau * r_tau + center
+        projection = project_to_streak(point, self.pt0, self.pt1, xp)
+        return projection.center + projection.t[..., None] * projection.tau
 
     def distance(self, point: RealArray) -> RealArray:
         """Euclidean distance from *point* to the nearest location on each segment.
@@ -112,13 +129,22 @@ class BaseLines(ArrayContainer):
         and its projection.
 
         Args:
-            point: Array broadcastable to ``(..., ndim)``.
+            point: Array broadcastable to ``(..., ptdim)``.
 
         Returns:
             Array of distances, shape ``(...,)``.
         """
         xp = self.__array_namespace__()
         return xp.sqrt(xp.sum((self.project(point) - point)**2, axis=-1))
+
+    def ravel_lines(self) -> RealArray:
+        """Flatten the line endpoints to a 1-D array.
+
+        Returns:
+            Array of shape ``(..., 2 * ptdim)`` with the endpoint coordinates
+            ``(x0, y0, ..., x1, y1, ...)``.
+        """
+        return self.lines.reshape((-1, 2 * self.ptdim))
 
 @dataclass
 class Lines(BaseLines):
@@ -129,10 +155,9 @@ class Lines(BaseLines):
     not need to be grouped by frame.
 
     Attributes:
-        lines: Float array of shape ``(N, 2 * ndim)`` with the endpoint
+        lines: Float array of shape ``(N, 2 * ptdim)`` with the endpoint
             coordinates ``(x0, y0, ..., x1, y1, ...)``.
     """
-
     lines       : RealArray
 
 class BaseStreaks(IndexedContainer, BaseLines):
@@ -148,7 +173,6 @@ class BaseStreaks(IndexedContainer, BaseLines):
         lines: Float array of shape ``(N, 4)`` with the endpoint
             coordinates ``(x0, y0, x1, y1)``.
     """
-
     index       : IntArray
     lines       : RealArray
 
@@ -215,18 +239,30 @@ class BaseStreaks(IndexedContainer, BaseLines):
         Returns:
             *out* with streaks drawn in-place.
         """
-        xp = self.__array_namespace__()
-        return draw_lines(out=out, lines=self.lines, idxs=xp.asarray(self.flat_index),
+        return draw_lines(out=out, lines=self.lines, idxs=self.flat_index,
                           width=width, kernel=kernel)
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def pattern_dataframe(self, shape: Tuple[int, int], width: float, kernel: str='gaussian'
+                          ) -> pd.DataFrame:
+        xp = self.__array_namespace__()
+        indices, streak_id, values = write_lines(self.lines, (len(self),) + shape, self.reset_index(),
+                                                 width=width, kernel=kernel)
+        index, pixel_id = indices // prod(shape), indices % prod(shape)
+        y, x = xp.unravel_index(pixel_id, shape)
+        return pd.DataFrame({'index': asnumpy(self.unique_index()[index]), 'y': asnumpy(y),
+                             'x': asnumpy(x), 'streak_id': asnumpy(streak_id), 'value': asnumpy(values)})
+
+    def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.
+
+        Args:
+            frames: Integer array of frame indices.
 
         Returns:
             DataFrame with columns ``'index'``, ``'x_0'``, ``'y_0'``,
             ``'x_1'``, ``'y_1'``.
         """
-        return pd.DataFrame({'index': asnumpy(self.index),
+        return pd.DataFrame({'index': asnumpy(frames[self.index]),
                              'x_0': asnumpy(self.x[:, 0]), 'y_0': asnumpy(self.y[:, 0]),
                              'x_1': asnumpy(self.x[:, 1]), 'y_1': asnumpy(self.y[:, 1])})
 
@@ -279,7 +315,7 @@ class Streaks(BaseStreaks):
         return cls(index=index, lines=lines)
 
     def concentric_only(self, x_ctr: float, y_ctr: float, threshold: float=0.33) -> BoolArray:
-        """Return a boolean mask selecting streaks tangential to circles centred at *(x_ctr, y_ctr)*.
+        """Return a mask selecting streaks tangential to circles centred at *(x_ctr, y_ctr)*.
 
         A streak is considered concentric when its line direction aligns with
         the tangential direction at its midpoint — equivalently, the component
@@ -374,7 +410,7 @@ class StackedStreaks(BaseStreaks):
         """Flat frame address computed as ``num_modules * index + module_id``."""
         return self.num_modules * self.index + self.module_id
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, frames: IntArray) -> pd.DataFrame:
         """Export the streak container to a :class:`~pandas.DataFrame`.
 
         Returns:
@@ -382,7 +418,7 @@ class StackedStreaks(BaseStreaks):
             ``'x_1'``, ``'y_1'``, and ``'module_id'`` when
             :attr:`num_modules` > 1.
         """
-        dataframe = super().to_dataframe()
+        dataframe = super().to_dataframe(frames)
         if self.num_modules > 1:
             dataframe['module_id'] = asnumpy(self.module_id)
         return dataframe

@@ -19,7 +19,7 @@ class TestFullGeometryParsing:
     def xp(self) -> NumPyNamespace:
         return NumPy
 
-    def test_file_with_regions_and_masks(self, tmp_path: Path) -> None:
+    def test_file_with_regions_and_masks(self, tmp_path: Path):
         """Test CrystFELFile parsing with regions and masks."""
         geom_file = tmp_path / "test_with_regions.geom"
         content = (
@@ -98,7 +98,7 @@ class TestFullGeometryParsing:
             "mask_badbits": 0x0000,
         }
 
-    def test_file_parsing_with_comments_and_whitespace(self, tmp_path: Path) -> None:
+    def test_file_parsing_with_comments_and_whitespace(self, tmp_path: Path):
         """Test CrystFELFile parsing handles comments, whitespace, and malformed lines."""
         geom_file = tmp_path / "test.geom"
         content = (
@@ -137,7 +137,7 @@ class TestFullGeometryParsing:
             "max_ss": 511,
         }
 
-    def test_simple_single_panel(self, tmp_path: Path) -> None:
+    def test_simple_single_panel(self, tmp_path: Path):
         """Test parsing simple single-panel geometry."""
         geom_file = tmp_path / "simple.geom"
         content = (
@@ -173,7 +173,7 @@ class TestFullGeometryParsing:
         assert detector.shape == (1, 512, 1024)
         assert detector.panels['panel'].shape == (1, 512, 1024)
 
-    def test_radii(self, tmp_path: Path, xp: NumPyNamespace) -> None:
+    def test_radii(self, tmp_path: Path, xp: NumPyNamespace):
         """Test detector radius generation in detector-frame coordinates."""
         geom_file = tmp_path / "radius.geom"
         content = (
@@ -202,7 +202,7 @@ class TestFullGeometryParsing:
             [2.0, 5.0 ** 0.5, 8.0 ** 0.5],
         ]))
 
-    def test_supported_geometry_fields(self, tmp_path: Path) -> None:
+    def test_supported_geometry_fields(self, tmp_path: Path):
         """Test fields listed in the CrystFEL geometry convention."""
         geom_file = tmp_path / "supported_fields.geom"
         content = (
@@ -280,7 +280,7 @@ class TestFullGeometryParsing:
         assert panel.masks[1].mask_badbits == 0x02
         assert detector.groups == {"all": ["panel"]}
 
-    def test_multi_panel_geometry(self, tmp_path: Path) -> None:
+    def test_multi_panel_geometry(self, tmp_path: Path):
         """Test parsing multi-panel geometry."""
         geom_file = tmp_path / "multi.geom"
         content = (
@@ -322,10 +322,42 @@ class TestFullGeometryParsing:
         assert detector.panels['panel0'].shape == (512, 512)
         assert detector.panels['panel1'].shape == (512, 512)
 
+    def test_is_onpanel(self, tmp_path: Path, xp: NumPyNamespace):
+        """Test that points must lie on a panel rather than in overall detector bounds."""
+        geom_file = tmp_path / "panels.geom"
+        content = (
+            "clen = 0.1m\n"
+            "res = 2\n"
+            "panel0/corner_x = -0.5\n"
+            "panel0/corner_y = -0.5\n"
+            "panel0/fs = +1.0x+0.0y\n"
+            "panel0/ss = +0.0x+1.0y\n"
+            "panel0/min_fs = 0\n"
+            "panel0/max_fs = 2\n"
+            "panel0/min_ss = 0\n"
+            "panel0/max_ss = 2\n"
+            "panel1/corner_x = +9.5\n"
+            "panel1/corner_y = -0.5\n"
+            "panel1/fs = +1.0x+0.0y\n"
+            "panel1/ss = +0.0x+1.0y\n"
+            "panel1/min_fs = 3\n"
+            "panel1/max_fs = 5\n"
+            "panel1/min_ss = 0\n"
+            "panel1/max_ss = 2\n"
+        )
+        geom_file.write_text(content)
+        detector = read_crystfel(str(geom_file))
+        x = xp.asarray([[0.5, 1.5], [-2.0, -1.0], [4.0, 8.0], [8.0, 11.0]])
+        y = xp.ones_like(x)
+
+        # Any on-panel endpoint counts; off-detector and panel-gap endpoints do not.
+        expected = xp.asarray([True, False, False, True])
+        assert xp.all(detector.is_onpanel(x, y) == expected)
+
 class TestRealGeometryFile:
     """Test with actual geometry file from experiments."""
 
-    def test_parse_swissfel_geometry(self) -> None:
+    def test_parse_swissfel_geometry(self):
         """Test parsing actual SwissFEL geometry file if available."""
         geom_path = Path(
             "/gpfs/cfel/user/nivanov/cbclib_v2/experiments/swissfel/geometry/"
@@ -340,15 +372,14 @@ class TestRealGeometryFile:
         # Check first panel
         assert len(detector.panels) == 32
         assert detector.shape == (16448, 1030)
-        assert detector.assembler().shape == (4433, 4218)
+        assert detector.assembled_shape == (4432, 4217)
         for panel in detector.panels.values():
             assert panel.shape == (514, 1030)
 
-    def test_parse_jungfrau_geometry(self) -> None:
+    def test_parse_jungfrau_geometry(self):
         """Test parsing JUNGFRAU geometry file if available."""
         geom_path = Path(
-            "/gpfs/cfel/user/nivanov/cbclib_v2/experiments/exfel/geometry/"
-            "jungfrau_4456_v1.geom"
+            "/gpfs/exfel/exp/SPB/202302/p004456/usr/geometry/jungfrau_4456_v1.geom"
         )
 
         if not geom_path.exists():
@@ -359,6 +390,6 @@ class TestRealGeometryFile:
         # Should have many panels (64 for JUNGFRAU 4M)
         assert len(detector.panels) == 64
         assert detector.shape == (8, 512, 1024)  # Example expected shape
-        assert detector.assembler().shape == (2173, 2398)
+        assert detector.assembled_shape == (2172, 2398)
         for panel in detector.panels.values():
             assert panel.shape == (1, 256, 256)  # Example panel shape

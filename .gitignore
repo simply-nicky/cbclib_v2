@@ -148,3 +148,6 @@ AGENTS.md
 
 # Auto generated RST files from docstrings
 docs/generated
+
+# Credentials
+.credentials

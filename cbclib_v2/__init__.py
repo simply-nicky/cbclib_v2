@@ -8,9 +8,9 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from . import annotations, cuda, indexer, label, ndimage, scripts, slurm, streak_finder
+    from . import annotations, cuda, indexer, label, ndimage, scaler, scripts, slurm, streak_finder
     from ._src.array_api import (add_at, array_namespace, ascupy, asjax, asnumpy, default_api,
-                                 default_rng, min_at, set_at)
+                                 default_rng, set_at)
     from ._src.config import (CPUConfig, get_cpu_config, reset_cpu_config, set_cpu_config,
                               set_cpu_pool_worker)
     from ._src.crystfel import Detector, Panel, read_crystfel
@@ -18,9 +18,11 @@ if TYPE_CHECKING:
                                     write_hdf)
     from ._src.data_container import (ArrayContainer, Container, DataContainer, IndexedContainer,
                                       split, to_list)
-    from ._src.data_processing import CrystData, CrystMetadata, RegionDetector, StreakDetector
-    from ._src.run import (BaseRun, RunConfig, RunLocator, LCLSConfig, LCLSRun, SwissFELConfig,
-                           SwissFELRun, XFELRun, XFELConfig, open_run)
+    from ._src.data_processing import (CrystData, CrystMetadata, LSQData, PCAProjection,
+                                       RegionDetector, SimpleProjection, StreakDetector)
+    from ._src.parser import FieldLocator
+    from ._src.run import (BaseRun, RunConfig, RunList, RunListIndices, RunLocator, LCLSConfig,
+                           LCLSRun, SwissFELConfig, SwissFELRun, XFELRun, XFELConfig, open_run)
     from ._src.state import DynamicField, State, dynamic_fields, field, static_fields
     from ._src.streaks import Lines, StackedStreaks, Streaks
 
@@ -32,7 +34,6 @@ _EXPORTS = {
     "asnumpy": ("._src.array_api", "asnumpy"),
     "default_api": ("._src.array_api", "default_api"),
     "default_rng": ("._src.array_api", "default_rng"),
-    "min_at": ("._src.array_api", "min_at"),
     "set_at": ("._src.array_api", "set_at"),
     "CPUConfig": ("._src.config", "CPUConfig"),
     "get_cpu_config": ("._src.config", "get_cpu_config"),
@@ -57,12 +58,18 @@ _EXPORTS = {
     "to_list": ("._src.data_container", "to_list"),
     "CrystData": ("._src.data_processing", "CrystData"),
     "CrystMetadata": ("._src.data_processing", "CrystMetadata"),
+    "LSQData": ("._src.data_processing", "LSQData"),
+    "PCAProjection": ("._src.data_processing", "PCAProjection"),
+    "SimpleProjection": ("._src.data_processing", "SimpleProjection"),
     "OnlineDetector": ("._src.data_processing", "OnlineDetector"),
     "StreakDetector": ("._src.data_processing", "StreakDetector"),
     "RegionDetector": ("._src.data_processing", "RegionDetector"),
+    "FieldLocator": ("._src.parser", "FieldLocator"),
     "RunConfig": ("._src.run", "RunConfig"),
     "RunLocator": ("._src.run", "RunLocator"),
     "BaseRun": ("._src.run", "BaseRun"),
+    "RunList": ("._src.run", "RunList"),
+    "RunListIndices": ("._src.run", "RunListIndices"),
     "LCLSConfig": ("._src.run", "LCLSConfig"),
     "LCLSRun": ("._src.run", "LCLSRun"),
     "XFELConfig": ("._src.run", "XFELConfig"),
@@ -86,6 +93,7 @@ _SUBMODULES = {
     "indexer",
     "label",
     "ndimage",
+    "scaler",
     "scripts",
     "slurm",
     "streak_finder",

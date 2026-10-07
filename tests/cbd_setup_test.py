@@ -1,10 +1,15 @@
+from typing import Literal, cast
 import pytest
 from cbclib_v2 import default_rng
-from cbclib_v2.annotations import Generator, NDArray, NumPyNamespace, NumPy, RealArray
-from cbclib_v2.indexer import (CBDModel, CBDPoints, MaskedLaueVectors, Miller, MillerWithRLP,
-                               FixedApertureState, FixedPupilState, FixedState, RotationState,
-                               ResolvedState, XtalCell, XtalState)
+from cbclib_v2.annotations import Generator, IntArray, NDArray, NumPyNamespace, NumPy, RealArray
+from cbclib_v2.indexer import (CBDPoints, ConvexPolygon, EdgePoints, FixedApertureSetup,
+                               FixedPupilSetup, FixedSetup, LinePoints, Miller, MillerWithRLP,
+                               PupilIntersection, Rectangle, RefineResult, RefinerModel,
+                               ResolvedGeometry, ResolvedSetup, RotationState, SimulatedVectors,
+                               SourcePlane, XtalCell, XtalState)
 from cbclib_v2.test_util import TestSetup, check_close
+
+SetupMode = Literal['shared', 'per-pattern']
 
 class TestCBDSetup():
     @pytest.fixture
@@ -16,12 +21,18 @@ class TestCBDSetup():
         return default_rng(42, xp)
 
     @pytest.fixture
-    def state(self, xp: NumPyNamespace) -> FixedState:
-        return FixedState(TestSetup.xtal(xp), TestSetup.fixed_setup())
+    def initial(self, xp: NumPyNamespace) -> FixedSetup:
+        return FixedSetup(TestSetup.xtal(xp), TestSetup.fixed_geometry())
 
     @pytest.fixture
-    def resolved(self, state: FixedState, xp: NumPyNamespace) -> ResolvedState:
-        return state.resolve(xp)
+    def resolved(self, initial: FixedSetup, xp: NumPyNamespace) -> ResolvedSetup:
+        return initial.resolve(xp)
+
+    @pytest.fixture
+    def geometry(self, resolved: ResolvedSetup) -> ResolvedGeometry:
+        if isinstance(resolved.geometry, ResolvedGeometry):
+            return resolved.geometry
+        raise ValueError(f"ResolvedGeometry expected, but {type(resolved.geometry)} found.")
 
     def skew_symmetric(self, vec: RealArray, xp: NumPyNamespace) -> RealArray:
         return xp.linalg.cross(xp.eye(vec.shape[-1]), vec[..., None, :])
@@ -37,8 +48,8 @@ class TestCBDSetup():
         return I + S * skew + (1.0 - C) * (skew @ skew)
 
     @pytest.fixture
-    def xtal(self, state: FixedState) -> XtalState:
-        return state.xtal
+    def xtal(self, initial: FixedSetup) -> XtalState:
+        return initial.xtal
 
     @pytest.fixture
     def ormatrix(self, xtal: XtalState) -> RotationState:
@@ -57,26 +68,31 @@ class TestCBDSetup():
         return request.param
 
     @pytest.fixture
-    def miller(self, rng: Generator[NDArray], q_abs: float, num_points: int, model: CBDModel,
-               resolved: ResolvedState, xp: NumPyNamespace) -> Miller:
+    def atol(self) -> float:
+        return 2e-6
+
+    @pytest.fixture
+    def miller(self, rng: Generator[NDArray], q_abs: float, num_points: int, model: RefinerModel,
+               resolved: ResolvedSetup, xp: NumPyNamespace) -> Miller:
         miller = model.hkl_in_aperture(q_abs, resolved, xp)
         idxs = rng.choice(miller.hkl.shape[0], size=(num_points,))
         return miller[idxs]
 
     @pytest.fixture
-    def rlp(self, miller: Miller, model: CBDModel,
-            state: FixedState, xp: NumPyNamespace) -> MillerWithRLP:
-        return model.xtal.hkl_to_q(miller, state.xtal, xp)
+    def rlp(self, miller: Miller, model: RefinerModel,
+            initial: FixedSetup, xp: NumPyNamespace) -> MillerWithRLP:
+        return model.xtal.hkl_to_q(miller, initial.xtal, xp)
 
     @pytest.fixture
-    def laue(self, rlp: MillerWithRLP, model: CBDModel, resolved: ResolvedState,
-             xp: NumPyNamespace) -> MaskedLaueVectors:
-        return model.lens.source_lines(rlp, resolved.setup.lens, xp)
+    def laue(self, rlp: MillerWithRLP, model: RefinerModel, resolved: ResolvedSetup,
+             xp: NumPyNamespace) -> SimulatedVectors:
+        pupil = model.lens.pupil(resolved.geometry, xp)
+        return model.lens.source_lines(rlp, pupil, xp)
 
     @pytest.fixture
-    def points(self, laue: MaskedLaueVectors, model: CBDModel, resolved: ResolvedState,
-               xp: NumPyNamespace) -> CBDPoints:
-        return model.kout_to_points(laue, resolved.setup, xp)
+    def points(self, laue: SimulatedVectors, model: RefinerModel, resolved: ResolvedSetup,
+               atol: float, xp: NumPyNamespace) -> CBDPoints:
+        return model.kout_to_points(laue, resolved.geometry, xp, atol=atol)
 
     def text_xtal_to_cell(self, xtal: XtalState, ormatrix: RotationState,
                           cell: XtalCell, xp: NumPyNamespace):
@@ -84,9 +100,9 @@ class TestCBDSetup():
         check_close(xp.linalg.det(ormatrix.matrix), xp.array(1.0))
         check_close(ormatrix @ basis.basis, xtal.basis)
 
-    def test_xtal_to_spherical(self, xtal: XtalState):
+    def test_xtal_to_spherical(self, xtal: XtalState, xp: NumPyNamespace):
         r, theta, phi = xtal.to_spherical()
-        basis = XtalState.import_spherical(r, theta, phi).basis
+        basis = XtalState.import_spherical(r, theta, phi, xp).basis
         check_close(xtal.basis, basis)
 
     def text_reciprocate_xtal(self, xtal: XtalState):
@@ -98,22 +114,40 @@ class TestCBDSetup():
         check_close(cell.lengths, new_cell.lengths)
 
     def test_hkl_and_q(self, miller: Miller, rlp: MillerWithRLP,
-                       model: CBDModel, state: FixedState, xp: NumPyNamespace):
-        rlp = model.xtal.q_to_hkl(rlp, state.xtal, xp)
+                       model: RefinerModel, initial: FixedSetup, xp: NumPyNamespace):
+        rlp = model.xtal.q_to_hkl(rlp, initial.xtal, xp)
         assert xp.all(rlp.hkl_indices == miller.hkl_indices)
 
-    def test_laue(self, laue: MaskedLaueVectors, model: CBDModel,
-                  resolved: ResolvedState, xp: NumPyNamespace):
-        check_close(xp.broadcast_to(laue.q, laue.kout.shape), laue.kout - laue.kin)
-        valid = xp.broadcast_to(laue.mask, laue.kin.shape[:-1])
-        kin = model.lens.project_to_pupil(laue.kin, laue.index, resolved.setup.lens, xp)
-        check_close(laue.kin[valid], kin[valid])
+    def test_laue(self, laue: SimulatedVectors, model: RefinerModel,
+                  geometry: ResolvedGeometry, xp: NumPyNamespace):
+        check_close(xp.broadcast_to(laue.q[..., None, :], laue.kout.shape),
+                    laue.kout - laue.kin)
+        valid = laue.distance == 0.0
+        kin = model.lens.project_to_pupil(laue.kin, laue.index, geometry, xp)
+        check_close(laue.kin, kin)
+        q = xp.broadcast_to(laue.q[..., None, :], laue.kin.shape)
+        check_close(xp.sum(laue.kin[valid] * q[valid], axis=-1),
+                    -0.5 * xp.sum(q[valid]**2, axis=-1))
 
-    def test_points_and_kout(self, laue: MaskedLaueVectors, points: CBDPoints,
-                             model: CBDModel, resolved: ResolvedState, xp: NumPyNamespace):
-        valid = xp.broadcast_to(laue.mask, laue.kout.shape[:-1])
-        kout = model.points_to_kout(points, resolved.setup, xp).kout
+    def test_points_and_kout(self, laue: SimulatedVectors, points: CBDPoints,
+                             model: RefinerModel, geometry: ResolvedGeometry, atol: float,
+                             xp: NumPyNamespace):
+        valid = xp.isclose(laue.distance, 0.0, atol=atol)
+        points = model.kout_to_points(laue, geometry, xp, atol=atol)
+        kout = model.points_to_kout(points, geometry, xp)
         check_close(kout[valid], laue.kout[valid])
+        assert xp.all(xp.isnan(points.points[~valid]))
+
+    def test_first_order_defocus_correction(self, laue: SimulatedVectors, points: CBDPoints,
+                                            model: RefinerModel, geometry: ResolvedGeometry,
+                                            atol: float, xp: NumPyNamespace):
+        valid = xp.isclose(laue.distance, 0.0, atol=atol)
+        kout_zero = model.points_to_kout(LinePoints(points.index, points.points), geometry, xp)
+
+        kout_first = model.points_to_kout(points, geometry, xp)
+
+        assert not xp.allclose(kout_zero[valid], laue.kout[valid])
+        check_close(kout_first[valid], laue.kout[valid])
 
     def test_rotation_to_tilt(self, ormatrix: RotationState, xp: NumPyNamespace):
         tilt = ormatrix.to_tilt()
@@ -124,20 +158,297 @@ class TestCBDSetup():
         tilt_over_axis = ormatrix.to_tilt().to_tilt_over_axis()
         check_close(ormatrix.matrix, tilt_over_axis.to_tilt().to_rotation().matrix)
 
-    def test_fixed_pupil_state_from_resolved(self, resolved: ResolvedState, xp: NumPyNamespace):
-        restored = FixedPupilState.from_resolved(resolved)
+    def test_fixed_pupil_state_from_resolved(self, resolved: ResolvedSetup, xp: NumPyNamespace):
+        restored = FixedPupilSetup.from_resolved(resolved)
         converted = restored.resolve(xp)
 
         check_close(converted.xtal.basis, resolved.xtal.basis)
-        check_close(converted.setup.lens.foc_pos, resolved.setup.lens.foc_pos)
-        check_close(converted.setup.lens.pupil_roi, resolved.setup.lens.pupil_roi)
-        check_close(converted.setup.z, resolved.setup.z)
+        check_close(converted.geometry.foc_pos, resolved.geometry.foc_pos)
+        check_close(converted.geometry.pupil_roi, resolved.geometry.pupil_roi)
+        if isinstance(converted.geometry, ResolvedGeometry) and \
+           isinstance(resolved.geometry, ResolvedGeometry):
+            check_close(converted.geometry.defocus, resolved.geometry.defocus)
 
-    def test_fixed_aperture_state_from_resolved(self, resolved: ResolvedState, xp: NumPyNamespace):
-        restored = FixedApertureState.from_resolved(resolved)
+    def test_fixed_aperture_state_from_resolved(self, resolved: ResolvedSetup, xp: NumPyNamespace):
+        restored = FixedApertureSetup.from_resolved(resolved)
         converted = restored.resolve(xp)
 
         check_close(converted.xtal.basis, resolved.xtal.basis)
-        check_close(converted.setup.lens.foc_pos, resolved.setup.lens.foc_pos)
-        check_close(converted.setup.lens.pupil_roi, resolved.setup.lens.pupil_roi)
-        check_close(converted.setup.z, resolved.setup.z)
+        check_close(converted.geometry.foc_pos, resolved.geometry.foc_pos)
+        check_close(converted.geometry.pupil_roi, resolved.geometry.pupil_roi)
+        if isinstance(converted.geometry, ResolvedGeometry) and \
+           isinstance(resolved.geometry, ResolvedGeometry):
+            check_close(converted.geometry.defocus, resolved.geometry.defocus)
+
+class TestPupilProjection:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    @pytest.fixture
+    def edge_parameters(self, xp: NumPyNamespace) -> RealArray:
+        return xp.broadcast_to(xp.asarray([-0.5, 0.5, 1.5]), (4, 3))
+
+    @pytest.fixture
+    def rectangle(self, xp: NumPyNamespace) -> Rectangle:
+        return Rectangle(roi=xp.asarray([0.0, 2.0, 0.0, 4.0]))
+
+    @pytest.fixture
+    def rectangle_points(self, rectangle: Rectangle,
+                         edge_parameters: RealArray) -> EdgePoints:
+        return rectangle.edges.to_points(edge_parameters)
+
+    @pytest.fixture
+    def polygon(self, xp: NumPyNamespace) -> ConvexPolygon:
+        return ConvexPolygon(center=xp.zeros(2), lengths=xp.ones(4))
+
+    @pytest.fixture
+    def polygon_points(self, polygon: ConvexPolygon,
+                       edge_parameters: RealArray) -> EdgePoints:
+        return polygon.edges.to_points(edge_parameters)
+
+    @pytest.fixture
+    def spherical_pupil(self, xp: NumPyNamespace) -> Rectangle:
+        return Rectangle(roi=xp.asarray([-0.2, 0.2, -0.1, 0.1]))
+
+    @pytest.fixture
+    def incident_vectors(self, xp: NumPyNamespace) -> RealArray:
+        return xp.asarray([[0.0, 0.0, 1.0], [0.2, 0.0, xp.sqrt(0.96)]])
+
+    def check_edge_projection(self, points: EdgePoints, xp: NumPyNamespace):
+        projected = points.project()
+        expected_t = xp.clip(points.t, 0.0, 1.0)
+        displacement = points.xy - projected.xy
+        expected_distance = xp.sqrt(xp.sum(displacement**2, axis=-1))
+
+        # Projection onto a finite edge clamps its line parameter and measures displacement.
+        check_close(projected.t, expected_t)
+        check_close(points.distance(), expected_distance)
+
+    def test_rectangle_distance(self, rectangle_points: EdgePoints,
+                                xp: NumPyNamespace):
+        self.check_edge_projection(rectangle_points, xp)
+
+    def test_polygon_projection(self, polygon_points: EdgePoints,
+                                xp: NumPyNamespace):
+        self.check_edge_projection(polygon_points, xp)
+
+    def test_spherical_projection(self, spherical_pupil: Rectangle,
+                                  incident_vectors: RealArray,
+                                  xp: NumPyNamespace):
+        projected = spherical_pupil.project(incident_vectors)
+        expected_xy = xp.clip(incident_vectors[..., :2], spherical_pupil.min,
+                              spherical_pupil.max)
+        expected_z = xp.sqrt(1.0 - xp.sum(expected_xy**2, axis=-1))
+        expected = xp.concat((expected_xy, expected_z[..., None]), axis=-1)
+
+        # Pupil projection clips transverse coordinates while preserving the unit sphere.
+        check_close(projected, expected)
+        check_close(xp.sum(projected**2, axis=-1), xp.ones(projected.shape[:-1]))
+        check_close(spherical_pupil.distance(incident_vectors),
+                    xp.sqrt(xp.sum((incident_vectors - projected)**2, axis=-1)))
+
+class TestSourcePlane:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    @pytest.fixture
+    def q(self, xp: NumPyNamespace) -> RealArray:
+        return xp.asarray([0.2, 0.0, 0.0])
+
+    @pytest.fixture
+    def source(self, q: RealArray) -> SourcePlane:
+        return SourcePlane.from_q(q=q)
+
+    @pytest.fixture
+    def kin(self, xp: NumPyNamespace) -> RealArray:
+        return xp.asarray([0.0, 0.0, 1.0])
+
+    @pytest.fixture
+    def zero_source(self, q: RealArray, xp: NumPyNamespace) -> SourcePlane:
+        return SourcePlane.from_q(q=xp.zeros_like(q))
+
+    @pytest.fixture
+    def batched_source(self, xp: NumPyNamespace) -> SourcePlane:
+        q = xp.asarray([[0.2, 0.0, 0.0], [0.0, 0.2, 0.0]])
+        return SourcePlane.from_q(q=q)
+
+    @pytest.fixture
+    def batched_kin(self, xp: NumPyNamespace) -> RealArray:
+        return xp.zeros((2, 3, 3))
+
+    @pytest.fixture
+    def expanded_source(self, batched_source: SourcePlane) -> SourcePlane:
+        return batched_source.expand_dims(axis=1)
+
+    def test_normalised_distance(self, source: SourcePlane, kin: RealArray,
+                                 xp: NumPyNamespace):
+        projected = source.project(kin)
+        displacement = kin - projected
+
+        # Orthogonal projection lands on the Laue plane by moving parallel to its normal.
+        check_close(source.residual(projected), xp.zeros_like(source.distance(kin)))
+        check_close(xp.linalg.cross(displacement, source.q), xp.zeros_like(source.q))
+        check_close(source.distance(kin), xp.sqrt(xp.sum(displacement**2, axis=-1)))
+
+    def test_zero_q(self, zero_source: SourcePlane, kin: RealArray,
+                    xp: NumPyNamespace):
+        # A zero reciprocal vector defines no plane correction or perpendicular distance.
+        check_close(zero_source.project(kin), kin)
+        check_close(zero_source.distance(kin), xp.zeros_like(zero_source.distance(kin)))
+
+    def test_expand_dims(self, expanded_source: SourcePlane, batched_kin: RealArray,
+                         xp: NumPyNamespace):
+        projected = expanded_source.project(batched_kin)
+        displacement = batched_kin - projected
+
+        # Expanding the plane batch axis preserves the projection law under broadcasting.
+        check_close(expanded_source.residual(projected),
+                    xp.zeros_like(expanded_source.distance(batched_kin)))
+        check_close(expanded_source.distance(batched_kin),
+                    xp.sqrt(xp.sum(displacement**2, axis=-1)))
+
+class TestPupilIntersection:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    @pytest.fixture
+    def outside_pupil(self, xp: NumPyNamespace) -> Rectangle:
+        return Rectangle(roi=xp.asarray([-0.2, 0.2, 0.0, 0.2]))
+
+    @pytest.fixture
+    def outside_intersection(self, outside_pupil: Rectangle,
+                             xp: NumPyNamespace) -> PupilIntersection:
+        return PupilIntersection.from_edge(q=xp.asarray([0.2, 0.0, 0.0]),
+                                           edges=outside_pupil.edges)
+
+    @pytest.fixture
+    def outside_solutions(self, outside_pupil: Rectangle,
+                          xp: NumPyNamespace) -> EdgePoints:
+        parameters = xp.asarray([[0.5, 0.25], [1.5, 0.5],
+                                 [0.5, 0.25], [-0.5, 0.5]])
+        return outside_pupil.edges.to_points(parameters)
+
+    @pytest.fixture
+    def parallel_pupil(self, xp: NumPyNamespace) -> Rectangle:
+        return Rectangle(roi=xp.asarray([-0.1, 0.1, -0.2, 0.2]))
+
+    @pytest.fixture
+    def parallel_q(self, xp: NumPyNamespace) -> RealArray:
+        return xp.asarray([[0.0, 0.1, 0.0],
+                           [0.0, 0.2, 0.0],
+                           [0.0, 0.22, 0.0]])
+
+    @pytest.fixture
+    def parallel_intersection(self, parallel_pupil: Rectangle, parallel_q: RealArray,
+                              xp: NumPyNamespace) -> PupilIntersection:
+        edges = parallel_pupil.edges.replace(
+            tau=xp.broadcast_to(parallel_pupil.edges.tau, parallel_q.shape[:-1] + (4, 2)),
+            origin=xp.broadcast_to(parallel_pupil.edges.origin,
+                                   parallel_q.shape[:-1] + (4, 2)),
+        )
+        return PupilIntersection.from_edge(q=parallel_q, edges=edges)
+
+    def test_outside_score(self, outside_pupil: Rectangle,
+                           outside_intersection: PupilIntersection,
+                           outside_solutions: EdgePoints, xp: NumPyNamespace):
+        projected = outside_solutions.project()
+        edge_distance = xp.sqrt(xp.sum((outside_solutions.xy - projected.xy)**2, axis=-1))
+        plane_distance = outside_intersection.source.distance(outside_solutions.points)
+        candidate_score = edge_distance + plane_distance
+        expected_score = xp.sort(xp.min(candidate_score, axis=-1), axis=-1)[..., :2]
+
+        kin, score = outside_intersection.select(outside_solutions)
+
+        # Selection minimizes the sum of finite-edge and Laue-plane violations.
+        check_close(score, expected_score)
+        assert xp.all(kin[..., :2] >= outside_pupil.min)
+        assert xp.all(kin[..., :2] <= outside_pupil.max)
+
+    def test_parallel_plane(self, parallel_pupil: Rectangle, parallel_q: RealArray,
+                            parallel_intersection: PupilIntersection,
+                            xp: NumPyNamespace):
+        kin, score = parallel_intersection.select(parallel_intersection.solutions())
+        plane_y = -0.5 * xp.sum(parallel_q**2, axis=-1) / parallel_q[..., 1]
+        expected_y = xp.clip(plane_y, parallel_pupil.y0, parallel_pupil.y1)
+        expected_x = xp.stack((parallel_pupil.x0, parallel_pupil.x1), axis=-1)
+        expected_x = xp.broadcast_to(expected_x, kin[..., 0].shape)
+        expected_score = xp.broadcast_to(xp.abs(plane_y - expected_y)[..., None], score.shape)
+
+        # A parallel Laue plane intersects at both x boundaries or clips to the nearest y edge.
+        check_close(xp.sort(kin[..., 0], axis=-1), xp.sort(expected_x, axis=-1))
+        check_close(kin[..., 1], xp.broadcast_to(expected_y[..., None], score.shape))
+        check_close(score, expected_score)
+        check_close(xp.sum(kin**2, axis=-1), xp.ones(kin.shape[:-1]))
+
+class TestRefineResult:
+    @pytest.fixture
+    def xp(self) -> NumPyNamespace:
+        return NumPy
+
+    @pytest.fixture(params=['shared', 'per-pattern'])
+    def mode(self, request: pytest.FixtureRequest) -> SetupMode:
+        return cast(SetupMode, request.param)
+
+    @pytest.fixture
+    def frames(self, xp: NumPyNamespace) -> IntArray:
+        return xp.asarray([7, 7, 9])
+
+    @pytest.fixture
+    def loss(self, xp: NumPyNamespace) -> RealArray:
+        return xp.asarray([2.0, 1.0, 3.0])
+
+    @pytest.fixture
+    def xtal(self, loss: RealArray, xp: NumPyNamespace) -> XtalState:
+        scales = xp.arange(1, loss.size + 1)
+        return XtalState(xp.asarray(scales[:, None, None] * xp.eye(3)))
+
+    @pytest.fixture
+    def geometry(self, mode: SetupMode, loss: RealArray,
+                 xp: NumPyNamespace) -> ResolvedGeometry:
+        size = 1 if mode == 'shared' else loss.size
+        offsets = xp.arange(size)[:, None]
+        foc_pos = xp.asarray([[0.10, 0.20, -0.40]]) + 0.01 * offsets
+        pupil_roi = xp.asarray([[0.15, 0.17, 0.12, 0.16]]) + 0.01 * offsets
+        defocus = 0.01 * xp.arange(1, size + 1)
+        return ResolvedGeometry(foc_pos, pupil_roi, defocus)
+
+    @pytest.fixture
+    def resolved(self, xtal: XtalState, geometry: ResolvedGeometry) -> ResolvedSetup:
+        return ResolvedSetup(xtal, geometry)
+
+    @pytest.fixture
+    def result(self, frames: IntArray, resolved: ResolvedSetup,
+               loss: RealArray) -> RefineResult:
+        return RefineResult(frames=frames, resolved=resolved, loss=loss)
+
+    def test_champions(self, result: RefineResult, xp: NumPyNamespace) -> None:
+        indices = result.champions_only()
+
+        # A champion is the unique minimum-loss candidate for each frame.
+        for frame in xp.unique_values(result.frames):
+            candidates = xp.where(result.frames == frame)[0]
+            selected = indices[result.frames[indices] == frame]
+            assert selected.size == 1
+            check_close(result.loss[selected], xp.min(result.loss[candidates]))
+
+    def test_dataframe_round_trip(self, result: RefineResult,
+                                  xp: NumPyNamespace) -> None:
+        dataframe = result.to_dataframe()
+        frames, restored = ResolvedSetup.import_dataframe(dataframe, index=True, xp=xp)
+        if result.resolved.geometry.size == 1:
+            expected_geometry = result.resolved.geometry.broadcast(result.frames.size)
+        else:
+            expected_geometry = result.resolved.geometry
+
+        # Tabular conversion preserves frame labels, loss, crystal state, and geometry.
+        assert isinstance(expected_geometry, ResolvedGeometry)
+        assert isinstance(restored.geometry, ResolvedGeometry)
+        assert xp.all(frames == result.frames)
+        check_close(dataframe['loss'].to_numpy(), result.loss)
+        check_close(restored.xtal.basis, result.resolved.xtal.basis)
+        check_close(restored.geometry.foc_pos, expected_geometry.foc_pos)
+        check_close(restored.geometry.pupil_roi, expected_geometry.pupil_roi)
+        check_close(restored.geometry.defocus, expected_geometry.defocus)

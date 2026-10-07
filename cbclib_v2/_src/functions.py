@@ -9,7 +9,6 @@ See Also:
 from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
-from math import prod
 from typing import (TYPE_CHECKING, Callable, NamedTuple, Optional, Protocol, Sequence, Tuple,
                     cast, overload)
 import warnings
@@ -62,6 +61,9 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
 
                     if isinstance(result, NDArray):
                         return asjax(result)
+                    if isinstance(result, tuple):
+                        return tuple(asjax(item) if isinstance(item, NDArray) else item
+                                     for item in result)
                     return result
 
                 warnings.warn(f"{func.__name__} is not implemented for JAX backend. Falling back " \
@@ -72,6 +74,9 @@ def array_dispatch(dispatch_arg: str, cpu_impl: Callable, gpu_impl: Callable):
 
                 if isinstance(result, CPArray):
                     return asjax(result)
+                if isinstance(result, tuple):
+                    return tuple(asjax(item) if isinstance(item, CPArray) else item
+                                 for item in result)
                 return result
 
             if xp is CuPy:
@@ -371,6 +376,93 @@ def draw_lines(out: RealArray, lines: RealArray, idxs: IntArray | None=None,
     See Also:
         :func:`accumulate_lines`: Accumulate lines across multiple frames.
         :mod:`cbclib_v2.device`: Set device context for backend selection.
+    """
+    ...
+
+def _write_lines_cpu(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular'
+                     ) -> Tuple[NDIntArray, NDIntArray, NDRealArray]:
+    num_threads = get_cpu_config().effective_num_threads()
+    if isinstance(width, (int, float)):
+        width = NumPy.asarray([width,], dtype=lines.dtype)
+    lines = asnumpy(lines)
+    widths = asnumpy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
+    idxs = asnumpy(idxs) if idxs is not None else None
+    return bresenham.write_lines(lines=lines, shape=shape, widths=widths, idxs=idxs,
+                                 max_val=max_val, kernel=kernel, num_threads=num_threads)
+
+def _write_lines_gpu(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                     width: RealArray | float=1.0, max_val: float=1.0,
+                     kernel: str='rectangular'
+                     ) -> Tuple[CPIntArray, CPIntArray, CPRealArray]:
+    if cuda_draw_lines is None:
+        raise RuntimeError("write_lines is not compiled for the current platform. "
+                           "Please, check if you have installed cbclib_v2 with GPU support.")
+    if isinstance(width, (int, float)):
+        width = CuPy.asarray([width,], dtype=lines.dtype)
+    lines = ascupy(lines)
+    widths = ascupy(width)
+    if widths.ndim == 0:
+        widths = widths.reshape((1,))
+    idxs = ascupy(idxs) if idxs is not None else None
+    return cuda_draw_lines.write_lines(lines=lines, shape=shape, widths=widths, idxs=idxs,
+                                       max_val=max_val, kernel=kernel)
+
+@overload
+def write_lines(lines: NDRealArray, shape: Sequence[int], idxs: NDIntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular'
+                ) -> Tuple[NDIntArray, NDIntArray, NDRealArray]: ...
+
+@overload
+def write_lines(lines: CPRealArray, shape: Sequence[int], idxs: CPIntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular'
+                ) -> Tuple[CPIntArray, CPIntArray, CPRealArray]: ...
+
+@overload
+def write_lines(lines: JaxRealArray, shape: Sequence[int], idxs: JaxIntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular'
+                ) -> Tuple[JaxIntArray, JaxIntArray, JaxRealArray]: ...
+
+@overload
+def write_lines(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular') -> Tuple[IntArray, IntArray, RealArray]: ...
+
+@array_dispatch("lines", cpu_impl=_write_lines_cpu, gpu_impl=_write_lines_gpu)
+def write_lines(lines: RealArray, shape: Sequence[int], idxs: IntArray | None=None,
+                width: RealArray | float=1.0, max_val: float=1.0,
+                kernel: str='rectangular') -> Tuple[IntArray, IntArray, RealArray]:
+    """Digitize line footprints into flat sparse arrays.
+
+    Each emitted entry describes one in-bounds pixel from one line. Pixels shared by
+    overlapping lines are retained as separate entries, allowing downstream intensity
+    extraction to integrate or otherwise combine each footprint independently.
+
+    Args:
+        lines: Array of shape ``(..., 2 * ndim)`` containing segment endpoints in xyz
+            coordinate order.
+        shape: Shape of the target image stack. The final ``ndim`` axes are spatial and
+            preceding axes are flattened into frame indices.
+        idxs: Optional flattened frame index for each line. If omitted, all lines target a
+            single frame; when the number of frames equals the number of lines, lines are
+            assigned to frames one-to-one.
+        width: Footprint width in pixels. A scalar applies to all lines; arrays may provide
+            one width per line or leading line group.
+        max_val: Scale applied to every kernel weight.
+        kernel: Radial kernel used to calculate footprint weights. Supported values are
+            ``'biweight'``, ``'gaussian'``, ``'parabolic'``, ``'rectangular'``, and
+            ``'triangular'``.
+
+    Returns:
+        A tuple ``(pixel_indices, line_indices, values)``. ``pixel_indices`` contains flat
+        C-order indices into an array with ``shape``; ``line_indices`` identifies the source
+        line; and ``values`` contains scaled kernel weights. Entry order is unspecified.
     """
     ...
 
@@ -1294,80 +1386,6 @@ def robust_mean(inp: IntArray | RealArray, axis: int | Tuple[int, ...]=0, r0: fl
     Returns:
         Array of robust mean and robust standard deviation (if return_std is True).
 
-    See Also:
-        :func:`robust_lsq`: Robust least-squares solution.
-    """
-    ...
-
-def _robust_lsq_cpu(W: IntArray | RealArray, y: IntArray | RealArray,
-                    axis: IntSequence=-1, r0: float=0.0, r1: float=0.5,
-                    n_iter: int=12, lm: float=9.0) -> NDRealArray:
-    num_threads = get_cpu_config().effective_num_threads()
-    return cpu_median.robust_lsq(W=W, y=y, axis=axis, r0=r0, r1=r1, n_iter=n_iter, lm=lm,
-                                 num_threads=num_threads)
-
-def _robust_lsq_gpu(W: IntArray | RealArray, y: IntArray | RealArray,
-                    axis: int | Tuple[int, ...]=-1, r0: float=0.0, r1: float=0.5,
-                    n_iter: int=12, lm: float=9.0) -> CPRealArray:
-    if CuPy is None or cuda_median is None:
-        raise RuntimeError("robust_lsq is not compiled for the current platform. "
-                           "Please, check if you have installed the cbclib_v2 with GPU support.")
-
-    xp = CuPy
-    if isinstance(axis, int):
-        axis = (axis,)
-
-    if tuple(y.shape[ax] for ax in axis) != W.shape[-len(axis):]:
-        raise ValueError("Shape of y along specified axis must match shape of W")
-
-    y = shift_axis(y, axis)
-    n_reduce = y.shape[-1]
-
-    W = xp.reshape(W, (prod(W.shape[:-len(axis)]), n_reduce))
-
-    fits = xp.sum(y[..., None, :] * W, axis=-1) / xp.sum(W * W, axis=-1)
-    j0, j1 = int(r0 * n_reduce), int(r1 * n_reduce)
-
-    for _ in range(n_iter):
-        errors = (y - xp.tensordot(fits, W, axes=(-1, 0)))**2
-        idxs = xp.argpartition(errors, (j0, j1), axis=-1)
-        fits = cuda_median.lsq(fits, W, y, idxs[..., j0:j1])
-
-    errors = (y - xp.tensordot(fits, W, axes=(-1, 0)))**2
-    idxs = xp.argsort(errors, axis=-1)
-    return cuda_median.inliers_lsq(fits, W, y, errors, idxs, lm)
-
-@array_dispatch("y", cpu_impl=_robust_lsq_cpu, gpu_impl=_robust_lsq_gpu)
-def robust_lsq(W: RealArray | IntArray, y: RealArray | IntArray, axis: int | Tuple[int, ...] = -1,
-               r0: float=0.0, r1: float=0.5, n_iter: int = 12, lm: float=9.0) -> RealArray:
-    """Robustly solve a linear least-squares problem with the fast least kth order statistics
-    (FLkOS) algorithm.
-
-    Given a (N[0], .., N[ndim]) target vector y and a design matrix W of the shape
-    (M, N[axis[0]], .., N[axis[-1]]), robust_lsq solves the following problems:
-
-        for i in range(0, prod(N[~axis])):
-            minimize ||W x - y[i]||**2
-
-    Automatically dispatches to CPU or CUDA backend based on current device context.
-
-    Args:
-        W: Design matrix of the shape (M, N[axis[0]], .., N[axis[-1]]).
-        y: Target vector of the shape (N[0], .., N[ndim]).
-        axis: Array axes along which the design matrix is fitted to the target.
-        r0: A lower bound guess of ratio of inliers. We'd like to make a sample out of worst
-            inliers from data points that are between r0 and r1 of sorted residuals.
-        r1: An upper bound guess of ratio of inliers. Choose the r0 to be as high as you are
-            sure the ratio of data is inlier.
-        n_iter: Number of iterations of fitting a gaussian with the FLkOS algorithm.
-        lm: How far (normalized by STD of the Gaussian) from the mean of the Gaussian, data is
-            considered inlier.
-
-    Returns:
-        The least-squares solution x of the shape N[~axis].
-
-    See Also:
-        :func:`robust_mean`: Robust mean calculation.
     """
     ...
 

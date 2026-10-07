@@ -34,7 +34,6 @@ Robust reductions that are resistant to outliers and structured artefacts
 
    median
    robust_mean
-   robust_lsq
 
 Labeling and morphology
 -----------------------

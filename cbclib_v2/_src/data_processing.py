@@ -18,15 +18,15 @@ from weakref import ref
 from typing_extensions import Self
 import numpy as np
 from .array_api import array_namespace
+from .crystfel import Assembler
 from .cxi_protocol import H5Protocol, Kinds
-from .data_container import DataContainer, list_indices
+from .data_container import DataContainer, list_indices, normalise_indices
 from .streak_finder import PatternStreakFinder, PeakLabels, Streaks as StreakResult
 from .streaks import StackedStreaks, Streaks
-from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, RealArray, ReferenceType,
-                          ROI, Shape)
+from .annotations import (Array, ArrayLike, BoolArray, Indices, IntArray, MultiIndices, RealArray,
+                          ReferenceType, ROI, Shape)
 from .functions import (LabelResult, RadialProfiles, Structure, center_of_mass, covariance_matrix,
-                        ellipse_fit, label, line_fit, median, radial_profiles, robust_lsq,
-                        robust_mean)
+                        ellipse_fit, label, line_fit, median, radial_profiles, robust_mean)
 
 MaskMethod = Literal['all-bad', 'no-bad', 'range', 'snr']
 MDMethod = Literal['median-poisson', 'robust-mean-scale', 'robust-mean-poisson']
@@ -62,8 +62,30 @@ class CrystBase(DataContainer):
         return (0,)
 
     @property
+    def frame_size(self) -> int:
+        return prod(self.frame_shape)
+
+    @property
     def num_modules(self) -> int:
-        return prod(self.frame_shape) // prod(self.frame_shape[-2:])
+        shape = self.frame_shape
+        return prod(shape) // prod(shape[-2:])
+
+    def assemble(self: Self, assembler: Assembler) -> Self:
+        """Assemble the detector modules data onto a single lab-frame images.
+
+        Args:
+            assembler: A :class:`~cbclib_v2.Assembler` object that knows how to
+                assemble the stacked module data onto a single lab-frame image.
+
+        Returns:
+            A new container with all frame-like arrays assembled into a single
+            frame.
+        """
+        assembled = {}
+        for attr, data in self.contents().items():
+            if self.protocol.get_kind(attr) in (Kinds.frame, Kinds.stack):
+                assembled[attr] = assembler(data)
+        return self.replace(**assembled)
 
     def crop(self: Self, roi: ROI) -> Self:
         cropped = {}
@@ -73,16 +95,133 @@ class CrystBase(DataContainer):
         return self.replace(**cropped)
 
 @dataclass
-class PCAProjection(DataContainer):
-    good_fields : Sequence[int] | IntArray
+class LSQData(DataContainer):
+    """Linear least-squares target and design matrix.
+
+    Attributes:
+        y: Per-frame target values, shape ``(n_frames, *frame_shape)``.
+        W: Design matrix, shape ``(n_frames or 1, n_fields, *frame_shape)``.
+    """
+    y : RealArray
+    W : RealArray
+
+    def __post_init__(self):
+
+        if (self.W.ndim != self.y.ndim + 1 or
+            self.W.shape[0] not in (1, self.y.shape[0]) or
+            self.W.shape[2:] != self.y.shape[1:]):
+            raise ValueError('W must have a shape (n_frames or 1, n_fields, *frame_shape)')
+
+        xp = self.__array_namespace__()
+        self.y = xp.reshape(self.y, (self.y.shape[0], -1))
+        self.W = xp.reshape(self.W, self.W.shape[:2] + (-1,))
+
+    def apply_mask(self, mask: BoolArray) -> 'LSQData':
+        """Return least-squares data with rejected entries zeroed.
+
+        Args:
+            mask: Per-frame acceptance mask, shape ``(n_frames, *frame_shape)``.
+
+        Returns:
+            Masked least-squares data with a frame-specific design matrix.
+        """
+        xp = self.__array_namespace__()
+        mask = xp.reshape(mask, (mask.shape[0], -1))
+        return self.replace(y=xp.where(mask, self.y, 0),
+                            W=xp.where(mask[:, None, :], self.W, 0))
+
+    def solve(self) -> RealArray:
+        """Solve the masked joint least-squares systems.
+
+        Returns:
+            Per-frame field coefficients, shape ``(n_frames, n_fields)``.
+        """
+        xp = self.__array_namespace__()
+        gram = xp.linalg.matmul(self.W, xp.permute_dims(self.W, (0, 2, 1)))
+        rhs = xp.sum(self.W * self.y[:, None, :], axis=-1)
+        return xp.linalg.matmul(xp.linalg.pinv(gram), rhs[..., None])[..., 0]
+
+@dataclass
+class SimpleProjection(DataContainer):
+    """Per-frame flatfield and noise scaling coefficients.
+
+    Attributes:
+        scale: Flatfield scale for each frame, shape ``(n_frames,)``.
+        std_scale: Noise standard-deviation scale for each frame, shape
+            ``(n_frames,)``.
+    """
+    scale     : RealArray
+    std_scale : RealArray
+
+    def whitefield(self, metadata: CrystMetadata) -> RealArray:
+        """Reconstruct per-frame whitefields from flatfield scales.
+
+        Args:
+            metadata: A :class:`CrystMetadata` containing the flatfield to scale.
+
+        Returns:
+            Per-frame whitefield array, shape ``(N, *frame_shape)``.
+        """
+        xp = self.__array_namespace__()
+        return xp.tensordot(self.scale, metadata.flatfield, axes=0)
+
+    def std(self, metadata: CrystMetadata) -> RealArray:
+        """Reconstruct per-frame noise standard deviations from fitted scales.
+
+        Args:
+            metadata: A :class:`CrystMetadata` containing the per-pixel noise
+                standard deviation to scale.
+
+        Returns:
+            Per-frame noise standard deviation array, shape ``(N, *frame_shape)``.
+        """
+        xp = self.__array_namespace__()
+        if metadata.is_empty(metadata.std):
+            return xp.empty(self.std_scale.shape + metadata.std.shape,
+                            dtype=metadata.std.dtype)
+        return xp.tensordot(self.std_scale, metadata.std, axes=0)
+
+    def scale_std(self, data: RealArray, metadata: CrystMetadata,
+                  mask: BoolArray, std_min: float=0.0) -> Self:
+        """Estimate per-frame noise scales from accepted background residuals.
+
+        Args:
+            data: Raw detector data, shape ``(N, *frame_shape)``.
+            metadata: Background metadata containing the reference pixel noise.
+            mask: Per-frame mask selecting background pixels used in the estimate.
+            std_min: Lower bound for the expected per-pixel standard deviation.
+
+        Returns:
+            A projection with ``std_scale`` equal to the RMS of the accepted
+            residuals normalised by their expected pixel noise.
+        """
+        xp = self.__array_namespace__()
+        expected = xp.clip(metadata.std, std_min, xp.inf)
+        valid = mask & (expected > 0)
+        denominator = xp.where(valid, expected, 1)
+        residual = xp.where(valid, (data - self.whitefield(metadata)) / denominator, 0)
+        axes = tuple(range(1, residual.ndim))
+        count = xp.sum(valid, axis=axes)
+        std_scale = xp.sqrt(xp.sum(residual ** 2, axis=axes) / count)
+        return self.replace(std_scale=std_scale)
+
+@dataclass
+class PCAProjection(SimpleProjection):
+    """Per-frame flatfield scales and PCA projection coefficients.
+
+    Attributes:
+        scale: Flatfield scale for each frame, shape ``(n_frames,)``.
+        projection: Eigen-field coefficients, shape ``(n_frames, n_fields)``.
+    """
     projection  : RealArray
 
-    def apply(self, metadata: CrystMetadata) -> RealArray:
+    def whitefield(self, metadata: CrystMetadata) -> RealArray:
         """Reconstruct per-frame whitefields from PCA projection coefficients.
 
-        Computes :math:`\\bar{W} + \\sum_k c_{ik} e_k` for each frame
-        :math:`i`, where :math:`c_{ik}` are the projection coefficients and
-        :math:`e_k` are the eigen fields.
+        Computes :math:`s_i \\bar{W} + \\sum_k c_{ik} e_k` for each frame
+        :math:`i`, where :math:`s_i` is the flatfield scale,
+        :math:`c_{ik}` are the projection coefficients, and :math:`e_k` are
+        the eigen fields.
 
         Args:
             metadata: A :class:`CrystMetadata` containing the PCA decomposition
@@ -94,18 +233,19 @@ class PCAProjection(DataContainer):
         Example:
             Reconstruct per-frame backgrounds and attach them to new data:
 
-            >>> proj = metadata.project(frames, method='lsq')
-            >>> whitefields = proj.apply(metadata)
-            >>> data = metadata.to_data(frames, whitefield=whitefields)
+            >>> proj = metadata.project(frames, n_iter=1)
+            >>> whitefields = proj.whitefield(metadata)
+            >>> data = metadata.to_data(frames, projection=proj)
         """
+        if self.projection.shape[1] != metadata.eigen_field.shape[0]:
+            raise ValueError(
+                f'metadata has incompatible number of fields: {metadata.eigen_field.shape[0]}'
+                f' expected {self.projection.shape[1]}'
+            )
         xp = self.__array_namespace__()
-
-        if metadata.is_empty(metadata.eigen_field):
-            return xp.tensordot(self.projection, metadata.flatfield[None], axes=((-1,), (0,)))
-
-        fields = xp.tensordot(self.projection, metadata.eigen_field[self.good_fields],
+        fields = xp.tensordot(self.projection, metadata.eigen_field,
                               axes=((-1,), (0,)))
-        return metadata.flatfield + fields
+        return super().whitefield(metadata) + fields
 
 @dataclass
 class CrystMetadata(CrystBase):
@@ -138,7 +278,7 @@ class CrystMetadata(CrystBase):
 
         >>> metadata = cbc.CrystMetadata.stack(meta_a, meta_b, meta_c)
         >>> metadata = metadata.pca()
-        >>> proj = metadata.project(frames, method='lsq')
+        >>> proj = metadata.project(frames, n_iter=1)
         >>> data = metadata.to_data(frames, projection=proj)
         >>> data = data.update_snr(std_min=0.5)
     """
@@ -152,7 +292,7 @@ class CrystMetadata(CrystBase):
 
     protocol    : H5Protocol = field(default_factory=lambda: H5Protocol.read(METADATA_PROTOCOL))
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if not self.is_empty(self.mask):
             if not self.is_empty(self.std):
                 self.std *= self.mask
@@ -161,6 +301,33 @@ class CrystMetadata(CrystBase):
 
         if self.is_empty(self.flatfield) and not self.is_empty(self.whitefields):
             self.flatfield = self.whitefields.mean(axis=0)
+
+    def __getitem__(self, indices: MultiIndices) -> 'CrystMetadata':
+        """Select detector pixels from every frame-like array.
+
+        Args:
+            indices: Integer indices, boolean mask, or slice selecting detector
+                pixels.
+
+        Returns:
+            Metadata restricted to the selected detector pixels.
+        """
+        if not isinstance(indices, tuple):
+            indices = normalise_indices((indices,), self.frame_shape)
+        else:
+            indices = normalise_indices(indices, self.frame_shape)
+
+        attributes = {}
+        for attr, data in self.contents().items():
+            if not isinstance(data, Array) or self.is_empty(data):
+                continue
+
+            kind = self.protocol.get_kind(attr)
+            if kind == Kinds.frame:
+                attributes[attr] = data[indices]
+            elif kind == Kinds.stack:
+                attributes[attr] = data[(...,) + indices]
+        return self.replace(**attributes)
 
     @classmethod
     def default_protocol(cls) -> H5Protocol:
@@ -220,7 +387,7 @@ class CrystMetadata(CrystBase):
                    whitefields=xp.stack(whitefields, axis=0), protocol=protocol)
 
     def to_data(self, data: RealArray, frames: IntArray | int | None=None,
-                projection: PCAProjection | None=None) -> 'CrystData':
+                projection: SimpleProjection | PCAProjection | None=None) -> 'CrystData':
         """Attach this background model to a new array of detector frames.
 
         Creates a :class:`CrystData` container populated with ``mask`` and
@@ -234,8 +401,8 @@ class CrystMetadata(CrystBase):
                 ``(*batch_shape, *frame_shape)``.
             frames: Integer frame indices. Inferred from the leading dimensions
                 of ``data`` when ``None``.
-            projection: A :class:`PCAProjection` containing the PCA decomposition
-                to apply.
+            projection: A :class:`SimpleProjection` or :class:`PCAProjection`
+                containing the fitted background coefficients to apply.
 
         Raises:
             ValueError: If ``projection`` is None and ``flatfield`` is absent.
@@ -250,7 +417,7 @@ class CrystMetadata(CrystBase):
             Apply static and dynamic background subtraction:
 
             >>> data = metadata.to_data(frames)                       # static
-            >>> proj = metadata.project(frames, method='lsq')
+            >>> proj = metadata.project(frames, n_iter=1)
             >>> data = metadata.to_data(frames, projection=proj)      # dynamic
         """
         xp = self.__array_namespace__()
@@ -266,15 +433,19 @@ class CrystMetadata(CrystBase):
             return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
                              whitefield=self.flatfield)
 
-        whitefield = projection.apply(self)
+        whitefield = projection.whitefield(self)
+        std = projection.std(self)
         if whitefield.size != data.size:
             raise ValueError(f'whitefield size {whitefield.size} must be equal to data size '
                              f'{data.size}')
 
         protocol = CrystData.default_protocol()
         protocol.kinds['whitefield'] = 'stack'
-        return CrystData(data=data, frames=frames, mask=self.mask, std=self.std,
-                         whitefield=xp.reshape(whitefield, data.shape), protocol=protocol)
+        protocol.kinds['std'] = 'stack'
+        result = CrystData(data=data, frames=frames, mask=self.mask, std=std,
+                           whitefield=xp.reshape(whitefield, data.shape), protocol=protocol)
+        result.mask &= xp.all(result.whitefield >= 0, axis=0)
+        return result.apply_mask()
 
     def pca(self) -> 'CrystMetadata':
         """Decompose whitefield variability into principal components.
@@ -311,69 +482,103 @@ class CrystMetadata(CrystBase):
         effs = xp.tensordot(eig_vecs, fields, axes=((0,), (0,)))
         return self.replace(eigen_field=effs, eigen_value=eig_vals / eig_vals.sum())
 
-    def project(self, data: RealArray, good_fields: Indices=slice(None),
-                method: str="robust-lsq", r0: float=0.0, r1: float=0.5, n_iter: int=12,
-                lm: float=9.0) -> PCAProjection:
+    def project(self, data: RealArray, clip_snr: float=3.0, n_iter: int=3,
+                std_min: float=0.0) -> SimpleProjection | PCAProjection:
         """Project detector frames onto the PCA basis.
 
-        Fits the residual :math:`D - \\bar{W}` for each frame to a linear
-        combination of the stored eigen fields and returns the projection
-        coefficients. Pass the result to :meth:`project` to reconstruct a
-        per-frame background.
+        Jointly fits the flatfield and stored eigen fields to each frame. Pass
+        the result to :meth:`SimpleProjection.whitefield` to reconstruct a per-frame
+        background.
 
         Args:
             data: Raw detector data, shape ``(N, *frame_shape)``.
-            good_fields: Indices of eigen fields to include in the fit.
-                All fields are used by default.
-            method: Fitting method:
-
-                * ``'lsq'`` — ordinary least squares.
-                * ``'robust-lsq'`` — least squares with FLkOS outlier rejection.
-
-            r0: Lower bound on the expected inlier fraction (FLkOS).
-            r1: Upper bound on the expected inlier fraction (FLkOS).
-            n_iter: Number of Gaussian-fitting iterations (FLkOS).
-            lm: Outlier threshold in units of the estimated standard deviation
-                (FLkOS).
+            clip_snr: SNR threshold for rejecting bright diffraction signal.
+            n_iter: Total number of least-squares fits. A value of one performs
+                ordinary masked least squares; later fits reject signal using
+                the preceding background estimate.
+            std_min: Lower bound for the per-pixel standard deviation used in
+                signal rejection.
 
         Raises:
-            ValueError: If ``flatfield`` is absent.
+            ValueError: If ``flatfield`` is absent, ``n_iter`` is less than one,
+                or iterative rejection is requested without ``std``.
 
         Returns:
-            A :class:`PCAProjection` with fields ``good_fields`` (selected
-            component indices) and ``projection`` (per-frame coefficient array,
-            shape ``(N, n_fields)``).
+            A :class:`SimpleProjection` when no eigen fields are present, or a
+            :class:`PCAProjection` containing both flatfield scales and
+            eigen-field coefficients otherwise. Iterative projections also
+            contain the per-frame RMS noise scale fitted from accepted residuals.
 
         Example:
             Project frames onto the two dominant PCA components:
 
-            >>> proj = metadata.project(frames, good_fields=[0, 1], method='lsq')
-            >>> whitefields = metadata.project(proj)
+            >>> proj = metadata.project(frames, n_iter=3)
+            >>> whitefields = proj.whitefield(metadata)
         """
         if self.is_empty(self.flatfield):
             raise ValueError('No flatfield in the container')
+        if n_iter < 1:
+            raise ValueError('n_iter must be at least one')
+        if n_iter > 1 and self.is_empty(self.std):
+            raise ValueError('No std in the container for iterative signal rejection')
+
         xp = self.__array_namespace__()
+        data = xp.reshape(data, (-1,) + self.frame_shape)
 
+        fields = self.flatfield[None]
+        if not self.is_empty(self.eigen_field):
+            fields = xp.concat((fields, self.eigen_field), axis=0)
+        lsq_data = LSQData(y=data, W=fields[None])
+
+        if self.is_empty(self.mask):
+            mask = xp.ones(data.shape, dtype=bool)
+        else:
+            mask = xp.broadcast_to(self.mask, data.shape)
+
+        coefficients = lsq_data.apply_mask(mask).solve()
+        result: SimpleProjection | PCAProjection
         if self.is_empty(self.eigen_field):
-            good_fields = xp.array([], dtype=int)
-            y = xp.reshape(data, (data.size // prod(self.frame_shape), -1))
-            W = xp.reshape(self.flatfield, (1, -1))
-
+            result = SimpleProjection(scale=coefficients[:, 0],
+                                      std_scale=xp.sqrt(coefficients[:, 0]))
         else:
-            good_fields = list_indices(good_fields, self.eigen_field.shape[0])
-            fields = self.eigen_field[good_fields]
+            result = PCAProjection(scale=coefficients[:, 0],
+                                   std_scale=xp.sqrt(coefficients[:, 0]),
+                                   projection=coefficients[:, 1:])
 
-            y = xp.reshape(data - self.flatfield, (data.size // prod(self.frame_shape), -1))
-            W = xp.reshape(fields, (fields.size // prod(self.frame_shape), -1))
+        if n_iter == 1:
+            return result
 
-        if method == "robust-lsq":
-            projection = robust_lsq(W=W, y=y, axis=1, r0=r0, r1=r1, n_iter=n_iter, lm=lm)
-        elif method == "lsq":
-            projection = xp.mean(y[..., None, :] * W, axis=-1) / xp.mean(W * W, axis=-1)
-        else:
-            raise ValueError(f"Invalid method argument: {method}")
+        for _ in range(1, n_iter):
+            background = result.whitefield(self)
+            std = xp.clip(result.std(self), std_min, xp.inf)
+            n_mask = mask & (data <= background + clip_snr * std)
+            coefficients = lsq_data.apply_mask(n_mask).solve()
+            if isinstance(result, PCAProjection):
+                result = result.replace(scale=coefficients[:, 0],
+                                        projection=coefficients[:, 1:])
+            else:
+                result = result.replace(scale=coefficients[:, 0])
+            result = result.scale_std(data, self, n_mask, std_min)
 
-        return PCAProjection(good_fields=good_fields, projection=projection)
+        return result
+
+    def select(self, good_fields: int | slice | Sequence[int]) -> 'CrystMetadata':
+        """Return a new :class:`CrystMetadata` with a subset of the PCA decomposition.
+
+        Args:
+            good_fields: Indices of eigen fields to retain.
+
+        Raises:
+            ValueError: If ``eigen_field`` is absent.
+
+        Returns:
+            A new :class:`CrystMetadata` with the selected PCA components.
+        """
+        if self.is_empty(self.eigen_field):
+            raise ValueError('No eigen_field in the container')
+        good_fields = list_indices(good_fields, self.eigen_field.shape[0])
+        return self.replace(eigen_field=self.eigen_field[good_fields],
+                            eigen_value=self.eigen_value[good_fields])
 
 @dataclass
 class CrystData(CrystBase):
@@ -390,7 +595,8 @@ class CrystData(CrystBase):
         data: Raw detector frames, shape ``(n_frames, *frame_shape)``.
         whitefield: Background model, shape ``frame_shape`` (static) or
             ``(n_frames, *frame_shape)`` (per-frame).
-        std: Per-pixel noise standard deviation, shape ``frame_shape``.
+        std: Per-pixel noise standard deviation, shape ``frame_shape`` (static) or
+            ``(n_frames, *frame_shape)`` (per-frame).
         snr: Background-corrected signal-to-noise ratio, shape
             ``(n_frames, *frame_shape)``. Computed by :meth:`update_snr`.
         frames: Integer indices of the frames in this container.
@@ -444,12 +650,39 @@ class CrystData(CrystBase):
     @property
     def num_whitefields(self) -> int:
         """Number of whitefield images stored (1 for static, N for per-frame)."""
-        return self.whitefield.size // prod(self.frame_shape)
+        return self.whitefield.size // self.frame_size
 
     @property
     def shape(self) -> Shape:
         """Full shape of the data array: ``(n_frames, *frame_shape)``."""
         return (self.num_frames,) + self.frame_shape
+
+    def values_at(self, attribute: Literal['data', 'whitefield', 'std'], index: IntArray,
+                  y: IntArray, x: IntArray) -> IntArray | RealArray:
+        """Sample a detector field at frame-indexed pixel coordinates.
+
+        Frame fields are shared by every pattern, while stack fields are indexed by the
+        compact frame index associated with each point.
+
+        Args:
+            attribute: Detector field to sample.
+            index: Compact frame index for each point.
+            y: Detector row for each point.
+            x: Detector column for each point.
+
+        Returns:
+            Sampled values with the same shape as ``index``.
+
+        Raises:
+            ValueError: If the selected field is neither a frame nor a stack.
+        """
+        values = getattr(self, attribute)
+        kind = self.protocol.get_kind(attribute)
+        if kind == Kinds.frame:
+            return values[(y, x)]
+        if kind == Kinds.stack:
+            return values[(index, y, x)]
+        raise ValueError(f"{attribute} is not a detector frame or stack")
 
     @classmethod
     def default_protocol(cls) -> H5Protocol:
@@ -1049,7 +1282,6 @@ class StreakDetector(DetectorBase):
             fitting.
         vmin: SNR threshold for streak significance testing.
     """
-
     data            : RealArray
     structure       : Structure
     vmin            : float

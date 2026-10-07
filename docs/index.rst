@@ -44,8 +44,9 @@ implemented in **cbclib_v2**:
    detector geometry to match the observed diffraction patterns using
    JAX-based optimisation (not documented yet).
 
-6. **Intensity scaling** — combines integrated signal from detected hits into
-   a common table of structure factors (not implemented yet).
+6. **Intensity scaling** — jointly estimates reflection intensities and
+   per-frame source-profile widths from integrated photon counts using
+   JAX-based optimisation (not documented yet).
 
 .. toctree::
    :maxdepth: 1

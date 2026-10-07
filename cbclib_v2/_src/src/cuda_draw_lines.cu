@@ -86,6 +86,28 @@ void check_widths(csize_t n_widths, csize_t n_items, csize_t n_groups)
     }
 }
 
+void check_index_size(csize_t size, csize_t expected_size)
+{
+    if (size != expected_size)
+    {
+        throw std::invalid_argument("idxs has an invalid size (" +
+                                    std::to_string(size) + " != " +
+                                    std::to_string(expected_size) + ")");
+    }
+}
+
+void check_index_range(const DeviceVector<int> & invalid_index, csize_t size)
+{
+    int is_invalid = 0;
+    handle_cuda_error(cudaMemcpy(&is_invalid, invalid_index.data(), sizeof(int),
+                                 cudaMemcpyDeviceToHost));
+    if (is_invalid)
+    {
+        throw std::out_of_range("idxs range is outside of (0, " +
+                                std::to_string(size) + ")");
+    }
+}
+
 // Building line data structures on device
 template <typename T, csize_t N>
 __global__ void build_lines_kernel(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
@@ -409,6 +431,47 @@ protected:
     DeviceVector<csize_t> m_indices, m_terms, m_offsets;
 };
 
+template <typename T, csize_t N>
+HOST_DEVICE bool line_bounding_box(const LineND<T, N> & line, T width,
+                                   const ShapeND<N> & grid, const PointND<T, N> & bin,
+                                   PointND<csize_t, N> & origin, ShapeND<N> & shape)
+{
+    if (width <= T() || !isfinite(width)) return false;
+    for (csize_t n = 0; n < N; n++)
+    {
+        if (!isfinite(line.pt0[n]) || !isfinite(line.pt1[n])) return false;
+    }
+
+    T offset = math_traits<T>::ceil(width) + 1;
+    auto tau = line.tangent();
+    tau = tau / amplitude(tau);
+
+    PointND<csize_t, N> end;
+    for (csize_t zyx_n = 0; zyx_n < N; zyx_n++)
+    {
+        csize_t xyz_n = N - zyx_n - 1;
+        auto x_offset = math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n];
+        auto start = math_traits<T>::round(line.pt0[xyz_n] - x_offset);
+        auto stop = math_traits<T>::round(line.pt1[xyz_n] + x_offset);
+        if (start > stop)
+        {
+            auto temp = start;
+            start = stop;
+            stop = temp;
+        }
+        start = math_traits<T>::floor(start / bin[zyx_n]);
+        stop = math_traits<T>::ceil(stop / bin[zyx_n]);
+        start = math_traits<T>::max(T(), start);
+        stop = math_traits<T>::min(static_cast<T>(grid.shape(zyx_n)), stop);
+        if (stop <= start) return false;
+        origin[zyx_n] = static_cast<csize_t>(start);
+        end[zyx_n] = static_cast<csize_t>(stop);
+    }
+
+    shape = ShapeND<N>(end - origin);
+    return true;
+}
+
 // DrawContext class for managing drawing parameters and line indices on device
 
 template <class Indices, typename T, csize_t N, typename IndicesView = typename Indices::const_view_type, typename IndicesRange = decltype(std::declval<IndicesView &>()[0])>
@@ -436,44 +499,17 @@ protected:
         HOST_DEVICE void apply_to_line(const PointND<T, N> & pt0, const PointND<T, N> & pt1,
                                        T width, Func func) const
         {
-            if (width <= T()) return;
-
-            T offset = math_traits<T>::ceil(width) + 1;
-
-            // Compute normalized direction vector tau
-            T length = T();
-            PointND<T, N> tau;
-            for (csize_t n = 0; n < N; n++) {tau[n] = pt1[n] - pt0[n]; length += tau[n] * tau[n];}
-            tau = tau / math_traits<T>::sqrt(length);
-
-            // coord0 and coord1 follow zyx convention
-            PointND<csize_t, N> coord0, coord1;
-            for (csize_t zyx_n = 0; zyx_n < N; zyx_n++)
-            {
-                // Compute bounding box in voxel coordinates
-                // Points are in xyz convention; grid/bin are in zyx convention
-                // Start index can be greater than end index if line is drawn backwards along this axis
-                // Start and end points can be outside of the volume
-
-                csize_t xyz_n = N - zyx_n - 1;  // Convert zyx index to xyz index
-                auto start = math_traits<T>::round(pt0[xyz_n] - math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n]);
-                auto end = math_traits<T>::round(pt1[xyz_n] + math_traits<T>::abs(offset / tau[xyz_n]) * tau[xyz_n]);
-                if (start > end) {auto temp = start; start = end; end = temp;}
-                start = math_traits<T>::floor(start / _M_bin[zyx_n]);
-                end = math_traits<T>::ceil(end / _M_bin[zyx_n]);
-                coord0[zyx_n] = math_traits<T>::max(T(), start);
-                coord1[zyx_n] = math_traits<T>::min(_M_grid.shape(zyx_n), end);
-            }
-
-            // Shape follows zyx convention
-            ShapeND<N> shape = coord1 - coord0;
+            PointND<csize_t, N> origin;
+            ShapeND<N> shape;
+            if (!line_bounding_box(LineND<T, N>{pt0, pt1}, width, _M_grid, _M_bin,
+                                   origin, shape)) return;
 
             // Coordinate also follows zyx convention
             PointND<csize_t, N> coord;
             for (csize_t offset = 0; offset < shape.size(); offset++)
             {
                 shape.coord_at(coord, offset);
-                coord += coord0;
+                coord += origin;
 
                 csize_t bin_idx = _M_grid.index_at(coord);
                 func(bin_idx);
@@ -752,13 +788,19 @@ template <typename T, typename I, csize_t N>
 __global__ void count_lines(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
                             csize_t group_size, csize_t n_line_groups,
                             ArrayViewND<I, 1> idxs, csize_t n_frames,
-                            DrawContextView<DrawIndices, T, N> context, DeviceRange<csize_t> counts)
+                            DrawContextView<DrawIndices, T, N> context,
+                            DeviceRange<csize_t> counts, DeviceRange<int> invalid_index)
 {
     csize_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lines.shape(0)) return;
 
-    csize_t frame = static_cast<csize_t>(idxs[idx]);
-    if (frame >= n_frames) return;
+    I frame_index = idxs[idx];
+    if (frame_index < I() || static_cast<csize_t>(frame_index) >= n_frames)
+    {
+        atomicExch(invalid_index.data(), 1);
+        return;
+    }
+    csize_t frame = static_cast<csize_t>(frame_index);
 
     csize_t widx = width_index(idx, group_size, lines.shape(0), n_line_groups, widths.size());
     context.apply_to_line(lines.begin_at(idx * lines.strides(0), 1), widths[widx],
@@ -794,6 +836,7 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
 {
     DrawContext<DrawIndices, T, N> context (shape, grid);
     DeviceVector<csize_t> max_counts (n_frames * context.grid().size(), 0);
+    DeviceVector<int> invalid_index (1, 0);
 
     // First pass: count lines per bin
     csize_t n_lines = lines.shape(0);
@@ -803,9 +846,10 @@ DrawContext<DrawIndices, T, N> build_context(const array_view<T, py::ssize_t> & 
                                                    cast_to_nd<T, 1>(widths), group_size,
                                                    n_line_groups, cast_to_nd<I, 1>(idxs),
                                                    n_frames, context.view(),
-                                                   max_counts.view());
+                                                   max_counts.view(), invalid_index.view());
     handle_cuda_error(cudaGetLastError());
     handle_cuda_error(cudaDeviceSynchronize());
+    check_index_range(invalid_index, n_frames);
 
     // Second pass: scan max_counts to get offsets
     DeviceVector<csize_t> offsets (n_frames * context.grid().size() + 1, 0);
@@ -1041,8 +1085,7 @@ __global__ void fill_curve_indices(ArrayViewND<T, 3> curves, ArrayViewND<T, 1> w
 }
 
 template <typename T, typename I, csize_t N>
-DrawContext<AccumulateIndices, T, N> build_curve_context(
-                                                         const array_view<T, py::ssize_t> & curves,
+DrawContext<AccumulateIndices, T, N> build_curve_context(const array_view<T, py::ssize_t> & curves,
                                                          const array_view<T, py::ssize_t> & widths,
                                                          const array_view<I, py::ssize_t> & terms,
                                                          const array_view<I, py::ssize_t> & frames,
@@ -1220,6 +1263,8 @@ array_t<T> draw_lines_nd_with_index(array_t<T> out, array_t<T> lines, array_t<T>
     csize_t group_size = n_line_groups ? n_lines / n_line_groups : 0;
     csize_t n_frames = std::reduce(out.shape(), shape, csize_t(1), std::multiplies());
 
+    check_index_size(idxs.size(), n_lines);
+
     // Early return for empty output
     if (out.size() == 0 || n_lines == 0) return out;
     check_widths(widths.size(), n_lines, n_line_groups);
@@ -1347,6 +1392,437 @@ array_t<T> draw_lines(array_t<T> out, array_t<T> lines, array_t<T> widths,
     else if (overlap == "max")
         return draw_lines_2d_3d<T, I, 1>(out, lines, widths, idxs, max_val, kernel, grid);
     else throw std::invalid_argument("Invalid overlap keyword: " + overlap);
+}
+
+constexpr int FOOTPRINT_BLOCK_SIZE = 128;
+constexpr csize_t FOOTPRINT_BLOCKS_PER_SM = 4;
+constexpr csize_t MAX_FOOTPRINT_BLOCKS_PER_LINE = 32;
+
+template <typename T, csize_t N>
+struct LineFootprint
+{
+    LineData<T, N> line;
+    PointND<csize_t, N> origin;
+    ShapeND<N> box;
+    csize_t frame_offset = 0;
+
+    HOST_DEVICE csize_t capacity() const { return box.size(); }
+
+    HOST_DEVICE T distance(csize_t offset, PointND<csize_t, N> & coord) const
+    {
+        coord = box.coord_at(offset) + origin;
+        PointND<T, N> point;
+        for (csize_t zyx_n = 0; zyx_n < N; zyx_n++)
+            point[N - zyx_n - 1] = static_cast<T>(coord[zyx_n]);
+        return line.distance(point);
+    }
+
+    HOST_DEVICE bool contains(T distance) const { return distance <= line.width(); }
+
+    HOST_DEVICE csize_t pixel_index(const ShapeND<N> & frame,
+                                    const PointND<csize_t, N> & coord) const
+    {
+        return frame_offset + frame.index_at(coord);
+    }
+
+    template <typename Kernel>
+    HOST_DEVICE T value(T distance, T max_val, Kernel kernel) const
+    {
+        return max_val * kernel(distance / line.width());
+    }
+};
+
+template <typename T, typename I>
+struct FootprintPixel
+{
+    static_assert(std::is_signed_v<I>, "FootprintPixel requires a signed index type");
+
+    I pixel_index = 0;
+    I line_index = -1;
+    T value = T();
+
+    HOST_DEVICE bool valid() const { return line_index >= I(); }
+};
+
+class CSRLayout
+{
+public:
+    CSRLayout() = default;
+
+    explicit CSRLayout(const DeviceVector<csize_t> & sizes)
+        : m_offsets(sizes.size() + 1, csize_t(0))
+    {
+        if (sizes.size() == 0) return;
+
+        void * temp_ptr = nullptr;
+        size_t temp_size = 0;
+        handle_cuda_error(cub::DeviceScan::InclusiveSum(
+            temp_ptr, temp_size, sizes.data(), m_offsets.data() + 1, sizes.size()));
+        DeviceVector<char> temp_storage (temp_size);
+        handle_cuda_error(cub::DeviceScan::InclusiveSum(
+            temp_storage.data(), temp_size, sizes.data(), m_offsets.data() + 1,
+            sizes.size()));
+        handle_cuda_error(cudaMemcpy(&m_total_size, m_offsets.data(sizes.size()),
+                                     sizeof(csize_t), cudaMemcpyDeviceToHost));
+    }
+
+    DeviceRange<csize_t> view() { return m_offsets.view(); }
+    DeviceRange<const csize_t> view() const { return m_offsets.view(); }
+    csize_t size() const { return m_offsets.size() ? m_offsets.size() - 1 : 0; }
+    csize_t total_size() const { return m_total_size; }
+
+private:
+    DeviceVector<csize_t> m_offsets;
+    csize_t m_total_size = 0;
+};
+
+template <typename T, typename I>
+class FootprintBuffer
+{
+public:
+    using value_type = FootprintPixel<T, I>;
+
+    template <bool IsConst,
+              typename Pixel = std::conditional_t<IsConst, const value_type, value_type>,
+              typename Size = std::conditional_t<IsConst, const csize_t, csize_t>>
+    struct FootprintBufferView
+    {
+        DeviceRange<Pixel> _M_pixels;
+        DeviceRange<Size> _M_capacity_offsets;
+        DeviceRange<Size> _M_sizes;
+
+        HOST_DEVICE DeviceRange<const value_type> operator[](csize_t index) const
+        {
+            auto start = _M_capacity_offsets[index];
+            auto stop = _M_capacity_offsets[index + 1];
+            return {_M_pixels.begin() + start, _M_pixels.begin() + stop};
+        }
+
+        template <bool C = IsConst, typename = std::enable_if_t<!C>>
+        HOST_DEVICE DeviceRange<Pixel> line(csize_t index)
+        {
+            auto start = _M_capacity_offsets[index];
+            auto stop = _M_capacity_offsets[index + 1];
+            return {_M_pixels.data(start), _M_pixels.data(stop)};
+        }
+
+        template <bool C = IsConst, typename = std::enable_if_t<!C>>
+        __device__ void add_size(csize_t index, csize_t count)
+        {
+            if (count) atomicAdd(&_M_sizes[index], count);
+        }
+
+        HOST_DEVICE csize_t size() const { return _M_sizes.size(); }
+
+        HOST_DEVICE const DeviceRange<Pixel> & pixels() const { return _M_pixels; }
+        HOST_DEVICE const DeviceRange<Size> & capacity_offsets() const
+        {
+            return _M_capacity_offsets;
+        }
+        HOST_DEVICE const DeviceRange<Size> & sizes() const { return _M_sizes; }
+    };
+
+    using view_type = FootprintBufferView<false>;
+    using const_view_type = FootprintBufferView<true>;
+
+    explicit FootprintBuffer(const DeviceVector<csize_t> & capacities)
+        : m_capacity(capacities), m_pixels(m_capacity.total_size()),
+          m_sizes(capacities.size(), csize_t(0)) {}
+
+    view_type view()
+    {
+        return {m_pixels.view(), m_capacity.view(), m_sizes.view()};
+    }
+
+    const_view_type view() const
+    {
+        return {m_pixels.view(), m_capacity.view(), m_sizes.view()};
+    }
+
+    csize_t capacity() const { return m_capacity.total_size(); }
+    csize_t size() const { return m_sizes.size(); }
+
+    const DeviceVector<csize_t> & sizes() const { return m_sizes; }
+
+private:
+    CSRLayout m_capacity;
+    DeviceVector<value_type> m_pixels;
+    DeviceVector<csize_t> m_sizes;
+};
+
+template <typename T, csize_t N>
+__device__ LineND<T, N> get_line(StridedIterator<T> iter)
+{
+    PointND<T, N> point0, point1;
+    for (csize_t n = 0; n < N; n++)
+    {
+        point0[n] = iter[n];
+        point1[n] = iter[N + n];
+    }
+    return {point0, point1};
+}
+
+template <typename T, typename I, csize_t N>
+__global__ void build_line_footprints(ArrayViewND<T, 2> lines, ArrayViewND<T, 1> widths,
+                                      csize_t group_size, csize_t n_line_groups,
+                                      ArrayViewND<I, 1> frames, csize_t n_frames,
+                                      ShapeND<N> frame,
+                                      DeviceRange<LineFootprint<T, N>> footprints,
+                                      DeviceRange<csize_t> capacities,
+                                      DeviceRange<int> invalid_index)
+{
+    csize_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= lines.shape(0)) return;
+
+    LineFootprint<T, N> footprint;
+    I frame_index = frames.size() ? frames[index] :
+                    static_cast<I>(n_frames == 1 ? csize_t(0) : index);
+    if (frame_index < I() || static_cast<csize_t>(frame_index) >= n_frames)
+    {
+        atomicExch(invalid_index.data(), 1);
+        footprints[index] = footprint;
+        capacities[index] = footprint.capacity();
+        return;
+    }
+    csize_t frame_offset = static_cast<csize_t>(frame_index);
+
+    auto width_idx = width_index(index, group_size, lines.shape(0), n_line_groups,
+                                 widths.size());
+    auto width = widths[width_idx];
+    auto iter = lines.begin_at(index * lines.strides(0), 1);
+    auto line = get_line<T, N>(iter);
+    footprint.line = LineData<T, N>(iter, width);
+
+    PointND<T, N> bin;
+    for (csize_t n = 0; n < N; n++) bin[n] = T(1);
+    if (line_bounding_box(line, width, frame, bin, footprint.origin, footprint.box))
+        footprint.frame_offset = frame_offset * frame.size();
+    footprints[index] = footprint;
+    capacities[index] = footprint.capacity();
+}
+
+template <typename T, typename I, csize_t N, typename Kernel, int BlockSize>
+__global__ void fill_footprint_buffer(DeviceRange<LineFootprint<T, N>> footprints,
+                                      typename FootprintBuffer<T, I>::view_type buffer,
+                                      csize_t blocks_per_line, ShapeND<N> frame,
+                                      T max_val, Kernel kernel)
+{
+    csize_t index = blockIdx.x / blocks_per_line;
+    csize_t shard = blockIdx.x % blocks_per_line;
+    if (index >= footprints.size()) return;
+
+    auto footprint = footprints[index];
+    auto line_buffer = buffer.line(index);
+    csize_t count = 0;
+    csize_t offset = shard * BlockSize + threadIdx.x;
+    csize_t stride = blocks_per_line * BlockSize;
+    for (; offset < footprint.capacity(); offset += stride)
+    {
+        PointND<csize_t, N> coord;
+        auto distance = footprint.distance(offset, coord);
+        FootprintPixel<T, I> pixel;
+        if (footprint.contains(distance))
+        {
+            pixel.pixel_index = static_cast<I>(footprint.pixel_index(frame, coord));
+            pixel.line_index = static_cast<I>(index);
+            pixel.value = footprint.value(distance, max_val, kernel);
+            count++;
+        }
+        line_buffer[offset] = pixel;
+    }
+
+    using BlockReduce = cub::BlockReduce<csize_t, BlockSize>;
+    __shared__ typename BlockReduce::TempStorage reduce_storage;
+    auto block_count = BlockReduce(reduce_storage).Sum(count);
+    if (threadIdx.x == 0) buffer.add_size(index, block_count);
+}
+
+template <typename T, typename I, int BlockSize>
+__global__ void compress_footprint_buffer(
+    typename FootprintBuffer<T, I>::const_view_type buffer,
+    DeviceRange<const csize_t> offsets, ArrayViewND<I, 1> pixel_indices,
+    ArrayViewND<I, 1> line_indices, ArrayViewND<T, 1> values)
+{
+    csize_t index = blockIdx.x;
+    if (index >= buffer.size()) return;
+
+    __shared__ csize_t output_offset;
+    __shared__ csize_t block_count;
+    using BlockScan = cub::BlockScan<csize_t, BlockSize>;
+    __shared__ typename BlockScan::TempStorage scan_storage;
+
+    auto line_buffer = buffer[index];
+    if (threadIdx.x == 0) output_offset = offsets[index];
+    __syncthreads();
+
+    for (csize_t base = 0; base < line_buffer.size(); base += BlockSize)
+    {
+        csize_t input_offset = base + threadIdx.x;
+        FootprintPixel<T, I> pixel;
+        csize_t valid = 0;
+        if (input_offset < line_buffer.size())
+        {
+            pixel = line_buffer[input_offset];
+            valid = pixel.valid();
+        }
+
+        csize_t local_offset = 0;
+        BlockScan(scan_storage).ExclusiveSum(valid, local_offset);
+        if (threadIdx.x == BlockSize - 1) block_count = local_offset + valid;
+        __syncthreads();
+
+        if (valid)
+        {
+            csize_t position = output_offset + local_offset;
+            pixel_indices[position] = pixel.pixel_index;
+            line_indices[position] = pixel.line_index;
+            values[position] = pixel.value;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) output_offset += block_count;
+        __syncthreads();
+    }
+}
+
+csize_t footprint_blocks_per_line(csize_t n_lines)
+{
+    int device = 0;
+    int multiprocessor_count = 0;
+    handle_cuda_error(cudaGetDevice(&device));
+    handle_cuda_error(cudaDeviceGetAttribute(&multiprocessor_count,
+                                             cudaDevAttrMultiProcessorCount, device));
+    csize_t target_blocks = FOOTPRINT_BLOCKS_PER_SM * multiprocessor_count;
+    csize_t blocks_per_line = (target_blocks + n_lines - 1) / n_lines;
+    return std::min(MAX_FOOTPRINT_BLOCKS_PER_LINE,
+                    std::max(csize_t(1), blocks_per_line));
+}
+
+template <typename T>
+array_t<T> empty_cupy_array(csize_t size)
+{
+    auto cupy = py::module_::import("cupy");
+    auto out = cupy.attr("empty")(py::make_tuple(size),
+                                  py::arg("dtype") = py::dtype::of<T>());
+    return array_t<T>::ensure(out);
+}
+
+template <typename T, typename I, csize_t N, kernels::type K>
+auto write_lines_nd_impl(array_t<T> lines, std::vector<py::ssize_t> shape,
+                         array_t<T> widths, std::optional<array_t<I>> idxs, T max_val)
+{
+    constexpr csize_t L = 2 * N;
+    constexpr auto kernel = kernels_t<T, cuda::kernel_traits>::template select<K>();
+
+    if (shape.size() < N) throw std::invalid_argument("shape has insufficient dimensions");
+    if (lines.ndim() < 2 || lines.shape(lines.ndim() - 1) != L)
+        throw std::invalid_argument("Line array has incorrect shape");
+    if (widths.ndim() != 1) widths = widths.reshape({widths.size()});
+    if (idxs && idxs->ndim() != 1) *idxs = idxs->reshape({idxs->size()});
+
+    csize_t n_lines = lines.size() / L;
+    csize_t n_line_groups = lines.shape(0);
+    csize_t group_size = n_line_groups ? n_lines / n_line_groups : 0;
+    auto spatial_shape = shape.data() + shape.size() - N;
+    csize_t n_frames = std::reduce(shape.data(), spatial_shape, csize_t(1),
+                                   std::multiplies());
+
+    check_widths(widths.size(), n_lines, n_line_groups);
+    if (idxs) check_index_size(idxs->size(), n_lines);
+    if (!idxs && n_frames != 1 && n_frames != n_lines)
+        throw std::invalid_argument("shape has an incompatible number of frames");
+    if (lines.ndim() != 2) lines = lines.reshape({n_lines, L});
+
+    if (n_lines == 0)
+    {
+        return std::make_tuple(empty_cupy_array<I>(0), empty_cupy_array<I>(0),
+                               empty_cupy_array<T>(0));
+    }
+
+    ShapeND<N> frame {spatial_shape};
+    auto frames = idxs ? *idxs : empty_cupy_array<I>(0);
+    DeviceVector<LineFootprint<T, N>> footprints (n_lines);
+    DeviceVector<csize_t> capacities (n_lines);
+    DeviceVector<int> invalid_index (1, 0);
+    csize_t line_blocks = (n_lines + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    csize_t blocks_per_line = footprint_blocks_per_line(n_lines);
+    csize_t pixel_blocks = n_lines * blocks_per_line;
+
+    build_line_footprints<T, I, N><<<line_blocks, BLOCK_SIZE>>>(
+        cast_to_nd<T, 2>(lines.view()), cast_to_nd<T, 1>(widths.view()), group_size,
+        n_line_groups, cast_to_nd<I, 1>(frames.view()), n_frames, frame, footprints.view(),
+        capacities.view(), invalid_index.view());
+    handle_cuda_error(cudaGetLastError());
+
+    FootprintBuffer<T, I> buffer (capacities);
+    check_index_range(invalid_index, n_frames);
+    fill_footprint_buffer<T, I, N, decltype(kernel), FOOTPRINT_BLOCK_SIZE>
+        <<<pixel_blocks, FOOTPRINT_BLOCK_SIZE>>>(footprints.view(), buffer.view(),
+                                                 blocks_per_line, frame, max_val, kernel);
+    handle_cuda_error(cudaGetLastError());
+
+    CSRLayout output_layout (buffer.sizes());
+    auto pixel_indices = empty_cupy_array<I>(output_layout.total_size());
+    auto line_indices = empty_cupy_array<I>(output_layout.total_size());
+    auto values = empty_cupy_array<T>(output_layout.total_size());
+
+    if (output_layout.total_size())
+    {
+        const auto & const_buffer = buffer;
+        const auto & const_layout = output_layout;
+        compress_footprint_buffer<T, I, FOOTPRINT_BLOCK_SIZE>
+            <<<buffer.size(), FOOTPRINT_BLOCK_SIZE>>>(
+            const_buffer.view(), const_layout.view(),
+            cast_to_nd<I, 1>(pixel_indices.view()),
+            cast_to_nd<I, 1>(line_indices.view()), cast_to_nd<T, 1>(values.view()));
+        handle_cuda_error(cudaGetLastError());
+        handle_cuda_error(cudaDeviceSynchronize());
+    }
+    return std::make_tuple(std::move(pixel_indices), std::move(line_indices),
+                           std::move(values));
+}
+
+template <typename T, typename I, csize_t N>
+auto write_lines_nd(array_t<T> lines, std::vector<py::ssize_t> shape,
+                    array_t<T> widths, std::optional<array_t<I>> idxs, T max_val,
+                    std::string kernel_name)
+{
+    auto kernel = kernels::get_type(kernel_name);
+    switch (kernel)
+    {
+        case kernels::biweight:
+            return write_lines_nd_impl<T, I, N, kernels::biweight>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::gaussian:
+            return write_lines_nd_impl<T, I, N, kernels::gaussian>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::parabolic:
+            return write_lines_nd_impl<T, I, N, kernels::parabolic>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::rectangular:
+            return write_lines_nd_impl<T, I, N, kernels::rectangular>(
+                lines, shape, widths, idxs, max_val);
+        case kernels::triangular:
+            return write_lines_nd_impl<T, I, N, kernels::triangular>(
+                lines, shape, widths, idxs, max_val);
+        default:
+            throw std::invalid_argument("Invalid kernel type: " + kernel_name);
+    }
+}
+
+template <typename T, typename I>
+auto write_lines(array_t<T> lines, std::vector<py::ssize_t> shape,
+                 array_t<T> widths, std::optional<array_t<I>> idxs, T max_val,
+                 std::string kernel_name)
+{
+    if (lines.ndim() < 2) throw std::invalid_argument("lines must have at least two dimensions");
+    auto line_size = lines.shape(lines.ndim() - 1);
+    if (shape.size() >= 2 && line_size == 4)
+        return write_lines_nd<T, I, 2>(lines, shape, widths, idxs, max_val, kernel_name);
+    if (shape.size() >= 3 && line_size == 6)
+        return write_lines_nd<T, I, 3>(lines, shape, widths, idxs, max_val, kernel_name);
+    throw std::invalid_argument("Shape dimensions (" + std::to_string(shape.size()) +
+                                ") do not match the line size (" +
+                                std::to_string(line_size) + ")");
 }
 
 template <typename T, typename I, csize_t N, int Update, kernels::type K>
@@ -1669,4 +2145,19 @@ PYBIND11_MODULE(cuda_draw_lines, m)
           py::arg("kernel") = "rectangular",
           py::arg("overlap") = "sum",
           py::arg("grid") = nullptr);
+
+    m.def("write_lines", &cu::write_lines<float, int>,
+          py::arg("lines"),
+          py::arg("shape"),
+          py::arg("widths"),
+          py::arg("idxs") = nullptr,
+          py::arg("max_val") = 1.0f,
+          py::arg("kernel") = "rectangular");
+    m.def("write_lines", &cu::write_lines<double, long>,
+          py::arg("lines"),
+          py::arg("shape"),
+          py::arg("widths"),
+          py::arg("idxs") = nullptr,
+          py::arg("max_val") = 1.0,
+          py::arg("kernel") = "rectangular");
 }

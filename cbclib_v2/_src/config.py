@@ -68,7 +68,7 @@ class CPUConfig:
 _default_num_threads = 1
 _thread_local = local()
 
-def set_cpu_pool_worker(is_pool: bool=True) -> None:
+def set_cpu_pool_worker(is_pool: bool=True):
     """Mark whether the current process is running as a pool worker.
 
     Args:
@@ -94,7 +94,7 @@ def get_cpu_config() -> CPUConfig:
         _thread_local.config = CPUConfig(_default_num_threads)
     return getattr(_thread_local, "config",)
 
-def set_cpu_config(num_threads: int) -> None:
+def set_cpu_config(num_threads: int):
     """Set the number of OpenMP threads for the current thread.
 
     Equivalent to ``get_cpu_config().num_threads = num_threads``.  Use
@@ -107,7 +107,7 @@ def set_cpu_config(num_threads: int) -> None:
     config = get_cpu_config()
     config.num_threads = num_threads
 
-def reset_cpu_config() -> None:
+def reset_cpu_config():
     """Reset the CPU configuration for the current thread to its default.
 
     The next call to :func:`get_cpu_config` will create a fresh

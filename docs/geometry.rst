@@ -116,7 +116,7 @@ Streak coordinate transforms
 
 :meth:`~cbclib_v2.Detector.to_streaks` converts pixel-space
 :class:`~cbclib_v2.Streaks` to lab-frame coordinates.
-:meth:`~cbclib_v2.Detector.to_patterns` then scales to metres for indexing:
+:meth:`~cbclib_v2.Detector.to_meters` then scales to metres for indexing:
 
 .. code-block:: python
 
@@ -126,7 +126,7 @@ Streak coordinate transforms
 
    # pixel_streaks: Streaks or StackedStreaks in raw array coordinates
    lab_streaks = detector.to_streaks(pixel_streaks)
-   patterns    = detector.to_patterns(lab_streaks)
+   patterns    = detector.to_meters(lab_streaks)
 
 See also
 --------

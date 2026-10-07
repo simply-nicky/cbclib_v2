@@ -179,7 +179,7 @@ def _load_stub_docs() -> dict[str, str]:
 _STUB_DOCS = _load_stub_docs()
 
 def _autodoc_process_pybind11(app: Any, what: str, name: str, obj: Any,
-                               options: Any, lines: list[str]) -> None:
+                               options: Any, lines: list[str]):
     """Fill empty docstrings for C++ extension objects from .pyi stubs.
 
     With disable_function_signatures() active in every pybind11 module,
@@ -201,6 +201,6 @@ def _autodoc_process_pybind11(app: Any, what: str, name: str, obj: Any,
             lines[:] = _STUB_DOCS[key].splitlines()
             return
 
-def setup(app: Any) -> None:
+def setup(app: Any):
     app.connect('autodoc-skip-member', _autodoc_skip_stdlib_member)
     app.connect('autodoc-process-docstring', _autodoc_process_pybind11, priority=100)

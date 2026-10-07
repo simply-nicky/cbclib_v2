@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import subprocess
 from typing import ClassVar, Dict, List
 import pytest
-from cbclib_v2.slurm import JobID, JobOutput, ScriptSpec, SLURMJobManager, SLURMScript
+from cbclib_v2.slurm import (JobID, JobOutput, JobStatus, ScriptSpec, SLURMArrayScript,
+                             SLURMJobManager, SLURMScript)
 
 class TestScriptSpec:
     def test_script_body_modules(self):
@@ -69,6 +71,10 @@ class TestJobManager:
     def script_spec(self) -> ScriptSpec:
         return ScriptSpec(time="00:05:00", partition="hour")
 
+    def status(self, job_id: JobID, state: str) -> JobStatus:
+        return JobStatus(job_id, "debug", "job", "node01", "user", state, "00:01", 1,
+                         job_id.id)
+
     def test_submit(self, manager: SLURMJobManager, monkeypatch: pytest.MonkeyPatch,
                     script_spec: ScriptSpec):
         # Test using SubmitSpec and SlurmConfig
@@ -83,6 +89,28 @@ class TestJobManager:
         script = SLURMScript(command="echo hello", job_name="test", parameters=script_spec)
         job_id = manager.submit(script)
         assert job_id.id == 12345
+
+    def test_submit_array_uses_embedded_task_ids(
+            self, manager: SLURMJobManager, monkeypatch: pytest.MonkeyPatch,
+            script_spec: ScriptSpec, caplog: pytest.LogCaptureFixture):
+        calls: List[List[str]] = []
+
+        def mock_run(args: List[str], **kwargs) -> MockOutput:
+            calls.append(args)
+            return MockOutput(stdout=self.mock_outputs['sbatch'], returncode=0, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        manager.logger = logging.getLogger("tests.slurm.submit")
+        caplog.set_level(logging.INFO, logger=manager.logger.name)
+        script = SLURMArrayScript(command="echo scan", job_name="test",
+                                  parameters=script_spec, task_ids=[373, 374, 380])
+
+        job_ids = manager.submit_array(script, wait=False)
+
+        # Scan numbers are submitted directly as sparse SLURM array task IDs.
+        assert calls[0][1] == '--array=373,374,380'
+        assert [job_id.task_id for job_id in job_ids] == script.task_ids
+        assert "Submitted array 12345 with 3 tasks" in caplog.messages
 
     def test_get_job_id_single(self, manager: SLURMJobManager,
                                monkeypatch: pytest.MonkeyPatch):
@@ -238,6 +266,68 @@ class TestJobManager:
 
         assert sum(1 for args in calls if args[0] == manager.config.squeue) == 1
         assert sum(1 for args in calls if args[0] == manager.config.sacct) == 1
+        assert any("State%30" in args[-1] for args in calls
+                   if args[0] == manager.config.sacct)
+
+    def test_wait_all_tolerates_visibility_gaps(
+            self, manager: SLURMJobManager, job_id: JobID,
+            monkeypatch: pytest.MonkeyPatch):
+        observations = [
+            [None],
+            [self.status(job_id, "RUNNING")],
+            [None],
+            [self.status(job_id, "COMPLETED")],
+        ]
+
+        monkeypatch.setattr(manager, "get_status", lambda _: observations.pop(0))
+
+        # A missing query row is not a job state until the visibility grace period expires.
+        manager.wait_all([job_id], poll_interval=0)
+
+        assert not observations
+
+    def test_wait_all_expires_missing_job(
+            self, manager: SLURMJobManager, job_id: JobID,
+            monkeypatch: pytest.MonkeyPatch):
+        times = [0.0, manager.visibility_timeout]
+
+        monkeypatch.setattr(manager, "get_status", lambda _: [None])
+        monkeypatch.setattr("cbclib_v2.slurm.slurm_manager.monotonic", lambda: times.pop(0))
+
+        with pytest.raises(RuntimeError, match="was not visible"):
+            manager.wait_all([job_id], poll_interval=0)
+
+    def test_wait_all_rejects_decorated_failure(
+            self, manager: SLURMJobManager, job_id: JobID,
+            monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            manager, "get_status", lambda _: [self.status(job_id, "CANCELLED by 12345")])
+
+        with pytest.raises(RuntimeError, match="CANCELLED by 12345"):
+            manager.wait_all([job_id], poll_interval=0)
+
+    def test_wait_all_logs_non_interactive_state_changes(
+            self, manager: SLURMJobManager, job_id: JobID, caplog: pytest.LogCaptureFixture,
+            monkeypatch: pytest.MonkeyPatch):
+        observations = [
+            [None],
+            [self.status(job_id, "RUNNING")],
+            [self.status(job_id, "COMPLETED")],
+        ]
+        manager.logger = logging.getLogger("tests.slurm.monitor")
+        caplog.set_level(logging.INFO, logger=manager.logger.name)
+
+        monkeypatch.setattr(manager, "get_status", lambda _: observations.pop(0))
+
+        manager.wait_all([job_id], poll_interval=0, desc="Test array")
+
+        messages = [record.getMessage() for record in caplog.records
+                    if record.name == manager.logger.name]
+        assert messages == [
+            "Test array: 0/1 completed, 1 missing",
+            "Test array: 0/1 completed, 1 running",
+            "Test array: 1/1 completed",
+        ]
 
     def test_get_output_uses_running_raw_job_id(self, manager: SLURMJobManager,
                                                 monkeypatch: pytest.MonkeyPatch):
@@ -271,7 +361,7 @@ class TestJobManager:
             calls.append(args)
             if args[0] == manager.config.squeue:
                 return MockOutput(stdout="", returncode=0, stderr="")
-            if args[0] == manager.config.sacct and args[-1] == "--format=State":
+            if args[0] == manager.config.sacct and args[-1] == "--format=State%30":
                 return MockOutput(stdout="COMPLETED\n", returncode=0, stderr="")
             if args[0] == manager.config.sacct:
                 return MockOutput(stdout="42_3|debug|job|node01|user|COMPLETED|00:03|1|401\n",

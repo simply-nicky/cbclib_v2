@@ -9,10 +9,10 @@ import re
 from types import TracebackType
 from typing import (Any, ClassVar, DefaultDict, Dict, Generic, Iterator, List, Literal,
                     OrderedDict as OrderedDictType, Tuple, TypeVar, overload)
-from .annotations import (Array, AnyNamespace, DataclassInstance, IntArray, NDArray, NumPy,
-                          RealArray, Shape)
+from .annotations import (Array, AnyNamespace, BoolArray, DataclassInstance, IntArray, NDArray,
+                          NumPy, RealArray, Shape)
 from .array_api import array_namespace, set_at
-from .data_container import Container
+from .data_container import ArrayContainer, Container
 from .functions import pixel_map, radius, radial_index
 from .streaks import StackedStreaks, Streaks
 from ..indexer import Patterns
@@ -714,8 +714,23 @@ class Panel(Container):
     def bounds(self) -> Tuple[float, float, float, float]:
         """Bounding box ``(x_min, y_min, x_max, y_max)`` in lab-frame pixel units."""
         x0, y0, _ = self.to_detector(0, 0)
-        x1, y1, _ = self.to_detector(self.shape[0] - 1, self.shape[1] - 1)
+        x1, y1, _ = self.to_detector(self.shape[-2] - 1, self.shape[-1] - 1)
         return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+    def is_inbound(self, x: RealArray, y: RealArray) -> BoolArray:
+        """Check whether any point lies inside this panel.
+
+        Args:
+            x: Point x-coordinates in lab-frame pixels.
+            y: Point y-coordinates in lab-frame pixels.
+
+        Returns:
+            Boolean array reduced over the final point axis.
+        """
+        xp = array_namespace(x, y)
+        x_min, y_min, x_max, y_max = self.bounds
+        return xp.any(((x >= x_min) & (x <= x_max) &
+                       (y >= y_min) & (y <= y_max)), axis=-1)
 
     def distance(self, *coordinates: IntArray | RealArray) -> RealArray:
         """Distance from each coordinate to the nearest point on this panel.
@@ -817,13 +832,22 @@ class Panel(Container):
         return x, y, z
 
 @dataclass
-class Assembler():
+class Assembler(ArrayContainer):
     ss              : IntArray
     fs              : IntArray
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> Shape:
+        return self.ss.shape
+
+    @property
+    def assembled_shape(self) -> Tuple[int, int]:
         return (int(self.ss.max()) + 1, int(self.fs.max()) + 1)
+
+    @property
+    def mask(self) -> IntArray:
+        xp = self.__array_namespace__()
+        return self(xp.ones_like(self.ss))
 
     @overload
     def __call__(self, frames: NDArray) -> NDArray: ...
@@ -832,17 +856,20 @@ class Assembler():
     def __call__(self, frames: Array) -> Array: ...
 
     def __call__(self, frames: Array) -> Array:
-        xp = array_namespace(frames)
-        frames = xp.reshape(frames, (-1,) + self.ss.shape)
+        xp = self.__array_namespace__()
+        if array_namespace(frames) != xp:
+            raise ValueError(f"frames array namespace ({array_namespace(frames)}) "
+                             f"does not match assembler namespace ({xp})")
+        frames = xp.reshape(frames, (-1,) + self.shape)
 
-        n_frames = frames.size // self.ss.size
+        n_frames = frames.size // self.size
         if n_frames > 1:
-            result = xp.zeros((n_frames,) + self.shape)
+            result = xp.zeros((n_frames,) + self.assembled_shape, dtype=frames.dtype)
         else:
-            result = xp.zeros(self.shape)
+            result = xp.zeros(self.assembled_shape, dtype=frames.dtype)
+            frames = xp.squeeze(frames, axis=0)
 
-        result[..., self.ss, self.fs] = frames
-        return result
+        return set_at(result, (..., self.ss, self.fs), frames)
 
 @dataclass
 class Detector():
@@ -878,6 +905,9 @@ class Detector():
     bad_regions     : OrderedDictType[str, Region] = field(default_factory=OrderedDict)
     groups          : Dict[str, List[str]] = field(default_factory=dict)
 
+    def __post_init__(self):
+        self._assembler = None
+
     @property
     def bounds(self) -> Tuple[float, float, float, float]:
         """Overall bounding box ``(x_min, y_min, x_max, y_max)`` across all panels in lab-frame
@@ -890,6 +920,13 @@ class Detector():
         return (min(x), min(y), max(x), max(y))
 
     @property
+    def corners(self) -> List[Tuple[float, float]]:
+        min_pt = (0, 0)
+        max_pt = ((self.assembled_shape[1] - 1) * self.pixel_size,
+                  (self.assembled_shape[0] - 1) * self.pixel_size)
+        return [min_pt, (min_pt[0], max_pt[1]), (max_pt[0], min_pt[1]), max_pt]
+
+    @property
     def shape(self) -> Shape:
         """Shape of the raw detector data array inferred from panel ROIs."""
         shape : DefaultDict[int, List] = defaultdict(list)
@@ -898,6 +935,12 @@ class Detector():
             for index, roi in enumerate(panel.roi()):
                 shape[index].append(roi.stop)
         return tuple(max(shape[index]) for index in range(len(shape)))
+
+    @property
+    def assembled_shape(self) -> Tuple[int, int]:
+        """Shape of the assembled lab-frame image, inferred from panel bounds."""
+        x_min, y_min, x_max, y_max = self.bounds
+        return (int(y_max - y_min) + 1, int(x_max - x_min) + 1)
 
     @property
     def num_modules(self) -> int:
@@ -952,11 +995,39 @@ class Detector():
             >>> assembler = detector.assembler()
             >>> assembled = assembler(frames)
         """
-        out = xp.empty((3,) + self.shape, dtype=xp.float64)
-        pix_x, pix_y, _ = self.pixel_map(out)
-        pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
-        pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
-        return Assembler(pix_y, pix_x)
+        if self._assembler is None:
+            out = xp.empty((3,) + self.shape, dtype=xp.float64)
+            pix_x, pix_y, _ = self.pixel_map(out)
+            pix_x = xp.asarray(xp.round(pix_x - self.bounds[0]), dtype=int)
+            pix_y = xp.asarray(xp.round(pix_y - self.bounds[1]), dtype=int)
+            self._assembler = Assembler(pix_y, pix_x)
+
+        if self._assembler.__array_namespace__() != xp:
+            self._assembler = self._assembler.to_xp(xp)
+
+        return self._assembler
+
+    def is_onpanel(self, x: RealArray, y: RealArray) -> BoolArray:
+        """Check whether any point lies inside a detector panel.
+
+        Detector-frame pixel coordinates are translated to the CrystFEL lab
+        frame before each panel performs its own bounds check.
+
+        Args:
+            x: Point x-coordinates in detector-frame pixels.
+            y: Point y-coordinates in detector-frame pixels.
+
+        Returns:
+            Boolean array reduced over the final point axis.
+        """
+        xp = array_namespace(x, y)
+        x_min, y_min = self.bounds[:2]
+        x = x + x_min
+        y = y + y_min
+        is_onpanel = xp.zeros(x.shape[:-1], dtype=bool)
+        for panel in self.panels.values():
+            is_onpanel = is_onpanel | panel.is_inbound(x, y)
+        return is_onpanel
 
     def panel(self, module_id: int) -> Panel:
         """Return the panel for a given zero-based module index.
@@ -1207,7 +1278,7 @@ class Detector():
         y = xp.take_along_axis(xp.stack((y0, y1), axis=-1), indices, axis=-1)
         return Streaks.import_xy(streaks.index, x, y)
 
-    def to_patterns(self, streaks: Streaks) -> Patterns:
+    def to_meters(self, streaks: Streaks) -> Patterns:
         """Convert lab-frame streaks to diffraction patterns in metres.
 
         Scales streak line coordinates by :attr:`pixel_size` to produce
@@ -1224,9 +1295,29 @@ class Detector():
         Example:
             Convert lab-frame pixel coordinates to metres for indexing:
 
-            >>> patterns = detector.to_patterns(detector.to_streaks(pixel_streaks))
+            >>> patterns = detector.to_meters(detector.to_streaks(pixel_streaks))
         """
         return Patterns(streaks.index, streaks.lines * self.pixel_size)
+
+    def to_pixels(self, patterns: Patterns) -> Streaks:
+        """Convert diffraction patterns in metres to lab-frame streaks in pixels.
+
+        Scales pattern line coordinates by :attr:`pixel_size` to produce
+        :class:`~cbclib_v2.Streaks` in pixel units suitable for visualization.
+
+        Args:
+            patterns: Diffraction patterns in metres (e.g. from
+                :meth:`to_meters`).
+
+        Returns:
+            :class:`~cbclib_v2.Streaks` with coordinates in pixels.
+
+        Example:
+            Convert diffraction patterns in metres back to lab-frame pixel coordinates:
+
+            >>> streaks = detector.to_pixels(detector.to_meters(lab_streaks))
+        """
+        return Streaks(patterns.index, patterns.lines / self.pixel_size)
 
 def read_crystfel(file: str) -> Detector:
     """Parse a CrystFEL ``.geom`` file and return a :class:`Detector`.

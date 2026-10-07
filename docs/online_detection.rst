@@ -89,6 +89,93 @@ created once per detector geometry and beam-centre choice. The radial profiles
 are data-dependent and are recomputed for the frames being searched.
 
 
+Complete usage
+--------------
+
+This compact example loads a frame stack, builds the geometry-dependent radial
+lookup, detects connected signal regions, and fits one line through each
+region. Replace the file paths, beam centre, and detection parameters with
+values for the experiment.
+
+.. code-block:: python
+
+   import numpy as np
+
+   import cbclib_v2 as cbc
+   from cbclib_v2.annotations import CuPy, NumPy
+   from cbclib_v2.label import Structure, line_fit
+
+   # Select the CPU backend and load raw detector frames as floating-point data.
+   xp = NumPy  # Use CuPy with a CUDA-enabled installation.
+   images = xp.asarray(np.load("images.npy"), dtype=xp.float32)
+
+   # Read the matching geometry and assign every detector pixel to a radial bin.
+   geometry = cbc.read_crystfel("detector.geom")
+   center = (512, 512)
+   n_bins = 1024
+   radial_index = xp.empty(geometry.shape, dtype=xp.int32)
+   radial_index = geometry.radial_index(radial_index, center, n_bins)
+
+   # Keep leading axes such as frames separate and connect image-plane neighbours.
+   radii = [0] * (images.ndim - 2) + [1, 1]
+   structure = Structure(radii, 1)
+
+   # Estimate the radial background and label connected residual-SNR outliers.
+   data = cbc.CrystData(data=images)
+   online = data.online_detector(structure, radial_index, n_bins)
+   profiles = online.profiles(interval=20, clip_snr=3.0, n_iter=1)
+   regions = online.detect_regions(profiles, min_snr=3.0, npts=10)
+
+   # Fit an intensity-weighted major-axis line through every retained region. Have a shape of (n_regions, 2 * image.ndim)
+   lines = line_fit(regions, images)
+   points = xp.reshape(lines, (-1, 2, images.ndim))  # two endpoints per line
+
+``profiles`` contains the radial mean, standard deviation, and contributing
+pixel count for every frame. ``regions.labels`` has the same shape as
+``images``, while ``regions.index`` lists the detected region identifiers.
+``lines`` contains two endpoint coordinates per input array axis for each
+region. Set ``xp = CuPy`` instead to use a CUDA-enabled installation.
+
+
+Plotting detections in the detector plane
+-----------------------------------------
+
+The ``lines`` returned by the complete example are expressed in raw image
+coordinates. Select one frame, then convert the two endpoints to detector-plane
+``(x, y)`` coordinates before drawing them over the assembled image:
+
+.. code-block:: python
+
+   import matplotlib.pyplot as plt
+   from cbclib_v2 import asnumpy
+
+   frame = 0
+   indices = xp.round(xp.mean(points[:, :, 2:], axis=-2)).astype(int)  # average over the leading axes to get the frame index
+   lines = points[:, :, :2]  # keep only the slow-scan and fast-scan coordinates
+
+   # to_detector expects slow-scan coordinates first, then fast-scan coordinates.
+   x, y, _ = geometry.to_detector(lines[..., 1:4:2], lines[..., :4:2])
+   streaks = cbc.Streaks.import_xy(indices, x, y)
+
+   # Matplotlib requires host arrays when xp is CuPy.
+   assembler = geometry.assembler(xp)
+
+   fig, ax = plt.subplots(figsize=(10, 10))
+   ax.imshow(asnumpy(assembler(images[frame])), cmap="gray_r", vmin=0, vmax=10)
+   for line in asnumpy(streaks.iloc[frame].ravel_lines()):
+       ax.plot(line[:4:2], line[1:4:2], color="red", linewidth=1)
+   fig.tight_layout()
+   plt.show()
+
+For a stack of two-dimensional frames, each fitted row is ordered
+``(fs_0, ss_0, frame_0, fs_1, ss_1, frame_1)``. The frame coordinates select
+the requested image; columns ``[1, 4]`` then select its slow-scan endpoints and
+columns ``[0, 3]`` its fast-scan endpoints. The geometry converts those raw
+array axes into detector-plane ``x`` and ``y``. Wrapping the result in
+:class:`~cbclib_v2.Streaks` provides :meth:`~cbclib_v2.Streaks.ravel_lines`,
+whose rows have the plotting order ``(x_0, y_0, x_1, y_1)``.
+
+
 Geometry and radial bins
 ------------------------
 
@@ -125,6 +212,12 @@ and more stable estimates but can wash out sharp background features.
 Profile estimation
 ------------------
 
+``n_bins``, ``interval``, ``n_iter``, and ``min_snr`` are the main
+background-related settings. The first three control the radial-background
+fit, while ``min_snr`` sets the residual threshold applied to the fitted
+background. ``clip_snr`` controls which bright outliers are excluded while the
+fit is refined.
+
 Create the detector from a :class:`~cbclib_v2.CrystData` container containing
 raw detector counts:
 
@@ -146,12 +239,28 @@ The estimator is iterative. After a first radial mean/std pass, pixels above
 this a few times keeps sparse diffraction peaks, hot regions, and jet artefacts
 from inflating the background model.
 
+``interval`` is the sampling interval for background estimation. The estimator
+uses every ``interval``-th pixel from the flattened detector data while still
+producing a value for every radial bin. For example, ``interval=20`` samples
+every twentieth pixel. A larger interval reduces the work per profile but also
+reduces the number of samples in each radial bin, so the estimated mean and
+standard deviation become less stable when bins are sparse.
+
+``n_iter`` is the number of outlier-rejection passes after the initial profile
+estimate. On each pass, pixels brighter than ``mean + clip_snr * std`` are
+excluded and the radial mean and standard deviation are fitted again. More
+passes can reduce contamination from strong diffraction signal, at the cost of
+additional computation.
+
 ``std_min`` is a noise floor. It prevents very quiet radial bins from producing
 unreasonably large SNR values from tiny absolute residuals.
 
 
 Region detection
 ----------------
+
+``structure`` and ``npts`` control connected-component detection after the
+background threshold has produced a boolean signal mask.
 
 Once the profiles are available, signal detection is a residual-SNR test:
 
@@ -176,6 +285,11 @@ foreground pixels are labeled with the supplied :class:`~cbclib_v2.label.Structu
 minimum number of connected above-threshold pixels required for a candidate
 region. Larger values reject isolated noise but can miss weak or fragmented
 features.
+
+``structure`` controls which foreground pixels count as neighbours. For a
+two-dimensional frame, ``Structure([1, 1], 1)`` connects pixels within one
+pixel along both image axes. It therefore determines whether nearby signal
+pixels form one component before the ``npts`` size filter is applied.
 
 
 Relation to streak detection

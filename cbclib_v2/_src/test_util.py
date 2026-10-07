@@ -1,7 +1,7 @@
 from typing import Any, Callable, Dict, Tuple, overload
 import numpy as np
 from jax.test_util import check_grads
-from ..indexer import FixedLens, FixedPupilLens, FixedPupilSetup, FixedSetup, XtalState
+from ..indexer import FixedFocus, Focus, FixedLens, FixedPupilLens, FixedPupilGeometry, FixedGeometry, XtalState
 from .annotations import Array, ArrayLike, AnyNamespace, ComplexArray, RealArray
 from .array_api import array_namespace
 
@@ -15,7 +15,7 @@ class TestSetup():
     foc_pos         = ( 0.14292289,  0.16409828, -0.39722229)
     roi             = (1100, 3260, 1040, 3108)
     pupil_roi       = (0.16583517, 0.17700936, 0.14640569, 0.15699476)
-    smp_dist        = 0.006571637911728528
+    defocus         = 0.006571637911728528
     x_pixel_size    = 7.5e-05
     y_pixel_size    = 7.5e-05
 
@@ -25,33 +25,33 @@ class TestSetup():
 
     @classmethod
     def fixed_lens(cls) -> FixedLens:
-        return FixedLens(cls.foc_pos, cls.pupil_roi)
+        return FixedLens(FixedFocus(cls.foc_pos), cls.pupil_roi)
 
     @classmethod
     def fixed_pupil_lens(cls, xp: AnyNamespace) -> FixedPupilLens:
-        return FixedPupilLens(xp.asarray(cls.foc_pos)[:2], float(cls.foc_pos[2]), cls.pupil_roi)
+        return FixedPupilLens(Focus(xp.asarray(cls.foc_pos)), cls.pupil_roi)
 
     @classmethod
-    def fixed_setup(cls, size: int=1) -> FixedSetup:
-        return FixedSetup(cls.fixed_lens(), cls.z(size=size))
+    def fixed_geometry(cls, size: int=1) -> FixedGeometry:
+        return FixedGeometry(FixedFocus(cls.foc_pos), cls.pupil_roi, cls.defoci(size=size))
 
     @classmethod
-    def fixed_pupil_setup(cls, xp: AnyNamespace, size: int=1) -> FixedPupilSetup:
-        return FixedPupilSetup(cls.fixed_pupil_lens(xp), cls.z(xp, size))
-
-    @overload
-    @classmethod
-    def z(cls, xp: None=None, size: int=1) -> Tuple[float, ...]: ...
+    def fixed_pupil_geometry(cls, xp: AnyNamespace, size: int=1) -> FixedPupilGeometry:
+        return FixedPupilGeometry(Focus(xp.asarray(cls.foc_pos)), cls.pupil_roi, cls.defoci(xp, size))
 
     @overload
     @classmethod
-    def z(cls, xp: AnyNamespace, size: int=1) -> RealArray: ...
+    def defoci(cls, xp: None=None, size: int=1) -> Tuple[float, ...]: ...
+
+    @overload
+    @classmethod
+    def defoci(cls, xp: AnyNamespace, size: int=1) -> RealArray: ...
 
     @classmethod
-    def z(cls, xp: AnyNamespace | None=None, size: int=1) -> Tuple[float, ...] | RealArray:
+    def defoci(cls, xp: AnyNamespace | None=None, size: int=1) -> Tuple[float, ...] | RealArray:
         if xp is None:
-            return tuple([cls.smp_dist + cls.foc_pos[2],] * size)
-        return xp.array([cls.smp_dist + cls.foc_pos[2],] * size)
+            return tuple([cls.defocus,] * size)
+        return xp.array([cls.defocus,] * size)
 
 _atol = {np.dtype(np.float32): 1e-4, np.dtype(np.float64): 1e-5,
          np.dtype(np.complex64): 1e-4, np.dtype(np.complex128): 1e-5}
