@@ -278,7 +278,6 @@ class Streaks(BaseStreaks):
         lines: Float array of shape ``(N, 4)`` with the endpoint
             coordinates ``(x0, y0, x1, y1)``.
     """
-
     index       : IntArray
     lines       : RealArray
 
@@ -358,7 +357,6 @@ class StackedStreaks(BaseStreaks):
             coordinates ``(x0, y0, x1, y1)``.
         num_modules: Total number of detector modules.
     """
-
     index       : IntArray
     module_id   : IntArray
     lines       : RealArray

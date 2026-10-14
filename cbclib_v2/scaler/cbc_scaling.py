@@ -6,11 +6,11 @@ from .._src.array_api import broadcast_to, det_to_k
 from .._src.data_container import DataContainer
 from ..indexer.cbc_data import Miller
 from ..indexer.cbc_indexing import CBDSetup
-from ..indexer.cbc_pupil import Rectangle, SourcePlane
+from ..indexer.cbc_pupil import RectangularPupil, SourcePlane
 from ..indexer.cbc_setup import ResolvedGeometry, ResolvedSetup
 from .cbc_data import (BaseData, MergeState, FullState, IntensityModel, MergeData, PedestalState,
-                       PhotonCounts, RefineStreakState, ReflectionList, PedestalData, StreakData,
-                       StreakPoints, StreakState)
+                       OverlapData, PhotonCounts, RefineStreakState, ReflectionList, ScalerData,
+                       StreakData, StreakPoints, StreakState)
 
 @dataclass(frozen=True, unsafe_hash=True)
 class ScalerModel(CBDSetup):
@@ -20,10 +20,16 @@ class ScalerModel(CBDSetup):
         if self.rate_floor <= 0.0:
             raise ValueError("rate_floor must be positive")
 
+    def pupil_at(self, points: StreakPoints, setup: ResolvedSetup, xp: AnyNamespace
+                 ) -> RectangularPupil:
+        kmin, kmax = self.lens.kin_min(setup.geometry, xp), self.lens.kin_max(setup.geometry, xp)
+        roi = xp.stack((kmin[..., 1], kmax[..., 1], kmin[..., 0], kmax[..., 0]), axis=-1)
+        return RectangularPupil(broadcast_to(roi, points.index, (4,), xp))
+
     def model_at(self, points: StreakPoints, miller: Miller, setup: ResolvedSetup,
                  xp: AnyNamespace) -> IntensityModel:
         """Construct the physical intensity model at detector points."""
-        smp_pos = self.smp_center(points.index, setup.geometry, xp)
+        smp_pos = self.smp_center(points, setup.geometry, xp)
         miller = self.xtal.hkl_to_q(miller, setup.xtal, xp)
         kout = det_to_k(points.points, smp_pos, xp)
         q = broadcast_to(miller.q, points.streak_id, (3,), xp)
@@ -33,10 +39,9 @@ class ScalerModel(CBDSetup):
             smp_pos = self.kin_to_sample(points.index, kin, setup.geometry, xp)
             kout = det_to_k(points.points, smp_pos, xp)
 
-        pupil = self.lens.pupil(setup.geometry, xp)
-        roi = broadcast_to(pupil.roi, points.index, (4,), xp)
-        return IntensityModel(kout=kout, source=SourcePlane.from_q(q=q),
-                              pupil=Rectangle(roi=roi), smp_pos=smp_pos)
+        pupil = self.pupil_at(points, setup, xp)
+        return IntensityModel(kout=kout, source=SourcePlane.from_q(q=q), pupil=pupil,
+                              smp_pos=smp_pos)
 
     def init_model(self, data: BaseData, setup: ResolvedSetup, xp: AnyNamespace
                    ) -> IntensityModel:
@@ -92,13 +97,9 @@ class BaseLoss(Generic[T_Data, T_State]):
         """Return expected log counts under the pedestal-plus-streak model."""
         return self.model.log_rate(self.predictor(data, state, xp), xp)
 
-    def log_profile(self, data: T_Data, state: T_State, xp: AnyNamespace) -> RealArray:
-        """Return the pointwise log profile of the fitted signal."""
-        raise NotImplementedError
-
     def profile(self, data: T_Data, state: T_State, xp: AnyNamespace) -> RealArray:
         """Return the unnormalised linear profile at each detector point."""
-        return xp.exp(self.log_profile(data, state, xp))
+        raise NotImplementedError
 
     def poisson_loss(self, data: T_Data, state: T_State, xp: AnyNamespace) -> RealArray:
         """Return pointwise Poisson loss for the pedestal-plus-streak model."""
@@ -129,21 +130,21 @@ class BaseLoss(Generic[T_Data, T_State]):
                                             sigma_hkl=self.std_hkl(data, state, xp))
 
 @dataclass(frozen=True, unsafe_hash=True)
-class PedestalLoss(BaseLoss[PedestalData, PedestalState]):
+class PedestalLoss(BaseLoss[ScalerData | OverlapData, PedestalState]):
     """Fit local pedestal corrections without a diffraction signal."""
     model : ScalerModel
 
-    def log_profile(self, data: PedestalData, state: PedestalState,
-                    xp: AnyNamespace) -> RealArray:
-        """Return the log profile of the spatially constant pedestal."""
-        return xp.zeros(data.points.shape, dtype=state.pedestal.dtype)
+    def profile(self, data: ScalerData | OverlapData, state: PedestalState,
+                xp: AnyNamespace) -> RealArray:
+        """Return the unit profile of the spatially constant pedestal."""
+        return xp.ones(data.points.shape, dtype=state.pedestal.dtype)
 
-    def predictor(self, data: PedestalData, state: PedestalState,
+    def predictor(self, data: ScalerData | OverlapData, state: PedestalState,
                   xp: AnyNamespace) -> RealArray:
         """Return the background-plus-pedestal predictor."""
-        return data.counts.background + state.pedestal_at(data.points)
+        return data.predictor(state.pedestal_at(data.points), xp)
 
-    def I_hkl(self, data: PedestalData, state: PedestalState,
+    def I_hkl(self, data: ScalerData | OverlapData, state: PedestalState,
               xp: AnyNamespace) -> RealArray:
         return xp.zeros(state.pedestal.shape, dtype=state.pedestal.dtype)
 
@@ -152,31 +153,25 @@ class StreakLoss(BaseLoss[StreakData, StreakState]):
     """Fit a signed profile coefficient at fixed streak geometry."""
     model : ScalerModel
 
-    def log_profile(self, data: StreakData, state: StreakState,
-                    xp: AnyNamespace) -> RealArray:
+    def profile(self, data: StreakData, state: StreakState,
+                xp: AnyNamespace) -> RealArray:
         """Return the fixed-geometry streak profile at each detector point."""
         log_sigma = state.log_sigma_at(data.points)
-        return data.modelled.log_profile(log_sigma, xp)
+        return data.modelled.profile(log_sigma, xp)
 
     def predictor(self, data: StreakData, state: StreakState,
                   xp: AnyNamespace) -> RealArray:
         """Return the background-plus-profile-intensity predictor."""
-        return (data.counts.background
-                + state.intensity_at(data.points) * self.profile(data, state, xp))
-
-    # def I_hkl(self, data: StreakData, state: StreakState,
-    #           xp: AnyNamespace) -> RealArray:
-    #     profile = self.profile(data, state, xp)
-    #     baseline = data.counts.background
-    #     signal = state.intensity_at(data.points)
-    #     contrast = self.model.rate_contrast(baseline, signal, xp)
-    #     return data.mean_by_profile(contrast, profile, xp)
+        signal = state.intensity_at(data.points) * self.profile(data, state, xp)
+        return data.predictor(signal, xp)
 
     def I_hkl(self, data: StreakData, state: StreakState,
               xp: AnyNamespace) -> RealArray:
-        """Return the profile-normalised fitted rate contrast for each reflection."""
+        """Return the profile-weighted mean of each streak's own fitted rate contrast."""
         profile = self.profile(data, state, xp)
-        return data.mean_by_profile(data.counts.signal, profile, xp)
+        signal = state.intensity_at(data.points)
+        contrast = self.model.rate_contrast(data.background, signal, xp)
+        return data.mean_by_profile(contrast, profile, xp)
 
 @dataclass(frozen=True, unsafe_hash=True)
 class RefineStreakLoss(StreakLoss):
@@ -188,41 +183,40 @@ class RefineStreakLoss(StreakLoss):
         points = data.points.points + state.displacement_at(data.points)
         return data.modelled.displace(points, xp)
 
-    def log_profile(self, data: StreakData, state: RefineStreakState,
-                    xp: AnyNamespace) -> RealArray:
+    def profile(self, data: StreakData, state: RefineStreakState,
+                xp: AnyNamespace) -> RealArray:
         """Return the displaced and per-streak-broadened profile."""
         modelled = self.model_at(data, state, xp)
         log_sigma = state.log_sigma_at(data.points)
-        return modelled.log_profile(log_sigma, xp)
+        return modelled.profile(log_sigma, xp)
 
 @dataclass(frozen=True, unsafe_hash=True)
-class FullLoss(BaseLoss[PedestalData, FullState]):
+class FullLoss(BaseLoss[ScalerData | OverlapData, FullState]):
     model      : ScalerModel
 
-    def model_at(self, data: PedestalData, state: FullState, xp: AnyNamespace) -> IntensityModel:
+    def model_at(self, data: ScalerData | OverlapData, state: FullState,
+                 xp: AnyNamespace) -> IntensityModel:
         resolved = state.setup.resolve(xp)
         return self.model.model_at(data.points, data.miller, resolved, xp)
 
-    def log_profile(self, data: PedestalData, state: FullState,
-                    xp: AnyNamespace) -> RealArray:
+    def profile(self, data: ScalerData | OverlapData, state: FullState,
+                xp: AnyNamespace) -> RealArray:
         """Return the streak profile under the jointly refined setup."""
         modelled = self.model_at(data, state, xp)
         log_sigma = state.streaks.log_sigma_at(data.points)
-        return modelled.log_profile(log_sigma, xp)
+        return modelled.profile(log_sigma, xp)
 
-    def predictor(self, data: PedestalData, state: FullState,
+    def predictor(self, data: ScalerData | OverlapData, state: FullState,
                   xp: AnyNamespace) -> RealArray:
         """Return the background-plus-profile-intensity predictor."""
-        streaks = state.streaks
-        return (data.counts.background
-                + streaks.intensity_at(data.points) * self.profile(data, state, xp))
+        signal = state.streaks.intensity_at(data.points) * self.profile(data, state, xp)
+        return data.predictor(signal, xp)
 
-    def I_hkl(self, data: PedestalData, state: FullState,
+    def I_hkl(self, data: ScalerData | OverlapData, state: FullState,
               xp: AnyNamespace) -> RealArray:
         profile = self.profile(data, state, xp)
-        baseline = data.counts.background
         signal = state.streaks.intensity_at(data.points)
-        contrast = self.model.rate_contrast(baseline, signal, xp)
+        contrast = self.model.rate_contrast(data.background, signal, xp)
         return data.mean_by_profile(contrast, profile, xp)
 
 @dataclass(frozen=True)

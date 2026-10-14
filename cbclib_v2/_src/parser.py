@@ -1,168 +1,66 @@
 from configparser import ConfigParser
 from enum import Enum
 import dataclasses
+from inspect import getmembers
 import json
 import os
-import re
-from typing import (Any, Callable, ClassVar, Dict, List, Tuple, Type, get_args, get_origin,
+from typing import (Any, Dict, Tuple, Type, get_args, get_origin,
                     get_type_hints as typing_get_type_hints, overload)
 import numpy as np
 from .data_container import Container, resolved_type
-from .annotations import AnyType, Array, AnyNamespace, ExpandedType, NDArray, NumPy, UnionType
-
-class BaseFormatter:
-    aliases : ClassVar[Tuple[Type, ...]]
-
-    @classmethod
-    def is_instance(cls, t: ExpandedType) -> bool:
-        if isinstance(t, tuple):
-            return any(t[0] is alias for alias in cls.aliases)
-
-        return any(t is alias for alias in cls.aliases)
-
-class SimpleFormatter(BaseFormatter):
-    @classmethod
-    def format_string(cls, string: str) -> Any:
-        return cls.aliases[0](string)
-
-class Formatter(BaseFormatter):
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> Any:
-        raise NotImplementedError
-
-class FloatFormatter(SimpleFormatter):
-    aliases = (float, np.floating)
-
-class IntFormatter(SimpleFormatter):
-    aliases = (int, np.integer)
-
-class BoolFormatter(SimpleFormatter):
-    aliases = (bool,)
-
-    @classmethod
-    def format_string(cls, string: str) -> bool:
-        return string in ['True', 'true', 'yes', 'y']
-
-class StringFormatter(SimpleFormatter):
-    aliases = (str,)
-
-class ListFormatter(Formatter):
-    aliases = (list,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> List:
-        is_list = re.search(r'^\[([\s\S]*)\]$', string)
-        if is_list:
-            return [dtype(p.strip('\'\"'))
-                    for p in re.split(r'\s*,\s*', is_list.group(1)) if p]
-        raise ValueError(f"Invalid string: '{string}'")
-
-class TupleFormatter(Formatter):
-    aliases = (tuple,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type) -> Tuple:
-        is_tuple = re.search(r'^\(([\s\S]*)\)$', string)
-        if is_tuple:
-            return tuple(dtype(p.strip('\'\"'))
-                         for p in re.split(r'\s*,\s*', is_tuple.group(1)) if p)
-        raise ValueError(f"Invalid string: '{string}'")
-
-class ArrayFormatter(Formatter):
-    aliases = (NDArray,)
-
-    @classmethod
-    def format_string(cls, string: str, dtype: Type, xp: AnyNamespace) -> Array:
-        is_list = re.search(r'^\[([\s\S]*)\]$', string)
-        if is_list:
-            return xp.fromstring(is_list.group(1), dtype=dtype, sep=',')
-        raise ValueError(f"Invalid string: '{string}'")
+from .annotations import AnyType, Array, AnyNamespace, NDArray, NumPy, UnionType
+from .array_api import asnumpy
 
 class StringFormatting:
-    FormatterDict = Dict[str, Type[SimpleFormatter] | Type[Formatter]]
-    formatters : FormatterDict = {'ndarray': ArrayFormatter,
-                                  'list': ListFormatter,
-                                  'tuple': TupleFormatter,
-                                  'float': FloatFormatter,
-                                  'int': IntFormatter,
-                                  'bool': BoolFormatter,
-                                  'str': StringFormatter}
-    @classmethod
-    def expand_types(cls, t: AnyType) -> ExpandedType:
-        origin = get_origin(t)
-        if origin is None:
-            return t
-        return (origin, [cls.expand_types(arg) for arg in get_args(t)])
+    """Encode INI values as JSON and restore decoded values to their annotated types."""
 
     @classmethod
-    def list_types(cls, expanded_type: ExpandedType) -> List[ExpandedType]:
-        def add_type(t: ExpandedType, types: List):
-            if not isinstance(t, tuple):
-                types.append(t)
-            else:
-                origin, args = t
-                types.append((origin, args))
-                if len(args) > 1:
-                    for arg in args:
-                        add_type(arg, types)
-
-        types = []
-        add_type(expanded_type, types)
-        return types
-
-    @classmethod
-    def flatten_list(cls, nested_list: List) -> List:
-        if not bool(nested_list):
-            return nested_list
-
-        if isinstance(nested_list[0], (list, tuple)):
-            return cls.flatten_list(*nested_list[:1]) + list(cls.flatten_list(nested_list[1:]))
-
-        return list(nested_list[:1]) + cls.flatten_list(nested_list[1:])
-
-    @classmethod
-    def get_dtype(cls, types: List) -> Type:
-        formatters = [formatter for formatter in cls.formatters.values()
-                      if issubclass(formatter, SimpleFormatter)]
-        for formatter in formatters:
-            for t in types:
-                if formatter.is_instance(t):
-                    return formatter.aliases[0]
-        return float
-
-    @classmethod
-    def get_formatter(cls, t: AnyType, xp: AnyNamespace) -> Callable[[str,], Any]:
-        types = cls.list_types(cls.expand_types(t))
-        for formatter in cls.formatters.values():
-            for extended_type in types:
-                if formatter.is_instance(extended_type):
-                    if issubclass(formatter, SimpleFormatter):
-                        return formatter.format_string
-
-                    if isinstance(extended_type, tuple):
-                        dtype = cls.get_dtype(cls.flatten_list(extended_type[1]))
-                    else:
-                        dtype = float
-
-                    if issubclass(formatter, ArrayFormatter):
-                        return lambda string: formatter.format_string(string, dtype, xp)
-                    return lambda string: formatter.format_string(string, dtype)
-        return str
+    def format_value(cls, value: Any, value_type: AnyType, xp: AnyNamespace) -> Any:
+        """Restore tuples and backend arrays from a decoded JSON value."""
+        if value is None:
+            return value
+        args = get_args(value_type)
+        if isinstance(value_type, UnionType):
+            value_type = next((arg for arg in args
+                               if (get_origin(arg) or arg) is NDArray), args[0])
+            return cls.format_value(value, value_type, xp)
+        origin = get_origin(value_type) or value_type
+        if origin in get_args(Array):
+            return xp.asarray(value)
+        if origin in (tuple, list):
+            if not args:
+                return origin(value)
+            if origin is tuple and args[-1] is not Ellipsis:
+                return tuple(cls.format_value(item, item_type, xp)
+                             for item, item_type in zip(value, args))
+            return origin(cls.format_value(item, args[0], xp) for item in value)
+        if origin is dict and args:
+            return {key: cls.format_value(item, args[1], xp) for key, item in value.items()}
+        return value
 
     @classmethod
     def format_dict(cls, dct: Dict[str, Any], types: Dict[str, AnyType] | AnyType,
                     xp: AnyNamespace) -> Dict[str, Any]:
+        """Reconstruct annotated types from a decoded, mapped parameter dictionary."""
         formatted_dct = {}
-        for attr, val in dct.items():
-            if isinstance(val, dict) and isinstance(types, dict):
-                formatted_dct[attr] = cls.format_dict(val, types[attr], xp)
-            if isinstance(val, str):
-                if isinstance(types, dict):
-                    formatter = cls.get_formatter(types[attr], xp)
-                else:
-                    formatter = cls.get_formatter(types, xp)
-                formatted_dct[attr] = formatter(val)
+        for attr, value in dct.items():
+            value_type = types[attr] if isinstance(types, dict) else types
+            if isinstance(value, dict) and isinstance(value_type, dict):
+                formatted_dct[attr] = cls.format_dict(value, value_type, xp)
+            else:
+                formatted_dct[attr] = cls.format_value(value, value_type, xp)
         return formatted_dct
+
+    @classmethod
+    def json_default(cls, value: Any) -> Any:
+        """Represent array, NumPy scalar, and enum values using JSON-native values."""
+        if isinstance(value, Array):
+            return asnumpy(value).tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, Enum):
+            return value.value
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serialisable")
 
     @overload
     @classmethod
@@ -170,24 +68,14 @@ class StringFormatting:
 
     @overload
     @classmethod
-    def to_string(cls, node: List) -> List: ...
-
-    @overload
-    @classmethod
-    def to_string(cls, node: Array | Any) -> str: ...
+    def to_string(cls, node: Any) -> str | Dict: ...
 
     @classmethod
-    def to_string(cls, node: Any | Dict | List | Array
-                  ) -> str | List | Dict:
+    def to_string(cls, node: Any) -> str | Dict:
+        """Encode each INI value as JSON, preserving the file-section mapping."""
         if isinstance(node, dict):
-            return {k: cls.to_string(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [cls.to_string(v) for v in node]
-        if isinstance(node, NDArray):
-            return np.array2string(np.array(node), separator=',')
-        if isinstance(node, Enum):
-            return str(node.value)
-        return str(node)
+            return {key: cls.to_string(value) for key, value in node.items()}
+        return json.dumps(node, default=cls.json_default)
 
 ContainerType = type[Container]
 
@@ -302,6 +190,13 @@ def get_type_hints(cls: Type[Any],
             result[field.name] = get_type_hints(origin, child_data)
         else:
             result[field.name] = field_type
+
+    # Adding properties to the type hints dictionary
+    for name, member in getmembers(cls):
+        if isinstance(member, property) and member.fget is not None:
+            property_hints = typing_get_type_hints(member.fget)
+            if 'return' in property_hints:
+                result[name] = property_hints['return']
     return result
 
 def read_fields(field_info: FieldInfo, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -438,7 +333,8 @@ class INIParser(Parser, Container):
         ini_parser = ConfigParser()
         ini_parser.read(file)
 
-        return {section: dict(ini_parser.items(section)) for section in ini_parser.sections()}
+        return {section: {name: json.loads(value) for name, value in ini_parser.items(section)}
+                for section in ini_parser.sections()}
 
     def read(self, file: str, xp: AnyNamespace=NumPy) -> Dict[str, Any]:
         return StringFormatting.format_dict(super().read(file), self.type_info, xp)
@@ -455,24 +351,25 @@ class INIParser(Parser, Container):
         ini_parser = ConfigParser()
         ini_parser.read_dict(self.to_dict(obj))
 
-        with np.printoptions(precision=None):
-            with open(file, 'w') as out_file:
-                ini_parser.write(out_file)
+        with open(file, 'w') as out_file:
+            ini_parser.write(out_file)
 
 @dataclasses.dataclass
 class JSONParser(Parser, Container):
+    type_info : Dict[str, Any]
+
     @classmethod
     def from_container(cls, container: Container, default: str | None=None) -> 'JSONParser':
         data = container.to_dict()
         field_info = fields(type(container), data, default)
-        return cls(field_info)
+        return cls(field_info, get_type_hints(type(container), data))
 
     @classmethod
     def from_file(cls, file: str, container_type: ContainerType, default: str | None=None
                   ) -> 'JSONParser':
         data = cls.read_all(file)
         field_info = fields(container_type, data, default)
-        return cls(field_info)
+        return cls(field_info, get_type_hints(container_type, data))
 
     @classmethod
     def read_all(cls, file: str) -> Dict[str, Any]:
@@ -480,6 +377,9 @@ class JSONParser(Parser, Container):
             json_dict = json.load(f)
 
         return json_dict
+
+    def read(self, file: str, xp: AnyNamespace=NumPy) -> Dict[str, Any]:
+        return StringFormatting.format_dict(super().read(file), self.type_info, xp)
 
     def to_dict(self, obj: Any) -> Dict[str, Dict[str, Any]]:
         def array_to_list(**values: Any) -> Dict[str, Any]:
@@ -497,7 +397,8 @@ class JSONParser(Parser, Container):
 
     def write(self, file: str, obj: Any):
         with open(file, 'w') as out_file:
-            json.dump(self.to_dict(obj), out_file, sort_keys=True, ensure_ascii=False, indent=4)
+            json.dump(self.to_dict(obj), out_file, default=StringFormatting.json_default,
+                      sort_keys=True, ensure_ascii=False, indent=4)
 
 def get_extension(file_or_extension: str) -> str:
     if file_or_extension == 'ini':

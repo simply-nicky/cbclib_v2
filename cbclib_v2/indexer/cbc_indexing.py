@@ -5,7 +5,7 @@ from .cbc_data import (AnyPoints, Candidates, CBDPoints, CircleState, LaueVector
                        RefinerDataMasked, RLP, Rotograms, SimulatedVectors, UCA)
 from .cbc_setup import (BaseSetup, IndexingResult, ResolvedLens, ResolvedGeometry, ResolvedSetup,
                         TiltOverAxisState, XtalState)
-from .cbc_pupil import BasePupil, Rectangle, intersect
+from .cbc_pupil import RectangularPupil, intersect
 from .._src.annotations import AnyNamespace, BoolArray, IntArray, JaxNumPy, NumPy, RealArray
 from .._src.array_api import (add_at, argmin_at, array_namespace, broadcast_to, det_to_k, k_to_det,
                               k_to_smp, kxy_to_k, min_at, project_to_rect, safe_divide, safe_sqrt)
@@ -88,24 +88,25 @@ class LensModel():
     def kin_min(self, state: AnyGeometry, xp: AnyNamespace) -> RealArray:
         return det_to_k(state.pupil_min, state.foc_pos, xp)
 
-    def pupil(self, state: AnyGeometry, xp: AnyNamespace) -> Rectangle:
+    def pupil(self, state: AnyGeometry, xp: AnyNamespace) -> RectangularPupil:
         kmin, kmax = self.kin_min(state, xp), self.kin_max(state, xp)
         roi = xp.stack((kmin[..., 1], kmax[..., 1], kmin[..., 0], kmax[..., 0]), axis=-1)
-        return Rectangle(roi=roi)
+        return RectangularPupil(roi)
 
-    def source_lines(self, miller: MillerWithRLP, pupil: BasePupil, xp: AnyNamespace,
+    def source_lines(self, miller: MillerWithRLP, pupil: RectangularPupil, xp: AnyNamespace,
                      ) -> SimulatedVectors:
-        edges = broadcast_to(pupil.edges, miller.index, (), xp)
+        edges = broadcast_to(pupil.edges, miller.index, pupil.edges.shape[1:], xp)
         kin, distance = intersect(miller.q, edges)
-        return SimulatedVectors(index=miller.index, kout=kin + miller.q[..., None, :],
-                                hkl=miller.hkl_indices, kin=kin, q=miller.q,
-                                distance=distance)
+        q = xp.expand_dims(miller.q, axis=tuple(range(miller.q.ndim - 1, kin.ndim - 1)))
+        return SimulatedVectors(index=miller.index, kout=kin + q, hkl=miller.hkl_indices,
+                                kin=kin, q=miller.q, distance=distance)
 
     def project_to_pupil(self, kin: RealArray, idxs: IntArray, state: AnyGeometry,
                          xp: AnyNamespace) -> RealArray:
         kin = safe_divide(kin, safe_sqrt(xp.sum(kin**2, axis=-1), xp)[..., None], xp)
-        kmin_xy = broadcast_to(self.kin_min(state, xp)[..., :2], idxs, (2,), xp)
-        kmax_xy = broadcast_to(self.kin_max(state, xp)[..., :2], idxs, (2,), xp)
+        kmin_xy, kmax_xy = self.kin_min(state, xp)[..., :2], self.kin_max(state, xp)[..., :2]
+        kmin_xy = broadcast_to(kmin_xy, idxs, (2,), xp)
+        kmax_xy = broadcast_to(kmax_xy, idxs, (2,), xp)
         kxy = project_to_rect(kin[..., :2], kmin_xy, kmax_xy, xp)
         return kxy_to_k(kxy, xp)
 
@@ -160,6 +161,7 @@ def loss_function(loss: Loss, xp: AnyNamespace = JaxNumPy) -> LossFn:
     return loss_fns[loss]
 
 class CBDSetup():
+    """Base class for indexing and scaling algorithms. Works with multiple-pupil geometries."""
     lens    : LensModel = LensModel()
     xtal    : XtalModel = XtalModel()
 
@@ -183,14 +185,6 @@ class CBDSetup():
 
         return broadcast_to(geometry.foc_pos, index, (3,), xp)
 
-    def smp_center(self, index: IntArray, geometry: AnyGeometry, xp: AnyNamespace) -> RealArray:
-        if isinstance(geometry, ResolvedGeometry):
-            kin = self.lens.kin_center(geometry, xp)
-            smp_pos = k_to_smp(kin, geometry.defocus, geometry.foc_pos, xp)
-            return broadcast_to(smp_pos, index, (3,), xp)
-
-        return broadcast_to(geometry.foc_pos, index, (3,), xp)
-
     def kout_to_points(self, simulated: SimulatedVectors, geometry: AnyGeometry,
                        xp: AnyNamespace, *, atol: float=2e-6) -> CBDPoints:
         def wrapper(simulated: SimulatedVectors, geometry: AnyGeometry) -> RealArray:
@@ -202,12 +196,28 @@ class CBDSetup():
         return CBDPoints(index=simulated.index, points=points, q=simulated.q, hkl=simulated.hkl,
                          kin=simulated.kin, kout=simulated.kout)
 
+    def init_patterns(self, miller: MillerWithRLP, geometry: AnyGeometry, xp: AnyNamespace,
+                      *, atol: float=2e-6) -> Patterns:
+        simulated = self.lens.source_lines(miller, self.lens.pupil(geometry, xp), xp)
+        points = self.kout_to_points(simulated, geometry, xp, atol=atol)
+        return Patterns.from_points(points)
+
+    def smp_center(self, points: AnyPoints, geometry: AnyGeometry, xp: AnyNamespace
+                   ) -> RealArray:
+        """Return sample centres for all pupils or selected contribution components."""
+        if isinstance(geometry, ResolvedGeometry):
+            kin = self.lens.kin_center(geometry, xp)
+            smp_pos = k_to_smp(kin, geometry.defocus, geometry.foc_pos, xp)
+            return broadcast_to(smp_pos, points.index, (3,), xp)
+
+        return broadcast_to(geometry.foc_pos, points.index, (3,), xp)
+
     def points_to_kout(self, points: AnyPoints, geometry: AnyGeometry, xp: AnyNamespace
                        ) -> RealArray:
         if isinstance(points, CBDPoints):
             smp_pos = self.kin_to_sample(points.index, points.kin, geometry, xp)
         else:
-            smp_pos = self.smp_center(points.index, geometry, xp)
+            smp_pos = self.smp_center(points, geometry, xp)
         return det_to_k(points.points, smp_pos, xp)
 
     def patterns_to_q(self, points: LinePoints, geometry: AnyGeometry, xp: AnyNamespace
@@ -222,12 +232,6 @@ class CBDSetup():
         q1 = kxy_to_k(kout_min, xp) - kmin
         q2 = kxy_to_k(kout_max, xp) - kmax
         return RLP(index=points.index, q=q1), RLP(index=points.index, q=q2)
-
-    def init_patterns(self, miller: MillerWithRLP, geometry: AnyGeometry, xp: AnyNamespace,
-                      *, atol: float=2e-6) -> Patterns:
-        simulated = self.lens.source_lines(miller, self.lens.pupil(geometry, xp), xp)
-        points = self.kout_to_points(simulated, geometry, xp, atol=atol)
-        return Patterns.from_points(points)
 
 @dataclass
 class CBDIndexer(CBDSetup):
@@ -450,15 +454,15 @@ class RefinerModel(CBDSetup):
         kout = self.points_to_kout(data.points, resolved.geometry, xp)
         kout = kout[data.miller.streak_id]
         rlp = self.xtal.hkl_to_q(data.miller, resolved.xtal, xp)
-        kin = kout - rlp.q[..., None, :]
+        q = xp.expand_dims(rlp.q, axis=tuple(range(rlp.q.ndim - 1, kout.ndim - 1)))
+        kin = kout - q
 
         if isinstance(resolved.geometry, ResolvedGeometry):
             smp_pos = self.kin_to_sample(data.miller.index, kin, resolved.geometry, xp)
             kout = det_to_k(data.points.points[data.miller.streak_id], smp_pos, xp)
-            kin = kout - rlp.q[..., None, :]
+            kin = kout - q
 
-        return LaueVectors(index=data.miller.index, q=rlp.q[..., None, :], kin=kin,
-                           kout=kout)
+        return LaueVectors(index=data.miller.index, q=rlp.q, kin=kin, kout=kout)
 
     def line_loss(self, loss: Loss='l1', xp: AnyNamespace=JaxNumPy) -> 'RefinerLoss':
         return RefinerLoss(self, self.lens.line_projector, loss_function(loss, xp))

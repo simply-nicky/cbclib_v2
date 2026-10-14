@@ -2,11 +2,12 @@ from typing import Literal, cast
 import pytest
 from cbclib_v2 import default_rng
 from cbclib_v2.annotations import Generator, IntArray, NDArray, NumPyNamespace, NumPy, RealArray
-from cbclib_v2.indexer import (CBDPoints, ConvexPolygon, EdgePoints, FixedApertureSetup,
+from cbclib_v2.indexer import (CBDPoints, EdgePoints, FixedApertureSetup,
                                FixedPupilSetup, FixedSetup, LinePoints, Miller, MillerWithRLP,
-                               PupilIntersection, Rectangle, RefineResult, RefinerModel,
+                               PupilIntersection, RefineResult, RefinerModel,
                                ResolvedGeometry, ResolvedSetup, RotationState, SimulatedVectors,
                                SourcePlane, XtalCell, XtalState)
+from cbclib_v2.indexer.cbc_pupil import RectangularPupil
 from cbclib_v2.test_util import TestSetup, check_close
 
 SetupMode = Literal['shared', 'per-pattern']
@@ -190,26 +191,17 @@ class TestPupilProjection:
         return xp.broadcast_to(xp.asarray([-0.5, 0.5, 1.5]), (4, 3))
 
     @pytest.fixture
-    def rectangle(self, xp: NumPyNamespace) -> Rectangle:
-        return Rectangle(roi=xp.asarray([0.0, 2.0, 0.0, 4.0]))
+    def rectangle(self, xp: NumPyNamespace) -> RectangularPupil:
+        return RectangularPupil(roi=xp.asarray([0.0, 2.0, 0.0, 4.0]))
 
     @pytest.fixture
-    def rectangle_points(self, rectangle: Rectangle,
+    def rectangle_points(self, rectangle: RectangularPupil,
                          edge_parameters: RealArray) -> EdgePoints:
         return rectangle.edges.to_points(edge_parameters)
 
     @pytest.fixture
-    def polygon(self, xp: NumPyNamespace) -> ConvexPolygon:
-        return ConvexPolygon(center=xp.zeros(2), lengths=xp.ones(4))
-
-    @pytest.fixture
-    def polygon_points(self, polygon: ConvexPolygon,
-                       edge_parameters: RealArray) -> EdgePoints:
-        return polygon.edges.to_points(edge_parameters)
-
-    @pytest.fixture
-    def spherical_pupil(self, xp: NumPyNamespace) -> Rectangle:
-        return Rectangle(roi=xp.asarray([-0.2, 0.2, -0.1, 0.1]))
+    def spherical_pupil(self, xp: NumPyNamespace) -> RectangularPupil:
+        return RectangularPupil(roi=xp.asarray([-0.2, 0.2, -0.1, 0.1]))
 
     @pytest.fixture
     def incident_vectors(self, xp: NumPyNamespace) -> RealArray:
@@ -229,11 +221,7 @@ class TestPupilProjection:
                                 xp: NumPyNamespace):
         self.check_edge_projection(rectangle_points, xp)
 
-    def test_polygon_projection(self, polygon_points: EdgePoints,
-                                xp: NumPyNamespace):
-        self.check_edge_projection(polygon_points, xp)
-
-    def test_spherical_projection(self, spherical_pupil: Rectangle,
+    def test_spherical_projection(self, spherical_pupil: RectangularPupil,
                                   incident_vectors: RealArray,
                                   xp: NumPyNamespace):
         projected = spherical_pupil.project(incident_vectors)
@@ -315,25 +303,25 @@ class TestPupilIntersection:
         return NumPy
 
     @pytest.fixture
-    def outside_pupil(self, xp: NumPyNamespace) -> Rectangle:
-        return Rectangle(roi=xp.asarray([-0.2, 0.2, 0.0, 0.2]))
+    def outside_pupil(self, xp: NumPyNamespace) -> RectangularPupil:
+        return RectangularPupil(roi=xp.asarray([-0.2, 0.2, 0.0, 0.2]))
 
     @pytest.fixture
-    def outside_intersection(self, outside_pupil: Rectangle,
+    def outside_intersection(self, outside_pupil: RectangularPupil,
                              xp: NumPyNamespace) -> PupilIntersection:
         return PupilIntersection.from_edge(q=xp.asarray([0.2, 0.0, 0.0]),
                                            edges=outside_pupil.edges)
 
     @pytest.fixture
-    def outside_solutions(self, outside_pupil: Rectangle,
+    def outside_solutions(self, outside_pupil: RectangularPupil,
                           xp: NumPyNamespace) -> EdgePoints:
         parameters = xp.asarray([[0.5, 0.25], [1.5, 0.5],
                                  [0.5, 0.25], [-0.5, 0.5]])
         return outside_pupil.edges.to_points(parameters)
 
     @pytest.fixture
-    def parallel_pupil(self, xp: NumPyNamespace) -> Rectangle:
-        return Rectangle(roi=xp.asarray([-0.1, 0.1, -0.2, 0.2]))
+    def parallel_pupil(self, xp: NumPyNamespace) -> RectangularPupil:
+        return RectangularPupil(roi=xp.asarray([-0.1, 0.1, -0.2, 0.2]))
 
     @pytest.fixture
     def parallel_q(self, xp: NumPyNamespace) -> RealArray:
@@ -342,7 +330,7 @@ class TestPupilIntersection:
                            [0.0, 0.22, 0.0]])
 
     @pytest.fixture
-    def parallel_intersection(self, parallel_pupil: Rectangle, parallel_q: RealArray,
+    def parallel_intersection(self, parallel_pupil: RectangularPupil, parallel_q: RealArray,
                               xp: NumPyNamespace) -> PupilIntersection:
         edges = parallel_pupil.edges.replace(
             tau=xp.broadcast_to(parallel_pupil.edges.tau, parallel_q.shape[:-1] + (4, 2)),
@@ -351,7 +339,7 @@ class TestPupilIntersection:
         )
         return PupilIntersection.from_edge(q=parallel_q, edges=edges)
 
-    def test_outside_score(self, outside_pupil: Rectangle,
+    def test_outside_score(self, outside_pupil: RectangularPupil,
                            outside_intersection: PupilIntersection,
                            outside_solutions: EdgePoints, xp: NumPyNamespace):
         projected = outside_solutions.project()
@@ -367,7 +355,7 @@ class TestPupilIntersection:
         assert xp.all(kin[..., :2] >= outside_pupil.min)
         assert xp.all(kin[..., :2] <= outside_pupil.max)
 
-    def test_parallel_plane(self, parallel_pupil: Rectangle, parallel_q: RealArray,
+    def test_parallel_plane(self, parallel_pupil: RectangularPupil, parallel_q: RealArray,
                             parallel_intersection: PupilIntersection,
                             xp: NumPyNamespace):
         kin, score = parallel_intersection.select(parallel_intersection.solutions())

@@ -565,14 +565,13 @@ ArrCon_T = TypeVar('ArrCon_T', bound='ArrayContainer')
 def broadcast_to(array: Array, idxs: IntArray, suffix: Shape, xp: AnyNamespace) -> Array: ...
 
 @overload
-def broadcast_to(array: ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespace
-                 ) -> ArrCon_T: ...
+def broadcast_to(array: ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespace) -> ArrCon_T: ...
 
 def broadcast_to(array: Array | ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespace
                  ) -> Array | ArrCon_T:
     array = array.reshape((-1,) + suffix)
     if array.shape[0] == 1:
-        return array[0]
+        return array
     return array[xp.reshape(idxs, -1)].reshape(idxs.shape + suffix)
 
 def euler_angles(rmats: RealArray, xp: AnyNamespace) -> RealArray:

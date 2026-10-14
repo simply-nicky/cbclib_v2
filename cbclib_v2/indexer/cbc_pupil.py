@@ -3,6 +3,7 @@ from .._src.array_api import array_namespace, kxy_to_k, project_to_rect, safe_di
 from .._src.state import State
 from .._src.data_container import ArrayContainer, DataContainer
 from ..annotations import RealArray, Shape
+from .cbc_setup import Rectangle
 
 class Edge(State, ArrayContainer):
     tau     : RealArray     # (..., 4, 2) edge tangents
@@ -44,68 +45,12 @@ class EdgePoints(State, DataContainer):
         delta = self.xy - self.project().xy
         return safe_sqrt(xp.sum(delta**2, axis=-1), xp)
 
-class BasePupil(ArrayContainer):
-    """Convex support of physical incident wavevectors on the unit sphere."""
-
-    @property
-    def edges(self) -> Edge:
-        raise NotImplementedError
-
-    def project(self, kin: RealArray) -> RealArray:
-        """Project incident vectors onto the spherical pupil support."""
-        raise NotImplementedError
-
-    def distance(self, kin: RealArray) -> RealArray:
-        """Return 3D Euclidean distances to the spherical pupil support."""
-        xp = self.__array_namespace__()
-        delta = kin - self.project(kin)
-        return safe_sqrt(xp.sum(delta**2, axis=-1), xp)
-
-class Rectangle(State, BasePupil):
+class RectangularPupil(Rectangle):
     roi : RealArray     # (n_samples, 4) rectangle coordinates (ky_0, ky_1, kx_0, kx_1)
 
-    def __post_init__(self):
-        self.roi = self.roi.reshape((-1, 4))
-
-    def __len__(self) -> int:
-        return self.roi.size // 4
-
     @property
-    def shape(self) -> Tuple[int, ...]:
+    def shape(self) -> Shape:
         return self.roi.shape[:-1]
-
-    @property
-    def y0(self) -> RealArray:
-        return self.roi[..., 0]
-
-    @property
-    def y1(self) -> RealArray:
-        return self.roi[..., 1]
-
-    @property
-    def x0(self) -> RealArray:
-        return self.roi[..., 2]
-
-    @property
-    def x1(self) -> RealArray:
-        return self.roi[..., 3]
-
-    @property
-    def min(self) -> RealArray:
-        xp = self.__array_namespace__()
-        return xp.stack((self.x0, self.y0), axis=-1)
-
-    @property
-    def max(self) -> RealArray:
-        xp = self.__array_namespace__()
-        return xp.stack((self.x1, self.y1), axis=-1)
-
-    @property
-    def center(self) -> RealArray:
-        xp = self.__array_namespace__()
-        x = 0.5 * (self.x0 + self.x1)
-        y = 0.5 * (self.y0 + self.y1)
-        return xp.stack((x, y), axis=-1)
 
     @property
     def edges(self) -> Edge:
@@ -124,85 +69,22 @@ class Rectangle(State, BasePupil):
         ), axis=-2)
         return Edge(tau=tau, origin=origins)
 
-    def broadcast(self, size: int) -> 'Rectangle':
-        xp = self.__array_namespace__()
-        return Rectangle(roi=xp.broadcast_to(self.roi, (size, 4)))
-
-    def collapse(self) -> 'Rectangle':
-        xp = self.__array_namespace__()
-        return Rectangle(roi=xp.mean(self.roi, axis=0, keepdims=True))
-
     def project(self, kin: RealArray) -> RealArray:
         """Project incident vectors onto the rectangular spherical support."""
         xp = self.__array_namespace__()
         xy = project_to_rect(kin[..., :2], self.min, self.max, xp)
         return kxy_to_k(xy, xp)
 
-class ConvexPolygon(State, BasePupil):
-    """Convex pupil defined by uniformly oriented supporting lines.
-
-    The edge normals start at the positive x direction and rotate counter-clockwise. Each
-    tangent is the counter-clockwise rotation of its outward normal, so the polygon interior
-    lies to the left of every oriented supporting line.
-
-    Attributes:
-        center: Interior reference points, shape ``(..., 2)``.
-        lengths: Perpendicular distances from each center to its supporting lines, shape
-            ``(..., n_edges)``.
-    """
-    center   : RealArray
-    lengths  : RealArray
-
-    def __post_init__(self):
-        if self.center.shape[-1:] != (2,):
-            raise ValueError("center must have shape (..., 2)")
-        if self.lengths.ndim == 0 or self.lengths.shape[-1] < 3:
-            raise ValueError("lengths must contain at least three polygon edges")
-
-    @property
-    def edges(self) -> Edge:
-        """Return finite polygon edges delimited by adjacent supporting lines."""
+    def distance(self, kin: RealArray) -> RealArray:
+        """Return 3D Euclidean distances to the spherical pupil support."""
         xp = self.__array_namespace__()
-        count = self.lengths.shape[-1]
-        phi = 2.0 * xp.pi * xp.arange(count) / count
-        outward = xp.stack((xp.cos(phi), xp.sin(phi)), axis=-1)
-        tau = xp.stack((-outward[..., 1], outward[..., 0]), axis=-1)
-        origin = self.center[..., None, :] + self.lengths[..., None] * outward
-        tau = xp.broadcast_to(tau, origin.shape)
-
-        def intersection_parameter(other_origin: RealArray,
-                                   other_normal: RealArray) -> RealArray:
-            numerator = xp.sum((other_origin - origin) * other_normal, axis=-1)
-            denominator = xp.sum(tau * other_normal, axis=-1)
-            return safe_divide(numerator, denominator, xp)
-
-        previous = intersection_parameter(xp.roll(origin, 1, axis=-2),
-                                          xp.roll(outward, 1, axis=-2))
-        following = intersection_parameter(xp.roll(origin, -1, axis=-2),
-                                           xp.roll(outward, -1, axis=-2))
-        start = origin + previous[..., None] * tau
-        return Edge(tau=(following - previous)[..., None] * tau, origin=start)
-
-    def project(self, kin: RealArray) -> RealArray:
-        """Project incident vectors onto the convex polygon's spherical support."""
-        xp = self.__array_namespace__()
-
-        xy = kin[..., :2]
-        delta = xy[..., None, :] - self.edges.origin
-        length_sq = xp.sum(self.edges.tau**2, axis=-1)
-        t = safe_divide(xp.sum(delta * self.edges.tau, axis=-1), length_sq, xp)
-        candidates = self.edges.to_points(t).project().xy
-
-        distance_sq = xp.sum((candidates - xy[..., None, :])**2, axis=-1)
-        indices = xp.argmin(distance_sq, axis=-1)
-        closest = xp.take_along_axis(candidates, indices[..., None, None], axis=-2)[..., 0, :]
-        inside = xp.all(xp.sum(delta * self.edges.normal, axis=-1) <= 0.0, axis=-1)
-        return kxy_to_k(xp.where(inside[..., None], xy, closest), xp)
+        delta = kin - self.project(kin)
+        return safe_sqrt(xp.sum(delta**2, axis=-1), xp)
 
 class SourcePlane(State, ArrayContainer):
     """Laue plane associated with a reciprocal-lattice vector."""
-    q       : RealArray
-    q_mag   : RealArray
+    q       : RealArray     # (n_points, 3) reciprocal-lattice vectors
+    q_mag   : RealArray     # (n_points,) squared magnitudes of reciprocal-lattice vectors
 
     @classmethod
     def from_q(cls, q: RealArray) -> 'SourcePlane':
@@ -213,13 +95,6 @@ class SourcePlane(State, ArrayContainer):
     @property
     def shape(self) -> Shape:
         return self.q.shape[:-1]
-
-    def expand_dims(self, axis: int | Tuple[int, ...]) -> 'SourcePlane':
-        """Return a source plane with new dimensions inserted before the vector axis."""
-        xp = self.__array_namespace__()
-        q = xp.expand_dims(self.q, axis=axis)
-        q_mag = xp.expand_dims(self.q_mag, axis=axis)
-        return self.replace(q=q, q_mag=xp.asarray(q_mag))
 
     def residual(self, kin: RealArray) -> RealArray:
         """Return the unnormalised signed Laue-plane residual."""
@@ -241,8 +116,8 @@ class SourcePlane(State, ArrayContainer):
 class PupilIntersection(State, DataContainer):
     """Candidate intersections between an Ewald circle and pupil supporting lines.
     """
-    source : SourcePlane
-    edges : Edge
+    source : SourcePlane    # (n_points,) reciprocal-lattice vectors
+    edges : Edge            # (n_points or 1, n_pupils) or (n_points or 1,) finite pupil edges
 
     @classmethod
     def from_edge(cls, q: RealArray, edges: Edge) -> 'PupilIntersection':
@@ -251,7 +126,7 @@ class PupilIntersection(State, DataContainer):
 
     def solutions(self) -> EdgePoints:
         xp = self.__array_namespace__()
-        source = self.source.expand_dims(axis=self.source.q.ndim - 1)
+        source = self.source.expand_dims(axis=range(self.source.ndim, self.edges.ndim + 1))
         origin_dot_q = xp.sum(self.edges.origin * source.q[..., :2], axis=-1)
         f1 = -0.5 * source.q_mag - origin_dot_q
         f2 = xp.sum(self.edges.tau * source.q[..., :2], axis=-1)

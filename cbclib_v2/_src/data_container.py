@@ -549,6 +549,26 @@ class ArrayContainer(DataContainer):
                 data[attr] = xp.asarray(value[field_indices])
         return self.replace(**data)
 
+    def expand_dims(self, axis: int | Sequence[int]) -> Self:
+        """Return a container with new dimensions inserted before the payload axes.
+
+        Args:
+            axis: Axis or axes along which to insert new dimensions.  Negative
+                values are interpreted relative to the end of the leading shape.
+
+        Returns:
+            New container instance with expanded array fields.
+        """
+        xp = self.__array_namespace__()
+        data = {}
+        for attr, value in self.contents().items():
+            if isinstance(value, ArrayContainer):
+                data[attr] = value.expand_dims(axis=axis)
+            else:
+                field_axis = tuple(a if a >= 0 else a + self.ndim for a in to_list(axis))
+                data[attr] = xp.expand_dims(value, axis=field_axis)
+        return self.replace(**data)
+
     def reshape(self: Self, shape: int | Sequence[int] | None=None) -> Self:
         """Reshape all array fields to *shape*.
 

@@ -1,23 +1,113 @@
-from typing import Iterable, Literal, overload, Tuple, Type
+from dataclasses import dataclass
+from typing import ClassVar, Iterable, List, Literal, overload, Tuple, Type
 from typing_extensions import Self
 import pandas as pd
-from .._src.annotations import (AnyNamespace, BoolArray, IntArray, IntSequence, JaxNumPy,
-                                RealArray, Shape)
+from .._src.annotations import AnyNamespace, BoolArray, IntArray, IntSequence, RealArray, Shape
 from .._src.array_api import add_at, asnumpy, det_to_k, safe_divide
 from .._src.crystfel import Detector
 from .._src.data_container import ArrayContainer, DataContainer, IndexedContainer, IndexLookup
 from .._src.data_processing import CrystData
 from .._src.state import State, field
 from ..indexer.cbc_data import Miller
-from ..indexer.cbc_pupil import BasePupil, SourcePlane
+from ..indexer.cbc_pupil import RectangularPupil, SourcePlane
 from ..indexer.cbc_setup import BaseSetup
 from .cbc_symmetry import PointGroup
 
+@dataclass(frozen=True)
+class LegendreFactory:
+    """Build pupil bases from globally cached exact shifted Legendre coefficients.
+
+    The process-wide cache contains unnormalised Python-integer rows in ascending
+    powers of the unit coordinate. Degrees zero through four are predefined;
+    higher degrees are generated once by the shifted Legendre recurrence.
+    """
+    cached: ClassVar[List[Tuple[int, ...]]] = [
+        (1,),
+        (-1, 2),
+        (1, -6, 6),
+        (-1, 12, -30, 20),
+        (1, -20, 90, -140, 70),
+    ]
+
+    @classmethod
+    def coefficients(cls, degree: int) -> Tuple[int, ...]:
+        """Return the cached exact coefficient row for a non-negative degree."""
+        if degree < 0:
+            raise ValueError("Legendre degree must be non-negative")
+        while len(cls.cached) <= degree:
+            n = len(cls.cached) - 1
+            current = cls.cached[n] + (0,)
+            previous = cls.cached[n - 1] + (0, 0)
+            shifted = (0,) + cls.cached[n]
+            # Each recurrence numerator is exactly divisible by n + 1.
+            row = tuple(((2 * n + 1) * (2 * shifted[k] - current[k])
+                         - n * previous[k]) // (n + 1) for k in range(n + 2))
+            cls.cached.append(row)
+        return cls.cached[degree]
+
+    @classmethod
+    def create(cls, degree: int, xp: AnyNamespace) -> 'LegendreBasis':
+        """Create a normalised backend basis from the shared integer cache.
+
+        Args:
+            degree: Maximum non-negative total degree ``m + n``.
+            xp: Array namespace in which the basis will be evaluated.
+        """
+        cls.coefficients(degree)
+        coefficients = xp.asarray([
+            [float(value) for value in cls.cached[n]] + [0.0] * (degree - n)
+            for n in range(degree + 1)])
+        normalisation = xp.sqrt(2.0 * xp.arange(degree + 1) + 1.0)
+        total, n = xp.meshgrid(xp.arange(degree + 1, dtype=int),
+                              xp.arange(degree + 1, dtype=int), indexing='ij')
+        modes = xp.stack((total - n, n), axis=-1)[n <= total]
+        return LegendreBasis(coefficients=xp.asarray(coefficients * normalisation[:, None]),
+                             modes=modes)
+
+class LegendreBasis(State, DataContainer):
+    """Reusable orthonormal shifted Legendre products on the unit-square pupil.
+
+    Modes use uniform area measure on ``[0, 1] ** 2`` and include the constant.
+    Each product is ``sqrt((2*m + 1)*(2*n + 1))*P_m(2*u - 1)*P_n(2*v - 1)``.
+    Construct once with :meth:`LegendreFactory.create` and reuse at different coordinates.
+
+    Attributes:
+        coefficients: Normalised shifted Legendre coefficients, shape
+            ``(degree + 1, degree + 1)``; rows index polynomial degree and columns
+            index ascending powers of the unit coordinate.
+        modes: Degree pairs ``(m, n)``, shape ``(n_modes, 2)``, ordered by total
+            degree, then descending u degree.
+    """
+    coefficients: RealArray
+    modes: IntArray
+
+    @property
+    def degree(self) -> int:
+        """Return the maximum polynomial degree represented by the coefficients."""
+        return self.coefficients.shape[0] - 1
+
+    def evaluate(self, points: RealArray) -> RealArray:
+        """Evaluate every mode using the stored coefficients without Python loops.
+
+        Args:
+            points: Coordinates ``(u, v)`` with shape ``(..., 2)``, in the same
+                array namespace as the basis.
+
+        Returns:
+            Values with shape ``(..., n_modes)``, ordered as :attr:`modes`.
+            No clipping or aperture mask is applied to the coordinates.
+        """
+        xp = self.__array_namespace__()
+        powers = points[..., None]**xp.arange(self.degree + 1, dtype=int)
+        polynomials = powers @ self.coefficients.T
+        return xp.asarray(polynomials[..., 0, self.modes[:, 0]]
+                          * polynomials[..., 1, self.modes[:, 1]])
+
 class IntensityModel(State, DataContainer):
-    kout        : RealArray     # (n_points, 3) endpoint kout vectors of the streak line
-    source      : SourcePlane   # (n_points,) source-plane support
-    pupil       : BasePupil     # (n_points,) or (1,) pupil support
-    smp_pos     : RealArray     # (n_points, 3) sample position in metres
+    kout        : RealArray         # (n_points, 3) endpoint kout vectors of the streak line
+    source      : SourcePlane       # (n_points,) source-plane support
+    pupil       : RectangularPupil  # (n_points or 1,) selected pupil support
+    smp_pos     : RealArray         # (n_points, 3) sample position in metres, used for displacement
 
     @property
     def kin(self) -> RealArray:
@@ -32,14 +122,10 @@ class IntensityModel(State, DataContainer):
         dist_ppl = xp.sum((self.kin - self.pupil.project(self.kin))**2, axis=-1)
         return xp.asarray(dist_src + dist_ppl)
 
-    def log_radial(self, log_sigma: RealArray, xp: AnyNamespace) -> RealArray:
+    def profile(self, log_sigma: RealArray, xp: AnyNamespace) -> RealArray:
         """Return Gaussian attenuation by source-plane and pupil-support distance."""
         inv_sigma_sq = xp.exp(-2.0 * log_sigma)
-        return -0.5 * self.distance_sq * inv_sigma_sq
-
-    def log_profile(self, log_sigma: RealArray, xp: AnyNamespace) -> RealArray:
-        """Return the continuous source-plane and pupil-support log profile."""
-        return self.log_radial(log_sigma, xp)
+        return xp.exp(-0.5 * self.distance_sq * inv_sigma_sq)
 
     def displace(self, points: RealArray, xp: AnyNamespace) -> 'IntensityModel':
         """Return a copy of the model with displaced streak endpoints."""
@@ -71,12 +157,8 @@ class StreakIndices(State, IndexedContainer):
     @classmethod
     def import_dataframe(cls, df: pd.DataFrame, xp: AnyNamespace) -> 'StreakIndices':
         """Import pattern points from :method:`~cbclib_v2.Patterns.pattern_dataframe`."""
-        df = df.drop_duplicates(subset=['index', 'y', 'x'], keep=False)
-        index = xp.asarray(df['index'].to_numpy())
-        streak_id = xp.asarray(df['streak_id'].to_numpy())
-        y = xp.asarray(df['y'].to_numpy())
-        x = xp.asarray(df['x'].to_numpy())
-        return cls(index=index, y=y, x=x, streak_id=streak_id)
+        return cls(index=xp.asarray(df['index']), y=xp.asarray(df['y']),
+                   x=xp.asarray(df['x']), streak_id=xp.asarray(df['streak_id']))
 
     @property
     def shape(self) -> Shape:
@@ -86,6 +168,18 @@ class StreakIndices(State, IndexedContainer):
     def xy(self) -> IntArray:
         xp = self.__array_namespace__()
         return xp.stack((self.x, self.y), axis=-1)
+
+    def unique(self) -> Tuple['StreakIndices', IntArray]:
+        """Return unique frame-pixels and a pixel ID for each streak contribution.
+
+        Pixel identity includes the frame. This discrete construction is eager, while
+        the returned mapping can be used inside compiled losses.
+        """
+        xp = self.__array_namespace__()
+        pixels = xp.stack((self.index, self.y, self.x), axis=-1)
+        _, positions, inverse = xp.unique(pixels, axis=0, return_index=True,
+                                          return_inverse=True)
+        return self[positions], inverse.reshape(self.shape)
 
     def mask(self, is_good: IntArray) -> 'StreakIndices':
         return self[is_good[self.y, self.x] > 0]
@@ -192,6 +286,25 @@ class BaseData(DataContainer):
         raise NotImplementedError("Concrete data classes must implement miller.")
 
     @property
+    def background(self) -> RealArray:
+        """Return background counts in streak-point order."""
+        raise NotImplementedError
+
+    @property
+    def signal(self) -> RealArray:
+        """Return measured signal in streak-point order for initialisation."""
+        raise NotImplementedError
+
+    @property
+    def std(self) -> RealArray:
+        """Return detector noise in streak-point order."""
+        raise NotImplementedError
+
+    def predictor(self, signal: RealArray, xp: AnyNamespace) -> RealArray:
+        """Combine per-streak signals with background in measured-pixel order."""
+        raise NotImplementedError("Concrete data classes must implement predictor.")
+
+    @property
     def n_patterns(self) -> int:
         """Return the number of patterns in the indexed data."""
         if self.points.size:
@@ -216,7 +329,7 @@ class BaseData(DataContainer):
 
     def std_by_streak(self, profile: RealArray, xp: AnyNamespace) -> RealArray:
         """Return profile-coefficient errors from measured detector noise."""
-        profile = safe_divide(profile, self.counts.std, xp)
+        profile = safe_divide(profile, self.std, xp)
         information = self.sum_by_streak(profile**2, xp)
         positive = information > 0.0
         denominator = xp.sqrt(xp.where(positive, information, 1.0))
@@ -230,22 +343,84 @@ class BaseData(DataContainer):
                         self.points.index, xp.ones_like(values))
         return safe_divide(sums, counts, xp)
 
-class PedestalData(State, BaseData):
-    """Hold observed photon counts and geometry for independently fitted streaks."""
+class ScalerData(State, BaseData):
+    """Hold matching geometry and count rows for non-overlapping streak pixels."""
     points : StreakPoints
     counts : PhotonCounts
     miller : Miller
 
+    @property
+    def background(self) -> RealArray:
+        """Return background counts in streak-point order."""
+        return self.counts.background
+
+    @property
+    def signal(self) -> RealArray:
+        """Return measured signal in streak-point order."""
+        return self.counts.signal
+
+    @property
+    def std(self) -> RealArray:
+        """Return detector noise in streak-point order."""
+        return self.counts.std
+
+    def predictor(self, signal: RealArray, xp: AnyNamespace) -> RealArray:
+        """Add the streak signal to the background at each measured pixel."""
+        return self.counts.background + signal
+
     @classmethod
     def import_data(cls, data: CrystData, streak_ids: StreakIndices, miller: Miller,
                     detector: Detector, xp: AnyNamespace, *, I_min: float=float('-inf')
-                    ) -> 'PedestalData':
+                    ) -> 'ScalerData':
         points = streak_ids.to_points(detector)
         counts = PhotonCounts.import_data(data, streak_ids, xp, I_min=I_min)
         return cls(points=points, counts=counts, miller=miller)
 
+class OverlapData(State, BaseData):
+    """Hold unique pixel counts and geometry for overlapping streak contributions.
+
+    Attributes:
+        points: Geometry for each streak-pixel contribution, shape ``(n_points,)``.
+        counts: Counts, background and noise for unique frame-pixels, shape ``(n_pixels,)``.
+        miller: Miller indices for the predicted streaks.
+        pixel_id: Unique pixel ID for each contribution, shape ``(n_points,)``.
+    """
+    points   : StreakPoints
+    counts   : PhotonCounts
+    miller   : Miller
+    pixel_id : IntArray
+
+    @property
+    def background(self) -> RealArray:
+        """Return background counts in streak-point order."""
+        return self.counts.background[self.pixel_id]
+
+    @property
+    def signal(self) -> RealArray:
+        """Return measured signal in streak-point order."""
+        return self.counts.signal[self.pixel_id]
+
+    @property
+    def std(self) -> RealArray:
+        """Return detector noise in streak-point order."""
+        return self.counts.std[self.pixel_id]
+
+    def predictor(self, signal: RealArray, xp: AnyNamespace) -> RealArray:
+        """Sum streak contributions at each pixel and add its background once."""
+        signal = add_at(xp.zeros(self.counts.shape, dtype=signal.dtype), self.pixel_id, signal)
+        return self.counts.background + signal
+
+    @classmethod
+    def import_data(cls, data: CrystData, streak_ids: StreakIndices, miller: Miller,
+                    detector: Detector, xp: AnyNamespace, *, I_min: float=float('-inf')
+                    ) -> 'OverlapData':
+        points = streak_ids.to_points(detector)
+        pixels, pixel_id = streak_ids.unique()
+        counts = PhotonCounts.import_data(data, pixels, xp, I_min=I_min)
+        return cls(points=points, counts=counts, miller=miller, pixel_id=pixel_id)
+
 class StreakData(State, BaseData):
-    scaling  : PedestalData
+    scaling  : ScalerData | OverlapData
     modelled : IntensityModel
 
     @property
@@ -255,6 +430,25 @@ class StreakData(State, BaseData):
     @property
     def counts(self) -> PhotonCounts:
         return self.scaling.counts
+
+    @property
+    def background(self) -> RealArray:
+        """Return background counts in streak-point order."""
+        return self.scaling.background
+
+    @property
+    def signal(self) -> RealArray:
+        """Return measured signal in streak-point order."""
+        return self.scaling.signal
+
+    @property
+    def std(self) -> RealArray:
+        """Return detector noise in streak-point order."""
+        return self.scaling.std
+
+    def predictor(self, signal: RealArray, xp: AnyNamespace) -> RealArray:
+        """Combine signals according to the contained scaling data's pixel representation."""
+        return self.scaling.predictor(signal, xp)
 
     @property
     def miller(self) -> Miller:
@@ -312,9 +506,9 @@ class StreakState(State, DataContainer):
         """Initialise signed profile coefficients by their information-weighted median."""
         previous = xp.zeros((data.n_streaks,))
         log_sigma = xp.full((data.n_patterns,), xp.log(sigma))
-        profile = xp.exp(data.modelled.log_profile(log_sigma[data.points.index], xp))
+        profile = data.modelled.profile(log_sigma[data.points.index], xp)
         estimator = WeightedLinearEstimator(group_id=data.points.streak_id, weights=weights)
-        intensity = estimator.fit_median(profile, data.counts.signal, previous)
+        intensity = estimator.fit_median(profile, data.signal, previous)
         return cls(asinh_hkl=xp.arcsinh(intensity), log_sigma=log_sigma)
 
     @overload

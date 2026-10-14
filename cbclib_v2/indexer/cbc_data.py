@@ -351,16 +351,13 @@ class LaueVectors(RLP):
     kout    : RealArray # (..., 2, 3) endpoint kout vectors of the streak line
 
     @property
-    def shape(self) -> Shape:
-        return self.kin.shape[:-2]
-
-    @property
     def source_points(self) -> RealArray:
         xp = self.__array_namespace__()
-        q_mag = xp.sum(self.q**2, axis=-1)
-        t = safe_divide(xp.sum(self.kin * self.q, axis=-1), q_mag, xp) + 0.5
-        kin = self.kin - t[..., None] * self.q
-        tau = kin + 0.5 * self.q
+        q = xp.expand_dims(self.q, axis=tuple(range(self.q.ndim - 1, self.kin.ndim - 1)))
+        q_mag = xp.sum(q**2, axis=-1)
+        t = safe_divide(xp.sum(self.kin * q, axis=-1), q_mag, xp) + 0.5
+        kin = self.kin - t[..., None] * q
+        tau = kin + 0.5 * q
         tau_mag = xp.sum(tau**2, axis=-1)
         s = safe_divide(xp.sum(kin**2, axis=-1) - 1.0,
                         xp.sum(kin * tau, axis=-1) + safe_sqrt(tau_mag, xp), xp)
@@ -380,7 +377,7 @@ class SimulatedVectors(State, IndexedContainer):
 
     @property
     def shape(self) -> Shape:
-        return self.kin.shape[:-2]
+        return self.q.shape[:-1]
 
     def project(self, index: IntArray, kout: RealArray, xp: AnyNamespace) -> EdgePoints:
         bounds = broadcast_to(self.kout[..., :2], index, (2, 2), xp)
@@ -397,7 +394,7 @@ class SimulatedVectors(State, IndexedContainer):
         distance = xp.mean(self.distance, axis=-1)
         return broadcast_to(distance, index, (), xp)
 
-class CBDPoints(LinePoints, LaueVectors):
+class CBDPoints(LaueVectors, LinePoints):
     hkl     : IntArray      # (N, 3) Miller indices of the streak point
 
 class RefinerData(State, DataContainer):

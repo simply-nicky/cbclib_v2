@@ -260,7 +260,8 @@ class TestLossWorkflow:
         assert xp.all(xp.isfinite(projected.q))
         check_close(xp.sum(projected.kout**2, axis=-1),
                     xp.ones(projected.kout.shape[:-1]))
-        check_close(projected.q, projected.kout - projected.kin)
+        # Both endpoints share the reflection's reciprocal-lattice vector.
+        check_close(projected.q[..., None, :], projected.kout - projected.kin)
 
     def test_loss_value(self, line_loss: RefinerLoss, data: RefinerData,
                         best_data: RefinerDataBest, initial: FixedSetup,

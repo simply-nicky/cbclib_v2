@@ -33,7 +33,7 @@ from ..indexer.cbc_setup import (BaseGeometry, BaseLens, BaseSetup, FixedApertur
                                  FixedPupilLens, FixedPupilSetup, FixedGeometry, FixedSetup, Geometry,
                                  Lens, IndexingResult, RefineResult, ResolvedSetup, Setup,
                                  TiltOverAxisState, XtalState)
-from ..scaler.cbc_data import (FullState, PedestalData, ReflectionList, RefineStreakState, StreakData,
+from ..scaler.cbc_data import (FullState, ScalerData, ReflectionList, RefineStreakState, StreakData,
                                StreakState, StreakIndices)
 from ..scaler.cbc_scaling import FullLoss, RefineStreakLoss, ScalerModel, StreakLoss
 
@@ -1342,7 +1342,7 @@ class PostRefineConfig(BaseParameters):
     def streak_data(self, scaler: ScalerModel, cryst_data: CrystData, miller: MillerWithRLP,
                     resolved: ResolvedSetup, detector: Detector, xp: AnyNamespace) -> StreakData:
         streak_ids = self.streak_indices(scaler, miller, resolved, detector, xp)
-        data = PedestalData.import_data(
+        data = ScalerData.import_data(
             cryst_data, streak_ids, miller, detector, xp, I_min=self.I_min)
         modelled = scaler.init_model(data, resolved, xp)
         return StreakData(data, modelled)
@@ -1373,7 +1373,7 @@ class PostRefineContext(Container):
 
     def init_streaks(self, sigma: float) -> StreakState:
         xp = self.data.__array_namespace__()
-        log_expected = self.scaler.log_rate(self.data.counts.background, xp)
+        log_expected = self.scaler.log_rate(self.data.background, xp)
         weights = xp.exp(-log_expected)
         return StreakState.from_data(self.data, sigma, weights, xp)
 
