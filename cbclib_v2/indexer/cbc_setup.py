@@ -612,6 +612,16 @@ class FixedAperture(BaseRectangle, State, DataContainer):
     center : RealArray
     aperture : Tuple[float, float] = field(static=True)
 
+    @property
+    def min(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.stack((self.x0, self.y0), axis=-1)
+
+    @property
+    def max(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.stack((self.x1, self.y1), axis=-1)
+
     @classmethod
     def from_parameters(cls: Type[Self], pupil_roi: RealArray, xp: AnyNamespace) -> Self:
         x = 0.5 * (pupil_roi[..., 2] + pupil_roi[..., 3])
@@ -645,6 +655,16 @@ class FixedAperture(BaseRectangle, State, DataContainer):
 
 class Rectangle(BaseRectangle, State, ArrayContainer):
     roi : RealArray     # (n_samples, n_rectangles, 4) rectangle coordinates
+
+    @property
+    def min(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.stack((self.x0, self.y0), axis=-1)
+
+    @property
+    def max(self) -> RealArray:
+        xp = self.__array_namespace__()
+        return xp.stack((self.x1, self.y1), axis=-1)
 
     @property
     def center(self) -> RealArray:

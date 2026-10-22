@@ -161,6 +161,12 @@ class TestPupilCoordinates:
         check_close(pupil.coordinates(kin), unit)
 
     @pytest.mark.parametrize('xp', [JaxNumPy], indirect=True, ids=['jax'])
+    def test_compiled_mapping(self, pupil: RectangularPupil, kin: RealArray,
+                              unit: RealArray) -> None:
+        # Compiling constant bounds preserves each rectangle's affine coordinate map.
+        check_close(jit(pupil.coordinates)(kin), unit)
+
+    @pytest.mark.parametrize('xp', [JaxNumPy], indirect=True, ids=['jax'])
     def test_coordinate_gradient(self, pupil: RectangularPupil, roi: RealArray,
                                  point: RealArray, xp: AnyNamespace) -> None:
         gradient = jit(jacfwd(pupil.coordinates))(point)
