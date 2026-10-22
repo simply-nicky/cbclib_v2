@@ -605,7 +605,7 @@ class DetectHits(BaseScript):
     @property
     def detector(self) -> Detector | None:
         """Return the detector geometry if :attr:`apply_geometry` is ``False``."""
-        if self.scan.config.apply_geometry:
+        if self.scan.config.apply_geometry or self.params.center is not None:
             return self.scan.config.data.geometry()
         return None
 
@@ -1078,12 +1078,6 @@ class PostRefineScript(BaseScript):
         return self.scan.files.scan_file(self.chunk_id, dir=self.scan.config.setup.solutions_dir,
                                          suffix=self.in_suffix)
 
-    @property
-    def has_streaks(self) -> bool:
-        with pd.HDFStore(self.in_file, mode='r') as store:
-            has_streaks = f'/{HDFKey.streaks}' in store.keys()
-        return has_streaks
-
     def run(self):
         print("Configuring the script...")
         xp = self.scan.config.system.jax_api()
@@ -1144,9 +1138,6 @@ class PostRefineScript(BaseScript):
             context = context.update_setup(resolved)
         else:
             print(f"Skipping post-refinement of setup for {frames.size:d} patterns...")
-            if self.has_streaks:
-                df = pd.read_hdf(self.in_file, HDFKey.streaks)
-                optimised = StreakState.import_dataframe(df, xp)
 
         result = RefineResult(frames, resolved, context.loss_by_pattern(optimised))
 
@@ -1162,10 +1153,6 @@ class PostRefineScript(BaseScript):
             stats.extend(refine_stats)
         else:
             print(f"Skipping scaling of refined streaks for {frames.size:d} patterns...")
-            if self.has_streaks:
-                df = pd.read_hdf(self.in_file, HDFKey.streaks)
-                if RefineStreakState.has_displacements(df):
-                    optimised = RefineStreakState.import_dataframe(df, geometry.pixel_size, xp)
 
         print(f"Saving the optimised solution to {solutions_path}...")
         self.params.save(solutions_path, mode='w', extra=extra)

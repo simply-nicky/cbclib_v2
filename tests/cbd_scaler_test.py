@@ -230,9 +230,14 @@ class ScalingCase:
     @pytest.fixture
     def result_std(self, streak_data: StreakData, result_profile: RealArray,
                    xp: JaxNamespace) -> RealArray:
-        information = streak_data.sum_by_streak(
-            (result_profile / streak_data.std)**2, xp)
-        return 1.0 / xp.sqrt(information)
+        errors = []
+        for streak_id in range(streak_data.n_streaks):
+            selected = streak_data.points.streak_id == streak_id
+            total = xp.sum(result_profile[selected])
+            weights = result_profile[selected] / xp.where(total > 0.0, total, 1.0)
+            # Independent variances add with squared normalised averaging weights.
+            errors.append(xp.sqrt(xp.sum(weights**2 * streak_data.std[selected]**2)))
+        return xp.stack(errors)
 
     @pytest.fixture
     def reflection_list(self, loss: StreakLoss, streak_data: StreakData,
@@ -241,10 +246,11 @@ class ScalingCase:
 
     def profile_mean(self, values: RealArray, profile: RealArray,
                      streak_data: StreakData, xp: JaxNamespace) -> RealArray:
-        length = streak_data.sum_by_streak(profile, xp)
+        estimator = streak_data.streak_estimator
+        length = estimator.sum(profile, xp)
         supported = length > 0.0
         denominator = xp.where(supported, length, 1.0)
-        mean = streak_data.sum_by_streak(profile * values, xp) / denominator
+        mean = estimator.sum(profile * values, xp) / denominator
         return xp.where(supported, mean, 0.0)
 
     @pytest.fixture(params=[False, True], ids=["ordinary", "overlap"])
@@ -378,13 +384,11 @@ class TestReflectionResults(ScalingCase):
         assert xp.all(reflection_list.hkl == streak_data.miller.hkl)
         check_close(reflection_list.I_hkl, expected)
 
-    def test_std_by_streak(self, loss: StreakLoss, streak_data: StreakData,
-                           result_state: StreakState, result_std: RealArray,
-                           xp: JaxNamespace) -> None:
-        profile = loss.profile(streak_data, result_state, xp)
-
-        # Detector-noise errors follow weighted profile regression.
-        check_close(streak_data.std_by_streak(profile, xp), result_std)
+    def test_standard_error(self, loss: StreakLoss, streak_data: StreakData,
+                            result_state: StreakState, result_std: RealArray,
+                            reflection_list: ReflectionList, xp: JaxNamespace) -> None:
+        check_close(loss.std_hkl(streak_data, result_state, xp), result_std)
+        check_close(reflection_list.sigma_hkl, result_std)
 
     def test_std_hkl(self, loss: StreakLoss, streak_data: StreakData,
                      state: StreakState, xp: JaxNamespace) -> None:
@@ -396,15 +400,15 @@ class TestReflectionResults(ScalingCase):
         check_close(loss.std_hkl(streak_data, negative, xp),
                     loss.std_hkl(streak_data, positive, xp))
 
-    def test_zero_information(self, model: ScalerModel, streak_data: StreakData,
-                              state: StreakState, xp: JaxNamespace) -> None:
+    def test_zero_noise(self, model: ScalerModel, streak_data: StreakData,
+                        state: StreakState, xp: JaxNamespace) -> None:
         counts = streak_data.counts.replace(std=xp.zeros_like(streak_data.counts.std))
-        unsupported = streak_data.replace(
+        noiseless = streak_data.replace(
             scaling=streak_data.scaling.replace(counts=counts))
-        std_hkl = StreakLoss(model).std_hkl(unsupported, state, xp)
+        std_hkl = StreakLoss(model).std_hkl(noiseless, state, xp)
 
-        # Points without a detector-noise estimate provide no uncertainty information.
-        assert xp.all(xp.isinf(std_hkl))
+        # Zero detector variance contributes zero propagated variance.
+        check_close(std_hkl, xp.zeros(streak_data.n_streaks))
 
 class TestScalingGeometry(ScalingCase):
     def test_modelled_q(self, model: ScalerModel, data: ScalerData | OverlapData,

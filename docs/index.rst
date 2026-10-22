@@ -48,6 +48,10 @@ implemented in **cbclib_v2**:
    per-frame source-profile widths from integrated photon counts using
    JAX-based optimisation (not documented yet).
 
+7. **Poisson merging** — fits shared reflection coefficients, pattern scales
+   and normalised pupil illumination directly to a scan's detector counts
+   (:doc:`poisson_merging`).
+
 .. toctree::
    :maxdepth: 1
    :hidden:
@@ -61,6 +65,7 @@ implemented in **cbclib_v2**:
    :caption: Key concepts
 
    key_concepts
+   poisson_merging
 
 .. toctree::
    :maxdepth: 1

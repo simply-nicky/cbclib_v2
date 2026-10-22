@@ -410,7 +410,7 @@ class SetupConfig(BaseParameters):
         """
         return self.unit_cell(xp).to_basis()
 
-    def geometry(self, xp: AnyNamespace=NumPy) -> FixedLens | FixedGeometry:
+    def geometry(self) -> FixedLens | FixedGeometry:
         """Load the fixed detector geometry from :attr:`setup_file`.
 
         Returns:
@@ -422,8 +422,8 @@ class SetupConfig(BaseParameters):
         if self.setup_file == str():
             raise ValueError("No setup file provided")
         if 'defocus' in read_all(self.setup_file):
-            return FixedGeometry.read(self.setup_file, xp)
-        return FixedLens.read(self.setup_file, xp)
+            return FixedGeometry.read(self.setup_file)
+        return FixedLens.read(self.setup_file)
 
 @dataclass
 class ScanArgument:

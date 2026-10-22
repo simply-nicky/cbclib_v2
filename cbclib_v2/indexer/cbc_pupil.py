@@ -52,6 +52,20 @@ class RectangularPupil(Rectangle):
     def shape(self) -> Shape:
         return self.roi.shape[:-1]
 
+    def coordinates(self, kin: RealArray) -> RealArray:
+        """Map incident-vector candidates to unit-square pupil coordinates.
+
+        Args:
+            kin: Incident vectors, shape ``(..., 3)``, with rectangle bounds
+                broadcastable over their leading dimensions.
+
+        Returns:
+            Coordinates ``(u, v)`` along ``(kx, ky)``, shape ``(..., 2)``.
+            Pupil corners map to zero and one. Candidates outside the pupil
+            are extrapolated without projection, clipping or an aperture mask.
+        """
+        return (kin[..., :2] - self.min) / (self.max - self.min)
+
     @property
     def edges(self) -> Edge:
         xp = self.__array_namespace__()

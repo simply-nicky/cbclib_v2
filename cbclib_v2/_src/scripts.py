@@ -33,9 +33,9 @@ from ..indexer.cbc_setup import (BaseGeometry, BaseLens, BaseSetup, FixedApertur
                                  FixedPupilLens, FixedPupilSetup, FixedGeometry, FixedSetup, Geometry,
                                  Lens, IndexingResult, RefineResult, ResolvedSetup, Setup,
                                  TiltOverAxisState, XtalState)
-from ..scaler.cbc_data import (FullState, ScalerData, ReflectionList, RefineStreakState, StreakData,
-                               StreakState, StreakIndices)
+from ..scaler.cbc_data import ReflectionList, ScalerData, StreakData, StreakIndices
 from ..scaler.cbc_scaling import FullLoss, RefineStreakLoss, ScalerModel, StreakLoss
+from ..scaler.cbc_setup import FullState, RefineStreakState, StreakState
 
 class BaseParameters(Container):
     """Base class for JSON-serialisable parameter containers.
@@ -1431,7 +1431,7 @@ class PostRefineContext(Container):
     def loss_by_pattern(self, state: StreakState) -> RealArray:
         xp = self.data.__array_namespace__()
         crit = self.streak_loss.poisson_loss(self.data, state, xp)
-        return self.data.mean_by_pattern(crit, xp)
+        return self.data.pattern_estimator.mean(crit, xp)
 
     def update_setup(self, resolved: ResolvedSetup) -> 'PostRefineContext':
         xp = self.data.__array_namespace__()

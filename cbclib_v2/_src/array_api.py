@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Tuple, Set, TypeVar, overload, cast
+from math import prod
 from jax import devices, device_put, dlpack as jdl, random
 import numpy as np
 from array_api_compat import array_namespace as get_array_namespace, device
@@ -569,7 +570,8 @@ def broadcast_to(array: ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespac
 
 def broadcast_to(array: Array | ArrCon_T, idxs: IntArray, suffix: Shape, xp: AnyNamespace
                  ) -> Array | ArrCon_T:
-    array = array.reshape((-1,) + suffix)
+    n_items = prod(array.shape[:-len(suffix)]) if 0 in suffix else -1
+    array = array.reshape((n_items,) + suffix)
     if array.shape[0] == 1:
         return array
     return array[xp.reshape(idxs, -1)].reshape(idxs.shape + suffix)
